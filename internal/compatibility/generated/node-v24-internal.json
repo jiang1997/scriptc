@@ -19277,6 +19277,8 @@
         "tests": [
           "tests/corpus/1358-crypto-random.ts",
           "tests/corpus/1534-crypto-hash-chain.ts",
+          "tests/corpus/1568-x509-fingerprint.ts",
+          "tests/corpus/1572-x509-validity-date-gettime.ts",
           "tests/corpus/2556-crypto-introspection.ts",
           "tests/corpus/2890-crypto-static-utility.ts",
           "tests/corpus/5250-cipher-aes-gcm.ts",
@@ -19313,6 +19315,7 @@
           "tests/corpus/6703-ecdh-private-keys.ts",
           "tests/corpus/6704-ecdh-set-public-key.cjs",
           "tests/corpus/6705-ecdh-handles.ts",
+          "tests/corpus/6936-x509-certificate-fields.ts",
           "tests/corpus/node24-crypto-kdf-errors.ts",
           "tests/corpus/node24-crypto-kdf-options.ts",
           "tests/corpus/node24-crypto-kdf.ts",
@@ -23306,8 +23309,13 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:X509Certificate",
+        "tests": [
+          "tests/corpus/1568-x509-fingerprint.ts",
+          "tests/corpus/1572-x509-validity-date-gettime.ts",
+          "tests/corpus/6936-x509-certificate-fields.ts"
+        ]
       },
       "anchorSource": "exact"
     },

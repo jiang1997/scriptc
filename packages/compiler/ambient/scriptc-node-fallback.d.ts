@@ -3008,17 +3008,29 @@ declare module "crypto" {
     keylen: number,
     callback: (error: Error | null, derivedKey: ArrayBuffer) => void,
   ): void;
-  /* The lowered X509Certificate surface is the data-record slice:
-   * fingerprint (the SHA-1 of the DER, uppercase colon-separated) and
-   * the validFrom/validTo validity window (Node's ASN1_TIME_print
-   * strings — "Jul  1 00:00:00 2026 GMT"; the cert-expiry idiom composes
-   * them with new Date(...).getTime()). All compute at construction;
-   * unparseable input throws Node's ERR_OSSL_PEM_NO_START_LINE Error. */
+  /* The lowered X509Certificate surface is the data-record slice: the
+   * fields below, all computed at construction (raw decodes the input,
+   * and the others read raw). validFrom/validTo are Node's
+   * ASN1_TIME_print strings ("Jul  1 00:00:00 2026 GMT"). Unparseable
+   * input throws Node's ERR_OSSL_PEM_NO_START_LINE Error. */
   export class X509Certificate {
     constructor(buffer: Uint8Array | string);
+    readonly ca: boolean;
     readonly fingerprint: string;
+    readonly fingerprint256: string;
+    readonly fingerprint512: string;
+    readonly subject: string;
+    readonly subjectAltName: string | undefined;
+    readonly infoAccess: string | undefined;
+    readonly issuer: string;
+    readonly raw: Buffer;
+    readonly serialNumber: string;
+    readonly signatureAlgorithm: string | undefined;
+    readonly signatureAlgorithmOid: string;
     readonly validFrom: string;
+    readonly validFromDate: Date;
     readonly validTo: string;
+    readonly validToDate: Date;
   }
   /* The crypto introspection statics: getFips() answers 0 (a compiled
    * binary is never a FIPS build), the three name lists bake as fresh

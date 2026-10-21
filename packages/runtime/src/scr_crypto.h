@@ -229,5 +229,21 @@ ScrStr *scr_crypto_x509_valid_from(ScrBytes *data);
 ScrStr *scr_crypto_x509_valid_from_str(ScrStr *pem);
 ScrStr *scr_crypto_x509_valid_to(ScrBytes *data);
 ScrStr *scr_crypto_x509_valid_to_str(ScrStr *pem);
+/* X509Certificate fields: raw decodes the constructor's input (+1 Buffer,
+ * or NULL with Node's PEM error pending); the others read that DER
+ * (borrowed) and never throw. subjectAltName, infoAccess and
+ * signatureAlgorithm answer "" where Node answers undefined. */
+ScrBytes *scr_crypto_x509_raw(ScrBytes *data);
+ScrBytes *scr_crypto_x509_raw_str(ScrStr *pem);
+ScrStr *scr_crypto_x509_subject(ScrBytes *der);
+ScrStr *scr_crypto_x509_issuer(ScrBytes *der);
+ScrStr *scr_crypto_x509_subject_alt_name(ScrBytes *der);
+ScrStr *scr_crypto_x509_info_access(ScrBytes *der);
+ScrStr *scr_crypto_x509_serial_number(ScrBytes *der);
+ScrStr *scr_crypto_x509_fingerprint256(ScrBytes *der);
+ScrStr *scr_crypto_x509_fingerprint512(ScrBytes *der);
+bool scr_crypto_x509_ca(ScrBytes *der);
+ScrStr *scr_crypto_x509_signature_algorithm(ScrBytes *der);
+ScrStr *scr_crypto_x509_signature_algorithm_oid(ScrBytes *der);
 
 #endif /* SCR_CRYPTO_H */
