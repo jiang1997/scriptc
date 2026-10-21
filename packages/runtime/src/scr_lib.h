@@ -174,6 +174,21 @@ double scr_process_uptime(void);
 /* perf_hooks performance.now(): fractional ms since process start (the
  * uptime anchor — Node's timeOrigin for a compiled program). */
 double scr_perf_now(void);
+/* perf_hooks event-loop metrics (scr_perf_loop.c). loop_mark records the
+ * loop's start (the emitted main calls it before the loop runs, only in
+ * programs that read the metric); loop_start answers it (0 before) and
+ * idle_time the idle ms since. The eld_* family is monitorEventLoopDelay's
+ * IntervalHistogram over a handle; eld_percentile expects 0 < p <= 100; eld_stat which: 0 min, 1 max, 2 mean, 3 stddev,
+ * 4 count, 5 exceeds. */
+void scr_perf_loop_mark(void);
+double scr_perf_loop_start(void);
+double scr_perf_idle_time(void);
+double scr_eld_new(double resolution);
+bool scr_eld_enable(double handle);
+bool scr_eld_disable(double handle);
+void scr_eld_reset(double handle);
+double scr_eld_percentile(double handle, double percentile);
+double scr_eld_stat(double handle, double which);
 /* perf_hooks user timing (scr_perf.c): mark, measure, the getEntries
  * family and the clears take the call's dyn argument vector (borrowed)
  * and apply Node's validation and errors. mark and measure answer 1 and

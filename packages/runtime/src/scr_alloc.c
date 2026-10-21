@@ -85,11 +85,37 @@ static char scr_sa_thp_mode(void) {
  * makes a few madvise calls per doubling, not one per step (each takes the
  * mmap lock for writing, which would wait for the pre-fault helper). Grid
  * points are huge-page aligned: a mapping boundary inside a huge page would
- * split it. */
+ * split it.
+ *
+ * Every slice a thread opens costs one of those calls, and the threads of a
+ * worker executable open hundreds of slices as they start. So they are only
+ * made when the kernel would write a core of the process: when
+ * kernel.core_pattern starts with '|' or '@' (a handler or a socket, which
+ * ignore RLIMIT_CORE), or when RLIMIT_CORE is above 0. Both are read when
+ * the reservation is mapped. Otherwise the whole reservation stays
+ * MADV_DONTDUMP: a core written after RLIMIT_CORE is raised for the running
+ * process (prlimit), or one taken with gdb's gcore, leaves out the slices. */
 #if defined(__linux__) && defined(MADV_DONTDUMP)
 #define SCR_SA_DUMP 1
 #define SCR_SA_DUMP_STEP ((size_t)1 << 20)
 #define SCR_SA_DUMP_GRAIN ((size_t)2 << 20) /* a multiple of the page size */
+#include <stdio.h>
+#include <sys/resource.h>
+/* Whether carved slices are made dumpable; set before the reservation is
+ * published. */
+static bool scr_sa_dump_slices;
+
+/* Whether the kernel would write a core of this process (see above); true
+ * when a setting cannot be read. */
+static bool scr_sa_cores_written(void) {
+  struct rlimit core;
+  if (getrlimit(RLIMIT_CORE, &core) != 0 || core.rlim_cur != 0) return true;
+  FILE *f = fopen("/proc/sys/kernel/core_pattern", "r");
+  if (!f) return true;
+  int c = fgetc(f);
+  fclose(f);
+  return c == '|' || c == '@';
+}
 #endif
 
 /* Maps span bytes of address space for slices (huge-page aligned where the
@@ -115,6 +141,7 @@ static void *scr_sa_map(size_t span) {
 #endif
 #ifdef SCR_SA_DUMP
   (void)madvise(p, span, MADV_DONTDUMP);
+  scr_sa_dump_slices = scr_sa_cores_written();
 #endif
   return p;
 }
@@ -1587,7 +1614,7 @@ __attribute__((cold, noinline)) void *scr_sa_slow(size_t n, bool zero) {
 #endif
     while ((size_t)(lim - p) < sz && lim < end) lim = scr_sa_extend(c, start, lim, end);
 #ifdef SCR_SA_DUMP
-    if (lim > from) scr_sa_dumpable(start, end, from, lim);
+    if (lim > from && scr_sa_dump_slices) scr_sa_dumpable(start, end, from, lim);
 #endif
     scr_sa.lim[c] = lim;
     if ((size_t)(lim - p) >= sz) {

@@ -38,7 +38,7 @@ export function classStaticDataFor(
 ): IrExpr | null {
   if (
     !info.decl ||
-    !isJsSourceFile(info.decl.getSourceFile()) ||
+    !isJsSourceFile(ts.getSourceFileOfNode(info.decl)) ||
     name.startsWith("#") ||
     constructorMembers.has(name)
   )

@@ -221,13 +221,13 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
     out.push("");
   }
 
-  // The WebAssembly modules the build can see: what translating them would
-  // take (wasm/discover.ts). No module compiles to native code yet; the
-  // sites that load one are blockers or deferred fences above.
+  // The WebAssembly modules the build can see (wasm/discover.ts). A build
+  // translates the valid ones to native code (wasm/translate.ts) when the
+  // program uses the WebAssembly API; the others fail to load at run time.
   const wasm = input.wasmModules ?? [];
   if (wasm.length > 0) {
     out.push(
-      `  ${c(DIM, "WebAssembly modules:")} ${c(DIM, "(found at build time; none compile to native code yet)")}`,
+      `  ${c(DIM, "WebAssembly modules:")} ${c(DIM, "(found at build time; valid ones compile to native code)")}`,
     );
     for (const m of wasm) {
       const name = m.path !== undefined ? displayPath(m.path, opts.root) : "inline module";

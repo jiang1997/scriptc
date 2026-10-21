@@ -25,7 +25,7 @@ export function builtinFunctionFenceValue(
       `library functions as values ('${display}' has no function-value lowering; call it directly)`,
     );
     lowerer.runtimeFences.push(diag);
-    const line = ts.getLineAndCharacterOfPosition(node.getSourceFile(), loc.start).line + 1;
+    const line = ts.getLineAndCharacterOfPosition(ts.getSourceFileOfNode(node), loc.start).line + 1;
     lowerer.liftedFns.push({
       name,
       params: [],

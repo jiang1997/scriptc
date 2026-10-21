@@ -36,7 +36,7 @@ export function jsonRequireTarget(
   if (call === undefined || !ts.isCallExpression(call)) return null;
   const spec = requireSpecOf(call);
   if (spec === null || !ts.isIdentifier(call.expression)) return null;
-  const sf = call.getSourceFile();
+  const sf = ts.getSourceFileOfNode(call);
   if (!isCjsJsFile(sf, lowerer.program)) return null;
   if (createRequireCalleeFileOf(lowerer, call.expression) !== null) return null;
   const target = resolveImport(lowerer.program, sf, spec, "require");

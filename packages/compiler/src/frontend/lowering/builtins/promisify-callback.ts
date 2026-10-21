@@ -3,6 +3,7 @@ import { type Lowerer } from "../lowerer.js";
 import { varRef } from "../../../ir/build.js";
 import {
   BOOL,
+  DYN,
   type IrExpr,
   type IrLocal,
   type IrParam,
@@ -90,6 +91,14 @@ function callbackShape(
   return { fnT, resultT, args, callbackT, callbackParamT: callbackParamT!, inner, error };
 }
 
+/** Whether `promisify(fn)`'s one argument is typed `any`: the function is
+ * only known at run time, so the promisified function is built there. */
+export function untypedPromisifyArgument(lowerer: Lowerer, call: ts.CallExpression): boolean {
+  if (call.questionDotToken || call.arguments.nodes.length !== 1) return false;
+  const argNode = call.arguments.nodes[0]!;
+  return !ts.isSpreadElement(argNode) && (lowerer.typeOf(argNode).flags & ts.TypeFlags.Any) !== 0;
+}
+
 /** The callback shape of a `promisify(fn)` call, or null. */
 export function callbackPromisifyShape(
   lowerer: Lowerer,
@@ -131,7 +140,17 @@ export function lowerCallbackPromisify(
   loc: SrcLoc,
 ): IrExpr | null {
   const shape = callbackPromisifyShape(lowerer, call, loc);
-  if (shape === null) return null;
+  if (shape === null) {
+    // An untyped (`any`) function: Node's promisify at run time.
+    if (!untypedPromisifyArgument(lowerer, call)) return null;
+    return {
+      kind: "libCall",
+      fn: "util.promisifyDyn",
+      args: [lowerer.lowerExprExpecting(call.arguments.nodes[0]!, DYN)],
+      type: DYN,
+      loc,
+    };
+  }
   const argNode = call.arguments.nodes[0]!;
   let fn = lowerer.lowerExpr(argNode);
   if (!typeEquals(fn.type, shape.fnT)) fn = lowerer.coerceToExpected(fn, shape.fnT);

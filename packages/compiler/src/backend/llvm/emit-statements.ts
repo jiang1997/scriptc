@@ -36,7 +36,7 @@ import { emitDiscardedSplice } from "./expr-containers.js";
 import { InternalCompilerError } from "../../errors.js";
 import { emitDenseArrayGet, emitDenseArrayPop, emitDenseArraySet } from "./dense-array-access.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
-import { f64Lit, llvmCommentText, sizeToDouble } from "./common.js";
+import { f64Lit, llvmCommentText, loadArrCount, sizeToDouble } from "./common.js";
 import { RESULT_DST_ID, RESULT_ENTRY_PREFIX } from "./record-results.js";
 import {
   matchIntegerArrayForLoop,
@@ -56,7 +56,9 @@ import {
   SPECULATIVE_RANGE,
   emitSafeIntegerCheck,
   emitSpeculativeInteger,
+  planProvenIntegerLoop,
   planSpeculativeLoop,
+  type ProvenLoopPlan,
   speculativeReads,
   speculativeWriteTarget,
 } from "./speculative-integers.js";
@@ -440,9 +442,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         done = B.newLabel("arr.len.done");
       B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${arr.name}, i32 0, i32 1`);
       emitter.markMemoryPointer(lenPtr, "array:header");
-      B.line(
-        `${len} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}${emitter.arrayLengthRange}`,
-      );
+      loadArrCount(emitter, len, lenPtr, emitter.fieldAliasAttachment(lenPtr));
       B.line(
         `${lenNumber} = ${sizeToDouble(emitter.sizeType)} ${emitter.sizeType} ${len} to double`,
       );
@@ -1092,12 +1092,26 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
           B.line(
             `${lenPtr} = getelementptr inbounds %${integerArrayLoop ? "ScrArr" : "ScrBytes"}, ptr ${receiver.name}, i64 0, i32 1`,
           );
-          emitter.markMemoryPointer(lenPtr, integerArrayLoop ? "array:header" : "bytes:header");
-          B.line(
-            `${len} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}`,
-          );
           B.line(`${index} = load ${emitter.sizeType}, ptr ${integerSlot}`);
-          B.line(`${inBounds} = icmp ult ${emitter.sizeType} ${index}, ${len}`);
+          if (integerArrayLoop) {
+            // The counter starts at most 2^32 - 1 and steps only while it is
+            // below the length, so it fits the i32 length field: compare in
+            // 32 bits, which lets the compare read the field directly.
+            emitter.markMemoryPointer(lenPtr, "array:header");
+            B.line(`${len} = load i32, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}`);
+            let narrow = index;
+            if (emitter.sizeType === "i64") {
+              narrow = B.tmp();
+              B.line(`${narrow} = trunc i64 ${index} to i32`);
+            }
+            B.line(`${inBounds} = icmp ult i32 ${narrow}, ${len}`);
+          } else {
+            emitter.markMemoryPointer(lenPtr, "bytes:header");
+            B.line(
+              `${len} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}`,
+            );
+            B.line(`${inBounds} = icmp ult ${emitter.sizeType} ${index}, ${len}`);
+          }
           B.condBr(inBounds, lb, exit);
         } else if (countedLoop && integerSlot && countedLimit) {
           const index = B.tmp();
@@ -1203,9 +1217,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         // The inline form of scr_arr_len, like the `length` intrinsic.
         B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${arr!.name}, i32 0, i32 1`);
         emitter.markMemoryPointer(lenPtr, "array:header");
-        B.line(
-          `${rawLen} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}${emitter.arrayLengthRange}`,
-        );
+        loadArrCount(emitter, rawLen, lenPtr, emitter.fieldAliasAttachment(lenPtr));
         B.line(
           `${len} = ${sizeToDouble(emitter.sizeType)} ${emitter.sizeType} ${rawLen} to double`,
         );
@@ -1792,7 +1804,9 @@ export function emitLoopCopies(
         )
       : null;
   if (!plan) {
-    emitCopy(exit);
+    const proven = allowed ? planProvenLoop(emitter, loop) : null;
+    if (proven) emitProvenLoop(emitter, proven, exit, emitCopy);
+    else emitCopy(exit);
     return;
   }
   const B = emitter.B;
@@ -1871,7 +1885,7 @@ export function emitLoopCopies(
       const leave = B.newLabel("spec.leave");
       emitCopy(leave);
       B.startBlock(leave);
-      emitter.writeBackSpeculativeGlobals(deferred);
+      emitter.writeBackDeferred(deferred);
       B.br(exit);
     }
   } finally {
@@ -1880,10 +1894,91 @@ export function emitLoopCopies(
   }
 }
 
+/** A proven integer loop (speculative-integers.ts) for this loop, or null.
+ * A shadowed local's double is stale until the loop is left, which only
+ * the loop's exit, a return and an exception do: the loop is planned only
+ * where an exception leaves the function (no enclosing try or finally, no
+ * coroutine frame), so no handler reads the stale double. */
+function planProvenLoop(
+  emitter: LlEmitter,
+  loop: Extract<IrStmt, { kind: "while" | "doWhile" | "for" }>,
+): ProvenLoopPlan | null {
+  if (
+    loop.kind !== "for" ||
+    !emitter.speculativeLoopsEnabled ||
+    emitter.speculation !== null ||
+    emitter.speculationResume !== null ||
+    emitter.tryStack.length > 0 ||
+    emitter.finallyStack.length > 0 ||
+    emitter.currentCoro !== null
+  )
+    return null;
+  const cursors = emitter.integerLoopRanges.get(loop);
+  if (!cursors) return null;
+  return planProvenIntegerLoop(
+    loop,
+    cursors,
+    (id) => emitter.currentLocals.has(id) && emitter.speculativeLocal(id),
+    (id) => emitter.integerLoopBindings.has(id) || emitter.int32Locals.has(id),
+    (e) => {
+      const range = emitter.integerRanges.get(e);
+      return (
+        range !== undefined &&
+        range !== null &&
+        range.min >= -Number.MAX_SAFE_INTEGER &&
+        range.max <= Number.MAX_SAFE_INTEGER
+      );
+    },
+  );
+}
+
+/** Emit a proven integer loop: its shadowed locals start from their
+ * doubles (integers in their loop ranges on entry), its planned writes
+ * compute integers into the shadows only, and leaving the loop through its
+ * exit writes each double back. */
+function emitProvenLoop(
+  emitter: LlEmitter,
+  plan: ProvenLoopPlan,
+  exit: string,
+  emitCopy: (exit: string) => void,
+): void {
+  const B = emitter.B;
+  for (const [id, range] of plan.locals) {
+    const shadow = B.slot();
+    B.entryAllocas.push(
+      `${shadow} = alloca i64 ; integer ${emitter.currentLocals.get(id)?.name ?? id}`,
+    );
+    const value = B.tmp(),
+      integer = B.tmp();
+    B.line(`${value} = load double, ptr ${emitter.binding(id).slot}`);
+    B.line(`${integer} = fptosi double ${value} to i64`);
+    B.line(`store i64 ${integer}, ptr ${shadow}`);
+    emitter.integerLoopBindings.set(id, { slot: shadow, type: "i64", signed: true, range });
+  }
+  const deferred = new Set<string>();
+  for (const id of plan.locals.keys()) deferred.add(id);
+  emitter.speculation = { writes: plan.writes, resume: new Map(), deferred };
+  try {
+    const leave = B.newLabel("integer.leave");
+    emitCopy(leave);
+    B.startBlock(leave);
+    emitter.writeBackDeferred(deferred);
+    B.br(exit);
+  } finally {
+    emitter.speculation = null;
+    for (const id of plan.locals.keys()) emitter.integerLoopBindings.delete(id);
+  }
+}
+
 /** A speculated write in the fast copy: compute the value as a safe
  * integer, store it to the shadow and its exact double to the local.
- * Any failed check re-executes the statement in the ordinary copy. */
-export function emitSpeculativeWrite(emitter: LlEmitter, s: IrStmt, resume: string): void {
+ * Any failed check re-executes the statement in the ordinary copy. A
+ * proven integer loop's write (no `resume`) has nothing to check. */
+export function emitSpeculativeWrite(
+  emitter: LlEmitter,
+  s: IrStmt,
+  resume: string | undefined,
+): void {
   const B = emitter.B;
   const target = speculativeWriteTarget(s)!;
   const binding = emitter.integerLoopBindings.get(target.localId)!;
@@ -1891,7 +1986,7 @@ export function emitSpeculativeWrite(emitter: LlEmitter, s: IrStmt, resume: stri
   let bails = false;
   emitter.declare("declare i1 @llvm.expect.i1(i1, i1)");
   const bail = (condition: string): void => {
-    if (condition === "false") return;
+    if (condition === "false" || resume === undefined) return;
     bails = true;
     const expected = B.tmp();
     B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${condition}, i1 false)`);
@@ -1920,7 +2015,7 @@ export function emitSpeculativeWrite(emitter: LlEmitter, s: IrStmt, resume: stri
     B.line(`${biased} = add i64 ${result}, ${Number.MAX_SAFE_INTEGER}`);
     B.line(`${outside} = icmp ugt i64 ${biased}, ${2 * Number.MAX_SAFE_INTEGER}`);
     bail(outside);
-  } else result = emitSpeculativeInteger(emitter, target.value, bail, reads);
+  } else result = emitSpeculativeInteger(emitter, target.value, bail, reads, resume === undefined);
   // Speculable values read only numbers past this point.
   if (emitter.frames.pop()!.length > 0)
     throw new InternalCompilerError("llvm emitter bug: speculative write owns a temporary");
@@ -1935,8 +2030,8 @@ export function emitSpeculativeWrite(emitter: LlEmitter, s: IrStmt, resume: stri
   const done = B.newLabel("spec.done");
   B.br(done);
   B.startBlock(failed);
-  emitter.writeBackSpeculativeGlobals(deferred);
-  B.br(resume);
+  emitter.writeBackDeferred(deferred);
+  B.br(resume!);
   B.startBlock(done);
 }
 

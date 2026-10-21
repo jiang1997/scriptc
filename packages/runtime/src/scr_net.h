@@ -164,6 +164,11 @@ void scr_net_server_timeout_option_set(ScrNetServer *s, double field, const stru
 ScrStr *scr_net_server_addr_ip(ScrNetServer *s);     /* +1 — address().address */
 ScrStr *scr_net_server_addr_family(ScrNetServer *s); /* +1 — address().family */
 void scr_net_server_close(ScrNetServer *s, ScrClosure *cb /*moves, nullable*/);
+void scr_net_server_close_dyn(ScrNetServer *s, const ScrDyn *listener /*borrowed*/);
+void scr_net_sock_on_lookup(ScrNetSocket *s, const ScrDyn *listener /*borrowed*/, bool once);
+void scr_net_lookup_install(void);
+ScrStr *scr_net_server_unix_path(ScrNetServer *s); /* +1, "" unless listening on a path */
+void scr_net_server_address_check(ScrNetServer *s);  /* throws for a Unix-socket server */
 void scr_net_server_close_all_connections(ScrNetServer *s);
 void scr_net_server_close_idle_connections(ScrNetServer *s);
 ScrDyn *scr_net_server_max_connections_get(ScrNetServer *s); /* +1 */
@@ -237,6 +242,12 @@ bool scr_net_sock_readable(ScrNetSocket *s);
 /* The deferred dial (the http agent's maxSockets queue): the socket
  * registers "connecting" and buffers writes; dial_start runs the dial. */
 ScrNetSocket *scr_net_connect_deferred(double port, ScrStr *host /*borrowed, nullable*/); /* +1 */
+ScrNetSocket *scr_net_connect_lookup_dyn(double port, ScrStr *host /*borrowed*/, const ScrDyn *lookup /*borrowed*/); /* +1, NULL on throw */
+/* A client socket for the Unix socket at `path`, dialed now or (deferred)
+ * by scr_net_sock_dial_start. A failure is the deferred 'error'. */
+ScrNetSocket *scr_net_connect_path(ScrStr *path /*borrowed*/, bool deferred); /* +1 */
+/* server.listen(path[, cb]): a Unix-socket server, its file removed at close. */
+void scr_net_listen_path(ScrNetServer *s, ScrStr *path /*borrowed*/, ScrClosure *cb /*moves, nullable*/);
 void scr_net_sock_dial_start(ScrNetSocket *s);
 void scr_net_sock_set_timeout(ScrNetSocket *s, double ms);
 void scr_net_sock_on_timeout(ScrNetSocket *s, ScrClosure *cb /*moves*/, bool once);

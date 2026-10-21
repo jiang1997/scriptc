@@ -26,6 +26,7 @@ import {
   mangleCtorThunk,
   mangleFunction,
   mangleGlobal,
+  mangleVtArray,
   mangleVtInstance,
   mangleVtStruct,
 } from "../mangle.js";
@@ -81,6 +82,12 @@ export class LlClassMeta {
    * member's struct carries the i32 slot word before its fields
    * (classSlotWordIndex). */
   threadSlot = false;
+  /** A member of a program-rooted hierarchy on a 64-bit target: instead of
+   * a vtable word, the rc word holds the class id (classIdRcWord) in its
+   * high 32 bits (CLASS_ID_OFFSET) and the reference count in its low 32
+   * bits, and the hierarchy's vtables are one array indexed by the id
+   * (mangleVtArray). */
+  idInRc = false;
 
   constructor(readonly def: IrClassDef) {
     this.root = this;
@@ -96,6 +103,7 @@ export class LlClassMeta {
 export function buildClassGraph(
   mod: IrModule,
   fnByName: Map<string, IrFunction>,
+  sizeType: "i32" | "i64" = "i64",
 ): Map<string, LlClassMeta> {
   const metaMap = new Map<string, LlClassMeta>();
   for (const cls of mod.classes ?? []) {
@@ -122,6 +130,11 @@ export function buildClassGraph(
     if (meta.base === null) number(meta, meta);
     meta.hierarchy = meta.base !== null || meta.children.length > 0;
   }
+  // The runtime reads the vtable word of runtime-rooted hierarchies (Error,
+  // EventEmitter, EventTarget, Event and the streams) and 32-bit targets
+  // have no spare half in the rc word: those keep the vtable word.
+  for (const meta of metaMap.values())
+    meta.idInRc = sizeType === "i64" && meta.hierarchy && meta.root.def.runtime !== true;
   const slotRoots = new Set<LlClassMeta>();
   for (const key of mod.threadSlotKeys ?? []) {
     const meta = metaMap.get(key);
@@ -336,11 +349,12 @@ function runtimePrefixOf(meta: LlClassMeta): RuntimePrefix | null {
 }
 
 /** The GEP index after a class's header words: rc at 0, the vtable word
- * at 1 on hierarchy members, then a runtime prefix (state + display name)
+ * at 1 on hierarchy members that do not keep their class id in the rc
+ * word (LlClassMeta.idInRc), then a runtime prefix (state + display name)
  * on classes rooted at a runtime base, then the stream-state slot on
  * stream-rooted ones. */
 function headerEnd(meta: LlClassMeta): number {
-  if (!meta.hierarchy) return 1;
+  if (!meta.hierarchy || meta.idInRc) return 1;
   if (streamRooted(meta)) return 5;
   return runtimePrefixOf(meta) ? 4 : 2;
 }
@@ -445,6 +459,69 @@ export function programLifetimeRc(sizeType: "i32" | "i64"): string {
   return sizeType === "i32" ? "-2147483648" : "-9223372036854775808";
 }
 
+/** Lines that load the preorder number of the dynamic class of `obj`, an
+ * instance of `meta`'s hierarchy whose struct is `struct`, into `pre` (a
+ * `sizeType`): from the high half of the rc word (LlClassMeta.idInRc), or
+ * from the vtable its vtable word points at. */
+export function classPreLines(
+  meta: LlClassMeta,
+  struct: string,
+  obj: string,
+  pre: string,
+  sizeType: "i32" | "i64",
+): string[] {
+  if (meta.idInRc)
+    return [
+      `  ${pre}.idp = getelementptr inbounds i8, ptr ${obj}, i64 ${CLASS_ID_OFFSET}`,
+      `  ${pre}.id = load i32, ptr ${pre}.idp`,
+      `  ${pre}.n = add i32 ${pre}.id, -1 ; the class id is the preorder number + 1`,
+      `  ${pre} = zext i32 ${pre}.n to ${sizeType}`,
+    ];
+  return [
+    `  ${pre}.vtp = getelementptr inbounds %${struct}, ptr ${obj}, i64 0, i32 1`,
+    `  ${pre}.vt = load ptr, ptr ${pre}.vtp`,
+    `  ${pre}.prep = getelementptr inbounds %ScrVt, ptr ${pre}.vt, i64 0, i32 0`,
+    `  ${pre} = load ${sizeType}, ptr ${pre}.prep`,
+  ];
+}
+
+/** Lines that load the class id of the LlClassMeta.idInRc instance `obj`
+ * (`group` adds !invariant.group to the load) and point `vt` at its class's
+ * element of the hierarchy's vtable array. */
+export function classIdVtLines(
+  meta: LlClassMeta,
+  obj: string,
+  vt: string,
+  group: string,
+): string[] {
+  const t = `${vt}.`;
+  const root = meta.root;
+  const vtt = `%${mangleVtStruct(root.def.name)}`;
+  const n = root.post - root.pre + 1;
+  return [
+    `  ${t}idp = getelementptr inbounds i8, ptr ${obj}, i64 ${CLASS_ID_OFFSET}`,
+    `  ${t}id = load i32, ptr ${t}idp${group}`,
+    `  ${t}ix = sub i32 ${t}id, ${root.pre + 1}`,
+    `  ${t}ix64 = zext i32 ${t}ix to i64`,
+    `  ${vt} = getelementptr inbounds [${n} x ${vtt}], ptr @${mangleVtArray(root.def.name)}, i64 0, i64 ${t}ix64`,
+  ];
+}
+
+/** The byte offset of the class id in the rc word of an instance that
+ * keeps it there (LlClassMeta.idInRc): the high half of the little-endian
+ * 64-bit word. The count is the i32 at offset 0. */
+export const CLASS_ID_OFFSET = 4;
+
+/** The rc word an LlClassMeta.idInRc instance is created with: the class
+ * id, its preorder number plus 1, in the high 32 bits, and in the low 32 bits
+ * a count of 1, or for a program-lifetime instance the midpoint of the 32-bit
+ * count (as programLifetimeRc is of the 32-bit word). The id is never 0,
+ * 0x80000000 or 0xffffffff, the high halves of other objects' rc words, so
+ * the runtime can tell an object with a class id (scr_rc.h scr_rc_class_id). */
+export function classIdRcWord(meta: LlClassMeta, lifetime: boolean): string {
+  return (BigInt(meta.pre + 1) * 2n ** 32n + (lifetime ? 2n ** 31n : 1n)).toString();
+}
+
 function undefFieldInits(
   host: ClassHost,
   meta: LlClassMeta,
@@ -524,17 +601,18 @@ export function emitClassShapes(
     // ScrEmitter* / ScrStream* / ScrEventTargetObj* / ScrEventObj* are the
     // usual pointer reinterprets.
     const runtimePrefix = runtimePrefixOf(meta);
-    const prefix = meta.hierarchy
-      ? streamRooted(meta)
-        ? ["ptr", "ptr", "ptr", "ptr"]
-        : runtimePrefix
-          ? ["ptr", "ptr", "ptr"]
-          : ["ptr"]
-      : [];
+    const prefix =
+      meta.hierarchy && !meta.idInRc
+        ? streamRooted(meta)
+          ? ["ptr", "ptr", "ptr", "ptr"]
+          : runtimePrefix
+            ? ["ptr", "ptr", "ptr"]
+            : ["ptr"]
+        : [];
     const members = [...prefix, ...(meta.threadSlot ? ["i32"] : []), ...fieldTys];
     typeDefs.push(
       `%${mangleClassStruct(cls.name)} = type { ${host.sizeType}${members.length ? ", " + members.join(", ") : ""} } ` +
-        `; class ${cls.name}${meta.hierarchy ? " (vt at 1)" : ""}${streamRooted(meta) ? " (ScrStream prefix at 2)" : runtimePrefix ? ` (${runtimePrefix.struct} prefix at 2)` : ""} { ${cls.fields.map((f) => llvmCommentText(f.name)).join("; ")} }`,
+        `; class ${cls.name}${meta.idInRc ? " (class id in rc)" : meta.hierarchy ? " (vt at 1)" : ""}${streamRooted(meta) ? " (ScrStream prefix at 2)" : runtimePrefix ? ` (${runtimePrefix.struct} prefix at 2)` : ""} { ${cls.fields.map((f) => llvmCommentText(f.name)).join("; ")} }`,
     );
   }
 
@@ -559,18 +637,40 @@ export function emitClassShapes(
   // One constant vtable instance per emitted hierarchy class: interval,
   // direct release, and the class's dispatch entry for every slot — the
   // method functions THEMSELVES (no adapters; see the header comment).
-  for (const cls of emitted) {
-    const meta = metaMap.get(cls.name)!;
-    if (!meta.hierarchy) continue;
+  const vtInit = (meta: LlClassMeta): string => {
     const entries = vtEntriesFor(meta).map(({ slot, impl }) =>
       impl === null
         ? `ptr null` // outside the declaring subtree / fully-abstract chain
         : `ptr @${host.virtualEntry?.(`%${impl.def.name}.${slot.method}`) ?? mangleFunction(`%${impl.def.name}.${slot.method}`)}`,
     );
-    const head = `%ScrVt { ${host.sizeType} ${meta.pre}, ${host.sizeType} ${meta.post}, ptr @${mangleClassReleaseDirect(cls.name)} }`;
+    const head = `%ScrVt { ${host.sizeType} ${meta.pre}, ${host.sizeType} ${meta.post}, ptr @${mangleClassReleaseDirect(meta.def.name)} }`;
+    return `{ ${[head, ...entries].join(", ")} }`;
+  };
+  for (const cls of emitted) {
+    const meta = metaMap.get(cls.name)!;
+    if (!meta.hierarchy || meta.idInRc) continue;
     defs.push(
       `@${mangleVtInstance(cls.name)} = internal constant %${mangleVtStruct(meta.root.def.name)} ` +
-        `{ ${[head, ...entries].join(", ")} } ; class ${cls.name}`,
+        `${vtInit(meta)} ; class ${cls.name}`,
+      ``,
+    );
+  }
+  // A hierarchy whose instances keep their class id in the rc word has
+  // one array of its classes' vtables, in preorder: the vtable of an
+  // instance is the element at its number minus the root's.
+  for (const name of roots) {
+    const root = metaMap.get(name)!;
+    if (!root.idInRc) continue;
+    const members = [...metaMap.values()]
+      .filter((m) => m.root === root)
+      .sort((a, b) => a.pre - b.pre);
+    const vtt = `%${mangleVtStruct(root.def.name)}`;
+    defs.push(
+      `@${mangleVtArray(root.def.name)} = internal constant [${members.length} x ${vtt}] [`,
+      ...members.map(
+        (m, i) => `  ${vtt} ${vtInit(m)}${i + 1 < members.length ? "," : ""} ; class ${m.def.name}`,
+      ),
+      `]`,
       ``,
     );
   }
@@ -605,6 +705,7 @@ export function emitClassShapes(
         release: `@${release}`,
         destroy: `${teardown}_destroy`,
         traced: host.tracedShapes.has(`object:${cls.name}`),
+        ...(meta.idInRc ? { count: "i32" as const } : {}),
       },
     ]);
   }
@@ -658,7 +759,13 @@ export function emitClassShapes(
 
     // retain: NULL-tolerant, immortal-skip — layout-generic (rc at 0), so
     // hierarchy members need no dispatch.
-    defs.push(...retainBody(host, mangleClassRetain(cls.name), `retain ${cls.name}`, lifetime), ``);
+    // An instance that keeps its class id in the rc word counts in the
+    // low half (CLASS_ID_OFFSET).
+    const count = meta.idInRc ? "i32" : host.sizeType;
+    defs.push(
+      ...retainBody(host, mangleClassRetain(cls.name), `retain ${cls.name}`, lifetime, count),
+      ``,
+    );
 
     // An out-of-line teardown tears typed children down directly
     // (directChildReleaseLines). It takes the chain length when it has such
@@ -714,6 +821,7 @@ export function emitClassShapes(
             traced,
             `release ${cls.name}`,
             lifetime,
+            count,
           ),
           ``,
         );
@@ -723,12 +831,16 @@ export function emitClassShapes(
         `  %isnull = icmp eq ptr %o, null`,
         `  br i1 %isnull, label %done, label %check`,
         `check:`,
-        `  %rc = load ${host.sizeType}, ptr %o`,
-        `  %imm = icmp eq ${host.sizeType} %rc, -1`,
+        `  %rc = load ${count}, ptr %o`,
+        `  %imm = icmp eq ${count} %rc, -1`,
         `  br i1 %imm, label %done, label %disp`,
         `disp:`,
-        `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,
-        `  %vt = load ptr, ptr %vtp`,
+        ...(meta.idInRc
+          ? classIdVtLines(meta, "%o", "%vt", "")
+          : [
+              `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,
+              `  %vt = load ptr, ptr %vtp`,
+            ]),
         `  %relp = getelementptr inbounds %ScrVt, ptr %vt, i64 0, i32 2`,
         `  %rel = load ptr, ptr %relp`,
         `  call void %rel(ptr %o) ; the DYNAMIC class's teardown`,
@@ -743,10 +855,10 @@ export function emitClassShapes(
       const reld: string[] = [
         `define internal void @${mangleClassReleaseDirect(cls.name)}(ptr %o) ${FN_ATTRS} { ; direct release ${cls.name}`,
         `entry:`,
-        `  %rc = load ${host.sizeType}, ptr %o`,
-        `  %n = sub ${host.sizeType} %rc, 1`,
-        `  store ${host.sizeType} %n, ptr %o`,
-        `  %dead = icmp eq ${host.sizeType} %n, 0`,
+        `  %rc = load ${count}, ptr %o`,
+        `  %n = sub ${count} %rc, 1`,
+        `  store ${count} %n, ptr %o`,
+        `  %dead = icmp eq ${count} %n, 0`,
         `  br i1 %dead, label %free, label %${traced ? "root" : "done"}`,
         `free:`,
       ];
@@ -815,10 +927,22 @@ export function emitClassShapes(
           host,
           sizeOf,
           traced && !lifetime ? { type: cycType } : null,
-          meta.hierarchy ? 16 : 8,
+          meta.hierarchy && !meta.idInRc ? 16 : 8,
         ),
       );
-    nw.push(`  store ${host.sizeType} ${lifetime ? programLifetimeRc(host.sizeType) : 1}, ptr %o`);
+    if (meta.idInRc) {
+      // The class id in the high half of the rc word, the count in the low
+      // half (classIdRcWord). It never changes while the object lives:
+      // retains, releases and the runtime write only the low half.
+      host.declare(`declare ptr @llvm.launder.invariant.group.p0(ptr)`);
+      nw.push(
+        `  %o.vt = call ptr @llvm.launder.invariant.group.p0(ptr %o)`,
+        `  store i64 ${classIdRcWord(meta, lifetime)}, ptr %o.vt ; class ${llvmCommentText(cls.name)} is ${meta.pre}`,
+      );
+    } else
+      nw.push(
+        `  store ${host.sizeType} ${lifetime ? programLifetimeRc(host.sizeType) : 1}, ptr %o`,
+      );
     if (lifetime && audit) {
       // --sanitize builds: the RC audit skips its leak report when the
       // program keeps program-lifetime objects (scr_console.c), and
@@ -826,7 +950,7 @@ export function emitClassShapes(
       host.declare(`declare void @scr_obj_lifetime_note(ptr)`);
       nw.push(`  call void @scr_obj_lifetime_note(ptr %o)`);
     }
-    if (meta.hierarchy) {
+    if (meta.hierarchy && !meta.idInRc) {
       // The vtable word is written once, here, and never changes while the
       // object lives: its store and the virtual-call loads carry
       // !invariant.group. A recycled block may have held an object of

@@ -2,7 +2,7 @@ import { AstNode } from "../../../packages/compiler/src/frontend/ts7/ast-node.js
 import type { SourceFile } from "../../../packages/compiler/src/frontend/ts7/ast-types.js";
 import { CheckerFacade, constituentTypes } from "../../../packages/compiler/src/frontend/ts7/checker.js";
 import { SemanticChecker } from "../../../packages/compiler/src/frontend/ts7/semantic-checker.js";
-import { SemanticType } from "../../../packages/compiler/src/frontend/ts7/semantic-model.js";
+import { SemanticType, symbolName, symbolNameOf } from "../../../packages/compiler/src/frontend/ts7/semantic-model.js";
 import { SyntaxKind, TypeFlags } from "../../../packages/compiler/src/frontend/ts7/enums.js";
 
 export function checkerSource(): string {
@@ -67,8 +67,8 @@ export function checkCheckerFacade(raw: SemanticChecker, root: SourceFile, reque
   const box = declaration(root, "Box");
   const boxSymbol = facade.getSymbolAtLocation(box.name!)!;
   const boxType = facade.getDeclaredTypeOfSymbol(boxSymbol);
-  check(facade.getPropertyOfType(boxType, "value")!.name === "value", "property lookup");
-  check(facade.getPropertiesOfType(boxType).some((property) => property.name === "method"), "property list");
+  check(symbolName(facade.getPropertyOfType(boxType, "value")!) === "value", "property lookup");
+  check(facade.getPropertiesOfType(boxType).some((property) => symbolName(property) === "method"), "property list");
   check(facade.getBaseTypes(boxType).length === 0, "empty class bases");
   const child = facade.getDeclaredTypeOfSymbol(facade.getSymbolAtLocation(declaration(root, "Child").name!)!);
   check(facade.getBaseTypes(child)[0] === boxType, "class base identity");
@@ -123,7 +123,7 @@ export function checkCheckerFacade(raw: SemanticChecker, root: SourceFile, reque
   check(facade.getTypeArguments(number).length === 0, "nonreference arguments");
   const dict = facade.getDeclaredTypeOfSymbol(facade.getSymbolAtLocation(declaration(root, "Dict").name!)!);
   const index = facade.getIndexInfosOfType(dict)[0]!;
-  check(index.keyType === string && index.valueType === number && index.isReadonly, "index signature");
+  check(index.keyType === string && index.type === number && index.isReadonly, "index signature");
   check(facade.getAwaitedType(aliasType(facade, root, "Promised")) === number, "await promise");
   check(facade.getAwaitedType(aliasType(facade, root, "MaybePromised")) === number, "await collapsed union");
   check(facade.getAwaitedType(aliasType(facade, root, "DifferentPromises")) === undefined, "await distinct union refusal");

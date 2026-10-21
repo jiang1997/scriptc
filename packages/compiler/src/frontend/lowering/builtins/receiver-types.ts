@@ -10,10 +10,10 @@ export function isBuiltinClassInstance(
 ): boolean {
   const type = lowerer.checker.getTypeAtLocation(node);
   const symbol = type.getAliasSymbol() ?? type.getSymbol();
-  if (symbol?.name !== name) return false;
+  if (symbol === undefined || ts.symbolName(symbol) !== name) return false;
   return symbol.declarations.some(
     (declaration) =>
       (ts.isClassDeclaration(declaration) || ts.isInterfaceDeclaration(declaration)) &&
-      lowerer.isStdlibFile(declaration.getSourceFile()),
+      lowerer.isStdlibFile(ts.getSourceFileOfNode(declaration)),
   );
 }

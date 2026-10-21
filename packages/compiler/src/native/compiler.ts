@@ -57,6 +57,11 @@ import { archiveNativeLibrary, localizeNativeLibrary, linkNativeWasmLibrary } fr
 import type { NativeToolchain } from "./toolchain.js";
 import { evaluateNativeComptime } from "./comptime.js";
 import { contentDigest, type NativeCache } from "./cache.js";
+import {
+  nativeProfileKey,
+  nativeProfileRefusal,
+  type NativeProfileOptions,
+} from "../backend/native-profile.js";
 import { splitLlvmLibraryProgram } from "../backend/llvm/split.js";
 import { prepareNativeExecutable, prepareNativeLibrary } from "./prepare.js";
 import { buildSanitizedRuntime, sanitizerDriver, sanitizerFlags } from "./sanitizer.js";
@@ -76,6 +81,22 @@ function failure(error: unknown, entry: string, sources: Map<string, string>): C
     ],
     sourceTexts: sources,
   };
+}
+
+/** The request's profile. An indexed profile is read here so every cache keys
+ * its bytes. */
+function nativeProfile(options: CompileRequestOptions): NativeProfileOptions | undefined {
+  if (options.profileGenerate !== undefined) return { generate: options.profileGenerate };
+  if (options.profileUse === undefined) return undefined;
+  const path = resolve(options.profileUse);
+  try {
+    return { use: { path, digest: contentDigest(readFileSync(path)) } };
+  } catch (error) {
+    throw new NativeCodegenError(
+      "SC3002",
+      `cannot read --profile-use file ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /** Shared frontend semantics with native processes for code generation and linking. */
@@ -146,6 +167,7 @@ export class NativeCompiler {
     optimization: NativeOptimization,
     outputKind: "obj" | "asm",
     partitions = 1,
+    profile?: NativeProfileOptions,
   ): string[] {
     const toolchain = this.toolchain;
     const outputs = nativePartitionPaths(output, partitions);
@@ -173,6 +195,7 @@ export class NativeCompiler {
             identity: readFileSync(join(toolchain.helperPackageRoot, "package.json"), "utf8"),
             version: toolchain.compilerVersion,
             ...(partitions > 1 ? { partitions } : {}),
+            ...(profile === undefined ? {} : { profile: nativeProfileKey(profile) }),
           }),
         );
         const cached = outputs.map((_, index) =>
@@ -207,6 +230,7 @@ export class NativeCompiler {
       outputKind,
       partitions,
       ...(partitionCache === null ? {} : { partitionCache }),
+      ...(profile === undefined ? {} : { profile }),
     });
     if (this.cache !== null && key !== null) {
       try {
@@ -228,6 +252,7 @@ export class NativeCompiler {
     optimization: NativeOptimization,
     stage: string,
     library: boolean,
+    profile?: NativeProfileOptions,
   ): string[] {
     // Library archives merge dev shards relocatably; executables link the
     // helper's program partitions directly.
@@ -238,7 +263,7 @@ export class NativeCompiler {
     const split = llvm === null ? null : splitLlvmLibraryProgram(llvm);
     if (split === null) {
       const partitions = library ? 1 : nativeProgramPartitions(statSync(input).size);
-      return this.emitObject(input, output, source, optimization, "obj", partitions);
+      return this.emitObject(input, output, source, optimization, "obj", partitions, profile);
     }
     const objects: string[] = [];
     for (const [index, shard] of split.shards.entries()) {
@@ -292,6 +317,15 @@ export class NativeCompiler {
         );
       }
       if (options.sanitize) sanitizerDriver(toolchain);
+      const profileRefusal = nativeProfileRefusal({
+        ...options,
+        outputKind,
+        optimization,
+        sanitize: options.sanitize ?? false,
+        platform: target.platform,
+      });
+      if (profileRefusal !== null) throw new NativeCodegenError("SC3002", profileRefusal);
+      const profile = nativeProfile(options);
       let ffi: FfiProfile | null = null;
       if (options.ffiProfilePath !== undefined) {
         const loaded = loadFfiProfile(resolve(options.ffiProfilePath));
@@ -372,6 +406,7 @@ export class NativeCompiler {
             optimization,
             stage,
             false,
+            profile,
           );
         else
           this.emitObject(
@@ -432,6 +467,7 @@ export class NativeCompiler {
           ...(options.windowsSubsystem === undefined
             ? {}
             : { windowsSubsystem: options.windowsSubsystem }),
+          ...(profile?.generate === undefined ? {} : { profileGenerate: true }),
         });
         const linkArgs = [
           ...(options.sanitize ? ["-fsanitize=address"] : toolchain.linkerArgs),

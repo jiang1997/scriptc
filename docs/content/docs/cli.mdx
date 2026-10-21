@@ -2,7 +2,7 @@
 title: "CLI Reference"
 ---
 
-The `scriptc` command has four subcommands: `build`, `run`, `coverage`, and `cache warm`. `scriptc --help` prints this summary and the options below, and `scriptc --version` prints the installed version.
+The `scriptc` command has five subcommands: `build`, `run`, `coverage`, `cache warm`, and `merge-profiles`. `scriptc --help` prints this summary and the options below, and `scriptc --version` prints the installed version.
 
 ```console
 $ scriptc --help
@@ -23,6 +23,13 @@ Usage:
                                             contract sidecar JSON beside the archive
   scriptc cache warm [runtime|tls…] verify and load precompiled runtime families
                                             for the current compiler/SDK/target
+  scriptc merge-profiles -o <out.profdata> [--sparse] <profile…>
+                                            merge the raw profiles that
+                                            --profile-generate runs wrote (or
+                                            earlier merged profiles) into one
+                                            profile for --profile-use;
+                                            --sparse leaves out functions
+                                            that never ran (a smaller file)
 ```
 
 ## scriptc build
@@ -85,6 +92,16 @@ Analyzes the program without building it and reports what compiles and what bloc
 
 Verifies and loads the installed precompiled runtime objects and vendored libraries, and prints the cache directory. Pass `runtime`, `tls`, or both to select which to warm. Ordinary builds don't need this step. With `--sanitize`, it builds the instrumented runtime objects using a C toolchain.
 
+## scriptc merge-profiles
+
+Merges the raw profiles that runs of a `--profile-generate` executable wrote, and any earlier merged profiles, into one profile for `--profile-use`. See [Profile-guided optimization](#profile-guided-optimization).
+
+```console
+$ scriptc merge-profiles -o app.profdata profiles/*.profraw
+```
+
+With `--sparse`, the profile leaves out the functions the runs never reached. The file is smaller, typically by about two thirds, and those functions are optimized as without a profile instead of as cold code.
+
 ## Options
 
 <dl>
@@ -118,6 +135,12 @@ Verifies and loads the installed precompiled runtime objects and vendored librar
   <dt><code>--detached-exit</code></dt>
   <dd>On Linux, when the program calls <code>process.exit()</code>, hand the release of its memory to a helper process so the parent sees the exit sooner. The kernel otherwise frees the whole address space before the exit is reported, which takes tens of milliseconds per gigabyte. Opt in only where the trade-offs are acceptable: for up to about 100 ms after the exit, the helper keeps the executable mapped (overwriting the binary in place fails with "text file busy"), its memory stays charged to the cgroup, and the teardown CPU time no longer appears in the parent's resource usage. Valid only for executable builds; it has no effect on other platforms.</dd>
 
+  <dt><code>--profile-generate &lt;pattern&gt;</code></dt>
+  <dd>On Linux, build an instrumented executable for profile-guided optimization. Each run writes a raw profile to the path pattern, where <code>%p</code> expands to the process ID; the <code>LLVM_PROFILE_FILE</code> environment variable overrides the pattern at run time. A relative pattern resolves from the current working directory. Instrumented programs run slower. Valid only for executable builds with <code>--optimization=release</code> or <code>speed</code>.</dd>
+
+  <dt><code>--profile-use &lt;file.profdata&gt;</code></dt>
+  <dd>Optimize the executable with a profile from <code>scriptc merge-profiles</code>: code is laid out, inlined, and split by how the profiled runs used it. Code the profile does not describe, or describes from an older version of the program, is optimized as without a profile, so a stale profile only loses part of its gain. Valid only for executable builds with <code>--optimization=release</code> or <code>speed</code>.</dd>
+
   <dt><code>--npm-static &lt;pkg[,pkg…]|auto&gt;</code></dt>
   <dd>Name npm packages to compile even if they don't ship their own type declarations (repeatable). A trailing <code>...</code>, as in <code>fs-extra...</code>, also names every package that package depends on. <code>auto</code> uses the default automatic selection. Packages that can't compile produce diagnostics. See <a href="/docs/dependencies#explicit-package-selection">npm Dependencies</a>.</dd>
 
@@ -134,7 +157,7 @@ Verifies and loads the installed precompiled runtime objects and vendored librar
   <dd>Coverage only. After the report, list the functions that already operate on values typed only at runtime and the bindings, fields, functions, classes and modules that unsupported constructs would move to the dynamic tier, each with the diagnostic behind it. With a name such as <code>x</code>, <code>Point</code>, or <code>Point.x</code>, show only the matching units. See <a href="/docs/coverage#dynamic-tier">Dynamic tier</a>.</dd>
 
   <dt><code>--wasm &lt;file.wasm&gt;</code></dt>
-  <dd>Coverage only. Report a WebAssembly module the program loads from a path its sources do not spell out. The report already lists modules whose paths the compiler resolves, modules inlined as base64 literals, and <code>.wasm</code> files shipped by packages that use WebAssembly; a <code>scriptc.wasm</code> array in <code>package.json</code> adds files the same way as this flag. Each module is listed with its size, whether it validates, and the WebAssembly proposals it uses. scriptc does not compile WebAssembly modules to native code yet. Repeatable.</dd>
+  <dd>Coverage only. Report a WebAssembly module the program loads from a path its sources do not spell out. The report already lists modules whose paths the compiler resolves, modules inlined as base64 literals, and <code>.wasm</code> files shipped by packages that use WebAssembly; a <code>scriptc.wasm</code> array in <code>package.json</code> adds files the same way as this flag. Each module is listed with its size, whether it validates, and the WebAssembly proposals it uses. Builds translate the modules they find to native code; a build reads the <code>scriptc.wasm</code> array but not this flag. Repeatable.</dd>
 
   <dt><code>--sanitize</code></dt>
   <dd>Build an executable with AddressSanitizer and a reference-count audit at exit, the same checks scriptc's own test suite uses. Requires a C compiler and is available only for host builds. Not supported with <code>--emit=asm</code> or <code>--emit=obj</code>.</dd>
@@ -188,6 +211,19 @@ $ SCRIPTC_TARGET=aarch64-linux-gnu.2.36 scriptc build fib.ts -o fib-linux
 $ file fib-linux
 fib-linux: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 2.0.0, with debug_info, not stripped
 ```
+
+## Profile-guided optimization
+
+A profile records how often each branch and call ran in representative runs of the program. With it, the optimizer inlines the hot calls, keeps hot paths together, and moves cold code out of the way. Profiling takes three steps:
+
+```console
+$ scriptc build app.ts --optimization=speed --profile-generate profiles/%p.profraw -o app-instrumented
+$ ./app-instrumented typical-input.json
+$ scriptc merge-profiles -o app.profdata profiles/*.profraw
+$ scriptc build app.ts --optimization=speed --profile-use app.profdata
+```
+
+Train on workloads like the ones the program will run: code the training never reached is optimized as without a profile. The profile can be committed and reused as the program changes. Functions whose control flow changed since the profile was collected lose their profile, and the rest keep theirs, so regenerate it when much of the program has changed.
 
 ## LLVM backend
 

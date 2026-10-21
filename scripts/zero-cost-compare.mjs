@@ -391,8 +391,9 @@ export function dynamicTierSymbols(names) {
 /* Bench workloads whose release binaries link dynamic-tier symbols on
  * b14377864: JSON.parse trees, worker messages, regex exec metadata
  * (two-tier §3.3 L5), and a shared scr_dyn_call/scr_dyn_define_property core
- * not yet traced to its typed root. bench/thread-slots and
- * bench/channel-messages, added later, link them through worker messages:
+ * not yet traced to its typed root. bench/thread-slots,
+ * bench/channel-messages and bench/worker-messages, added later, link them
+ * through worker messages:
  * node:worker_threads values are dyn objects. Every other bench workload is fully typed and must link none. The gate and
  * tests/harness/bench-dynamic-tier.test.ts enforce that, and the test also
  * fails when a listed workload stops linking them, so remove a workload here
@@ -407,6 +408,7 @@ export const DYNAMIC_WORKLOADS = new Set([
   "bench/intern-table",
   "bench/thread-slots",
   "bench/channel-messages",
+  "bench/worker-messages",
   "bench/typed-array-scan-workers",
   "bench/log-summary",
   "bench/inventory-report",
@@ -476,10 +478,13 @@ export function compareCounts(baseline, candidate) {
 
 /** One program's verdict from its build results and artifact comparisons.
  * `allowed` marks programs that match the change's pattern signature. */
-export function programVerdict({ baseline, candidate, artifacts, allowed }) {
+/** `required` programs must build with both checkouts: a failure both share
+ * means the gate compared nothing for them. Other programs may fail the same
+ * way on both sides, as a corpus program the compiler refuses does. */
+export function programVerdict({ baseline, candidate, artifacts, allowed, required = false }) {
   if (!baseline.ok || !candidate.ok) {
     if (!baseline.ok && !candidate.ok && baseline.error === candidate.error)
-      return { verdict: "both-fail", fails: false };
+      return { verdict: "both-fail", fails: required };
     return { verdict: "build-error", fails: true };
   }
   const differing = Object.entries(artifacts).filter(([, r]) => !r.identical);

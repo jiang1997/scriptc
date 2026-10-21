@@ -18,8 +18,23 @@ function createLookup(): (
 ) => void {
   return function lookup(hostname, opts, callback) {
     dns.lookup(hostname, opts as dns.LookupOneOptions, (err, address, family) => {
-      if (err) return callback(err, "", 0);
-      callback(null, address, family);
+      if (err) {
+        callback(err, address as string, family);
+        return;
+      }
+      // With `all: true` Node answers an address list whatever the
+      // overload the cast selected says.
+      if (Array.isArray(address)) {
+        const v4: dns.LookupAddress[] = [];
+        for (const entry of address) if (entry.family === 4) v4.push(entry);
+        // The same list read through casts to the declared element type.
+        const viaCast = (address as dns.LookupAddress[]).map((entry) => entry.address);
+        const viaShape = address.map((entry) => (entry as { address: string }).address);
+        console.log("casts", viaCast.join(","), viaShape.join(","));
+        callback(null, v4);
+        return;
+      }
+      callback(null, address as string, family);
     });
   };
 }
@@ -40,8 +55,11 @@ function flatten(input: HeadersLike | undefined): string[] {
 const lookup = createLookup();
 lookup("localhost", { family: 4 }, (err, address, family) => {
   console.log("one", err, address, family);
-  lookup("127.0.0.1", 4, (err3, address3, family3) => {
-    console.log("family", err3, address3, family3);
-    console.log(flatten({ accept: "text/plain", "x-list": ["a", "b"], "x-skip": undefined }).join(","));
+  lookup("localhost", { all: true }, (err2, addresses) => {
+    console.log("all", err2, JSON.stringify(addresses));
+    lookup("127.0.0.1", 4, (err3, address3, family3) => {
+      console.log("family", err3, address3, family3);
+      console.log(flatten({ accept: "text/plain", "x-list": ["a", "b"], "x-skip": undefined }).join(","));
+    });
   });
 });

@@ -103,7 +103,7 @@ export function fenceWebCryptoMember(
   use: "read" | "call",
 ): IrExpr | null {
   if (use !== "read" || !ts.isPropertyAccessExpression(access)) return null;
-  if (isJsSourceFile(access.getSourceFile())) return null;
+  if (isJsSourceFile(ts.getSourceFileOfNode(access))) return null;
   if (isSubtleReceiver(lowerer, access)) {
     lowerer.noLowering("crypto.subtle as a value", access, SUBTLE_HINT);
   }
@@ -123,8 +123,8 @@ export function isWebCryptoMemberType(lowerer: Lowerer, type: ts.Type): boolean 
   const symbol = type.getAliasSymbol() ?? type.getSymbol();
   return (
     symbol !== undefined &&
-    symbol.name !== "Crypto" &&
-    WEBCRYPTO_DYN_TYPES.has(symbol.name) &&
+    ts.symbolName(symbol) !== "Crypto" &&
+    WEBCRYPTO_DYN_TYPES.has(ts.symbolName(symbol)) &&
     lowerer.isStdlibSymbol(symbol)
   );
 }

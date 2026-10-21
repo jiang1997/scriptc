@@ -14,7 +14,7 @@
  * throw. The guards are cheap: one load and compare per site, which LLVM
  * folds where an identical test already dominates. */
 import { InternalCompilerError } from "../../errors.js";
-import { classMembershipIntervals } from "./classes.js";
+import { classMembershipIntervals, type LlClassMeta } from "./classes.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 import { vAdapters } from "./shapes.js";
 
@@ -124,6 +124,7 @@ export function emitCaughtInstanceof(
   const B = host.B;
   const target = host.classMetaOf(className);
   const intervals = classMembershipIntervals(host.classMeta, target.def.name);
+  if (target.idInRc) return emitCaughtClassIdInstanceof(host, caught, target, intervals);
   if (!target.hierarchy) {
     const adapterSlot = B.tmp();
     const adapter = B.tmp();
@@ -168,6 +169,80 @@ export function emitCaughtInstanceof(
   if (result === undefined) throw new InternalCompilerError("empty class membership");
   return result;
 }
+
+/** `e instanceof C` for a class whose instances keep their class id in
+ * the rc word (classes.ts LlClassMeta.idInRc). They are thrown as REF
+ * payloads, like standalone class instances: the retain adapter names the
+ * hierarchy (the adapter of whichever static class threw), and the payload's
+ * class id is tested against the intervals. */
+function emitCaughtClassIdInstanceof(
+  host: LlvmEmitterContext,
+  caught: string,
+  target: LlClassMeta,
+  intervals: { pre: number; post: number }[],
+): string {
+  const B = host.B;
+  const kp = B.tmp(),
+    kind = B.tmp(),
+    isRef = B.tmp(),
+    adapterSlot = B.tmp(),
+    adapter = B.tmp();
+  B.line(`${kp} = getelementptr inbounds %ScrCaught, ptr ${caught}, i64 0, i32 1`);
+  B.line(`${kind} = load i32, ptr ${kp}`);
+  B.line(`${isRef} = icmp eq i32 ${kind}, ${CAUGHT_REF_KIND}`);
+  B.line(`${adapterSlot} = getelementptr inbounds %ScrCaught, ptr ${caught}, i64 0, i32 5`);
+  B.line(`${adapter} = load ptr, ptr ${adapterSlot}`);
+  let anyAdapter: string | undefined;
+  for (const m of host.classMeta.values()) {
+    if (m.root !== target.root) continue;
+    const rc = vAdapters(host.shapeHost, { kind: "object", className: m.def.name });
+    const matches = B.tmp();
+    B.line(`${matches} = icmp eq ptr ${adapter}, ${rc.retain}`);
+    if (anyAdapter === undefined) anyAdapter = matches;
+    else {
+      const joined = B.tmp();
+      B.line(`${joined} = or i1 ${anyAdapter}, ${matches}`);
+      anyAdapter = joined;
+    }
+  }
+  const inHierarchy = B.tmp();
+  B.line(`${inHierarchy} = and i1 ${isRef}, ${anyAdapter!}`);
+  const test = B.newLabel("caught.class"),
+    join = B.newLabel("caught.class.done"),
+    from = B.currentLabel();
+  B.condBr(inHierarchy, test, join);
+  B.startBlock(test);
+  const payloadSlot = B.tmp(),
+    payload = B.tmp();
+  B.line(`${payloadSlot} = getelementptr inbounds %ScrCaught, ptr ${caught}, i64 0, i32 4`);
+  B.line(`${payload} = load ptr, ptr ${payloadSlot}`);
+  const pre = host.loadVtPre(payload, target.def.name);
+  let result: string | undefined;
+  for (const interval of intervals) {
+    const ge = B.tmp(),
+      le = B.tmp(),
+      t = B.tmp();
+    B.line(`${ge} = icmp uge ${host.sizeType} ${pre}, ${interval.pre}`);
+    B.line(`${le} = icmp ule ${host.sizeType} ${pre}, ${interval.post}`);
+    B.line(`${t} = and i1 ${ge}, ${le}`);
+    if (result === undefined) result = t;
+    else {
+      const combined = B.tmp();
+      B.line(`${combined} = or i1 ${result}, ${t}`);
+      result = combined;
+    }
+  }
+  if (result === undefined) throw new InternalCompilerError("empty class membership");
+  const tested = B.currentLabel();
+  B.br(join);
+  B.startBlock(join);
+  const out = B.tmp();
+  B.line(`${out} = phi i1 [ false, %${from} ], [ ${result}, %${tested} ]`);
+  return out;
+}
+
+/** SCR_EXC_REF (scr_exception.h). */
+const CAUGHT_REF_KIND = 4;
 
 /** SCR_EXC_F64 = 1, SCR_EXC_BOOL = 2, SCR_EXC_STR = 3 (scr_exception.h). */
 export const CAUGHT_SCALAR_KINDS = { f64: 1, bool: 2, string: 3 } as const;

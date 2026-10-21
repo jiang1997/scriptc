@@ -170,6 +170,10 @@ test.each([32, 64] as const)(
     expect(fn.match(new RegExp(`icmp ult ${size} `, "g"))).toHaveLength(3);
     expect(fn).toMatch(/store double 0x4004000000000000, ptr /);
     expect(fn).toMatch(/zext i1 .* to i8/);
+    // Per push: data + (cap - len), then the state byte `width * cap - 1`
+    // past it; plus the boolean value slot.
+    expect(fn.match(/getelementptr inbounds \[8 x i8\], ptr .* -1$/gm)).toHaveLength(2);
+    expect(fn.match(/getelementptr inbounds \[1 x i8\], ptr .* -1$/gm)).toHaveLength(1);
     expect(fn.match(/getelementptr inbounds i8, ptr /g)).toHaveLength(4);
     expect(fn.match(/store i8 1, ptr /g)).toHaveLength(3);
     expect(fn.match(new RegExp(`add nuw ${size} .*, 1$`, "gm"))).toHaveLength(3);

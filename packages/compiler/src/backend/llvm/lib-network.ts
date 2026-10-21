@@ -60,7 +60,54 @@ export function emitNetworkHttpLibCall(host: LlvmEmitterContext, e: LibCallExpr)
       ...handler,
     ]);
   }
+  if (
+    e.fn === "http.requestDyn" ||
+    e.fn === "http.requestDynCb" ||
+    e.fn === "https.requestDyn" ||
+    e.fn === "https.requestDynCb"
+  ) {
+    // [options, autoEnd(, cb)]: the runtime walks the options record and
+    // attaches its signal through events.addAbortListener (the event-target
+    // unit, linked for these calls by runtime-features).
+    const args = e.args.map((arg) => host.emitExpr(arg));
+    host.usesTimers = true;
+    const cb = args[2];
+    const handler =
+      cb === undefined
+        ? [ptr(), ptr()]
+        : callbackAdapter(
+            host,
+            cb,
+            callbackType(cb).params.length === 0
+              ? "scr_http_resp_thunk0"
+              : "scr_http_resp_thunk_res",
+            ["ptr", "ptr"],
+          );
+    host.declare(`declare ptr @scr_events_add_abort_listener(ptr, ptr)`);
+    return finishRuntimeCall(
+      host,
+      e,
+      e.fn.startsWith("https.") ? "scr_https_request_dyn" : "scr_http_request_dyn",
+      [
+        abiValue(host, args[0]!),
+        abiValue(host, args[1]!),
+        ...handler,
+        ptr("@scr_events_add_abort_listener"),
+      ],
+    );
+  }
   const B = host.B;
+  if (e.fn === "net.listenPath" || e.fn === "net.listenPathCb") {
+    const args = e.args.map((a) => host.emitExpr(a));
+    let cb = "null";
+    if (e.fn === "net.listenPathCb") {
+      host.toHeap(args[2]!);
+      cb = args[2]!.name;
+    }
+    host.declare(`declare void @scr_net_listen_path(ptr, ptr, ptr)`);
+    B.line(`call void @scr_net_listen_path(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${cb})`);
+    return { name: "", type: e.type };
+  }
   if (e.fn === "net.connectOptsChk") {
     return emitAlwaysThrowLibCall(host, e, "scr_net_connect_opts_chk");
   }

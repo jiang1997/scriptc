@@ -115,7 +115,7 @@ const CONTRACT_GLOBAL_TYPES = new Set(["Array", "ReadonlyArray", "Uint8Array"]);
 type TypeBindings = Map<ts.SourceFile, Set<string>>;
 
 function locOf(file: ts.SourceFile, node: ts.Node): SrcLoc {
-  return { file: file.fileName, start: node.getStart(), end: node.end };
+  return { file: file.fileName, start: ts.tokenStartOfNode(node), end: node.end };
 }
 
 function isExported(stmt: ts.Node): boolean {
@@ -248,7 +248,7 @@ function typeShape(
     const lit = node.literal;
     if (ts.isStringLiteral(lit)) return { k: "stringLit", text: lit.text };
     if (lit.kind === ts.SyntaxKind.NullKeyword) return { k: "absent", unit: "null" };
-    return { k: "unsupported", text: node.getText(file) };
+    return { k: "unsupported", text: ts.getTextOfNode(node) };
   }
   if (ts.isArrayTypeNode(node))
     return { k: "array", elem: typeShape(file, node.elementType, bindings) };
@@ -280,15 +280,19 @@ function typeShape(
   if (ts.isConditionalTypeNode(node)) {
     return {
       k: "unsupported",
-      text: `a conditional type (${node.getText(file)})`,
+      text: `a conditional type (${ts.getTextOfNode(node)})`,
       computed: "conditional",
     };
   }
   if (ts.isMappedTypeNode(node)) {
-    return { k: "unsupported", text: `a mapped type (${node.getText(file)})`, computed: "mapped" };
+    return {
+      k: "unsupported",
+      text: `a mapped type (${ts.getTextOfNode(node)})`,
+      computed: "mapped",
+    };
   }
   if (ts.isTypeReferenceNode(node)) {
-    if (!ts.isIdentifier(node.typeName)) return { k: "unsupported", text: node.getText(file) };
+    if (!ts.isIdentifier(node.typeName)) return { k: "unsupported", text: ts.getTextOfNode(node) };
     const name = node.typeName.text;
     const global =
       CONTRACT_GLOBAL_TYPES.has(name) && isUnshadowedGlobalType(file, node, name, bindings);
@@ -302,10 +306,10 @@ function typeShape(
       return { k: "array", elem: typeShape(file, node.typeArguments.nodes[0]!, bindings) };
     }
     if ((node.typeArguments?.nodes.length ?? 0) > 0)
-      return { k: "unsupported", text: node.getText(file) };
+      return { k: "unsupported", text: ts.getTextOfNode(node) };
     return { k: "ref", name };
   }
-  return { k: "unsupported", text: node.getText(file) };
+  return { k: "unsupported", text: ts.getTextOfNode(node) };
 }
 
 /** Unwrap `expr as const` / parenthesized initializers. */
@@ -362,7 +366,7 @@ function envMsgArray(expr: ts.Expression): { env: string; msg: string }[] | null
 
 /** One mergeable declaration site, `file:line` (1-based line). */
 function siteOf(file: ts.SourceFile, node: ts.Node): string {
-  return `${file.fileName}:${ts.getLineAndCharacterOfPosition(file, node.getStart()).line + 1}`;
+  return `${file.fileName}:${ts.getLineAndCharacterOfPosition(file, ts.tokenStartOfNode(node)).line + 1}`;
 }
 
 /** Everything the sidecar projection needs from the program's syntax

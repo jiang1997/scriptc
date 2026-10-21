@@ -205,6 +205,105 @@ function call(host: Host, ret: string, fn: string, args: [string, string][]): st
   return r;
 }
 
+/** `x % y` on two doubles: an integer remainder when both are integers of
+ * magnitude below 2^31 and y is nonzero (the result keeps the dividend's
+ * sign, so a zero result of a negative dividend, including -0, is -0),
+ * else frem (libm's fmod). */
+function remainder(host: Host, x: string, y: string): string {
+  const B = host.B;
+  host.declare(`declare double @llvm.fabs.f64(double)`);
+  const ax = B.tmp();
+  const ay = B.tmp();
+  const smallX = B.tmp();
+  const smallY = B.tmp();
+  const small = B.tmp();
+  B.line(`${ax} = call double @llvm.fabs.f64(double ${x})`);
+  B.line(`${ay} = call double @llvm.fabs.f64(double ${y})`);
+  B.line(`${smallX} = fcmp olt double ${ax}, 2147483648.0`);
+  B.line(`${smallY} = fcmp olt double ${ay}, 2147483648.0`);
+  B.line(`${small} = and i1 ${smallX}, ${smallY}`);
+  const ints = B.newLabel("js.rem.i");
+  const exact = B.newLabel("js.rem.x");
+  const float = B.newLabel("js.rem.f");
+  const join = B.newLabel("js.rem.j");
+  B.condBr(small, ints, float);
+  B.startBlock(ints);
+  const xi = B.tmp();
+  const yi = B.tmp();
+  const xb = B.tmp();
+  const yb = B.tmp();
+  const xInt = B.tmp();
+  const yInt = B.tmp();
+  const nonzero = B.tmp();
+  const both = B.tmp();
+  const ok = B.tmp();
+  B.line(`${xi} = fptosi double ${x} to i64`);
+  B.line(`${yi} = fptosi double ${y} to i64`);
+  B.line(`${xb} = sitofp i64 ${xi} to double`);
+  B.line(`${yb} = sitofp i64 ${yi} to double`);
+  B.line(`${xInt} = fcmp oeq double ${xb}, ${x}`);
+  B.line(`${yInt} = fcmp oeq double ${yb}, ${y}`);
+  B.line(`${nonzero} = icmp ne i64 ${yi}, 0`);
+  B.line(`${both} = and i1 ${xInt}, ${yInt}`);
+  B.line(`${ok} = and i1 ${both}, ${nonzero}`);
+  B.condBr(ok, exact, float);
+  B.startBlock(exact);
+  const r = B.tmp();
+  const rd = B.tmp();
+  const xBits = B.tmp();
+  const negative = B.tmp();
+  const zero = B.tmp();
+  const negZero = B.tmp();
+  const intResult = B.tmp();
+  B.line(`${r} = srem i64 ${xi}, ${yi}`);
+  B.line(`${rd} = sitofp i64 ${r} to double`);
+  B.line(`${xBits} = bitcast double ${x} to i64`);
+  B.line(`${negative} = icmp slt i64 ${xBits}, 0`);
+  B.line(`${zero} = icmp eq i64 ${r}, 0`);
+  B.line(`${negZero} = and i1 ${negative}, ${zero}`);
+  B.line(`${intResult} = select i1 ${negZero}, double -0.0, double ${rd}`);
+  const exactEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(float);
+  const fr = B.tmp();
+  B.line(`${fr} = frem double ${x}, ${y}`);
+  const floatEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(join);
+  const out = B.tmp();
+  B.line(`${out} = phi double [ ${intResult}, %${exactEnd} ], [ ${fr}, %${floatEnd} ]`);
+  return out;
+}
+
+const BITWISE_OPS: Readonly<Record<string, string>> = {
+  "&": "and",
+  "|": "or",
+  "^": "xor",
+  "<<": "shl",
+  ">>": "ashr",
+  ">>>": "lshr",
+};
+
+/** A double's ToInt32 when its magnitude is below 2^63: truncation toward
+ * zero, then the low 32 bits; branches to `slow` otherwise (NaN and the
+ * infinities included). */
+function int32Operand(host: Host, d: string, slow: string): string {
+  const B = host.B;
+  host.declare(`declare double @llvm.fabs.f64(double)`);
+  const magnitude = B.tmp();
+  const small = B.tmp();
+  B.line(`${magnitude} = call double @llvm.fabs.f64(double ${d})`);
+  B.line(`${small} = fcmp olt double ${magnitude}, 9223372036854775808.0`);
+  const ok = B.newLabel("js.int");
+  B.condBr(small, ok, slow);
+  B.startBlock(ok);
+  const wide = B.tmp();
+  const i = B.tmp();
+  B.line(`${wide} = fptosi double ${d} to i64`);
+  B.line(`${i} = trunc i64 ${wide} to i32`);
+  return i;
+}
+
 const ARITH_OPS: Readonly<Record<string, string>> = {
   "-": "fsub",
   "*": "fmul",
@@ -334,8 +433,8 @@ export function emitJsLibCall(host: Host, e: LibCallExpr): LlValue {
         (slow) => {
           const x = a.number(slow);
           const y = b.number(slow);
-          const r = B.tmp();
-          B.line(`${r} = ${inst} double ${x}, ${y}`);
+          const r = op === "%" ? remainder(host, x, y) : B.tmp();
+          if (op !== "%") B.line(`${r} = ${inst} double ${x}, ${y}`);
           return boxDouble(host, r);
         },
         runtime,
@@ -410,17 +509,54 @@ export function emitJsLibCall(host: Host, e: LibCallExpr): LlValue {
       return { name: out, type: e.type };
     }
     case "js.bitwise": {
-      const a = host.emitExpr(e.args[0]!).name;
-      const b = host.emitExpr(e.args[1]!).name;
+      const op = literalOp(e.args[2]!);
+      const inst = op !== null ? BITWISE_OPS[op] : undefined;
+      if (inst === undefined) {
+        const a = host.emitExpr(e.args[0]!).name;
+        const b = host.emitExpr(e.args[1]!).name;
+        const opArg = host.emitExpr(e.args[2]!).name;
+        const r = call(host, "ptr", "scr_js_bitwise", [
+          ["ptr", a],
+          ["ptr", b],
+          ["ptr", opArg],
+        ]);
+        const out = jsval(r);
+        host.emitPendingCheck();
+        return out;
+      }
+      // Two numbers of magnitude below 2^63: ToInt32 is truncation and
+      // wrapping, so the operation runs on i32; anything else (NaN, the
+      // infinities, larger magnitudes) takes the runtime.
+      const a = operand(host, e.args[0]!);
+      const b = operand(host, e.args[1]!);
       const opArg = host.emitExpr(e.args[2]!).name;
-      const r = call(host, "ptr", "scr_js_bitwise", [
-        ["ptr", a],
-        ["ptr", b],
-        ["ptr", opArg],
-      ]);
-      const out = jsval(r);
-      host.emitPendingCheck();
-      return out;
+      const out = withSlowPath(
+        host,
+        "ptr",
+        (slow) => {
+          const x = int32Operand(host, a.number(slow), slow);
+          const y = int32Operand(host, b.number(slow), slow);
+          const r = B.tmp();
+          const d = B.tmp();
+          if (op === "<<" || op === ">>" || op === ">>>") {
+            const count = B.tmp();
+            B.line(`${count} = and i32 ${y}, 31`);
+            B.line(`${r} = ${inst} i32 ${x}, ${count}`);
+          } else {
+            B.line(`${r} = ${inst} i32 ${x}, ${y}`);
+          }
+          B.line(`${d} = ${op === ">>>" ? "uitofp" : "sitofp"} i32 ${r} to double`);
+          return boxDouble(host, d);
+        },
+        () =>
+          call(host, "ptr", "scr_js_bitwise", [
+            ["ptr", a.word()],
+            ["ptr", b.word()],
+            ["ptr", opArg],
+          ]),
+        true,
+      );
+      return jsval(out);
     }
     default:
       throw new InternalCompilerError(`llvm emitter bug: unknown jsval builtin ${e.fn}`);

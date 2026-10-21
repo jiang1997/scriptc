@@ -20,7 +20,7 @@ import {
 } from "../../ir/ir.js";
 import { mangleFunction, mangleGlobal, mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
-import { type LlClassMeta, classFieldIndex, classStructSym } from "./classes.js";
+import { type LlClassMeta, classFieldIndex, classPreLines, classStructSym } from "./classes.js";
 import { SCR_ARR_FIELD, llvmCommentText } from "./common.js";
 import {
   FN_ATTRS,
@@ -188,10 +188,10 @@ export function streamTypedRefCommitAdapter(
       `  call void @scr_arr_outline(ptr %next)`,
     ];
     const storageMembers = [
-      { name: "len", index: 1, type: host.sizeType },
-      { name: "cap", index: 2, type: host.sizeType },
+      // The dense states follow the data slots, so they move with data and cap.
+      { name: "len", index: SCR_ARR_FIELD.len, type: "i32" },
+      { name: "cap", index: SCR_ARR_FIELD.cap, type: "i32" },
       { name: "data", index: SCR_ARR_FIELD.data, type: "ptr" },
-      { name: "present", index: SCR_ARR_FIELD.present, type: "ptr" },
       { name: "filled", index: SCR_ARR_FIELD.filled, type: "i32" },
       { name: "ext", index: SCR_ARR_FIELD.ext, type: "ptr" },
     ];
@@ -232,10 +232,13 @@ export function streamTypedRefCommitAdapter(
     ];
     if (meta.hierarchy && meta.children.length) {
       lines.push(
-        `  %derived_vt_slot = getelementptr inbounds %${classStructSym(t.className)}, ptr %target, i64 0, i32 1`,
-        `  %derived_vt = load ptr, ptr %derived_vt_slot`,
-        `  %derived_pre_slot = getelementptr inbounds %ScrVt, ptr %derived_vt, i64 0, i32 0`,
-        `  %derived_pre = load ${host.sizeType}, ptr %derived_pre_slot`,
+        ...classPreLines(
+          meta,
+          classStructSym(t.className),
+          "%target",
+          "%derived_pre",
+          host.sizeType,
+        ),
       );
       const descendants = (current: typeof meta): (typeof meta)[] =>
         current.children.flatMap((child) => [child, ...descendants(child)]);
@@ -728,16 +731,9 @@ export function streamTypedRefMaterializeAdapter(
     }
     if (adapter.classOps !== undefined) liveClassOps(host, snapshot, meta);
     if (meta.hierarchy && meta.children.length) {
-      const vtSlot = B.tmp(),
-        vt = B.tmp(),
-        preSlot = B.tmp(),
-        pre = B.tmp();
-      B.line(
-        `${vtSlot} = getelementptr inbounds %${classStructSym(t.className)}, ptr %p, i64 0, i32 1`,
-      );
-      B.line(`${vt} = load ptr, ptr ${vtSlot}`);
-      B.line(`${preSlot} = getelementptr inbounds %ScrVt, ptr ${vt}, i64 0, i32 0`);
-      B.line(`${pre} = load ${host.sizeType}, ptr ${preSlot}`);
+      const pre = B.tmp();
+      for (const line of classPreLines(meta, classStructSym(t.className), "%p", pre, host.sizeType))
+        B.line(line.trimStart());
       const descendants = (current: typeof meta): (typeof meta)[] =>
         current.children.flatMap((child) => [child, ...descendants(child)]);
       for (const child of descendants(meta).reverse()) {
@@ -766,8 +762,13 @@ export function streamTypedRefMaterializeAdapter(
       !meta.def.instancePrototypeHelper &&
       !meta.def.prototypeDataHelper
     ) {
-      host.declare(`declare ptr @scr_stream_dyn_view(ptr)`);
-      B.line(`${out} = call ptr @scr_stream_dyn_view(ptr %p)`);
+      // Programs with constructor-function streams view them through
+      // scr_dyn_builtin_stream.c, which answers their own objects.
+      const view = host.usesDynBuiltinStream
+        ? "scr_dyn_builtin_stream_view"
+        : "scr_stream_dyn_view";
+      host.declare(`declare ptr @${view}(ptr)`);
+      B.line(`${out} = call ptr @${view}(ptr %p)`);
     } else B.line(`${out} = call ptr @scr_dyn_new_obj()`);
     const withAttributes = meta.def.fields.some((field) => field.name === CLASS_ATTRIBUTES);
     if (meta.def.tracksOwnFields) {
@@ -1359,16 +1360,9 @@ function liveClassOps(host: LlvmEmitterContext, snapshot: string, meta: LlClassM
   if (subclasses.length > 0) {
     exact = `@${snapshot}_cexact`;
     const B = new BlockBuilder();
-    const vtSlot = B.tmp(),
-      vt = B.tmp(),
-      preSlot = B.tmp(),
-      pre = B.tmp();
-    B.line(
-      `${vtSlot} = getelementptr inbounds %${classStructSym(meta.def.name)}, ptr %p, i64 0, i32 1`,
-    );
-    B.line(`${vt} = load ptr, ptr ${vtSlot}`);
-    B.line(`${preSlot} = getelementptr inbounds %ScrVt, ptr ${vt}, i64 0, i32 0`);
-    B.line(`${pre} = load ${host.sizeType}, ptr ${preSlot}`);
+    const pre = B.tmp();
+    for (const line of classPreLines(meta, classStructSym(meta.def.name), "%p", pre, host.sizeType))
+      B.line(line.trimStart());
     for (const child of subclasses.reverse()) {
       const childAdapter = host.liveDynRefAdapter({ kind: "object", className: child.def.name });
       const match = B.tmp(),

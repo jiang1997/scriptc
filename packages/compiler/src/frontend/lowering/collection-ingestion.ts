@@ -91,7 +91,7 @@ export function collectionInput(
   const symbol = type.getSymbol();
   if (
     !symbol ||
-    (symbol.name !== "MapIterator" && symbol.name !== "SetIterator") ||
+    (ts.symbolName(symbol) !== "MapIterator" && ts.symbolName(symbol) !== "SetIterator") ||
     !lowerer.isStdlibSymbol(symbol)
   )
     return null;

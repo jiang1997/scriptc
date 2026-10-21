@@ -282,7 +282,7 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
   /* Published values (immortal) travel by pointer: a typed value as a
    * capsule over the same object, a dyn graph as itself. */
   if (input->kind == SCR_DYN_TYPED_REF && input->v.typed_ref.ptr &&
-      *(const size_t *)input->v.typed_ref.ptr == SIZE_MAX) {
+      SCR_RC_COUNT(input->v.typed_ref.ptr) == SCR_RC_IMMORTAL) {
     scr_sa_thread_shares();
     encoder->visits[id].view = (ScrDyn *)input;
     ScrMessageNode *node = &encoder->message->nodes[id];
@@ -572,6 +572,9 @@ static ScrMessage *scr_message_try_publish(const ScrDyn *value) {
       } else if (d->rc != SIZE_MAX) {
         scr_cyc_on_dead(d); /* leave the candidate and tenured buffers */
         d->rc = SIZE_MAX;
+        /* A shape names a node of this thread's transition tree (scr_js.h),
+         * which other threads cannot use and which ends with this thread. */
+        if (d->kind == SCR_DYN_OBJ) d->v.obj.shape = NULL;
 #ifdef SCR_RC_AUDIT
         scr_dyn_live_forget();
 #endif

@@ -174,7 +174,7 @@ function mixinFnShapeInner(
     if (n === t.expression) return undefined;
     if (
       ts.isIdentifier(n) &&
-      n.text === p.name.getText() &&
+      n.text === ts.getTextOfNode(p.name) &&
       lowerer.checker.getSymbolAtLocation(n) === paramSym
     ) {
       extraRef = true;
@@ -451,8 +451,8 @@ function instantiateMixinCall(
 
   const base = mixinBaseClassOf(lowerer, call.arguments.nodes[0]!);
   const instName = lowerer.qualify(
-    call.getSourceFile(),
-    `%mx${call.getStart()}.${shape.classNode.name?.text ?? ""}`,
+    ts.getSourceFileOfNode(call),
+    `%mx${ts.tokenStartOfNode(call)}.${shape.classNode.name?.text ?? ""}`,
   );
   const ordinal = lowerer.mixinOrdinals.get(shape.classNode) ?? 0;
   lowerer.mixinOrdinals.set(shape.classNode, ordinal + 1);
@@ -513,7 +513,10 @@ function instantiateMixinCall(
       );
     }
     if (info.mixinInstance) {
-      info.mixinInstance.statics = { sf: call.getSourceFile(), pos: holder.getStart() };
+      info.mixinInstance.statics = {
+        sf: ts.getSourceFileOfNode(call),
+        pos: ts.tokenStartOfNode(holder),
+      };
     }
   }
   return info;

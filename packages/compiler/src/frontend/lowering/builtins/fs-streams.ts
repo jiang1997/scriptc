@@ -19,7 +19,7 @@ import {
 } from "../../../ir/ir.js";
 
 function isFsFallbackDecl(lowerer: Lowerer, d: ts.Node): boolean {
-  const file = d.getSourceFile();
+  const file = ts.getSourceFileOfNode(d);
   if (!lowerer.isStdlibFile(file) || isNodeTypesPath(file.fileName)) return false;
   for (let node: ts.Node | undefined = d.parent; node; node = node.parent) {
     if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
@@ -153,11 +153,13 @@ export function fsStreamClassOf(
   lowerer: Lowerer,
   symbol: ts.Symbol | null | undefined,
 ): "ReadStream" | "WriteStream" | null {
-  if (!symbol || (symbol.name !== "ReadStream" && symbol.name !== "WriteStream")) return null;
+  if (!symbol) return null;
+  const name = ts.symbolName(symbol);
+  if (name !== "ReadStream" && name !== "WriteStream") return null;
   const declared = symbol.declarations.some(
     (d) => ts.isClassDeclaration(d) && isFsFallbackDecl(lowerer, d),
   );
-  return declared ? symbol.name : null;
+  return declared ? name : null;
 }
 
 /** `new fs.ReadStream(path, options)` / `new fs.WriteStream(...)`: the

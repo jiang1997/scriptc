@@ -23,7 +23,13 @@ import {
   isUnionType,
   type Type,
 } from "typescript/unstable/sync";
-import { SemanticNodeHandle, SemanticSnapshot, SemanticType } from "./semantic-model.js";
+import {
+  SemanticNodeHandle,
+  SemanticSnapshot,
+  SemanticType,
+  symbolNameOf,
+} from "./semantic-model.js";
+import type { __String } from "./ast-types.js";
 import {
   SemanticObjectFlags as ObjectFlags,
   SemanticSignatureFlags as SignatureFlags,
@@ -97,7 +103,7 @@ test("absent handles and empty known lists do not issue requests", () => {
   expect(type.getExtendsType()).toBeUndefined();
   expect(type.getBaseType()).toBeUndefined();
   expect(type.getConstraint()).toBeUndefined();
-  expect(type.getTypes()).toBeUndefined();
+  expect(type.getTypes()).toEqual([]);
   expect(type.getBaseTypes()).toBeUndefined();
   expect(type.getTypeParameters()).toEqual([]);
   expect(type.getOuterTypeParameters()).toEqual([]);
@@ -304,8 +310,8 @@ test("symbol tables keep escaped keys, display names, canonical context and cach
   answers.set("getExportSymbolOfSymbol", symbol(3));
   const members = parent.getMembers();
   const exports = parent.getExports();
-  expect(members.get("___x")?.name).toBe("__x");
-  expect(exports.get("__x")?.name).toBe("__x");
+  expect(symbolNameOf(members.get("___x" as __String))).toBe("__x");
+  expect(symbolNameOf(exports.get("__x" as __String))).toBe("__x");
   expect(parent.getMembers()).toBe(members);
   expect(parent.getExports()).toBe(exports);
   expect(parent.getParent()).toBe(first.symbol(symbol(2)));

@@ -647,6 +647,9 @@ export function isSupportedArrayElem(t: IrType): boolean {
     case "regex":
     case "child":
     case "netServer":
+    // fs.Stats snapshots (`await Promise.all(paths.map(stat))`): immutable
+    // refcounted handles with their own retain/release adapters.
+    case "stats":
     case "symbol":
     case "classval":
     case "moduleNs":
@@ -1044,6 +1047,24 @@ export interface IrModule {
    * write in the program (ir/contract-check.ts). Backends may rely on them
    * unconditionally. Absent when the program writes no contract. */
   contracts?: IrContracts;
+  /** The WebAssembly modules translated into this program (wasm/
+   * translate.ts), present exactly when the program uses the WebAssembly
+   * API (possibly empty). The backend appends each module's translation
+   * and emits the registry the runtime looks modules up in. */
+  wasmModules?: IrWasmModule[];
+  /** The program calls WebAssembly.Module.customSections, so translated
+   * modules keep their custom sections (otherwise they carry none, and
+   * debug sections cost nothing). */
+  wasmCustomSections?: boolean;
+}
+
+/** A WebAssembly module whose bytes the build saw, validated within the
+ * translatable feature level. */
+export interface IrWasmModule {
+  /** Hex SHA-256 of the bytes. */
+  sha256: string;
+  /** The bytes, base64. */
+  bytes: string;
 }
 
 /** Verified contract facts, keyed by IR names. */
@@ -4079,6 +4100,7 @@ export const DYN_HANDLE_KINDS: ReadonlyMap<string, { tag: string; cls: string }>
   ["http2Session", { tag: "SCR_DYNH_H2_SESSION", cls: "Http2Session" }],
   ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", cls: "Http2Stream" }],
   ["httpClientReq", { tag: "SCR_DYNH_HTTP_CLIENT", cls: "ClientRequest" }],
+  ["dgramSocket", { tag: "SCR_DYNH_DGRAM_SOCKET", cls: "Socket" }],
   ["dir", { tag: "SCR_DYNH_DIR", cls: "Dir" }],
   ["cryptoHash", { tag: "SCR_DYNH_HASH", cls: "Hash" }],
   ["cryptoHmac", { tag: "SCR_DYNH_HMAC", cls: "Hmac" }],
@@ -4199,6 +4221,10 @@ export function canConvertToDyn(
         (a) =>
           a.kind === "undefinedT" ||
           isJsonSafeType(a, getRecord, getUnion) ||
+          // Composite arms (records holding dyn, Map or Set members) box
+          // through the walker beside the promise arm: a method answering
+          // either its result or a promise of it.
+          canBoxDynComposite(a, getRecord, getUnion, visiting) ||
           isDynTypedRefType(a) ||
           a.kind === "classval" ||
           DYN_HANDLE_KINDS.has(a.kind) ||

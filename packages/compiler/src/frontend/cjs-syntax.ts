@@ -1,4 +1,5 @@
 import * as ts from "./ts7/syntax.js";
+import { tokenStartOfNode } from "./ts7/node-functions.js";
 
 export interface CjsLexedExports {
   /** Names Node's lexer detects in THIS file (no reexport resolution). */
@@ -30,7 +31,7 @@ function identRunEnd(text: string, pos: number): number {
  * a `a`-escaped name parses to the same AST as its plain spelling,
  * but merve reads bytes and stops at the backslash. */
 function sourceSpellsIdentifier(node: ts.Node, sf: ts.SourceFile): boolean {
-  const ch = sf.text[node.getStart(sf)];
+  const ch = sf.text[tokenStartOfNode(node)];
   return ch !== undefined && isIdentStartChar(ch);
 }
 
@@ -39,16 +40,16 @@ function sourceSpellsIdentifier(node: ts.Node, sf: ts.SourceFile): boolean {
  * defineProperty getter's `return IDENT.IDENT` because `this` lexes as an
  * identifier run — probed), escapes and private names do not. */
 function isIdentTokenNode(node: ts.Node, sf: ts.SourceFile): boolean {
-  const start = node.getStart(sf);
+  const start = tokenStartOfNode(node);
   const ch = sf.text[start];
-  return ch !== undefined && isIdentStartChar(ch) && identRunEnd(sf.text, start) === node.getEnd();
+  return ch !== undefined && isIdentStartChar(ch) && identRunEnd(sf.text, start) === node.end;
 }
 
 /** The identifier run at the node's START — the whole name when its
  * spelling is plain, the byte prefix merve consumed when a unicode escape
  * interrupts the run mid-name. */
 function identPrefixOf(node: ts.Node, sf: ts.SourceFile): string {
-  const start = node.getStart(sf);
+  const start = tokenStartOfNode(node);
   return sf.text.slice(start, identRunEnd(sf.text, start));
 }
 
@@ -84,20 +85,17 @@ export function isModuleExports(e: ts.Expression): boolean {
  * follows — so the recognizer descends the leftmost-child chain while it
  * still starts where `e` starts. A ParenthesizedExpression breaks the
  * chain naturally (its child starts after the `(`), matching merve. */
-function leadingRequireOf(
-  e: ts.Expression,
-  sf: ts.SourceFile,
-): { spec: string; end: number } | null {
-  const start = e.getStart(sf);
+function leadingRequireOf(e: ts.Expression): { spec: string; end: number } | null {
+  const start = tokenStartOfNode(e);
   let cur: ts.Node = e;
   for (;;) {
     const spec = bareRequireSpecOf(cur);
-    if (spec !== null && cur.getStart(sf) === start) return { spec, end: cur.getEnd() };
+    if (spec !== null && tokenStartOfNode(cur) === start) return { spec, end: cur.end };
     let first: ts.Node | undefined;
     ts.forEachChild(cur, (c) => {
       first ??= c;
     });
-    if (first === undefined || first.getStart(sf) !== start) return null;
+    if (first === undefined || tokenStartOfNode(first) !== start) return null;
     cur = first;
   }
 }
@@ -179,13 +177,13 @@ function scanTableLiteral(
       continue; // whitespace before `,` is skipped on the shorthand path
     }
     if (ts.isSpreadAssignment(prop)) {
-      const req = leadingRequireOf(prop.expression, sf);
+      const req = leadingRequireOf(prop.expression);
       let consumedEnd: number;
       if (req !== null) {
         reexports.push(req.spec);
         consumedEnd = req.end;
       } else if (sourceSpellsIdentifier(prop.expression, sf)) {
-        consumedEnd = identRunEnd(text, prop.expression.getStart(sf));
+        consumedEnd = identRunEnd(text, tokenStartOfNode(prop.expression));
       } else {
         return; // `...{}` and friends stop the scan
       }
@@ -213,7 +211,7 @@ function scanTableLiteral(
       }
       if (key === null) return; // numeric / computed / template keys stop the scan
       const value = prop.initializer;
-      const req = leadingRequireOf(value, sf);
+      const req = leadingRequireOf(value);
       if (req !== null) {
         // A require VALUE adds the key, records the reexport, and stops
         // the scan UNCONDITIONALLY — probed: `{ a: require('x'), b: v }`
@@ -223,7 +221,7 @@ function scanTableLiteral(
         reexports.push(req.spec);
         return;
       }
-      const start = value.getStart(sf);
+      const start = tokenStartOfNode(value);
       const ch0 = text[start];
       if (ch0 === undefined || !isIdentStartChar(ch0)) return; // literal values stop WITHOUT adding the key
       const consumedEnd = identRunEnd(text, start);
@@ -351,8 +349,8 @@ function starExportSpecOf(call: ts.CallExpression, sf: ts.SourceFile): string | 
   if (!sourceSpellsIdentifier(nameNode, sf)) return null;
   const arg0 = call.arguments.nodes[0];
   if (arg0 === undefined) return null;
-  if (!byteAdjacentParen(sf, nameNode.getEnd(), arg0.getStart(sf))) return null;
-  return leadingRequireOf(arg0, sf)?.spec ?? null;
+  if (!byteAdjacentParen(sf, nameNode.end, tokenStartOfNode(arg0))) return null;
+  return leadingRequireOf(arg0)?.spec ?? null;
 }
 
 /** True when the bytes between a callee name ending at `nameEnd` and its
@@ -384,7 +382,7 @@ function starAssignOf(stmt: ts.VariableStatement, sf: ts.SourceFile): [string, s
     init.arguments.nodes.length >= 1
   ) {
     const arg0 = init.arguments.nodes[0]!;
-    if (!byteAdjacentParen(sf, init.expression.getEnd(), arg0.getStart(sf))) return null;
+    if (!byteAdjacentParen(sf, init.expression.end, tokenStartOfNode(arg0))) return null;
     const spec = bareRequireSpecOf(arg0);
     if (spec !== null) return [decl.name.text, spec];
   }
@@ -717,15 +715,16 @@ export function cjsLexedExportsOfFile(sf: ts.SourceFile): CjsLexedExports {
       ) {
         exports.add(lhs.argumentExpression.text);
       } else if (isModuleExports(lhs)) {
-        events.push({ pos: n.getStart(sf), kind: "assign", rhs: n.right });
+        events.push({ pos: tokenStartOfNode(n), kind: "assign", rhs: n.right });
       }
     } else if (ts.isCallExpression(n)) {
       scanDefineProperty(n, sf, exports);
       if (braceDepth === 0) {
         const starSpec = starExportSpecOf(n, sf);
-        if (starSpec !== null) events.push({ pos: n.getStart(sf), kind: "spec", spec: starSpec });
+        if (starSpec !== null)
+          events.push({ pos: tokenStartOfNode(n), kind: "spec", spec: starSpec });
         const loopId = starLoopIdOf(n, sf);
-        if (loopId !== null) events.push({ pos: n.getStart(sf), kind: "loop", id1: loopId });
+        if (loopId !== null) events.push({ pos: tokenStartOfNode(n), kind: "loop", id1: loopId });
       }
     } else if (ts.isVariableStatement(n) && braceDepth === 0) {
       const assign = starAssignOf(n, sf);
@@ -745,7 +744,7 @@ export function cjsLexedExportsOfFile(sf: ts.SourceFile): CjsLexedExports {
       for (const spec of starAssigns.get(ev.id1) ?? []) reexports.push(spec);
     } else {
       reexports = []; // every `module.exports =` clears — stars included (probed)
-      const req = leadingRequireOf(ev.rhs, sf);
+      const req = leadingRequireOf(ev.rhs);
       if (req !== null) {
         reexports.push(req.spec);
       } else if (ts.isObjectLiteralExpression(ev.rhs)) {

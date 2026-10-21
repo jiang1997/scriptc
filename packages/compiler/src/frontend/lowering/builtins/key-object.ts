@@ -23,7 +23,7 @@ export function isKeyObjectClass(lowerer: Lowerer, node: ts.Expression): boolean
 export function isKeyObjectValue(lowerer: Lowerer, node: ts.Expression): boolean {
   const type = lowerer.typeOf(node);
   const sym = type.getAliasSymbol() ?? type.getSymbol();
-  return !!sym && sym.name === "KeyObject" && lowerer.isStdlibSymbol(sym);
+  return !!sym && ts.symbolName(sym) === "KeyObject" && lowerer.isStdlibSymbol(sym);
 }
 
 /** `v instanceof KeyObject`. */
@@ -51,7 +51,7 @@ export function lowerKeyObjectCall(lowerer: Lowerer, call: ts.CallExpression): I
     kind: "dynInvoke",
     recv: lowerer.lowerExprExpecting(access.expression, DYN),
     method: access.name.text,
-    calleeName: access.getText(),
+    calleeName: ts.getTextOfNode(access),
     args: call.arguments.nodes.map((arg) => lowerer.lowerExprExpecting(arg, DYN)),
     type: DYN,
     loc: locOf(call),

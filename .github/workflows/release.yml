@@ -219,6 +219,12 @@ jobs:
           Move-Item "$expanded\clang+llvm-22.1.8-x86_64-pc-windows-msvc" $llvm
           echo "LLVM_DIR=$llvm\lib\cmake\llvm" >> $env:GITHUB_ENV
           echo "$llvm\bin" >> $env:GITHUB_PATH
+      # A musl CLI ships tsc-ts's musl executable, and these jobs run on glibc
+      # runners, where pnpm installs only the glibc platform packages.
+      - name: Let pnpm install musl platform packages
+        if: endsWith(matrix.cli_target, '-musl')
+        run: |
+          printf 'supportedArchitectures:\n  libc: [current, musl]\n' >> pnpm-workspace.yaml
       - run: pnpm install --frozen-lockfile
       - name: Build native packages (POSIX)
         if: matrix.platform != 'windows-x64'

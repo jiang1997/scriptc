@@ -281,7 +281,7 @@ export function scanDivergences(
           ts.isVariableDeclaration(decl) &&
           decl.initializer !== undefined &&
           ts.isObjectLiteralExpression(decl.initializer) &&
-          decl.getSourceFile() === inner.getSourceFile()
+          ts.getSourceFileOfNode(decl) === ts.getSourceFileOfNode(inner)
         ) {
           lit = decl.initializer;
           binding = inner.text;
@@ -291,7 +291,9 @@ export function scanDivergences(
       const contextual = safely(() => checker.getContextualType(lit!));
       if (contextual === undefined) continue;
       if (namedObjectDeclaration(checker, contextual) === null) continue;
-      const declared = safely(() => checker.getPropertiesOfType(contextual).map((p) => p.name));
+      const declared = safely(() =>
+        checker.getPropertiesOfType(contextual).map((p) => ts.symbolName(p)),
+      );
       if (declared === undefined) continue;
       const written = lit.properties.nodes.map((p) => propertyNameText(p)!);
       const assigned =
@@ -463,7 +465,7 @@ function identityUse(root: ts.Node, name: string, from = -1): IdentityUse | null
     return cur;
   };
   const textOf = (node: ts.Node): string => {
-    const text = node.getText();
+    const text = ts.getTextOfNode(node);
     return text.length > 60 ? `${text.slice(0, 57)}...` : text;
   };
   const visit = (node: ts.Node): "skip" | "stop" | undefined => {
@@ -591,7 +593,7 @@ function elementWrite(root: ts.Node, name: string, from: number): string | null 
     )
       target = node.operand;
     if (target !== undefined && throughElement(target)) {
-      found = target.getText();
+      found = ts.getTextOfNode(target);
       return "stop";
     }
     if (
@@ -670,8 +672,8 @@ function widthCopyBetween(
     // still observes the same writes: no divergence to report.
     const accessor = ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor;
     if (sourceProps.some((p) => (p.flags & accessor) !== 0)) return null;
-    const sourceNames = new Set(sourceProps.map((p) => p.name));
-    const targetNames = checker.getPropertiesOfType(t).map((p) => p.name);
+    const sourceNames = new Set(sourceProps.map((p) => ts.symbolName(p)));
+    const targetNames = checker.getPropertiesOfType(t).map((p) => ts.symbolName(p));
     if (targetNames.length === sourceNames.size && targetNames.every((n) => sourceNames.has(n)))
       return null;
   }
@@ -684,7 +686,7 @@ function isProgramClassType(checker: ts.TypeChecker, type: ts.Type): boolean {
   return (
     symbol !== undefined &&
     (symbol.flags & ts.SymbolFlags.Class) !== 0 &&
-    symbol.declarations.some((d) => !d.getSourceFile().isDeclarationFile)
+    symbol.declarations.some((d) => !ts.getSourceFileOfNode(d).isDeclarationFile)
   );
 }
 
@@ -698,7 +700,7 @@ function isPlainRecordType(checker: ts.TypeChecker, type: ts.Type): boolean {
   if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Class) !== 0) return false;
   // Library-declared object types (Map, Date, Promise, ...) are not records.
   const decls = symbol === undefined ? [] : symbol.declarations;
-  if (decls.some((d) => d.getSourceFile().isDeclarationFile)) return false;
+  if (decls.some((d) => ts.getSourceFileOfNode(d).isDeclarationFile)) return false;
   return true;
 }
 
@@ -711,7 +713,7 @@ function namedObjectDeclaration(checker: ts.TypeChecker, type: ts.Type): ts.Node
   if (symbol === undefined) return null;
   if ((symbol.flags & ts.SymbolFlags.Class) !== 0) return null;
   const decl = symbol.declarations[0];
-  if (decl === undefined || decl.getSourceFile().isDeclarationFile) return null;
+  if (decl === undefined || ts.getSourceFileOfNode(decl).isDeclarationFile) return null;
   return decl;
 }
 
@@ -765,7 +767,7 @@ function classDeclarationOfTypeNode(
   const symbol = lowerer.checker.getSymbolAtLocation(node.typeName);
   if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Class) === 0) return null;
   const decl = symbol.declarations.find((d) => ts.isClassDeclaration(d) || ts.isClassExpression(d));
-  if (decl === undefined || decl.getSourceFile().isDeclarationFile) return null;
+  if (decl === undefined || ts.getSourceFileOfNode(decl).isDeclarationFile) return null;
   return decl as ts.ClassLikeDeclaration;
 }
 
@@ -776,7 +778,7 @@ function classDeclarationOfType(
   const symbol = type.getSymbol();
   if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Class) === 0) return null;
   const decl = symbol.declarations.find((d) => ts.isClassDeclaration(d) || ts.isClassExpression(d));
-  if (decl === undefined || decl.getSourceFile().isDeclarationFile) return null;
+  if (decl === undefined || ts.getSourceFileOfNode(decl).isDeclarationFile) return null;
   return decl as ts.ClassLikeDeclaration;
 }
 

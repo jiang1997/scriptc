@@ -86,9 +86,9 @@ function ownValueReturns(ctor: ts.ConstructorDeclaration): ts.ReturnStatement[] 
   const visit = (node: ts.Node): void => {
     if (ts.isFunctionLike(node) || ts.isClassLikeDeclaration(node)) return;
     if (ts.isReturnStatement(node) && node.expression !== undefined) out.push(node);
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  ctor.body?.forEachChild(visit);
+  if (ctor.body !== undefined) ts.forEachChild(ctor.body, visit);
   return out;
 }
 
@@ -188,9 +188,9 @@ function ownReturns(body: ts.Node): ts.ReturnStatement[] {
   const visit = (node: ts.Node): void => {
     if (ts.isFunctionLike(node) || ts.isClassLikeDeclaration(node)) return;
     if (ts.isReturnStatement(node)) out.push(node);
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  body.forEachChild(visit);
+  ts.forEachChild(body, visit);
   return out;
 }
 
@@ -225,7 +225,7 @@ export function constructorReturnPlan(
       // the class too (`if (C.instance) return C.instance;`).
       const runtimeInstance =
         info.localClass === undefined &&
-        isJsSourceFile(ctor.getSourceFile()) &&
+        isJsSourceFile(ts.getSourceFileOfNode(ctor)) &&
         [...returns].some(([stmt, kind]) => kind === "mixed" && !insideFinallyTry(stmt, ctor));
       if ([...returns.values()].includes("instance") || runtimeInstance) {
         slot = {
@@ -277,7 +277,7 @@ export function lowerConstructorReturn(lowerer: Lowerer, stmt: ts.ReturnStatemen
     };
   }
   const feature = foreignObjectFeature(info);
-  if (kind === "object" || !isJsSourceFile(stmt.getSourceFile()))
+  if (kind === "object" || !isJsSourceFile(ts.getSourceFileOfNode(stmt)))
     lowerer.unsupported("SC1090", stmt, feature);
   // A JavaScript value that is an object only sometimes: a primitive
   // still answers the constructed instance, an object refuses.
@@ -296,7 +296,7 @@ export function lowerConstructorReturn(lowerer: Lowerer, stmt: ts.ReturnStatemen
   });
   const diag = unsupportedDiag("SC1090", loc, feature);
   lowerer.runtimeFences.push(diag);
-  const sf = stmt.getSourceFile();
+  const sf = ts.getSourceFileOfNode(stmt);
   const line = ts.getLineAndCharacterOfPosition(sf, loc.start).line + 1;
   return {
     kind: "block",
@@ -460,7 +460,7 @@ export function superIntoResultSlot(
   const slot = plan.slot;
   const display = base.def.name.replace(/^%|^%m\d+\./, "");
   const feature = `extending a class whose constructor can return an existing instance ('super()' would rebind 'this' to the instance '${display}' returns)`;
-  if (!isJsSourceFile(blame.getSourceFile())) {
+  if (!isJsSourceFile(ts.getSourceFileOfNode(blame))) {
     lowerer.unsupported("SC1090", blame, feature);
     return call;
   }
@@ -470,7 +470,8 @@ export function superIntoResultSlot(
   if (!lowerer.liftedFns.some((fn) => fn.name === name)) {
     const diag = unsupportedDiag("SC1090", loc, feature);
     lowerer.runtimeFences.push(diag);
-    const line = ts.getLineAndCharacterOfPosition(blame.getSourceFile(), loc.start).line + 1;
+    const line =
+      ts.getLineAndCharacterOfPosition(ts.getSourceFileOfNode(blame), loc.start).line + 1;
     const instance = { id: "instance.0", name: "instance", type, mutable: false };
     const returned = { id: "returned.0", name: "returned", type: slot.type, mutable: false };
     lowerer.liftedFns.push({

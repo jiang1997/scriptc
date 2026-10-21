@@ -21,7 +21,13 @@
  *   node scripts/limitations-partials.mjs split <file> [page]  write the page and partials from one file
  *   node scripts/limitations-partials.mjs merge <base> <theirs>
  *       three-way merge a branch's single-file page (<theirs>, forked from
- *       <base>) into the current partials, then split the result */
+ *       <base>) into the current partials, then split the result
+ *   node scripts/limitations-partials.mjs check   fail on a partial line that holds two sentences
+ *   node scripts/limitations-partials.mjs fix     put each such sentence on its own line
+ *
+ * One sentence per line keeps changes to different sentences on different
+ * lines, so concurrent edits merge. Markdown joins the lines with a space,
+ * so the rendered page is the same. */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -139,6 +145,41 @@ function write(text, page = defaultPage) {
   console.error(`${relative(docsRoot, page)}: ${partials.size} partials in ${relative(docsRoot, partialsDir)}/`);
 }
 
+// A sentence ends at `.`, `!` or `?` (after any closing `)`, `"` or `*`)
+// followed by a space and a capital letter, a code span, a link or bold
+// text. Abbreviations don't end one.
+const sentenceEnd = /(?<!\b(?:e\.g|i\.e|etc|vs|cf))([.!?][)"*]*) (?=[A-Z`[*])/g;
+
+/** The partial text with each sentence of a prose line on its own line;
+ * a bullet's sentences continue with the two-space indent. Code fences,
+ * headings, tables, HTML and include lines are left alone, as are code
+ * spans and link targets. */
+export function splitSentences(text) {
+  let inFence = false;
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    if (inFence || /^\s*(```|~~~|#|<|\||$)/.test(line)) {
+      out.push(line);
+      continue;
+    }
+    const indent = /^\s*(?:[-*]|\d+\.) /.test(line) ? "  " : line.match(/^\s*/)[0];
+    // Mask code spans (all but the opening backtick, which can start a
+    // sentence) and link targets, so their periods never split.
+    const masked = line.replace(/`[^`]*`|\]\([^)]*\)/g, (m) => m[0] + "\0".repeat(m.length - 1));
+    const pieces = [];
+    let start = 0;
+    for (const match of masked.matchAll(sentenceEnd)) {
+      const end = match.index + match[1].length;
+      pieces.push(line.slice(start, end));
+      start = end + 1;
+    }
+    pieces.push(line.slice(start));
+    out.push(pieces[0], ...pieces.slice(1).map((piece) => indent + piece));
+  }
+  return out.join("\n");
+}
+
 function listPartials(dir = partialsDir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? listPartials(join(dir, entry.name)) : [join(dir, entry.name)],
@@ -175,9 +216,20 @@ if (command === "join") {
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+} else if (command === "check" || command === "fix") {
+  let unsplit = 0;
+  for (const file of listPartials().sort()) {
+    const text = readFileSync(file, "utf8");
+    const split = splitSentences(text);
+    if (split === text) continue;
+    unsplit++;
+    if (command === "fix") writeFileSync(file, split);
+    else console.error(`${relative(docsRoot, file)}: put each sentence on its own line (node docs/scripts/limitations-partials.mjs fix)`);
+  }
+  if (command === "check" && unsplit > 0) process.exitCode = 1;
 } else if (command === "list") {
   for (const file of listPartials().sort()) console.log(relative(docsRoot, file));
 } else {
-  console.error("usage: limitations-partials.mjs join [page] | split <file> [page] | merge <base> <theirs> | list");
+  console.error("usage: limitations-partials.mjs join [page] | split <file> [page] | merge <base> <theirs> | check | fix | list");
   process.exitCode = 2;
 }

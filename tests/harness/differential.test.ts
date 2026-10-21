@@ -155,15 +155,27 @@ function wantsNoDeprecation(file: string): boolean {
 
 /** The Node oracle's argv for a corpus entry (shims + the per-program
  * transform flag). */
+/** `// @disallow-code-generation` in the directive head: the Node oracle
+ * runs with --disallow-code-generation-from-strings — the mode compiled
+ * programs match for eval and the Function constructor, which throw its
+ * EvalError (code-generation.ts). Programs that never generate code
+ * behave identically either way. */
+function wantsDisallowCodeGeneration(file: string): boolean {
+  return directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l));
+}
+
 function nodeOracleArgs(file: string): string[] {
   const transform = wantsTransformTypes(file)
     ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
     : [];
   const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
+  const codegen = wantsDisallowCodeGeneration(file)
+    ? ["--disallow-code-generation-from-strings"]
+    : [];
   // --import makes Node load even a CJS entry through its ESM loader,
   // changing an entry throw's uncaughtException origin to unhandledRejection.
   const shims = directiveHead(file).includes("// @no-node-shims") ? [] : ["--import", comptimeShim];
-  return [...transform, ...nodep, ...shims, nodeOracleFile(file)];
+  return [...transform, ...nodep, ...codegen, ...shims, nodeOracleFile(file)];
 }
 
 /** Runs a binary, tolerating an expected nonzero exit (execFile rejects on

@@ -98,8 +98,8 @@ export function appendImplicitUndefinedReturn(
 
 /** Whether the source explicitly documents a return contract. */
 export function hasExplicitJsDocReturn(decl: ts.SignatureDeclaration): boolean {
-  const sourceFile = decl.getSourceFile();
-  return /@returns?\b/.test(sourceFile.text.slice(decl.pos, decl.getStart(sourceFile)));
+  const sourceFile = ts.getSourceFileOfNode(decl);
+  return /@returns?\b/.test(sourceFile.text.slice(decl.pos, ts.tokenStartOfNode(decl)));
 }
 
 export function promiseCarriesDyn(lowerer: Lowerer, type: IrType): boolean {
@@ -130,14 +130,14 @@ export function declaredReturnType(
   decl: ts.SignatureDeclaration,
   blame: ts.Node,
 ): IrType {
-  if (isJsSourceFile(decl.getSourceFile()) && ts.isGetAccessorDeclaration(decl)) return DYN;
+  if (isJsSourceFile(ts.getSourceFileOfNode(decl)) && ts.isGetAccessorDeclaration(decl)) return DYN;
   const sig = lowerer.checker.getSignatureFromDeclaration(decl);
   if (!sig) lowerer.unsupported("SC1090", decl, "this function form");
   const retTsType = lowerer.checker.getReturnTypeOfSignature(sig);
   // An inferred null/undefined return in JS can read a mutable checked-value
   // field. Keep the actual value instead of restricting it to the initializer.
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     (retTsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0
   )
     return DYN;
@@ -154,7 +154,7 @@ export function declaredReturnType(
   )
     mappedReturn = mapAsyncGeneratorAnnotation(retTsType, lowerer.typeCtx);
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     decl.modifiers?.nodes.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) &&
     !decl.asteriskToken &&
     mappedReturn?.kind !== "promise"
@@ -162,7 +162,11 @@ export function declaredReturnType(
     const fallback = dynFallbackType(lowerer, decl, retTsType);
     return fallback?.kind === "promise" ? fallback : { kind: "promise", inner: DYN };
   }
-  if (mappedReturn && isJsSourceFile(decl.getSourceFile()) && functionCanReturnUndefined(decl))
+  if (
+    mappedReturn &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
+    functionCanReturnUndefined(decl)
+  )
     mappedReturn = lowerer.withUndefinedArmOf(mappedReturn) ?? mappedReturn;
   // A generic-class method body that can return an indexed read that
   // misses returns undefined there, whatever the declared result says.
@@ -171,33 +175,33 @@ export function declaredReturnType(
       mappedReturn.kind === "promise"
         ? { kind: "promise", inner: lowerer.runtimeOptionalType(mappedReturn.inner) }
         : lowerer.runtimeOptionalType(mappedReturn);
-  if (isJsSourceFile(decl.getSourceFile()) && mappedReturn?.kind === "void") {
+  if (isJsSourceFile(ts.getSourceFileOfNode(decl)) && mappedReturn?.kind === "void") {
     let returnsValue = false;
     const scan = (node: ts.Node): void => {
       if (node !== decl && ts.isFunctionLike(node)) return;
       if (ts.isReturnStatement(node) && node.expression) returnsValue = true;
-      node.forEachChild(scan);
+      ts.forEachChild(node, scan);
     };
     scan(decl);
     if (returnsValue) return DYN;
   }
-  if (isJsSourceFile(decl.getSourceFile()) && mappedReturn?.kind === "array") return DYN;
+  if (isJsSourceFile(ts.getSourceFileOfNode(decl)) && mappedReturn?.kind === "array") return DYN;
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     !decl.type &&
     !hasExplicitJsDocReturn(decl) &&
     mappedReturn?.kind === "record"
   )
     return DYN;
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     !decl.type &&
     !hasExplicitJsDocReturn(decl) &&
     mappedReturn?.kind === "date"
   )
     return DYN;
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     !decl.type &&
     !hasExplicitJsDocReturn(decl) &&
     mappedReturn?.kind === "union" &&
@@ -207,7 +211,7 @@ export function declaredReturnType(
   // JS inference assigns Number to arithmetic over any, although the
   // runtime operands can both be BigInts. Preserve that native result.
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     !decl.type &&
     !hasExplicitJsDocReturn(decl) &&
     mappedReturn?.kind === "f64"
@@ -237,13 +241,13 @@ export function declaredReturnType(
         )
       )
         numericAnyReturn = true;
-      node.forEachChild(check);
+      ts.forEachChild(node, check);
     };
     check(decl);
     if (numericAnyReturn) return DYN;
   }
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     !hasExplicitJsDocReturn(decl) &&
     mappedReturn !== null &&
     promiseCarriesDyn(lowerer, mappedReturn) &&
@@ -264,7 +268,7 @@ export function declaredReturnType(
   // value rides its own box, calls go through the boxed thunk (JS
   // arity), and typed slots re-check with dynCheck as usual.
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     decl.type === undefined &&
     lowerer.mapTypeOf(retTsType)?.kind === "func"
   ) {
@@ -304,7 +308,7 @@ export function declaredReturnType(
         (arm.kind === "object" && !hasExplicitJsDocReturn(decl)),
     );
   if (
-    isJsSourceFile(decl.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     decl.type === undefined &&
     recordReturn !== null &&
     recordReturn !== undefined &&
@@ -468,5 +472,5 @@ export function blockBodyOf(decl: ts.FunctionLikeDeclaration): ts.Block | null {
   const body = decl.body;
   if (body === undefined) return null;
   if (ts.isBlock(body)) return body;
-  return decl.forEachChild((c) => (ts.isBlock(c) ? c : undefined)) ?? null;
+  return ts.forEachChild(decl, (c) => (ts.isBlock(c) ? c : undefined)) ?? null;
 }

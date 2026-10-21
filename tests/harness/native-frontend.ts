@@ -56,7 +56,13 @@ export const programs = [
   "nullish-long-chain.ts",
   "class-array-optional-return.ts",
   "contextual-array-union-write.ts",
+  "2391-default-builtin-imports/main.ts",
+  "3055-default-builtin-nodenext/main.ts",
+  "5854-array-from-async.ts",
   "6020-class-extends-function-constructor.js",
+  "5585-record-results-inlined.ts",
+  "2631-create-require/main.ts",
+  "4970-int32-call-abi.ts",
   // Re-chosen key orders rebuild the inspect helpers after lowering.
   "key-order-late-optional.ts",
   "5888-inspect-sorted.ts",

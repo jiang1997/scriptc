@@ -41,7 +41,7 @@ function isObjectFactoryNew(lowerer: Lowerer, expr: ts.NewExpression): boolean {
     !owner ||
     !declaration?.body ||
     !bindingNeverReassigned(lowerer, symbol, owner) ||
-    !isJsSourceFile(declaration.getSourceFile()) ||
+    !isJsSourceFile(ts.getSourceFileOfNode(declaration)) ||
     declaration.asteriskToken ||
     declaration.modifiers?.nodes.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
   )

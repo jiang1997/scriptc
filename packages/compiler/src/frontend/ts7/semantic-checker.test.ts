@@ -10,6 +10,8 @@ import { tsgoExecutable } from "./rpc-api.js";
 import { spawnTs7Wire } from "./rpc-process.js";
 import { Ts7Session } from "./session.js";
 import { SyntaxKind } from "./enums.js";
+import { getSourceFileOfNode } from "./node-functions.js";
+import { forEachChild } from "./ast.js";
 
 const source = [
   "export class Box { value = 1; }",
@@ -98,15 +100,15 @@ test("synthetic type roots and descendants match the pinned SDK without claiming
       expect(actual.file.node(1)).toBe(actual);
       expect(actual.parent).toBeUndefined();
       expect(() => actual.file.sourceFile).toThrow("expected a source file root");
-      expect(() => actual.getSourceFile()).toThrow("expected a source file root");
-      actual.forEachChild((child) => {
+      expect(() => getSourceFileOfNode(actual)).toThrow("expected a source file root");
+      forEachChild(actual, (child) => {
         expect(child.parent).toBe(actual);
       });
       checked++;
     }
     expect(checked).toBe(6);
     expect(root.file.sourceFile).toBe(root);
-    expect(root.getSourceFile()).toBe(root);
+    expect(getSourceFileOfNode(root)).toBe(root);
   } finally {
     snapshot.dispose();
     sdkSnapshot.dispose();

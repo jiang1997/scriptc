@@ -1,4 +1,5 @@
 import { lowerReadlineCursorCall } from "./builtins/readline.js";
+import { lowerMonitorEventLoopDelayCall } from "./builtins/performance.js";
 import {
   lowerEnvironmentData,
   lowerReceiveMessageOnPort,
@@ -15,6 +16,8 @@ import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerCallbackPromisify } from "./builtins/promisify-callback.js";
 import { lowerNodeModuleCall } from "./builtins/module-resolution.js";
 import { builtinModuleFnOf, builtinFenceHintOf } from "./surfaces.js";
+import { resultIsDiscarded } from "./call-position.js";
+import { locOf, requireSpecOf } from "../program.js";
 
 /** `events.addAbortListener(signal, listener)`: the runtime registers the
  * once/resist-stop-propagation abort listener (or queues the call for an
@@ -54,6 +57,38 @@ export function lowerAddAbortListener(
   return { kind: "dynObjLit", fields: [{ key, value: dispose }], type: DYN, loc };
 }
 
+/** graceful-fs's `gracefulify(fsModule)` (graceful-fs is served as node:fs —
+ * builtin-modules.ts): it patches a module object with the retry queue,
+ * which statically lowered fs calls never consult, so the call statement
+ * is a no-op. The argument still evaluates unless it is a plain reference
+ * (the patched module, typically `require("fs")` or a namespace binding).
+ * The returned module object has no representation; other positions
+ * fence. */
+function lowerGracefulify(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcLoc): IrExpr {
+  const args = expr.arguments.nodes;
+  if (!resultIsDiscarded(expr) || args.length !== 1 || ts.isSpreadElement(args[0]!)) {
+    lowerer.noLowering(
+      "gracefulify",
+      expr,
+      "graceful-fs compiles as node:fs; gracefulify(fsModule) lowers as a statement whose result is unused",
+    );
+  }
+  let arg: ts.Expression = args[0]!;
+  while (ts.isParenthesizedExpression(arg)) arg = arg.expression;
+  const plain =
+    ts.isIdentifier(arg) ||
+    (ts.isCallExpression(arg) && requireSpecOf(arg) !== null) ||
+    (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression));
+  if (plain) return { kind: "seqExpr", stmts: [], result: dynUndefinedExpr(loc), type: DYN, loc };
+  return {
+    kind: "seqExpr",
+    stmts: [{ kind: "exprStmt", expr: lowerer.lowerExpr(arg), loc: locOf(arg) }],
+    result: dynUndefinedExpr(loc),
+    type: DYN,
+    loc,
+  };
+}
+
 /** Named imports, namespace members and callable aliases share validation
  * and dispatch. Resolve diagnostic provenance only if no handler accepts. */
 export function lowerBuiltinCall(
@@ -70,6 +105,9 @@ export function lowerBuiltinCall(
     return lowerAddAbortListener(lowerer, expr, loc);
   }
   if (bi.module === "events" && bi.member === "once") return lowerEventsOnce(lowerer, expr, loc);
+  if (bi.module === "perf_hooks" && bi.member === "monitorEventLoopDelay") {
+    return lowerMonitorEventLoopDelayCall(lowerer, expr);
+  }
   if (bi.module === "events") {
     const helper = lowerEventsEmitterHelper(lowerer, expr, bi.member, loc);
     if (helper) return helper;
@@ -126,6 +164,8 @@ export function lowerBuiltinCall(
   if (bi.module === "worker_threads" && bi.member === "markAsUncloneable") {
     return lowerUncloneable(lowerer, expr);
   }
+  if (bi.module === "fs" && bi.member === "gracefulify")
+    return lowerGracefulify(lowerer, expr, loc);
   const builtinFn = builtinModuleFnOf(lowerer, bi.module, bi.member);
   if (!builtinFn) {
     lowerer.noLowering(

@@ -16,16 +16,32 @@ import {
   type SemanticQuery,
 } from "./semantic-model.js";
 import { SemanticSymbolFlags } from "./semantic-schema.generated.js";
+import type { TypePredicateKind } from "./enums.generated.js";
 
-export interface SemanticIndexInfo {
-  keyType: SemanticType;
-  valueType: SemanticType;
-  isReadonly: boolean;
-  declaration: SemanticNodeHandle | undefined;
+/** An index signature of a type. Its declaration resolves on first read: most queries only count a
+ * type's index infos. */
+export class SemanticIndexInfo {
+  private declarationNode: AstNode | undefined;
+  private declarationResolved = false;
+
+  constructor(
+    readonly keyType: SemanticType,
+    readonly type: SemanticType,
+    readonly isReadonly: boolean,
+    private readonly declarationHandle: SemanticNodeHandle | undefined,
+  ) {}
+
+  get declaration(): AstNode | undefined {
+    if (!this.declarationResolved) {
+      this.declarationNode = this.declarationHandle?.resolve();
+      this.declarationResolved = true;
+    }
+    return this.declarationNode;
+  }
 }
 
 export interface SemanticTypePredicate {
-  kind: number;
+  kind: TypePredicateKind;
   parameterIndex: number;
   parameterName: string | undefined;
   type: SemanticType | undefined;
@@ -382,15 +398,17 @@ export class SemanticChecker {
     const data = this.project.request<IndexInfoResponse[] | null>("getIndexInfosOfType", {
       type: type.id,
     });
-    return (data ?? []).map((item) => ({
-      keyType: this.project.type(item.keyType),
-      valueType: this.project.type(item.valueType),
-      isReadonly: item.isReadonly ?? false,
-      declaration:
-        item.declaration === undefined
-          ? undefined
-          : new SemanticNodeHandle(item.declaration, this.project),
-    }));
+    return (data ?? []).map(
+      (item) =>
+        new SemanticIndexInfo(
+          this.project.type(item.keyType),
+          this.project.type(item.valueType),
+          item.isReadonly ?? false,
+          item.declaration === undefined
+            ? undefined
+            : new SemanticNodeHandle(item.declaration, this.project),
+        ),
+    );
   }
   private getWellKnownSymbols(): WellKnownSymbols {
     this.project.ensureActive();

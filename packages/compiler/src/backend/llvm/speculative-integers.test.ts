@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { F64, type IrExpr, type IrStmt } from "../../ir/ir.js";
 import {
   isSpeculableValue,
+  planProvenIntegerLoop,
   planSpeculativeLoop,
   speculativeReads,
 } from "./speculative-integers.js";
@@ -193,4 +194,75 @@ test("loops that only count and compare keep one copy", () => {
     increment("i"),
   ]);
   expect(planSpeculativeLoop(scaled as never, all)?.locals.has("n")).toBe(true);
+});
+
+test("bounded cursors with proven writes are shadowed in a proven integer loop", () => {
+  // for (i = 0; i < n; i++) { if (a < b) run = run + 1; else run = 0;
+  //   if (run > longest) longest = run; }
+  const sum = bin("+", ref("run"), num(1));
+  const step = assign("run", sum);
+  const reset = assign("run", num(0));
+  const copy = assign("longest", ref("run"));
+  const forLoop = (body: IrStmt[]): IrStmt => ({
+    kind: "for",
+    init: null,
+    cond: bin("<", ref("i"), ref("n")),
+    update: assign("i", bin("+", ref("i"), num(1))),
+    body,
+    loc,
+  });
+  const branch = (then: IrStmt[], else_: IrStmt[] | null): IrStmt => ({
+    kind: "if",
+    cond: bin("<", ref("a"), ref("b")),
+    then,
+    else_,
+    loc,
+  });
+  const body = [branch([step], [reset]), branch([copy], null)];
+  const range = { min: 0, max: 100 };
+  const cursors = new Map([
+    ["run", range],
+    ["longest", range],
+  ]);
+  const plan = planProvenIntegerLoop(forLoop(body) as never, cursors, all, () => false, all)!;
+  expect([...plan.locals]).toEqual([
+    ["run", range],
+    ["longest", range],
+  ]);
+  expect(plan.writes).toEqual(new Set([step, reset, copy]));
+  // A binding the loop does not bound keeps its double.
+  const only = planProvenIntegerLoop(
+    forLoop(body) as never,
+    new Map([["run", range]]),
+    all,
+    () => false,
+    all,
+  )!;
+  expect([...only.locals.keys()]).toEqual(["run"]);
+  // An unproven sum leaves `run` unshadowed, and its copy reads `run`
+  // where nothing proves it integral.
+  const unproven = (e: IrExpr): boolean => e !== sum && e.kind !== "varRef";
+  expect(
+    planProvenIntegerLoop(forLoop(body) as never, cursors, all, () => false, unproven),
+  ).toBeNull();
+  // An expression-position write refuses the binding.
+  const inner: IrStmt = {
+    kind: "exprStmt",
+    expr: { kind: "incDec", op: "+", prefix: false, localId: "longest", type: F64, loc },
+    loc,
+  };
+  expect([
+    ...planProvenIntegerLoop(
+      forLoop([...body, inner]) as never,
+      cursors,
+      all,
+      () => false,
+      all,
+    )!.locals.keys(),
+  ]).toEqual(["run"]);
+  // A labeled jump may leave past the write-back.
+  const jump: IrStmt = { kind: "break", label: "outer", loc };
+  expect(
+    planProvenIntegerLoop(forLoop([...body, jump]) as never, cursors, all, () => false, all),
+  ).toBeNull();
 });

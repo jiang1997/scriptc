@@ -292,7 +292,7 @@ export function lowerImportMetaResolveCall(
     );
   }
   const result = resolveImportMetaRuntime(
-    call.getSourceFile().fileName,
+    ts.getSourceFileOfNode(call).fileName,
     specifier,
     lowerer.targetPlatform,
     lowerer.frontendServices,
@@ -314,8 +314,8 @@ function requireResolverBaseFile(lowerer: Lowerer, receiver: ts.Expression): ts.
   const created = createRequireCalleeFileOf(lowerer, receiver);
   if (created !== null) return created;
   return lowerer.isStdlibGlobal(receiver, "require") &&
-    !isNodeEsmFile(receiver.getSourceFile(), lowerer.program)
-    ? receiver.getSourceFile()
+    !isNodeEsmFile(ts.getSourceFileOfNode(receiver), lowerer.program)
+    ? ts.getSourceFileOfNode(receiver)
     : null;
 }
 

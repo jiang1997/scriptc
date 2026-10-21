@@ -1,8 +1,7 @@
-// @deferred-fences: 1
 // `s.match(re) || []` types the empty array as an empty tuple that the
 // typescript-go API panics to describe (moment.js's configFromStringAndFormat).
-// The panic stays with the statements whose lowering asks about that
-// type, so the rest of the program compiles and runs.
+// The union reads through its widened members, so the whole program
+// compiles, including the statements whose lowering asks about that type.
 
 /** @param {string} s */
 function firstDigit(s) {
@@ -18,3 +17,4 @@ function digitCount(s) {
 
 const parsers = { firstDigit, digitCount };
 console.log(typeof parsers.firstDigit, parsers.digitCount('a1b22'));
+console.log(firstDigit('a1b22'), firstDigit('none'));

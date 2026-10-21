@@ -1,6 +1,8 @@
+import { declareTypedArguments } from "./typed-arguments.js";
 import { varRef } from "../../ir/build.js";
 import { InternalCompilerError } from "../../errors.js";
 import * as ts from "../ts7/adapter.js";
+import { isRebindableFunctionSymbol } from "./rebindable-functions.js";
 import { bodyReadsArguments } from "../arguments-usage.js";
 import type { Lowerer } from "./lowerer.js";
 import {
@@ -58,6 +60,8 @@ function declareCallReceiver(
  * same collection lists top-level declarations ride. */
 export function isTopLevelFnSymbol(lowerer: Lowerer, ident: ts.Identifier): boolean {
   const symbol = lowerer.resolveValueSymbol(ident);
+  // A reassigned JavaScript declaration is read through its module global.
+  if (isRebindableFunctionSymbol(lowerer, symbol ?? undefined)) return false;
   if (symbol && lowerer.staticCallables.get(symbol)?.kind === "declared-function") return true;
   const decl = symbol ? symbol.declarations[0] : undefined;
   return (
@@ -129,7 +133,7 @@ function declareFunctionArguments(
     lowerer.ctx.argumentsLocal = local;
   }
   if (
-    isJsSourceFile(node.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(node)) &&
     !ts.isArrowFunction(node) &&
     shapes.length === 1 &&
     shapes[0]?.mode === "dynRest" &&
@@ -203,7 +207,7 @@ export function lowerLambda(
   // Fluent methods must return that receiver without a class cast.
   if (
     ts.isMethodDeclaration(node) &&
-    isJsSourceFile(node.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(node)) &&
     !node.type &&
     !node.asteriskToken &&
     !hasExplicitJsDocReturn(node) &&
@@ -214,6 +218,19 @@ export function lowerLambda(
       ret: funcType.ret.kind === "promise" ? { ...funcType.ret, inner: DYN } : DYN,
     };
   }
+  // An ASYNC lambda whose signature answered a bare checked-dynamic result
+  // (`retry(async () => loose())` against a library slot typed
+  // `(...) => A | Promise<A>` with A = any — the union collapses to `any`):
+  // calling it still produces a promise, so the value's result is
+  // Promise<unknown>, the payload the dyn the body returns.
+  if (
+    funcType.ret.kind === "dyn" &&
+    !ts.isAccessor(node) &&
+    node.asteriskToken === undefined &&
+    node.modifiers?.nodes.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true
+  ) {
+    funcType = { ...funcType, ret: { kind: "promise", inner: DYN } };
+  }
   // A lambda IS a value: the completed-ABI rule applies at birth. The
   // contextual (target) type decides — `(x?: number) => void` may flow
   // into a slot annotated `(x: number | undefined) => void` (same ABI
@@ -222,7 +239,7 @@ export function lowerLambda(
   if (
     !(
       ts.isMethodDeclaration(node) &&
-      isJsSourceFile(node.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(node)) &&
       canBoxFuncIntoDyn(
         funcType,
         (id) => lowerer.shapes.get(id),
@@ -273,14 +290,14 @@ export function lowerLambda(
   if (lowerer.methodLambdasInProgress.has(node))
     lowerer.methodLambdasInProgress.set(node, { fnName, type: funcType, selfReads: 0 });
   const inferredSignature =
-    isJsSourceFile(node.getSourceFile()) && !node.type
+    isJsSourceFile(ts.getSourceFileOfNode(node)) && !node.type
       ? lowerer.checker.getSignatureFromDeclaration(node)
       : undefined;
   const returnsConstructor =
     inferredSignature &&
     producesConstructor(lowerer, lowerer.checker.getReturnTypeOfSignature(inferredSignature));
   if (
-    isJsSourceFile(node.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(node)) &&
     !node.type &&
     !isAsync &&
     !isGenerator &&
@@ -302,13 +319,15 @@ export function lowerLambda(
   try {
     const receiver =
       (checkedReceiver ||
-        isJsSourceFile(node.getSourceFile()) ||
+        isJsSourceFile(ts.getSourceFileOfNode(node)) ||
         node.parameters.nodes.some(isThisParameter)) &&
       !ts.isArrowFunction(node)
         ? declareCallReceiver(lowerer, node, isGenerator)
         : null;
     const { params, prologue } = lowerer.declareParams(node.parameters.nodes, shapes);
     if (receiver) prologue.unshift(receiver);
+    if (ts.isFunctionExpression(node) && lowerer.typedArgumentsLambdas.has(node))
+      declareTypedArguments(lowerer, node, shapes, params, prologue);
     declareFunctionArguments(
       lowerer,
       node,
@@ -445,7 +464,7 @@ export function lowerLambda(
     // position. ICEs (SC9001) stay compile errors, exactly like
     // lowerStmts; probe mode (diagSink) keeps the poison.
     if (!(e instanceof PoisonError)) throw e;
-    if (!isJsSourceFile(node.getSourceFile())) throw e;
+    if (!isJsSourceFile(ts.getSourceFileOfNode(node))) throw e;
     const params: IrParam[] = funcType.params.map((t, i) => ({
       localId: `%pf${i}`,
       name: `%pf${i}`,
@@ -494,7 +513,7 @@ export function lowerFunction(lowerer: Lowerer, decl: ts.FunctionDeclaration): I
   lowerer.fnStack.push(ctx);
   try {
     const receiver =
-      decl.parameters.nodes.some(isThisParameter) || isJsSourceFile(decl.getSourceFile())
+      decl.parameters.nodes.some(isThisParameter) || isJsSourceFile(ts.getSourceFileOfNode(decl))
         ? declareCallReceiver(lowerer, decl, sig.generator !== undefined)
         : null;
     const { params, prologue } = lowerer.declareParams(decl.parameters.nodes, sig.params);
@@ -547,7 +566,7 @@ export function lowerFunction(lowerer: Lowerer, decl: ts.FunctionDeclaration): I
     // at the declaration's position — so a reachable-but-broken
     // signature stops the RUN at its own site instead of the build.
     // ICEs (SC9001) stay compile errors, exactly like lowerStmts.
-    if (isJsSourceFile(decl.getSourceFile())) {
+    if (isJsSourceFile(ts.getSourceFileOfNode(decl))) {
       // An ABI type naming a class that never REGISTERED (the sentence-
       // walker idiom's path type — the #private fence) is fine to emit:
       // callers CAN lower calls to this symbol (a same-typed param

@@ -999,6 +999,20 @@ static const ScrChar1 scr_ascii1[128] = {
   SCR_A8(64),  SCR_A8(72),  SCR_A8(80),  SCR_A8(88),
   SCR_A8(96),  SCR_A8(104), SCR_A8(112), SCR_A8(120),
 };
+/* "10" through "99": converting a small integer to a string returns one of
+ * these (or a digit from scr_ascii1) without allocating. */
+typedef struct { size_t rc; size_t len; size_t cap; char data[3]; } ScrChar2;
+#define SCR_D2_WORD(t, u) (((uint64_t)(t) << 16) | ((uint64_t)(u) << 8) | (uint64_t)(u))
+#define SCR_D2(t, u) \
+  {SIZE_MAX, 2, SCR_STR_CAP_WORD(2, SCR_KEY_HASH32_SHORT(2, SCR_D2_WORD(t, u)), 1), {(char)(t), (char)(u), 0}}
+#define SCR_D2_ROW(t) \
+  SCR_D2(t, '0'), SCR_D2(t, '1'), SCR_D2(t, '2'), SCR_D2(t, '3'), SCR_D2(t, '4'), \
+  SCR_D2(t, '5'), SCR_D2(t, '6'), SCR_D2(t, '7'), SCR_D2(t, '8'), SCR_D2(t, '9')
+static const ScrChar2 scr_digits2[90] = {
+  SCR_D2_ROW('1'), SCR_D2_ROW('2'), SCR_D2_ROW('3'), SCR_D2_ROW('4'), SCR_D2_ROW('5'),
+  SCR_D2_ROW('6'), SCR_D2_ROW('7'), SCR_D2_ROW('8'), SCR_D2_ROW('9'),
+};
+
 static const struct { size_t rc; size_t len; size_t cap; char data[1]; }
     scr_lit_empty = {SIZE_MAX, 0, SCR_STR_CAP_WORD(0, SCR_KEY_HASH32_SHORT(0, 0), 1), ""};
 
@@ -1846,9 +1860,10 @@ static uint16_t *scr_str_units(const ScrStr *s, size_t *n) {
  * UTF-16 units to bytes through the cursor and checkpoints. Once its
  * reads would have paid for converting it (one read per 16 bytes), a
  * receiver up to SCR_SIDX_UNITS_MAX units keeps its code units in its
- * entry and reads become loads. The array is freed with the entry, and an
- * append drops it (scr_sidx_concat_append). */
-#define SCR_SIDX_UNITS_MAX ((size_t)1 << 20)
+ * entry and reads become loads. The bound admits source texts of several
+ * megabytes, which scanners read in full. The array is freed with the
+ * entry, and an append drops it (scr_sidx_concat_append). */
+#define SCR_SIDX_UNITS_MAX ((size_t)1 << 24)
 static bool scr_sidx_units(const ScrStr *s, ScrSidx *e) {
   if (!e->units) {
     if (++e->reads < 32 || e->reads * 16 < s->len || s->len > SCR_SIDX_UNITS_MAX) return false;
@@ -3146,6 +3161,11 @@ double scr_bytes_to_number(const char *p, size_t len) {
 }
 
 ScrStr *scr_f64_to_scrstr(double x) {
+  if (x >= 0 && x < 100) { /* -0 prints "0" as well */
+    unsigned v = (unsigned)x;
+    if ((double)v == x)
+      return v < 10 ? (ScrStr *)&scr_ascii1['0' + v] : (ScrStr *)&scr_digits2[v - 10];
+  }
   char buf[32];
   size_t len = scr_f64_to_str(x, buf);
   return scr_str_new_ascii(buf, len); /* number text is always ASCII */

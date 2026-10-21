@@ -287,7 +287,7 @@ function assertsSlot(node: ts.Node, operands: Operands): boolean {
       return;
     }
     if ((n.flags & ts.NodeFlags.OptionalChain) !== 0) return;
-    n.forEachChild(visit);
+    ts.forEachChild(n, visit);
   };
   if (ts.isVariableStatement(node)) {
     for (const declaration of node.declarationList.declarations.nodes)
@@ -323,7 +323,7 @@ function unchanged(nodes: readonly ts.Node[], { array, index }: Operands): boole
       let hit = false;
       const walk = (n: ts.Node): void => {
         if (ts.isIdentifier(n) && roots.includes(n.text)) hit = true;
-        n.forEachChild(walk);
+        ts.forEachChild(n, walk);
       };
       walk(e);
       return hit;
@@ -372,7 +372,7 @@ function unchanged(nodes: readonly ts.Node[], { array, index }: Operands): boole
       ok = false;
       return;
     }
-    n.forEachChild(visit);
+    ts.forEachChild(n, visit);
   };
   for (const node of nodes) visit(node);
   return ok;

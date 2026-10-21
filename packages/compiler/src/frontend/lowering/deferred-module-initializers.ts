@@ -62,8 +62,9 @@ export class DeferredModuleInitializers {
       const info = exactClassOfReceiver(lowerer, owner);
       if (
         info &&
-        info.decl?.getSourceFile() === statement.getSourceFile() &&
-        info.decl.getStart() < statement.getStart() &&
+        info.decl !== null &&
+        ts.getSourceFileOfNode(info.decl) === ts.getSourceFileOfNode(statement) &&
+        ts.tokenStartOfNode(info.decl) < ts.tokenStartOfNode(statement) &&
         !info.localClass &&
         !info.classDecorators &&
         !info.generic &&
@@ -101,7 +102,7 @@ export class DeferredModuleInitializers {
       loc: locOf(statement),
     };
     const context = lowerer.ctx;
-    const moduleIndex = [...lowerer.initNameOf.keys()].indexOf(statement.getSourceFile());
+    const moduleIndex = [...lowerer.initNameOf.keys()].indexOf(ts.getSourceFileOfNode(statement));
     const initializers = this.pending.get(key) ?? [];
     initializers.push({
       loc: block.loc,
@@ -269,14 +270,14 @@ function registryInitializer(
       return false;
     expression = expression.arguments.nodes[0]!;
   }
-  const packageSource = npmStaticPackageOfPath(statement.getSourceFile().fileName) !== null;
+  const packageSource = npmStaticPackageOfPath(ts.getSourceFileOfNode(statement).fileName) !== null;
   const initialized = (declaration: ts.Node): boolean => {
-    const source = declaration.getSourceFile();
-    return source === statement.getSourceFile()
-      ? declaration.getStart() < statement.getStart()
+    const source = ts.getSourceFileOfNode(declaration);
+    return source === ts.getSourceFileOfNode(statement)
+      ? ts.tokenStartOfNode(declaration) < ts.tokenStartOfNode(statement)
       : [...lowerer.initNameOf.keys()].indexOf(source) >= 0 &&
           [...lowerer.initNameOf.keys()].indexOf(source) <
-            [...lowerer.initNameOf.keys()].indexOf(statement.getSourceFile());
+            [...lowerer.initNameOf.keys()].indexOf(ts.getSourceFileOfNode(statement));
   };
   const callable = (callee: ts.Expression): boolean => {
     if (!ts.isIdentifier(callee)) return false;
@@ -324,7 +325,7 @@ function registryInitializer(
     // bundlers. Arguments still need to be safe to omit: an annotation
     // never licenses dropping argument effects or a throwing property read.
     if (packageSource && (ts.isCallExpression(node) || ts.isNewExpression(node))) {
-      const trivia = node.getSourceFile().text.slice(node.pos, node.getStart());
+      const trivia = ts.getSourceFileOfNode(node).text.slice(node.pos, ts.tokenStartOfNode(node));
       if (!/[@#]__PURE__/.test(trivia)) return false;
       if (!callable(node.expression)) return false;
       return (node.arguments?.nodes ?? []).every((argument) => value(argument, depth + 1));
@@ -337,8 +338,8 @@ function registryInitializer(
       const info = exactClassOfReceiver(lowerer, node.expression.expression);
       return (
         !!info?.decl &&
-        info.decl.getSourceFile() === statement.getSourceFile() &&
-        info.decl.getStart() < statement.getStart() &&
+        ts.getSourceFileOfNode(info.decl) === ts.getSourceFileOfNode(statement) &&
+        ts.tokenStartOfNode(info.decl) < ts.tokenStartOfNode(statement) &&
         classWriteIsUnobserved(lowerer, info, statement) &&
         (findMethodOn(lowerer, info, node.name.text) !== null ||
           findGenericMethodOn(lowerer, info, node.name.text) !== null)
@@ -398,7 +399,7 @@ function registryInitializer(
     if (
       functionDeclaration &&
       ts.isFunctionDeclaration(functionDeclaration) &&
-      functionDeclaration.getSourceFile() === statement.getSourceFile()
+      ts.getSourceFileOfNode(functionDeclaration) === ts.getSourceFileOfNode(statement)
     )
       return true;
     // Reading an earlier initialized binding executes none of its
@@ -410,8 +411,8 @@ function registryInitializer(
       functionDeclaration &&
       ts.isVariableDeclaration(functionDeclaration) &&
       functionDeclaration.initializer &&
-      functionDeclaration.getSourceFile() === statement.getSourceFile() &&
-      functionDeclaration.getStart() < statement.getStart()
+      ts.getSourceFileOfNode(functionDeclaration) === ts.getSourceFileOfNode(statement) &&
+      ts.tokenStartOfNode(functionDeclaration) < ts.tokenStartOfNode(statement)
     )
       return true;
     const info = symbol && lowerer.classBySymbol.get(symbol);
@@ -421,8 +422,8 @@ function registryInitializer(
     // decorated classes and local factories keep ordinary initialization.
     return (
       !!declaration &&
-      declaration.getSourceFile() === statement.getSourceFile() &&
-      declaration.getStart() < statement.getStart() &&
+      ts.getSourceFileOfNode(declaration) === ts.getSourceFileOfNode(statement) &&
+      ts.tokenStartOfNode(declaration) < ts.tokenStartOfNode(statement) &&
       ts.isClassDeclaration(declaration) &&
       !info!.classDecorators &&
       !info!.generic &&
@@ -476,19 +477,20 @@ function registryOwnerIsData(
     )
   )
     return false;
-  if (declaration.getSourceFile() !== statement.getSourceFile()) {
+  if (ts.getSourceFileOfNode(declaration) !== ts.getSourceFileOfNode(statement)) {
     const modules = [...lowerer.initNameOf.keys()];
     return (
       !!frozen &&
-      modules.indexOf(declaration.getSourceFile()) >= 0 &&
-      modules.indexOf(declaration.getSourceFile()) < modules.indexOf(statement.getSourceFile())
+      modules.indexOf(ts.getSourceFileOfNode(declaration)) >= 0 &&
+      modules.indexOf(ts.getSourceFileOfNode(declaration)) <
+        modules.indexOf(ts.getSourceFileOfNode(statement))
     );
   }
-  if (declaration.getStart() >= statement.getStart()) return false;
+  if (ts.tokenStartOfNode(declaration) >= ts.tokenStartOfNode(statement)) return false;
   if (frozen) return true;
   let safe = true;
   const visit = (node: ts.Node): void => {
-    if (!safe || node.getStart() >= statement.getStart()) return;
+    if (!safe || ts.tokenStartOfNode(node) >= ts.tokenStartOfNode(statement)) return;
     if (
       ts.isIdentifier(node) &&
       node !== declaration.name &&
@@ -515,7 +517,7 @@ function registryOwnerIsData(
     }
     ts.forEachChild(node, visit);
   };
-  visit(statement.getSourceFile());
+  visit(ts.getSourceFileOfNode(statement));
   return safe;
 }
 
@@ -527,7 +529,7 @@ function classWriteIsUnobserved(
   info: ClassInfo,
   statement: ts.Statement,
 ): boolean {
-  const source = statement.getSourceFile();
+  const source = ts.getSourceFileOfNode(statement);
   const declaration = info.decl!;
   if (
     declaration.members.nodes.some(
@@ -543,7 +545,10 @@ function classWriteIsUnobserved(
   )
     return false;
   for (const earlier of source.statements.nodes) {
-    if (earlier.getStart() <= declaration.getStart() || earlier.getStart() >= statement.getStart())
+    if (
+      ts.tokenStartOfNode(earlier) <= ts.tokenStartOfNode(declaration) ||
+      ts.tokenStartOfNode(earlier) >= ts.tokenStartOfNode(statement)
+    )
       continue;
     if (
       ts.isFunctionDeclaration(earlier) ||

@@ -27,9 +27,10 @@ const ASSERTION_ERROR_PROPERTIES: ReadonlySet<string> = new Set([
 export function isExecExceptionType(lowerer: Lowerer, t: ts.Type): boolean {
   const sym = t.getSymbol();
   return (
-    sym?.name === "ExecException" &&
+    sym !== undefined &&
+    ts.symbolName(sym) === "ExecException" &&
     sym.declarations.some(
-      (d) => ts.isInterfaceDeclaration(d) && lowerer.isStdlibFile(d.getSourceFile()),
+      (d) => ts.isInterfaceDeclaration(d) && lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
     )
   );
 }
@@ -52,6 +53,20 @@ export function refuseExecExceptionCode(lowerer: Lowerer, node: ts.Node): never 
  * declaration is not stdlib). Reads only: writes keep their fence (no
  * compiled program constructs an errno error). Null for non-error
  * receivers and non-stdlib members, so the chain keeps trying. */
+/** Error members with slots of their own: never read through the dynamic
+ * node, even when an intersection restates them. */
+const ERROR_SLOT_MEMBERS = new Set([
+  "code",
+  "cause",
+  "stack",
+  "message",
+  "name",
+  "errno",
+  "syscall",
+  "path",
+  "dest",
+]);
+
 export function lowerErrorCodeProperty(
   lowerer: Lowerer,
   expr: ts.PropertyAccessExpression,
@@ -134,6 +149,33 @@ export function lowerErrorCodeProperty(
       },
       declared,
     );
+  }
+  // A member an `Error & { ... }` intersection adds beyond Error's own and
+  // the system-error metadata (`Object.assign(new Error(m), { status })`):
+  // an own property of the error's checked-dynamic node, read at the
+  // declared type (the intersection mapping admits only checkable types).
+  if (
+    recvT.className === "%Error" &&
+    !ERROR_SLOT_MEMBERS.has(expr.name.text) &&
+    !expr.questionDotToken &&
+    !lowerer.isStdlibMember(expr) &&
+    lowerer.typeOf(expr.expression).isIntersectionType()
+  ) {
+    const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
+    if (declared && declared.kind !== "void") {
+      const receiver = lowerer.lowerExpr(expr.expression);
+      const loc = locOf(expr);
+      return lowerer.coerceToExpected(
+        {
+          kind: "dynKeyGet",
+          value: lowerer.coerceToExpected(receiver, DYN),
+          key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+          type: DYN,
+          loc,
+        },
+        declared,
+      );
+    }
   }
   // A program class under the receiver's class can carry its own `code`
   // (a declared field or a property added through an untyped reference),

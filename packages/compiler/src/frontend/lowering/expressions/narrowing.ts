@@ -10,6 +10,7 @@ import {
   type IrLocal,
   type IrType,
   NULL_T,
+  STRING,
   type SrcLoc,
   UNDEFINED_T,
   arrayOf,
@@ -23,9 +24,14 @@ import {
 import { isJsSourceFile, locOf } from "../../program.js";
 import { hasRuntimeStatics } from "../class-runtime-statics.js";
 import { jsBindingHasOpenWrites } from "../lower-stmts.js";
+import { documentedParameter, prototypeAssignedFunction } from "../call-signatures.js";
 import { narrowClassUnion, narrowStoredClassValue, structuralNarrowing } from "../class-unions.js";
 import { checkedClassAssertion, checkedClassUnionAssertion } from "../class-assertions.js";
-import { isOptionalProcessStreamProperty } from "../builtins/process.js";
+import {
+  isOptionalProcessStreamProperty,
+  isOptionalProcessVersionsRead,
+} from "../builtins/process.js";
+import { requestGeneralStreamSurface } from "../general-streams.js";
 import { literalValues } from "../../literal-values.js";
 import { literalUnionArm } from "../../union-discriminants.js";
 import { checkedArmExtraction } from "../coercions/unions.js";
@@ -91,7 +97,7 @@ export function lowerTernary(
           ) {
             falseArmNarrows.push(n);
           }
-          n.forEachChild(collect);
+          ts.forEachChild(n, collect);
         };
         collect(expr.whenFalse);
       }
@@ -332,7 +338,7 @@ export function lowerTernary(
     // call ABI. A checker join can erase a rest/arguments pack even though
     // a later call supplies additional observable arguments.
     const callableJoin =
-      isJsSourceFile(expr.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       thenRaw.type.kind === "func" &&
       elseRaw.type.kind === "func" &&
       !typeEquals(thenRaw.type, elseRaw.type) &&
@@ -342,7 +348,7 @@ export function lowerTernary(
     // a conditional's type even after that field acquired other values.
     // A checked arm must retain its actual representation at the join.
     const checkedJsJoin =
-      isJsSourceFile(expr.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       (thenRaw.type.kind === "dyn" || elseRaw.type.kind === "dyn") &&
       lowerer.dynConvertible(thenRaw.type) &&
       lowerer.dynConvertible(elseRaw.type);
@@ -384,7 +390,7 @@ export function lowerTernary(
 export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrExpr {
   if (
     (expr.type.kind === "union" || expr.type.kind === "dyn") &&
-    isJsSourceFile(node.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(node)) &&
     ts.isPropertyAccessExpression(node)
   ) {
     const symbol = lowerer.checker.getSymbolAtLocation(node.name);
@@ -395,7 +401,7 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
           ts.isPropertyDeclaration(decl) &&
           !decl.initializer &&
           !decl.type &&
-          isJsSourceFile(decl.getSourceFile()),
+          isJsSourceFile(ts.getSourceFileOfNode(decl)),
       )
     ) {
       // Inference describes later writes, not the initial undefined.
@@ -412,10 +418,13 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
   // instead of misreading the payload (the dyn boundary's usual stance).
   // Object/array narrowings stay dyn-typed and keep their fences.
   if (expr.type.kind === "dyn") {
+    // A process.versions entry declared as a string can be absent here.
+    if (isOptionalProcessVersionsRead(lowerer, node))
+      return lowerer.coerceToExpected(expr, lowerer.withUndefinedArm(STRING));
     // An inferred JS member's storage may be deliberately wider than its
     // declaration (prototype-selected buffers, null-initialized scratch
     // objects). Extract at the consuming operation, not at the read.
-    if (isJsSourceFile(node.getSourceFile()) && ts.isPropertyAccessExpression(node)) {
+    if (isJsSourceFile(ts.getSourceFileOfNode(node)) && ts.isPropertyAccessExpression(node)) {
       const receiver = lowerer.mapTypeOf(lowerer.typeOf(node.expression));
       if (receiver?.kind === "object") {
         const info = lowerer.classes.get(receiver.className);
@@ -431,7 +440,7 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
       }
     }
     if (
-      isJsSourceFile(node.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(node)) &&
       (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
     ) {
       let receiver = node.expression;
@@ -460,7 +469,7 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
         if (bound && lowerer.mapTypeOf(bound)?.kind === "dyn") return expr;
       }
     }
-    if (isJsSourceFile(node.getSourceFile()) && ts.isIdentifier(node)) {
+    if (isJsSourceFile(ts.getSourceFileOfNode(node)) && ts.isIdentifier(node)) {
       const symbol = lowerer.resolveValueSymbol(node);
       if (
         symbol &&
@@ -479,6 +488,20 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
         )
       )
         return expr;
+      // A prototype method in a file TypeScript does not check takes its
+      // documented parameters as checked-dynamic values whatever their
+      // JSDoc says (paramShape); reads keep the actual value.
+      if (
+        symbol &&
+        !lowerer.checkedJsFile(ts.getSourceFileOfNode(node)) &&
+        symbol.declarations.some(
+          (decl) =>
+            ts.isParameter(decl) &&
+            prototypeAssignedFunction(decl.parent) &&
+            documentedParameter(decl),
+        )
+      )
+        return expr;
       if (
         symbol &&
         symbol.declarations.some(
@@ -494,7 +517,9 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
             decl.initializer &&
             !decl.type &&
             !/@(?:param|type)\b/.test(
-              decl.getSourceFile().text.slice(decl.parent?.pos ?? decl.pos, decl.getStart()),
+              ts
+                .getSourceFileOfNode(decl)
+                .text.slice(decl.parent?.pos ?? decl.pos, ts.tokenStartOfNode(decl)),
             ),
         )
       )
@@ -521,7 +546,7 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
     // has no such property. Preserve the checked read for JS capability
     // probes instead of treating a declaration as a runtime type guard.
     if (
-      isJsSourceFile(node.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(node)) &&
       ts.isPropertyAccessExpression(node) &&
       ["isTTY", "columns", "rows"].includes(node.name.text) &&
       lowerer.isStdlibMember(node)
@@ -531,7 +556,7 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
     // checker flow calls its non-null branch never. The live checked
     // value remains authoritative; never is not a numeric guard.
     if (
-      isJsSourceFile(node.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(node)) &&
       (lowerer.typeOf(node).flags & ts.TypeFlags.Never) !== 0
     )
       return expr;
@@ -588,6 +613,7 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
   if (expr.type.kind !== "union") return expr;
   if (ts.isPropertyAccessExpression(node) && isOptionalProcessStreamProperty(lowerer, node))
     return expr;
+  if (isOptionalProcessVersionsRead(lowerer, node)) return expr;
 
   // Represented fields and index values can include undefined even when
   // checker inference or lib.d.ts declares strings (RegExp captures).
@@ -838,11 +864,11 @@ export function v8CalleeText(node: ts.Node): string {
     const object = v8CalleeText(node.expression);
     return ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)
       ? `${object}.${key.text}`
-      : `${object}[${key.getText()}]`;
+      : `${object}[${ts.getTextOfNode(key)}]`;
   }
   if (ts.isPropertyAccessExpression(node) && !node.questionDotToken)
     return `${v8CalleeText(node.expression)}.${node.name.text}`;
-  return node.getText();
+  return ts.getTextOfNode(node);
 }
 
 /** Node's TypeError for the operation consuming `node` when it holds a
@@ -1186,6 +1212,56 @@ function classInstanceOrAbsent(lowerer: Lowerer, type: IrType): boolean {
   );
 }
 
+/** `Object.fromEntries(...) as T` with T a declared record (the generic
+ * `transform<T extends Record<string, unknown>>(t: T): T` idiom): the
+ * entries build a pure index-signature record, which has no layout in
+ * common with T's struct. Node keeps the object itself, with exactly the
+ * keys and the order the entries gave it. The result of fromEntries is a
+ * fresh object nothing else references, so the checked-dynamic bridge,
+ * which keeps keys and their order the same way `JSON.parse(text) as T`
+ * does, cannot be told apart from the original object; a value outside
+ * T throws the catchable TypeError of every checked cast. The entries'
+ * values must be scalars or checked-dynamic values, which the bridge
+ * passes by value or by identity; native arrays and records would be
+ * copied. Other sources may be aliased, where a rebuilt object would sever
+ * mutation, so they keep the exact-shape fence. */
+function freshEntriesRecordAssertion(
+  lowerer: Lowerer,
+  expr: ts.AsExpression | ts.TypeAssertion,
+  inner: IrExpr,
+  target: IrType | null,
+): IrExpr | null {
+  if (inner.type.kind !== "record" || target?.kind !== "record") return null;
+  const source = lowerer.shapes.get(inner.type.shapeId);
+  const dest = lowerer.shapes.get(target.shapeId);
+  if (!source?.indexValue || source.tuple || source.fields.length > 0) return null;
+  if (!dest || dest.tuple || dest.indexValue || shapeHasAccessorSlots(dest)) return null;
+  // Native arrays and records in the entries would be copied on the way
+  // through the checked-dynamic bridge, severing their identity: only
+  // slots of scalars or checked-dynamic values pass.
+  if (extractionCopiesReference(lowerer, source.indexValue)) return null;
+  let operand: ts.Expression = expr.expression;
+  while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
+  if (
+    !ts.isCallExpression(operand) ||
+    !ts.isPropertyAccessExpression(operand.expression) ||
+    operand.expression.name.text !== "fromEntries" ||
+    !lowerer.isStdlibGlobal(operand.expression.expression, "Object")
+  )
+    return null;
+  if (!lowerer.dynConvertible(inner.type)) return null;
+  if (
+    !canDynCheckTo(
+      target,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  )
+    return null;
+  const loc = locOf(expr);
+  return { kind: "dynCheck", value: lowerer.coerceToExpected(inner, DYN), type: target, loc };
+}
+
 /** `e as T` and the old-style assertion `<T>e` — one node shape (both
  * carry `.type` and `.expression`), one lowering. */
 export function lowerAsExpression(
@@ -1237,12 +1313,14 @@ export function lowerAsExpression(
     // the requested shape; an assertion does not bypass runtime checks.
     const narrowed = lowerer.mapTypeOf(lowerer.typeOf(expr.expression));
     const bridged =
-      narrowed &&
-      (narrowed.kind === "f64" ||
-        narrowed.kind === "bool" ||
-        narrowed.kind === "string" ||
-        narrowed.kind === "object" ||
-        narrowed.kind === "dyn");
+      (narrowed &&
+        (narrowed.kind === "f64" ||
+          narrowed.kind === "bool" ||
+          narrowed.kind === "string" ||
+          narrowed.kind === "object" ||
+          narrowed.kind === "dyn")) ||
+      // `catch (e: any)`: the binding reads as its checked-dynamic value.
+      (narrowed === null && (lowerer.typeOf(expr.expression).flags & ts.TypeFlags.Any) !== 0);
     if (!bridged) lowerer.unsupported("SC1063", expr);
   }
   const inner = lowerer.lowerExpr(expr.expression);
@@ -1323,6 +1401,8 @@ export function lowerAsExpression(
     ) {
       return lowerer.coerceInto(expr, inner, target);
     }
+    const rebuilt = freshEntriesRecordAssertion(lowerer, expr, inner, target);
+    if (rebuilt) return rebuilt;
     // `job as Job & { startedAt: number }` on a record: the asserted
     // record refines the stored one, so the assertion keeps the object
     // (a width copy would sever writes through the asserted view).
@@ -1376,6 +1456,12 @@ export function lowerAsExpression(
     return inner; // erasure, unchanged
   }
 
+  // `value as never` is the escape hatch that makes an unknown value fit
+  // any slot (`tagSuccess(value as never)`). No value has type never, so
+  // checking against its placeholder layout would reject every value.
+  // Erase it instead: the consuming slot applies the same validated
+  // extraction an unknown value gets wherever the checker admits it.
+  if (expr.type.kind === ts.SyntaxKind.NeverKeyword) return inner;
   const targetTs = lowerer.checker.getTypeFromTypeNode(expr.type);
   const target = lowerer.mapTypeOf(targetTs) ?? dynFallbackType(lowerer, expr.type, targetTs);
   if (!target) lowerer.badType(expr.type, targetTs);
@@ -1450,6 +1536,9 @@ export function lowerAsExpression(
     if (DYN_HANDLE_KINDS.has(target.kind)) {
       return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
     }
+    // `value as NodeJS.ReadableStream`: the general stream classes take
+    // the checked cast (general-streams.ts).
+    requestGeneralStreamSurface(lowerer, expr);
     lowerer.unsupported(
       "SC1090",
       expr,

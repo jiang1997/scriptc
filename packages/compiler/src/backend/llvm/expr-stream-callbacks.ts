@@ -17,7 +17,7 @@ export function streamDataAdapter(
   const p = cbT.params[0];
   if (
     cbT.params.length > 1 ||
-    (p && p.kind !== "bytes" && p.kind !== "string" && p.kind !== "dyn")
+    (p && p.kind !== "bytes" && p.kind !== "string" && p.kind !== "dyn" && p.kind !== "union")
   ) {
     throw new InternalCompilerError(
       "llvm emitter bug: stream data listener param shape (frontend must fence)",
@@ -72,6 +72,46 @@ export function streamDataAdapter(
       `  %r0 = call ptr ${retainSym(host.shapeHost, p)}(ptr ${slot})`,
     );
     finish("%r0");
+    d.push(`}`, ``);
+  } else if (p.kind === "union") {
+    // A `Buffer | string` chunk: wrap whichever slot the stream filled at
+    // its arm of the (boxed) union.
+    const def = host.unionsById.get(p.unionId);
+    const bytesTag = def ? def.arms.findIndex((a) => a.kind === "bytes" && a.elem === "u8") : -1;
+    const strTag = def ? def.arms.findIndex((a) => a.kind === "string") : -1;
+    if (
+      !def ||
+      host.nullableUnions.has(p.unionId) ||
+      bytesTag < 0 ||
+      strTag < 0 ||
+      def.arms.length !== 2
+    )
+      throw new InternalCompilerError(
+        "llvm emitter bug: stream data listener union is not Buffer | string (frontend must fence)",
+      );
+    host.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
+    host.declare(`declare ptr @scr_bytes_retain_v(ptr)`);
+    host.declare(`declare void @scr_bytes_release_v(ptr)`);
+    host.declare(`declare ptr @scr_str_retain_v(ptr)`);
+    host.declare(`declare void @scr_str_release_v(ptr)`);
+    d.push(
+      `  %uslot = alloca ptr`,
+      `  %isb = icmp ne ptr %a0, null`,
+      `  br i1 %isb, label %buf, label %str`,
+      `buf:`,
+      `  %rb = call ptr @scr_bytes_retain_v(ptr %a0)`,
+      `  %ub = call ptr @scr_union_new_ref(i32 ${bytesTag}, ptr %rb, ptr @scr_bytes_retain_v, ptr @scr_bytes_release_v, ptr null)`,
+      `  store ptr %ub, ptr %uslot`,
+      `  br label %go`,
+      `str:`,
+      `  %rs = call ptr @scr_str_retain_v(ptr %a1)`,
+      `  %us = call ptr @scr_union_new_ref(i32 ${strTag}, ptr %rs, ptr @scr_str_retain_v, ptr @scr_str_release_v, ptr null)`,
+      `  store ptr %us, ptr %uslot`,
+      `  br label %go`,
+      `go:`,
+      `  %uv = load ptr, ptr %uslot`,
+    );
+    finish("%uv");
     d.push(`}`, ``);
   } else {
     // dyn: box by runtime tag — the JS lane's adapter parameter.

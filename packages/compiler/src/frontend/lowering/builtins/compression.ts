@@ -136,7 +136,7 @@ export function zlibStreamModeOf(
   if (alias !== null) return alias.kind === "zlib" ? alias.mode : null;
   const target =
     symbol.flags & ts.SymbolFlags.Alias ? lowerer.checker.getAliasedSymbol(symbol) : symbol;
-  const mode = ZLIB_STREAM_MODES.get(target.name);
+  const mode = ZLIB_STREAM_MODES.get(ts.symbolName(target));
   if (mode === undefined) return null;
   return target.declarations.some((d) => ts.isClassDeclaration(d) && isZlibFallbackDecl(lowerer, d))
     ? mode
@@ -144,7 +144,7 @@ export function zlibStreamModeOf(
 }
 
 function isZlibFallbackDecl(lowerer: Lowerer, d: ts.Node): boolean {
-  const file = d.getSourceFile();
+  const file = ts.getSourceFileOfNode(d);
   if (!lowerer.isStdlibFile(file) || isNodeTypesPath(file.fileName)) return false;
   for (let node: ts.Node | undefined = d.parent; node; node = node.parent) {
     if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {

@@ -1,4 +1,4 @@
-import { refuseWebAssemblyUse } from "./builtins/webassembly.js";
+import { lowerWebAssemblyValue, refuseWebAssemblyUse } from "./builtins/webassembly.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, strLit, varRef } from "../../ir/build.js";
 import { InternalCompilerError } from "../../errors.js";
 /* Expression lowering: the expression dispatch (lowerExpr), literals
@@ -9,6 +9,7 @@ import { InternalCompilerError } from "../../errors.js";
  * (FieldTarget). */
 import * as ts from "../ts7/adapter.js";
 import { checkedPrivateReceiver, localPrivateBrandClass } from "./private-brands.js";
+import { staticCondition } from "./static-typeof.js";
 import { constituentTypes } from "../ts7/checker.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerMaybePromiseAwait, maybePromiseUnionOf } from "./maybe-promise.js";
@@ -134,6 +135,8 @@ export {
   lowerIncDecTarget,
   lowerPrefixUnary,
 } from "./expressions/updates.js";
+import { awaitDynThenable, programMayDefineThenables } from "./thenables.js";
+import { awaitsChildThenable } from "./handle-properties.js";
 export { lowerInstanceOf } from "./expressions/relational.js";
 
 /** An assignable `obj.field` target — a class field, a record field, or a
@@ -151,6 +154,21 @@ export type FieldTarget =
   // (the write-slot type; reads arm it with undefined under
   // noUncheckedIndexedAccess in fieldGetExpr).
   | { container: "recordOvf"; obj: IrExpr; shapeId: string; field: string; fieldType: IrType }
+  // A computed key of a record in a read-modify-write (`r[k] += v`,
+  // `r[k]++`, `r[k] ??= v`; keyed-field-targets.ts): `keys` lists the
+  // declared fields a literal-union key can name, which share fieldType;
+  // null keys mean a string key into a pure index-signature record, whose
+  // entries fieldType types. `key` is null when the one literal is static.
+  | {
+      container: "recordKeyed";
+      obj: IrExpr;
+      shapeId: string;
+      field: string;
+      keys: readonly string[] | null;
+      key: IrExpr | null;
+      fieldType: IrType;
+      missNaN?: true;
+    }
   | { container: "accessor"; obj: IrExpr; className: string; field: string; fieldType: IrType }
   // A RECORD accessor property (an object-literal `get x()`/`set x(v)` —
   // the shape carries %get:/%set: closure slots): reads call the getter
@@ -178,9 +196,9 @@ export function templateRawTextOf(
 ): string {
   const own = (node as { rawText?: string }).rawText;
   if (own !== undefined) return own;
-  const sf = node.getSourceFile();
-  const start = node.getStart(sf);
-  const end = node.getEnd();
+  const sf = ts.getSourceFileOfNode(node);
+  const start = ts.tokenStartOfNode(node);
+  const end = node.end;
   const tailTrim =
     node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle ? 2 : 1;
   return sf.text.slice(start + 1, end - tailTrim);
@@ -263,7 +281,10 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   if (externalTypeSpecifier !== null) {
     lowerer.externalHostFence(externalTypeSpecifier, expr);
   }
-  // Every reached use of the WebAssembly API fences at its expression.
+  // WebAssembly API values lower; every other reached use of the API
+  // fences at its expression.
+  const webAssemblyValue = lowerWebAssemblyValue(lowerer, expr);
+  if (webAssemblyValue !== null) return webAssemblyValue;
   refuseWebAssemblyUse(lowerer, expr);
 
   if (ts.isNumericLiteral(expr)) {
@@ -278,14 +299,14 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     // integer within ±(2^53−1)) and non-integer spellings carry
     // nothing, so the IR is unchanged for programs that held their
     // numbers.
-    const spelled = expr.getText().replace(/_/g, "");
+    const spelled = ts.getTextOfNode(expr).replace(/_/g, "");
     if (/^\d+$/.test(spelled) && String(Number(spelled)) !== spelled) {
       return { kind: "numLit", value: Number(spelled), spelling: spelled, type: F64, loc };
     }
     return { kind: "numLit", value, type: F64, loc };
   }
   if (ts.isBigIntLiteral(expr)) {
-    const spelling = expr.getText().replace(/_/g, "").replace(/n$/i, "");
+    const spelling = ts.getTextOfNode(expr).replace(/_/g, "").replace(/n$/i, "");
     return {
       kind: "libCall",
       fn: "bigint.parse",
@@ -466,7 +487,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     // Only arrows can see an enclosing method's `this` (JS lexical-this);
     // `this` in plain nested functions is already a tsc error under
     // noImplicitThis, so the generic scope walk here is preflight-safe.
-    const local = lowerer.resolveThis();
+    const local = lowerer.resolveThis(expr);
     if (local) {
       const value: IrExpr = { kind: "varRef", localId: local.id, type: local.type, loc };
       // `this.#x` in a function-local class's prototype method, whose `this`
@@ -531,7 +552,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     // the read answers the strict-mode plain-call undefined, the old
     // constant. TypeScript keeps the fence (noImplicitThis makes it a
     // compile-time story there).
-    if (isJsSourceFile(expr.getSourceFile())) {
+    if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       // Module scope of a CommonJS file: `this` is module.exports.
       const exportsThis = lowerCjsTopLevelThis(lowerer, expr);
       if (exportsThis) return exportsThis;
@@ -618,9 +639,14 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       // and answers itself. Thenable adoption stays unmodeled
       // (SEMANTICS.md).
       if (value.type.kind === "dyn") {
+        // A program that can define thenables adopts them (thenables.ts).
+        if (programMayDefineThenables(lowerer)) return awaitDynThenable(lowerer, value, loc);
         return { kind: "libCall", fn: "async.awaitDyn", args: [value], type: DYN, loc };
       }
 
+      if (awaitsChildThenable(lowerer, expr, value)) {
+        return awaitDynThenable(lowerer, lowerer.coerceToExpected(value, DYN), loc);
+      }
       // A TYPED non-promise operand (`await 42`, an awaited record):
       // JS awaits non-thenables through exactly one microtask turn and
       // yields the value itself — evaluate the operand, hop, answer it.
@@ -1039,6 +1065,15 @@ export function nullishBranches(
 export function lowerCondition(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   let e: ts.Expression = expr;
   while (ts.isParenthesizedExpression(e)) e = e.expression;
+  // `if (Object.setPrototypeOf)`: the feature test of transpiled Error
+  // subclasses' prototype reset. Node always has it.
+  if (
+    ts.isPropertyAccessExpression(e) &&
+    !e.questionDotToken &&
+    e.name.text === "setPrototypeOf" &&
+    lowerer.isStdlibGlobal(e.expression, "Object")
+  )
+    return { kind: "boolLit", value: true, type: BOOL, loc: locOf(e) };
   if (ts.isPropertyAccessExpression(e)) {
     const presence = lowerPromiseThenPresence(lowerer, e, {
       kind: "boolLit",
@@ -1047,7 +1082,14 @@ export function lowerCondition(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       loc: locOf(e),
     });
     if (presence !== null) return presence;
+    if (isTimerMethodPresence(lowerer, e))
+      return { kind: "boolLit", value: true, type: BOOL, loc: locOf(e) };
   }
+  // Global detection (`typeof window < "u"`, `typeof self !==
+  // "undefined" && …`): a condition whose typeof answers are static
+  // folds, so the untaken arm never lowers (static-typeof.ts).
+  const folded = staticCondition(lowerer, e);
+  if (folded !== null) return { kind: "boolLit", value: folded, type: BOOL, loc: locOf(e) };
   if (ts.isBinaryExpression(e)) {
     const op = e.operatorToken.kind;
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
@@ -1130,6 +1172,18 @@ function maybePromiseThenPresence(
     type: result.type,
     loc,
   };
+}
+
+/** `if (t.unref)` over a Node timer handle: the guard libraries write for
+ * runtimes whose timers lack the method (execa's kill timeout). Node's
+ * Timeout and Immediate always have it. */
+function isTimerMethodPresence(lowerer: Lowerer, access: ts.PropertyAccessExpression): boolean {
+  if (access.questionDotToken || !ts.isIdentifier(access.expression)) return false;
+  if (!["ref", "unref", "hasRef", "refresh"].includes(access.name.text)) return false;
+  const symbol = lowerer.checker.getSymbolAtLocation(access.name);
+  if (!symbol || !lowerer.isStdlibSymbol(symbol)) return false;
+  const owner = lowerer.typeOf(access.expression).getSymbol();
+  return owner !== undefined && ["Timeout", "Immediate"].includes(ts.symbolName(owner));
 }
 
 export function lowerPromiseThenPresence(
@@ -1521,7 +1575,7 @@ export function lowerAbsenceProbe(lowerer: Lowerer, node: ts.Expression): IrExpr
   // statement ruled non-null without narrowing it (jose's secs()).
   if (
     receiverT?.kind === "union" &&
-    isJsSourceFile(expr.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
     !expr.questionDotToken &&
     !hasOptionalChainGuard(expr.expression)
   ) {
@@ -1711,7 +1765,8 @@ export function stringWrapperToString(lowerer: Lowerer, node: ts.Expression): Ir
   while (ts.isParenthesizedExpression(e)) e = e.expression;
   if (!ts.isNewExpression(e) || !ts.isIdentifier(e.expression)) return null;
   const symbol = lowerer.resolveValueSymbol(e.expression);
-  if (symbol?.name !== "String" || !lowerer.isStdlibSymbol(symbol)) return null;
+  if (symbol === null || ts.symbolName(symbol) !== "String" || !lowerer.isStdlibSymbol(symbol))
+    return null;
   const args = e.arguments?.nodes ?? [];
   if (args.length > 1 || args.some(ts.isSpreadElement)) return null;
   if (args.length === 0) return { kind: "strLit", value: "", type: STRING, loc: locOf(e) };
@@ -2000,7 +2055,7 @@ export function aliasTypeofNarrows(
     const leaf = aliasTypeofArmOf(lowerer, e, strip);
     if (leaf) out.push(leaf);
   };
-  if (implicitMonoFile(cond.getSourceFile())) walk(cond, polarity);
+  if (implicitMonoFile(ts.getSourceFileOfNode(cond))) walk(cond, polarity);
   return out;
 }
 
@@ -2100,7 +2155,7 @@ export function cjsAccessorSnapshotOf(
 ): { id: string; type: IrType } | null {
   const hit = lowerer.cjsAccessorSnapshots.get(getter);
   if (hit !== undefined) return hit;
-  if (!lexerVisibleAccessors(getter.getSourceFile()).includes(getter)) return null;
+  if (!lexerVisibleAccessors(ts.getSourceFileOfNode(getter)).includes(getter)) return null;
   const call = cjsAccessorCall(lowerer, getter, locOf(getter));
   if (call === null) return null;
   const snapshot = { id: `%g.cjsSnapshot.${lowerer.cjsAccessorSnapshots.size}`, type: call.type };
@@ -2239,7 +2294,25 @@ export function caughtRead(
   // Unnarrowed reads cross into unknown. The caught-value dispatch pass
   // retains known native class payloads through live identity capsules;
   // other payload kinds use the runtime's ordinary conversion.
-  if (narrowed?.kind === "dyn") {
+  // `catch (e: any)` (or useUnknownInCatchVariables off) reads the same way.
+  if (
+    narrowed?.kind === "dyn" ||
+    (narrowed === null && (lowerer.typeOf(node).flags & ts.TypeFlags.Any) !== 0)
+  ) {
+    return { kind: "caughtToDyn", value: ref, type: DYN, loc };
+  }
+
+  // A binding a user type predicate (or an assertion) narrowed to a
+  // structural type (`isErrorLike(e)` → `{ message: string; … }`, an
+  // intersection like `TypeError & { code: unknown }`): the thrown value is
+  // still whatever was thrown, so it crosses as a checked-dynamic value and
+  // each member read validates its own result, as JavaScript reads it.
+  const checked = lowerer.typeOf(node);
+  if (
+    narrowed?.kind === "record" ||
+    narrowed?.kind === "union" ||
+    (narrowed === null && (checked.flags & (ts.TypeFlags.Object | ts.TypeFlags.Intersection)) !== 0)
+  ) {
     return { kind: "caughtToDyn", value: ref, type: DYN, loc };
   }
   lowerer.unsupported("SC1063", node);
@@ -2531,7 +2604,7 @@ export function lowerOptionalArrayIndexRead(
   key: IrExpr,
 ): IrExpr | null {
   if (
-    !isJsSourceFile(expr.getSourceFile()) ||
+    !isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
     expr.questionDotToken ||
     hasOptionalChainGuard(expr.expression)
   )

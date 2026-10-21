@@ -1,19 +1,22 @@
 scriptc coverage tests/coverage-fixtures/wasm/main.ts
 
-  statements analyzed   8
-  compile statically    6  (75%)
-    in dynamic tier     2  (operate on values typed only at runtime; --explain-dynamic lists them)
+  statements analyzed   9
+  compile statically    9  (100%)
+    in dynamic tier     4  (operate on values typed only at runtime; --explain-dynamic lists them)
 
   npm package compilation:
     wasm-fixture-pkg  static
 
-  WebAssembly modules: (found at build time; none compile to native code yet)
+  WebAssembly modules: (found at build time; valid ones compile to native code)
     inline module  39 bytes  valid
       1 function, 0 imports, 1 export
       found: inline at tests/coverage-fixtures/wasm/glue.js:5
     tests/coverage-fixtures/wasm/add.wasm  41 bytes  valid
       1 function, 0 imports, 1 export
       found: path at tests/coverage-fixtures/wasm/glue.js:8
+    tests/coverage-fixtures/wasm/ext.so  36 bytes  valid
+      1 function, 0 imports, 1 export
+      found: path at tests/coverage-fixtures/wasm/glue.js:15
     tests/coverage-fixtures/wasm/node_modules/wasm-fixture-pkg/lib/core.wasm  27 bytes  invalid: type mismatch (at byte 27)
       1 function, 0 imports, 0 exports
       found: shipped by the package at tests/coverage-fixtures/wasm/node_modules/wasm-fixture-pkg
@@ -22,10 +25,4 @@ scriptc coverage tests/coverage-fixtures/wasm/main.ts
       features: simd
       found: configured by tests/coverage-fixtures/wasm/package.json
 
-  in unreached code   (never lowered — cannot fail a build)
-      ×1  SC2004  uses of 'instance' inherit the blocker on its declaration
-          at tests/coverage-fixtures/wasm/glue.js:17:10
-          hint: the declaration of 'instance' did not compile — fix the diagnostic reported there and these sites clear with it
-      ×1  SC2020  'WebAssembly.instantiate' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-          at tests/coverage-fixtures/wasm/glue.js:16:30
-          hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
+  fully static — all analyzed statements compile to native code.

@@ -196,6 +196,19 @@ static void vm_flags(const void *p, char *out, size_t cap) {
   }
   fclose(f);
 }
+
+#include <sys/resource.h>
+/* Whether the kernel would write a core of this process: a core_pattern
+ * handler or socket, or a nonzero RLIMIT_CORE. */
+static bool cores_written(void) {
+  struct rlimit core;
+  if (getrlimit(RLIMIT_CORE, &core) != 0 || core.rlim_cur != 0) return true;
+  FILE *f = fopen("/proc/sys/kernel/core_pattern", "r");
+  if (!f) return true;
+  int c = fgetc(f);
+  fclose(f);
+  return c == '|' || c == '@';
+}
 #endif
 
 /* A class slice carves contiguously from its start, across the points where
@@ -230,13 +243,15 @@ static void check_slice_growth(void) {
     vm_flags((void *)(start + AFTER), flags, sizeof flags);
     assert(strstr(flags, " hg") && !strstr(flags, " nh"));
   }
-  /* Core dumps hold the carved blocks but not the untouched rest of the
-   * reservation (" dd" is VM_DONTDUMP). */
+  /* Core dumps hold the carved blocks, where the kernel would write a core
+   * at all, but not the untouched rest of the reservation (" dd" is
+   * VM_DONTDUMP). */
+  bool cores = cores_written();
   char flags[256];
   vm_flags(first, flags, sizeof flags);
-  assert(!strstr(flags, " dd"));
+  assert(!strstr(flags, " dd") == cores);
   vm_flags(prev + SZ - 1, flags, sizeof flags);
-  assert(!strstr(flags, " dd"));
+  assert(!strstr(flags, " dd") == cores);
   vm_flags((void *)(start + ((uintptr_t)1 << scr_sa.shift) - 1), flags, sizeof flags);
   assert(strstr(flags, " dd"));
   vm_flags((void *)(scr_sa.base + scr_sa.span - 1), flags, sizeof flags);

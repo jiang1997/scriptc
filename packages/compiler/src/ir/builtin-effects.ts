@@ -10,6 +10,9 @@ import type { IrLibFn } from "./builtin-signatures.js";
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // Node's argument, cipher-name, IV, tag-length and key-length errors.
   "crypto.cipherNew",
+  // Node's curve, key, point, encoding and format errors.
+  "crypto.ecdhNew",
+  "crypto.ecdhConvertKey",
   // node:test's { timeout } and { concurrency } range checks.
   "test.register",
   "test.registerEmpty",
@@ -75,12 +78,19 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "process.stdoutWriteBytes",
   "process.stderrWriteBytes",
   "procStream.write",
+  "child.stdioStream",
+  "stream.unboxDyn",
+  "stream.pipeDyn",
+  "stream.unpipeDyn",
   "weakMap.new",
   "weakSet.new",
   "dyn.fromEntries",
   "bytes.constructor",
   "bytes.instanceOf",
   "buffer.byteLenDyn",
+  "buffer.byteLenValue",
+  "buffer.allocValue",
+  "fs.realpathValue",
   "bytes.construct",
   "arrayBuffer.new",
   "sharedArrayBuffer.new",
@@ -133,6 +143,20 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "blob.new",
   "blob.fileNew",
   "blob.slice",
+  "wasm.compile",
+  "wasm.validate",
+  "wasm.instantiate",
+  "wasm.moduleNew",
+  "wasm.instanceNew",
+  "wasm.errorNew",
+  "wasm.memoryNew",
+  "wasm.tableNew",
+  "wasm.globalNew",
+  "wasm.withoutNew",
+  "wasm.moduleImports",
+  "wasm.moduleExports",
+  "wasm.moduleCustomSections",
+  "wasm.valueOf",
   "events.addAbortListener",
   "fetch.streamNew",
   "fetch.streamFrom",
@@ -263,6 +287,14 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // ("Invalid URL") or a non-http scheme (ERR_INVALID_PROTOCOL).
   "http.requestUrl",
   "http.requestUrlCb",
+  // The runtime options walk throws Node's validation errors and the
+  // fence for documented options it does not implement.
+  "http.requestDyn",
+  "http.requestDynCb",
+  "https.requestDyn",
+  "https.requestDynCb",
+  // address() of a Unix-socket server read as the AddressInfo record.
+  "net.serverAddressCheck",
   // The h2 client's throwing entries: connect on a bad/non-http
   // authority (ERR_INVALID_URL / ERR_INVALID_PROTOCOL), request on a
   // closed/destroyed session (ERR_HTTP2_INVALID_SESSION), setEncoding on
@@ -324,6 +356,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.onDyn",
   "readable.resume",
   "readable.pipe",
+  "readable.pipeGeneral",
   "readable.unpipe",
   "writable.write",
   "writable.writeStr",
@@ -367,6 +400,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "perf.entries",
   "perf.clearMarks",
   "perf.clearMeasures",
+  // monitorEventLoopDelay's resolution: Node's ERR_OUT_OF_RANGE.
+  "perf.eldNew",
   // Non-TTY stdin: Node's stdin has no setRawMode member, so the call is
   // the exact catchable TypeError.
   "process.stdinSetRawMode",
@@ -403,6 +438,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "error.stack",
   "error.cause",
   "error.setCause",
+  "error.assign",
   "error.deleteCause",
   "dyn.objectTag",
   // Numeric coercion runs user valueOf/toString — throws propagate.
@@ -423,6 +459,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // The caller's lookup runs synchronously inside the connect call — a
   // throw there propagates like Node's.
   "net.connectLookup",
+  "net.connectLookupDyn",
   "cp.execSync",
   "cp.execCapture",
   // The client request constructors validate the method token
@@ -505,6 +542,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "util.inherits",
   "util.deprecate",
   "util.callbackify",
+  "util.promisifyDyn",
   "util.debuglog",
   // The URI codecs throw the spec's URIError: decoding on bad hex/invalid
   // UTF-8 octets, encoding (and querystring.escape) on a lone surrogate.
@@ -559,6 +597,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.objCreateWithProperties",
   "dyn.getPrototype",
   "dyn.setPrototype",
+  // a proxy in the prototype chain can throw
+  "dyn.builtinInstanceOf",
+  "dyn.functionInstanceOf",
   "dyn.getOwnPropertyNames",
   "dyn.ownKeys",
   "dyn.getOwnPropertySymbols",
@@ -594,6 +635,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.destructureRest",
   "dyn.arrayFromIterator",
   "dyn.iterator",
+  "dyn.asyncIteratorOpen",
   "dyn.iteratorResult",
   "dyn.iteratorStep",
   "dyn.mapSeedEntries",
@@ -612,6 +654,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.bagSet",
   "dyn.defineProperty",
   "dyn.getOwnPropertyDescriptor",
+  "child.propsDefine",
+  "child.propsDescriptor",
+  "child.propsOnDyn",
   "dyn.arrayProtoCall",
   "process.chdir",
   "os.getPriority",
@@ -736,6 +781,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "buffer.poolFromBytes",
   "buffer.poolFromArray",
   "buffer.poolFromDyn",
+  "buffer.poolFromDynRef",
   // The checked-dynamic compare/equals validators: Node's argument
   // ladders throw ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE catchably.
   "buffer.compareChk",
@@ -794,6 +840,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // Node's argument checks (ERR_INVALID_ARG_TYPE/VALUE, ERR_SOCKET_BAD_PORT).
   "dns.lookupDyn",
   "dns.lookupService",
+  "dns.promisesLookup",
+  "dns.promisesLookupService",
   "dns.setDefaultResultOrder",
   "net.connect",
   "net.connectCb",

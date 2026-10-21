@@ -209,7 +209,7 @@ export function lowerConsoleInstanceCall(
   if (access.questionDotToken) return null;
   const recvType = lowerer.typeOf(access.expression);
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
-  if (!sym || sym.name !== "Console" || !lowerer.isStdlibSymbol(sym)) return null;
+  if (!sym || ts.symbolName(sym) !== "Console" || !lowerer.isStdlibSymbol(sym)) return null;
   const toStderr = OUTPUT_MEMBERS.get(access.name.text);
   if (toStderr === undefined) {
     lowerer.noLowering(

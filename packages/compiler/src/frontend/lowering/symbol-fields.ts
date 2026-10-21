@@ -118,13 +118,13 @@ export function classSymbolKeyOfSymbol(lowerer: Lowerer, sym: ts.Symbol): ClassS
   const init = decl.initializer;
   if (init && (ts.isIdentifier(init) || ts.isPropertyAccessExpression(init))) {
     const target = classSymbolKeyOf(lowerer, init);
-    if (!target || bindingWritten(lowerer, sym, decl.getSourceFile())) return null;
+    if (!target || bindingWritten(lowerer, sym, ts.getSourceFileOfNode(decl))) return null;
     const preceding = list.declarations.nodes.slice(0, list.declarations.nodes.indexOf(decl));
     if (
       bindingEarlyUse7(
         lowerer.program,
-        decl.getSourceFile(),
-        decl.getSourceFile().statements.nodes.indexOf(list.parent),
+        ts.getSourceFileOfNode(decl),
+        ts.getSourceFileOfNode(decl).statements.nodes.indexOf(list.parent),
         decl,
         preceding,
       ) !== null
@@ -139,7 +139,7 @@ export function classSymbolKeyOfSymbol(lowerer: Lowerer, sym: ts.Symbol): ClassS
   const { registered, description } = call;
   // Ordinary Symbol() is a fresh identity per evaluation, so only the
   // module-scope declaration above can name one fixed layout slot.
-  const sf = decl.getSourceFile();
+  const sf = ts.getSourceFileOfNode(decl);
   if (bindingWritten(lowerer, sym, sf)) return null;
   const preceding = list.declarations.nodes.slice(0, list.declarations.nodes.indexOf(decl));
   // Creating a function value does not execute its body. The general
@@ -268,7 +268,7 @@ function cjsTableSymbolKeyOf(
   )
     return null;
   const stmt = assign.parent;
-  const sf = stmt.getSourceFile();
+  const sf = ts.getSourceFileOfNode(stmt);
   if (cjsExportDiscardReason(stmt) !== null) return null;
   const call = literalSymbolCallOf(lowerer, decl.initializer);
   if (!call) return null;
@@ -330,7 +330,7 @@ function tablePropertyWritten(
       if (node.name.text !== name) return false;
       const recv = node.expression;
       if (
-        node.getSourceFile() === home &&
+        ts.getSourceFileOfNode(node) === home &&
         ((ts.isIdentifier(recv) && recv.text === "exports") || isModuleExportsAccess(recv))
       )
         return true;
@@ -381,7 +381,7 @@ function bindingWritten(lowerer: Lowerer, sym: ts.Symbol, sf: ts.SourceFile): bo
       // Assignment to obj[key] changes the property, never the key's
       // binding. The same applies to these leaves in destructuring.
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return "skip";
-      if (!ts.isIdentifier(node) || node.text !== sym.name) return;
+      if (!ts.isIdentifier(node) || node.text !== ts.symbolName(sym)) return;
       const targetSym = ts.isShorthandPropertyAssignment(node.parent)
         ? lowerer.checker.getShorthandAssignmentValueSymbol(node.parent)
         : lowerer.checker.getSymbolAtLocation(node);

@@ -73,7 +73,7 @@ export function lifetimeRegionMemberOf(
   if (
     !ts.isClassDeclaration(owner) ||
     owner.name?.text !== "LifetimeRegion" ||
-    !isExperimentalDeclarationFile(owner.getSourceFile(), known)
+    !isExperimentalDeclarationFile(ts.getSourceFileOfNode(owner), known)
   )
     return null;
   const name = access.name.text;
@@ -105,7 +105,7 @@ export function internTableMemberOf(
   if (
     !ts.isClassDeclaration(owner) ||
     owner.name?.text !== "InternTable" ||
-    !isExperimentalDeclarationFile(owner.getSourceFile(), known)
+    !isExperimentalDeclarationFile(ts.getSourceFileOfNode(owner), known)
   )
     return null;
   const name = access.name.text;
@@ -135,7 +135,7 @@ export function threadSlotsMemberOf(
   if (
     !ts.isClassDeclaration(owner) ||
     owner.name?.text !== "ThreadSlots" ||
-    !isExperimentalDeclarationFile(owner.getSourceFile(), known)
+    !isExperimentalDeclarationFile(ts.getSourceFileOfNode(owner), known)
   )
     return null;
   const name = access.name.text;

@@ -611,7 +611,7 @@ export class ArrayElementStates {
         if (this.host.markIterationBinding(name, known)) changed = true;
         return;
       }
-      name.forEachChild(mark);
+      ts.forEachChild(name, mark);
     };
     if (ts.isVariableDeclarationList(initializer)) {
       for (const declaration of initializer.declarations.nodes) mark(declaration.name);

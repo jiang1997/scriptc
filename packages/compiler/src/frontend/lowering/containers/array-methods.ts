@@ -1,3 +1,4 @@
+import { liftedFreshSpread } from "../coercions/fresh-spread.js";
 import { lowerArrayIteratorValue } from "../iterator-adapters.js";
 import { identityPreservingWidening } from "../coercions/identity.js";
 import { arrayConcatHelper } from "./array-concat.js";
@@ -353,7 +354,7 @@ export function lowerArrayMethodCall(
       // machinery answered string[]): same rule, any-typed spelling.
       ((lowerer.typeOf(access.expression).flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !==
         0 &&
-        isJsSourceFile(access.getSourceFile())))
+        isJsSourceFile(ts.getSourceFileOfNode(access))))
   ) {
     const probe = lowerer.lowerExpr(access.expression);
     if (probe.type.kind === "array") {
@@ -794,6 +795,10 @@ export function lowerArrayMethodCall(
         };
       }
       if (!typeEquals(src.type, receiverIr)) {
+        // Fresh elements (an array literal) convert into the element layout.
+        src = liftedFreshSpread(lowerer, spreadArg.expression, src, receiverIr, loc) ?? src;
+      }
+      if (!typeEquals(src.type, receiverIr)) {
         lowerer.unsupported(
           "SC1090",
           spreadArg,
@@ -1039,7 +1044,7 @@ export function lowerArrayMethodCall(
           kind: "dynInvoke",
           recv: receiver,
           method: "join",
-          calleeName: access.getText(),
+          calleeName: ts.getTextOfNode(access),
           args,
           type: DYN,
           loc,
@@ -2096,7 +2101,7 @@ export function lowerTupleReadMethodCall(
       kind: "dynInvoke",
       recv: { kind: "dynFrom", value: receiver, type: DYN, loc },
       method: "flatMap",
-      calleeName: access.getText(),
+      calleeName: ts.getTextOfNode(access),
       args: [{ kind: "dynFrom", value: fnArg, type: DYN, loc }],
       type: DYN,
       loc,

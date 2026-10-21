@@ -75,5 +75,7 @@
 #include "scr_assert.h"
 #include "scr_console.h"
 #include "scr_fs_cp.h"
+#include "scr_wasm_abi.h"
+#include "scr_wasm.h"
 
 #endif /* SCR_RUNTIME_H */

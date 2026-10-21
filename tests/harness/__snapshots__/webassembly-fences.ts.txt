@@ -1,98 +1,26 @@
-webassembly-fences.ts:10:15 - error SC2020: 'WebAssembly.validate' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
+webassembly-fences.ts:9:26 - error SC2020: 'WebAssembly.instantiateStreaming' is not supported yet: scriptc implements WebAssembly.compile, instantiate, validate, the Module, Instance, Memory, Table and Global constructors, Module.imports, exports and customSections, and the error classes over modules translated at build time, but not this part of the API
 
-   9 | async function load(options: LoaderOptions, bytes: Uint8Array): Promise<void> {
-  10 |   console.log(WebAssembly.validate(bytes));
-     |               ^~~~~~~~~~~~~~~~~~~~
-  11 |   const module = await WebAssembly.compile(bytes);
+   8 |   console.log(WebAssembly.Module.imports(module).length);
+   9 |   const streamed = await WebAssembly.instantiateStreaming(fetch("https://example.com/x.wasm"));
+     |                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  10 |   console.log(streamed.instance);
 
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
+  hint: the streaming functions, Tag and Exception, and the classes used as values other than with new and instanceof are planned; 'scriptc coverage' lists the modules this program loads (https://scriptc.dev/limitations)
 
-webassembly-fences.ts:11:24 - error SC2020: 'WebAssembly.compile' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
+webassembly-fences.ts:11:16 - error SC2020: 'WebAssembly.Module' is not supported yet: scriptc implements WebAssembly.compile, instantiate, validate, the Module, Instance, Memory, Table and Global constructors, Module.imports, exports and customSections, and the error classes over modules translated at build time, but not this part of the API
 
-  10 |   console.log(WebAssembly.validate(bytes));
-  11 |   const module = await WebAssembly.compile(bytes);
-     |                        ^~~~~~~~~~~~~~~~~~~
-  12 |   const { instance } = await WebAssembly.instantiate(bytes, options.imports);
+  10 |   console.log(streamed.instance);
+  11 |   const Ctor = WebAssembly.Module;
+     |                ^~~~~~~~~~~~~~~~~~
+  12 |   console.log(Ctor);
 
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
+  hint: the streaming functions, Tag and Exception, and the classes used as values other than with new and instanceof are planned; 'scriptc coverage' lists the modules this program loads (https://scriptc.dev/limitations)
 
-webassembly-fences.ts:12:30 - error SC2020: 'WebAssembly.instantiate' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
+webassembly-fences.ts:13:18 - error SC2020: 'WebAssembly.Memory' is not supported yet: scriptc implements WebAssembly.compile, instantiate, validate, the Module, Instance, Memory, Table and Global constructors, Module.imports, exports and customSections, and the error classes over modules translated at build time, but not this part of the API
 
-  11 |   const module = await WebAssembly.compile(bytes);
-  12 |   const { instance } = await WebAssembly.instantiate(bytes, options.imports);
-     |                              ^~~~~~~~~~~~~~~~~~~~~~~
-  13 |   console.log(instance instanceof WebAssembly.Instance, module);
+  12 |   console.log(Ctor);
+  13 |   const Memory = WebAssembly.Memory;
+     |                  ^~~~~~~~~~~~~~~~~~
+  14 |   console.log(new Memory({ initial: 1 }));
 
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
-
-webassembly-fences.ts:13:35 - error SC2020: 'WebAssembly.Instance' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-
-  12 |   const { instance } = await WebAssembly.instantiate(bytes, options.imports);
-  13 |   console.log(instance instanceof WebAssembly.Instance, module);
-     |                                   ^~~~~~~~~~~~~~~~~~~~
-  14 |   const direct = new WebAssembly.Instance(new WebAssembly.Module(bytes));
-
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
-
-webassembly-fences.ts:14:22 - error SC2020: 'new WebAssembly.Instance' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-
-  13 |   console.log(instance instanceof WebAssembly.Instance, module);
-  14 |   const direct = new WebAssembly.Instance(new WebAssembly.Module(bytes));
-     |                      ^~~~~~~~~~~~~~~~~~~~
-  15 |   console.log(direct.exports);
-
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
-
-webassembly-fences.ts:16:22 - error SC2020: 'new WebAssembly.Memory' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-
-  15 |   console.log(direct.exports);
-  16 |   const memory = new WebAssembly.Memory({ initial: 1 });
-     |                      ^~~~~~~~~~~~~~~~~~
-  17 |   console.log(memory.buffer.byteLength);
-
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
-
-webassembly-fences.ts:17:15 - error SC2004: uses of 'memory' inherit the blocker on its declaration
-
-  16 |   const memory = new WebAssembly.Memory({ initial: 1 });
-  17 |   console.log(memory.buffer.byteLength);
-     |               ^~~~~~~~~~~~~~~~~~~~~~~~
-  18 |   const api = globalThis.WebAssembly;
-
-  hint: the declaration of 'memory' did not compile — fix the diagnostic reported there and these sites clear with it
-
-webassembly-fences.ts:18:15 - error SC2020: 'globalThis.WebAssembly' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-
-  17 |   console.log(memory.buffer.byteLength);
-  18 |   const api = globalThis.WebAssembly;
-     |               ^~~~~~~~~~~~~~~~~~~~~~
-  19 |   console.log(api);
-
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
-
-webassembly-fences.ts:19:15 - error SC2004: uses of 'api' inherit the blocker on its declaration
-
-  18 |   const api = globalThis.WebAssembly;
-  19 |   console.log(api);
-     |               ^~~
-  20 |   console.log(WebAssembly.Module.imports(module).length);
-
-  hint: the declaration of 'api' did not compile — fix the diagnostic reported there and these sites clear with it
-
-webassembly-fences.ts:20:15 - error SC2020: 'WebAssembly.Module.imports' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-
-  19 |   console.log(api);
-  20 |   console.log(WebAssembly.Module.imports(module).length);
-     |               ^~~~~~~~~~~~~~~~~~~~~~~~~~
-  21 | }
-
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
-
-webassembly-fences.ts:27:33 - error SC2020: 'globalThis.WebAssembly' is not supported yet: scriptc does not compile WebAssembly modules to native code yet
-
-  26 | }
-  27 | const { WebAssembly: viewed } = globalThis as unknown as { WebAssembly: WebAssemblyGlobal };
-     |                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  28 | console.log(typeof viewed.compile);
-
-  hint: WebAssembly support is planned as translation of each module whose bytes the build can see (an inline literal, or a file read from a path the compiler resolves) into native code; 'scriptc coverage' lists the modules this program would load (https://scriptc.dev/limitations)
+  hint: the streaming functions, Tag and Exception, and the classes used as values other than with new and instanceof are planned; 'scriptc coverage' lists the modules this program loads (https://scriptc.dev/limitations)

@@ -21,6 +21,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <sys/un.h> /* AF_UNIX: listen(path) and http's socketPath */
 #if defined(__FreeBSD__) || defined(__DragonFly__) || defined(_AIX) || defined(__sun)
 #include <sys/param.h>
 #endif
@@ -442,6 +443,7 @@ struct ScrNetServer {
                         * '::' when bound_v6, else '0.0.0.0' — Node's own
                         * address().address answers) */
   ScrStr *pending_err; /* deferred listen failure */
+  ScrStr *unix_path;   /* listen(path): the bound socket file, removed at close */
   size_t nconns;
   ScrNetLs conn_ls, err_ls, close_ls, listening_cbs, timeout_ls;
   /* server.maxConnections (unset = undefined) and its 'drop' listeners */
@@ -532,6 +534,14 @@ struct ScrNetSocket {
   /* the in-flight dial chain's LAST failure — surfaced (moved into
    * pending_err) only when the list exhausts; a later success drops it */
   ScrStr *dial_err;
+  /* a dial that is not the TCP sockaddr path (the Unix-socket connect):
+   * scr_net_sock_dial_peer hands the dial to it; unix_path is its target */
+  void (*dial_hook)(ScrNetSocket *s);
+  ScrStr *unix_path;
+  /* 'lookup' listeners and the resolutions waiting to reach them (the
+   * lookup unit's records; see scr_net_lookup_ops) */
+  ScrNetLs lookup_ls;
+  struct ScrNetLookupEv *lookup_evs;
   ScrNetLs data_ls, end_ls, close_ls, err_ls, conn_ls, timeout_ls, readable_ls;
   /* Flow control (pause()/resume()): user_paused holds reads OFF even
    * with consumers (kernel/TCP backpressure is the buffer); flowing
@@ -608,6 +618,21 @@ typedef struct ScrNetTunnel {
   size_t in_len;
 } ScrNetTunnel;
 
+/* The 'lookup' event's half of the runtime, installed by the first
+ * 'lookup' registration: programs without a 'lookup' listener never link
+ * it, and the hook sites below are a NULL check. */
+typedef struct ScrNetLookupOps {
+  /* a host name resolved (ip/family) or failed (err_msg, ip NULL) */
+  void (*record)(ScrNetSocket *s, const char *host, size_t host_len, const char *ip, int family,
+                 const char *err_msg);
+  void (*flush)(ScrNetSocket *s); /* deliver the recorded resolutions */
+  void (*free)(ScrNetSocket *s);
+} ScrNetLookupOps;
+/* Not static: the compiler must not resolve the calls through it to the
+ * one implementation, which would link that half into every program. */
+extern SCR_TL const ScrNetLookupOps *scr_net_lookup_ops;
+SCR_TL const ScrNetLookupOps *scr_net_lookup_ops = NULL;
+
 static void scr_net_tunnel_free(ScrNetTunnel *t) {
   if (t == NULL) return;
   free(t->out);
@@ -648,6 +673,7 @@ void scr_net_server_release(ScrNetServer *s) {
     scr_dyn_release(s->drop_max_connection);
     scr_str_release(s->bound_host);
     scr_str_release(s->pending_err);
+    scr_str_release(s->unix_path);
     if (s->fd >= 0) scr_net_close_fd_raw(s->fd);
 #ifdef SCR_RC_AUDIT
     scr_net_live--;
@@ -685,6 +711,9 @@ void scr_net_sock_release(ScrNetSocket *s) {
     free(s->dial_ips);
     scr_str_release(s->dial_err);
     scr_str_release(s->dial_host);
+    scr_str_release(s->unix_path);
+    scr_net_ls_drop(&s->lookup_ls);
+    if (s->lookup_evs != NULL) scr_net_lookup_ops->free(s);
     scr_net_tunnel_free(s->tunnel);
     free(s->wbuf);
     free(s->rbuf);
@@ -1385,6 +1414,10 @@ static void scr_net_sock_connect_done(ScrNetSocket *s) {
  * one): the transport handshake starts, or 'connect' fires and buffered
  * writes flush. */
 static void scr_net_sock_connected(ScrNetSocket *s) {
+  if (s->lookup_evs != NULL) {
+    scr_net_lookup_ops->flush(s);
+    if (scr_exc_pending()) return;
+  }
   scr_net_sock_update_write(s); /* keeps the filter iff bytes are buffered */
   scr_net_sock_update_read(s);
   scr_net_sock_touch(s);
@@ -1892,6 +1925,11 @@ void scr_net_server_close_direct(ScrNetServer *s, ScrClosure *cb /*moves, nullab
     scr_net_close_fd_raw(s->fd); /* stops accepting NOW (registrations dropped first) */
     s->fd = -1;
     s->listening = false;
+#ifndef _WIN32
+    /* a Unix-socket server removes its socket file as it closes, like
+     * libuv's pipe close */
+    if (s->unix_path != NULL) unlink(s->unix_path->data);
+#endif
   }
   /* A close BEFORE the deferred 'listening' delivered cancels it — Node's
    * emitListeningNT checks the handle close() nulled, so the listen
@@ -1905,6 +1943,9 @@ void scr_net_server_close_direct(ScrNetServer *s, ScrClosure *cb /*moves, nullab
     s->close_seq = ++scr_net_close_seq;
   }
   s->closing = true; /* the sweep fires 'close' once nconns drains */
+  /* a server that never listened is not registered yet: Node still emits
+   * its 'close' (and runs close callbacks) */
+  scr_net_server_register(s);
   /* Node's http server.close() first closes its idle keep-alive
    * connections; busy ones end after their response (scr_http.c). Only
    * HTTP connections carry an idle probe, so plain net servers keep
@@ -2207,7 +2248,10 @@ ScrStr *scr_net_blocking_lookup(ScrStr *host /*borrowed*/) {
  * autoselect), and any other name is resolved when the dial starts. */
 static void scr_net_sock_set_peer(ScrNetSocket *s, ScrStr *host /*borrowed, nullable*/) {
   const char *h = host && host->len > 0 ? host->data : "localhost";
-  if (strcmp(h, "localhost") == 0) h = "127.0.0.1";
+  if (strcmp(h, "localhost") == 0) {
+    h = "127.0.0.1";
+    if (scr_net_lookup_ops != NULL) scr_net_lookup_ops->record(s, "localhost", 9, h, 4, NULL);
+  }
   snprintf(s->peer_ip, sizeof s->peer_ip, "%s", h);
   struct in_addr a4;
   struct in6_addr a6;
@@ -2253,6 +2297,9 @@ static void scr_net_sock_dial_host(ScrNetSocket *s) {
       out = inet_ntop(AF_INET6, &((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr, ip, sizeof ip);
     }
     if (out == NULL) continue;
+    if (scr_net_lookup_ops != NULL)
+      scr_net_lookup_ops->record(s, host->data, host->len, ip, ai->ai_family == AF_INET6 ? 6 : 4,
+                                 NULL);
     if (first == AF_UNSPEC) first = ai->ai_family;
     size_t f = ai->ai_family == first ? 0 : 1;
     if (fam[f] == NULL) {
@@ -2283,6 +2330,7 @@ static void scr_net_sock_dial_host(ScrNetSocket *s) {
     char msg[320];
     snprintf(msg, sizeof msg, "getaddrinfo %s %.*s", code,
              (int)(host->len < 255 ? host->len : 255), host->data);
+    if (scr_net_lookup_ops != NULL) scr_net_lookup_ops->record(s, host->data, host->len, NULL, 0, msg);
     free(ips);
     scr_str_release(host);
     s->pending_err = scr_str_new(msg, strlen(msg));
@@ -2304,6 +2352,10 @@ static void scr_net_sock_dial_host(ScrNetSocket *s) {
  * queue — the socket exists, buffers writes, and dials when a slot
  * frees). */
 static void scr_net_sock_dial_peer(ScrNetSocket *s) {
+  if (s->dial_hook != NULL) {
+    s->dial_hook(s);
+    return;
+  }
   if (s->dial_host != NULL) {
     scr_net_sock_dial_host(s);
     return;
@@ -2552,6 +2604,179 @@ void scr_net_sock_dial_start(ScrNetSocket *s) {
   scr_net_sock_dial_peer(s);
 }
 
+/* ── Unix domain sockets ───────────────────────────────────────────────
+ *
+ * listen(path) and the http client's socketPath option. Node (libuv)
+ * reports these failures with the path where a TCP error names
+ * host:port: "connect ENOENT /run/x.sock", "listen EADDRINUSE: address
+ * already in use /run/x.sock". Windows has no Unix-socket support here
+ * (Node maps paths to named pipes there), so both forms fail with ENOTSUP. */
+
+static const char *scr_net_unix_errname(int err) {
+  switch (err) {
+  case ENOENT: return "ENOENT";
+  case ENOTDIR: return "ENOTDIR";
+  case ENAMETOOLONG: return "ENAMETOOLONG";
+  case EAGAIN: return "EAGAIN";
+  case EPROTOTYPE: return "EPROTOTYPE";
+  default: return scr_net_errname(err);
+  }
+}
+
+static const char *scr_net_unix_reason(int err) {
+  switch (err) {
+  case EADDRINUSE: return "address already in use";
+  case EACCES: return "permission denied";
+  case ENOENT: return "no such file or directory";
+  case ENOTDIR: return "not a directory";
+  case ENAMETOOLONG: return "name too long";
+  case EINVAL: return "invalid argument";
+  default: return "operation not supported";
+  }
+}
+
+/* Fills a sockaddr_un for `path`; false (with errno set) when it does not
+ * fit, which libuv reports as ENAMETOOLONG too. */
+#ifndef _WIN32
+static bool scr_net_unix_addr(const ScrStr *path, struct sockaddr_un *sa) {
+  memset(sa, 0, sizeof *sa);
+  sa->sun_family = AF_UNIX;
+  if (path->len >= sizeof sa->sun_path || memchr(path->data, '\0', path->len) != NULL) {
+    errno = ENAMETOOLONG;
+    return false;
+  }
+  memcpy(sa->sun_path, path->data, path->len);
+  return true;
+}
+#endif
+
+/* The dial_hook of a Unix-socket client: a nonblocking connect that
+ * completes through the same write-readiness path as TCP. A local
+ * connect usually settles at once; its failure is the deferred 'error'. */
+static void scr_net_sock_dial_unix(ScrNetSocket *s) {
+  int err = ENOTSUP;
+#ifndef _WIN32
+  struct sockaddr_un sa;
+  if (scr_net_unix_addr(s->unix_path, &sa)) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+      fputs("scriptc: socket() failed\n", stderr);
+      abort();
+    }
+    scr_net_nonblock(fd);
+    s->fd = fd;
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0 || errno == EINPROGRESS) {
+      s->connecting = true;
+      scr_net_sock_update_write(s);
+      return;
+    }
+  }
+  err = errno;
+#endif
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "connect ");
+  scr_jb_puts(&b, scr_net_unix_errname(err));
+  scr_jb_putc(&b, ' ');
+  scr_jb_write(&b, s->unix_path->data, s->unix_path->len);
+  s->pending_err = scr_jb_finish(&b);
+  s->had_error = true;
+  s->connecting = false;
+  scr_net_sock_close_fd(s);
+}
+
+/* A client socket for the Unix socket at `path` (borrowed). `deferred`
+ * creates it the way scr_net_connect_deferred does: registered and
+ * buffering, dialed by scr_net_sock_dial_start. +1. */
+ScrNetSocket *scr_net_connect_path(ScrStr *path, bool deferred) {
+  ScrNetSocket *s = scr_net_sock_new();
+  s->unix_path = scr_str_retain(path);
+  s->dial_hook = &scr_net_sock_dial_unix;
+  if (!scr_net_poller_init()) {
+    fputs("scriptc: event poller init failed\n", stderr);
+    abort();
+  }
+  if (deferred) {
+    s->connecting = true;
+    s->dial_deferred = true;
+  } else {
+    scr_net_sock_dial_unix(s);
+  }
+  scr_net_sock_register(s);
+  return s;
+}
+
+/* server.address() in programs that listen on a path (the compiler links
+ * these only there): the Unix-socket path a listening server answers in
+ * place of the AddressInfo record (+1, "" for a TCP server), and the check
+ * a record-typed address() read makes first. */
+ScrStr *scr_net_server_unix_path(ScrNetServer *s) {
+  return s->listening && s->unix_path != NULL ? scr_str_retain(s->unix_path) : scr_str_new("", 0);
+}
+
+void scr_net_server_address_check(ScrNetServer *s) {
+  if (!s->listening || s->unix_path == NULL) return;
+  static const char msg[] =
+      "server.address() of a server listening on a Unix socket is the socket path string; "
+      "type the result as string | AddressInfo | null (Node's declaration) to read it";
+  scr_throw_error_msg(SCR_ERR_ERROR, msg, sizeof msg - 1);
+}
+
+/* server.listen(path[, cb]): binds a Unix socket now; a failure is the
+ * deferred 'error', success the deferred 'listening', as for a port. */
+void scr_net_listen_path(ScrNetServer *s, ScrStr *path /*borrowed*/,
+                         ScrClosure *cb /*moves, nullable*/) {
+  /* Node's isPipeName: a string that reads as a non-negative number is a port */
+  double port = scr_string_to_number(path);
+  if (port >= 0) {
+    scr_net_listen_any(s, port, false, cb);
+    return;
+  }
+  if (cb) scr_net_ls_add(&s->listening_cbs, cb, NULL, true);
+  if (s->listening || s->close_emitted) return;
+  if (!scr_net_poller_init()) {
+    fputs("scriptc: event poller init failed\n", stderr);
+    abort();
+  }
+  int err = ENOTSUP;
+#ifndef _WIN32
+  struct sockaddr_un sa;
+  if (scr_net_unix_addr(path, &sa)) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+      fputs("scriptc: socket() failed\n", stderr);
+      abort();
+    }
+    scr_net_nonblock(fd);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(fd, 511) == 0) {
+      s->fd = fd;
+      s->listening = true;
+      s->emit_listening = true;
+      scr_str_release(s->unix_path);
+      s->unix_path = scr_str_retain(path);
+      scr_net_watch_read(fd, s, true);
+      scr_net_server_register(s);
+      return;
+    }
+    err = errno;
+    close(fd);
+  } else {
+    err = errno;
+  }
+#endif
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "listen ");
+  scr_jb_puts(&b, scr_net_unix_errname(err));
+  scr_jb_puts(&b, ": ");
+  scr_jb_puts(&b, scr_net_unix_reason(err));
+  scr_jb_putc(&b, ' ');
+  scr_jb_write(&b, path->data, path->len);
+  if (!s->pending_err) s->pending_err = scr_jb_finish(&b);
+  else scr_str_release(scr_jb_finish(&b));
+  scr_net_server_register(s); /* the sweep delivers the failure */
+}
+
 /* ── the caller-lookup dial (net.connect with a lookup option) ─────────
  *
  * portless's createLoopbackConnection: connect({ host, port,
@@ -2666,6 +2891,81 @@ ScrNetSocket *scr_net_connect_lookup(double port, ScrStr *host /*borrowed*/,
   scr_closure_release(lookup);
   /* a synchronous throw inside the lookup left the exception pending —
    * the emitter's may-throw check unwinds past this return */
+  return s;
+}
+
+/* The callback a checked-dynamic lookup function receives (Node's own
+ * shape, `(err, address, family)`): with `all: true` the address is a list
+ * of { address, family } records, otherwise one address string. caps[0]
+ * boxes the socket, as for the typed answer closure. */
+static ScrDyn *scr_net_lookup_dyn_thunk(ScrClosure *clo, ScrDyn *const *args, size_t argc) {
+  const ScrDyn *err = argc > 0 ? args[0] : scr_dyn_undefined();
+  const ScrDyn *addr = argc > 1 ? args[1] : scr_dyn_undefined();
+  ScrStr *msg = NULL;
+  ScrArr *ips = NULL;
+  bool failed = scr_dyn_truthy(err);
+  if (failed) {
+    const ScrDyn *m = err->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(err, "message", 7) : NULL;
+    msg = m != NULL && m->kind == SCR_DYN_STR ? scr_str_retain(m->v.str) : scr_dyn_string_coerce_js(err);
+  } else {
+    ScrDyn *view = addr->kind == SCR_DYN_TYPED_REF ? scr_dyn_typed_ref_materialize(addr) : NULL;
+    const ScrDyn *list = view != NULL ? view : addr;
+    ips = scr_arr_new(SCR_ELEM_STR, 0);
+    if (list->kind == SCR_DYN_STR) {
+      scr_arr_push_ref(ips, scr_str_retain(list->v.str));
+    } else if (list->kind == SCR_DYN_ARR) {
+      for (size_t i = 0; i < list->v.arr.len; i++) {
+        const ScrDyn *entry = list->v.arr.items[i];
+        ScrDyn *ev = entry->kind == SCR_DYN_TYPED_REF ? scr_dyn_typed_ref_materialize(entry) : NULL;
+        const ScrDyn *rec = ev != NULL ? ev : entry;
+        const ScrDyn *a = rec->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(rec, "address", 7) : NULL;
+        if (a != NULL && a->kind == SCR_DYN_STR) scr_arr_push_ref(ips, scr_str_retain(a->v.str));
+        scr_dyn_release(ev);
+      }
+    }
+    scr_dyn_release(view);
+  }
+  scr_net_lookup_answer(clo, failed, msg, ips);
+  scr_str_release(msg);
+  if (ips != NULL) scr_arr_release(ips);
+  return scr_dyn_retain(scr_dyn_undefined());
+}
+
+/* net.connect({ host, port, lookup }) with a lookup of Node's own type
+ * (`(hostname, options, callback)` whose callback takes a string or an
+ * address list), held as a checked-dynamic function: the runtime calls it
+ * as Node's autoSelectFamily dial does, with { hints, all: true }, and dials
+ * the answered addresses in order. NULL with the exception pending. */
+ScrNetSocket *scr_net_connect_lookup_dyn(double port, ScrStr *host /*borrowed*/,
+                                          const ScrDyn *lookup /*borrowed*/) {
+  if (!scr_net_host_chk(host)) return NULL;
+  ScrNetSocket *s = scr_net_sock_new();
+  s->peer_port = (int)port;
+  snprintf(s->peer_ip, sizeof s->peer_ip, "%.*s",
+           (int)(host->len < 63 ? host->len : 63), host->data);
+  if (!scr_net_poller_init()) {
+    fputs("scriptc: event poller init failed\n", stderr);
+    abort();
+  }
+  s->connecting = true;
+  s->lookup_wait = true;
+  scr_net_sock_register(s);
+  ScrClosure *ans = scr_closure_new((void *)&scr_net_lookup_dyn_thunk, 1);
+  ScrBox *box = scr_box_new_obj(&scr_net_sock_retain_v, &scr_net_sock_release_v, NULL);
+  scr_box_set_ref(box, scr_net_sock_retain(s));
+  ans->caps[0] = box;
+  ScrDyn *callback = scr_dyn_new_func(ans, &scr_net_lookup_dyn_thunk, 3, "(err, address, family)", "callback");
+  ScrDyn *options = scr_dyn_new_obj();
+#ifndef _WIN32
+  scr_dyn_obj_set(options, "hints", 5, scr_dyn_new_num((double)AI_ADDRCONFIG));
+#endif
+  scr_dyn_obj_set(options, "all", 3, scr_dyn_new_bool(true));
+  ScrDyn *name = scr_dyn_new_str(host);
+  ScrDyn *args[3] = { name, options, callback };
+  scr_dyn_release(scr_dyn_call(lookup, args, 3, "lookup"));
+  scr_dyn_release(name);
+  scr_dyn_release(options);
+  scr_dyn_release(callback);
   return s;
 }
 
@@ -4094,6 +4394,136 @@ void scr_net_sock_on_close_dyn(ScrNetSocket *s, const ScrDyn *listener /*borrowe
                  (void *)&scr_net_dyn_fire_arg, once);
 }
 
+/* ── 'lookup' ─────────────────────────────────────────────────────────── */
+
+typedef struct ScrNetLookupEv {
+  struct ScrNetLookupEv *next;
+  ScrStr *host;
+  ScrStr *ip;      /* NULL with err_msg */
+  int family;
+  ScrStr *err_msg; /* "getaddrinfo ENOTFOUND host" */
+} ScrNetLookupEv;
+
+static void scr_net_lookup_record(ScrNetSocket *s, const char *host, size_t host_len,
+                                  const char *ip, int family, const char *err_msg) {
+  ScrNetLookupEv *ev = calloc(1, sizeof *ev);
+  if (!ev) scr_net_oom();
+  ev->host = scr_str_new(host, host_len);
+  ev->ip = ip != NULL ? scr_str_new(ip, strlen(ip)) : NULL;
+  ev->family = family;
+  ev->err_msg = err_msg != NULL ? scr_str_new(err_msg, strlen(err_msg)) : NULL;
+  ScrNetLookupEv **link = &s->lookup_evs;
+  while (*link) link = &(*link)->next;
+  *link = ev;
+}
+
+static void scr_net_lookup_ev_free(ScrNetLookupEv *ev) {
+  scr_str_release(ev->host);
+  scr_str_release(ev->ip);
+  scr_str_release(ev->err_msg);
+  free(ev);
+}
+
+static void scr_net_lookup_free(ScrNetSocket *s) {
+  while (s->lookup_evs) {
+    ScrNetLookupEv *ev = s->lookup_evs;
+    s->lookup_evs = ev->next;
+    scr_net_lookup_ev_free(ev);
+  }
+}
+
+/* Node emits ('lookup', err, address, family, host) from the resolver's
+ * answer, before it dials: here the resolutions recorded at the dial reach
+ * the listeners just before 'connect' (or the lookup's 'error'). */
+static void scr_net_lookup_flush(ScrNetSocket *s) {
+  while (s->lookup_evs && !scr_exc_pending()) {
+    ScrNetLookupEv *ev = s->lookup_evs;
+    s->lookup_evs = ev->next;
+    if (s->lookup_ls.n > 0) {
+      ScrDyn *args[4];
+      if (ev->err_msg != NULL) {
+        ScrError *e = scr_error_new(SCR_ERR_ERROR, ev->err_msg);
+        const char *code = strchr(ev->err_msg->data, ' ');
+        if (code != NULL) {
+          char buf[32];
+          size_t n = strcspn(code + 1, " ");
+          if (n < sizeof buf) {
+            memcpy(buf, code + 1, n);
+            buf[n] = '\0';
+            scr_error_set_code(e, buf);
+          }
+        }
+        args[0] = scr_dyn_from_error(e);
+        scr_error_release(e);
+        args[1] = scr_dyn_retain(scr_dyn_undefined());
+        args[2] = scr_dyn_retain(scr_dyn_undefined());
+      } else {
+        args[0] = scr_dyn_new_null();
+        args[1] = scr_dyn_new_str(ev->ip);
+        args[2] = scr_dyn_new_num((double)ev->family);
+      }
+      args[3] = scr_dyn_new_str(ev->host);
+      ScrNetL *snap;
+      size_t n = scr_net_ls_snapshot(&s->lookup_ls, &snap);
+      scr_dyn_this_push(s, SCR_DYNH_NET_SOCKET);
+      for (size_t i = 0; i < n; i++) {
+        if (!scr_exc_pending()) {
+          ScrDyn *fn = scr_dyn_listener_fn(snap[i].cb);
+          scr_dyn_release(scr_dyn_call(fn, args, 4, "listener"));
+          scr_dyn_release(fn);
+        }
+        scr_closure_release(snap[i].cb);
+      }
+      scr_dyn_this_pop();
+      free(snap);
+      for (size_t i = 0; i < 4; i++) scr_dyn_release(args[i]);
+    }
+    scr_net_lookup_ev_free(ev);
+  }
+}
+
+static const ScrNetLookupOps scr_net_lookup_ops_impl = {
+  &scr_net_lookup_record,
+  &scr_net_lookup_flush,
+  &scr_net_lookup_free,
+};
+
+/* The C main of a program with a 'lookup' listener installs the lookup
+ * records before any socket dials. */
+void scr_net_lookup_install(void) { scr_net_lookup_ops = &scr_net_lookup_ops_impl; }
+
+/* socket.on/once('lookup', listener) with a dyn function listener. The
+ * socket resolved when net.connect ran, before the listener was added; it
+ * delivers its recorded answers at the connect, like Node's asynchronous
+ * lookup. */
+void scr_net_sock_on_lookup(ScrNetSocket *s, const ScrDyn *listener /*borrowed*/, bool once) {
+  if (s->close_emitted) return;
+  scr_net_ls_add(&s->lookup_ls, scr_dyn_listener_closure_fn(listener, (void *)&scr_net_dyn_fire_arg),
+                 (void *)&scr_net_dyn_fire_arg, once);
+}
+
+/* server.close((err) => ...): the callback runs at 'close' with undefined,
+ * or with Node's ERR_SERVER_NOT_RUNNING when the server was not listening. */
+static void scr_net_close_not_running_fire(ScrClosure *cb) {
+  ScrDyn *fn = scr_dyn_listener_fn(cb);
+  static const char msg[] = "Server is not running.";
+  ScrStr *text = scr_str_new(msg, sizeof msg - 1);
+  ScrError *e = scr_error_new(SCR_ERR_ERROR, text);
+  scr_str_release(text);
+  scr_error_set_code(e, "ERR_SERVER_NOT_RUNNING");
+  ScrDyn *err = scr_dyn_from_error(e);
+  scr_error_release(e);
+  scr_dyn_release(scr_dyn_call(fn, &err, 1, "listener"));
+  scr_dyn_release(err);
+  scr_dyn_release(fn);
+}
+
+void scr_net_server_close_dyn(ScrNetServer *s, const ScrDyn *listener /*borrowed*/) {
+  ScrClosure *cb = scr_dyn_listener_closure_fn(
+      listener, s->listening ? (void *)&scr_dyn_listener_fire0 : (void *)&scr_net_close_not_running_fire);
+  scr_net_server_close(s, cb);
+}
+
 void scr_net_sock_on_write_flush_dyn(ScrNetSocket *s, const ScrDyn *listener /*borrowed*/) {
   if (s->close_emitted) return;
   scr_net_ls_add(&s->wcb_ls, scr_dyn_listener_closure_fn(listener, (void *)&scr_net_dyn_fire_arg),
@@ -4752,6 +5182,13 @@ static void scr_net_sweep(void) {
         return;
       }
     }
+    if (sock->lookup_evs != NULL && sock->pending_err) {
+      scr_net_lookup_ops->flush(sock);
+      if (scr_exc_pending()) {
+        scr_net_sock_release(sock);
+        return;
+      }
+    }
     if (sock->pending_err) {
       ScrStr *msg = sock->pending_err;
       sock->pending_err = NULL;
@@ -4810,6 +5247,7 @@ static void scr_net_sweep(void) {
       scr_net_ls_drop(&sock->finish_ls);
       scr_net_ls_drop(&sock->wcb_ls);
       scr_net_ls_drop(&sock->ready_ls);
+      scr_net_ls_drop(&sock->lookup_ls);
       if (sock->pipe_dst) {
         scr_net_sock_release(sock->pipe_dst);
         sock->pipe_dst = NULL;
@@ -4908,17 +5346,30 @@ static int scr_net_pollfd(void) {
   return scr_net_poller != NULL ? scrp_poller_fd(scr_net_poller) : -1;
 }
 
+bool scr_loop_io_take(void);
+bool scr_loop_io_more(void);
+void scr_loop_io_reopen(void);
+
 static void scr_net_dispatch(void) {
   if (!scr_net_servers && !scr_net_socks &&
       !scr_net_proto_pending()) {
     return;
   }
+  /* One poller drain per loop iteration (scr_loop_io_take); a full batch
+   * keeps draining within the phase's batch budget (scr_loop_io_more), like
+   * libuv's poll phase. Deferred emits (the sweep) still run on every
+   * call. */
+  bool may_drain = scr_loop_io_take();
   for (;;) {
     scr_net_sweep();
     if (scr_exc_pending()) return;
     if (scr_net_poller == NULL) return;
     ScrPollerEvent evs[64];
-    int n = scrp_drain(scr_net_poller, evs, 64);
+    int n = 0;
+    if (may_drain) {
+      n = scrp_drain(scr_net_poller, evs, 64);
+      may_drain = n == 64 && scr_loop_io_more();
+    }
     for (int i = 0; i < n; i++) {
       void *udata = evs[i].udata;
       if (!udata) continue;
@@ -4992,8 +5443,13 @@ static void scr_net_dispatch(void) {
       }
       if (scr_exc_pending()) return;
     }
-    if (!scr_net_flags_pending()) return;
-    if (scr_loop_has_ready()) return; /* microtasks interleave first */
+    if (!scr_net_flags_pending() && !may_drain) return;
+    if (scr_loop_has_ready()) {
+      /* microtasks interleave first; a full batch's rest drains on the
+       * next call, still within this poll phase */
+      if (may_drain) scr_loop_io_reopen();
+      return;
+    }
   }
 }
 
@@ -5011,6 +5467,7 @@ static void scr_net_cleanup_atexit(void) {
     scr_net_ls_drop(&s->conn_ls);
     scr_net_ls_drop(&s->timeout_ls);
     scr_net_ls_drop(&s->readable_ls);
+    scr_net_ls_drop(&s->lookup_ls);
     /* Tear down the protocol layer's parser NOW: an in-flight http
      * exchange (a handler that threw before res.end()) holds req/res,
      * and the res holds this socket back — a cycle the lean untraced

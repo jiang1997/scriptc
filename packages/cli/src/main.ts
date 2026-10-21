@@ -6,6 +6,7 @@ import {
   analyzeCached,
   compile,
   compileLibrary,
+  mergeProfiles,
   resolveProvenanceSources,
   sourceTargetPlatform,
   warmNativeCaches,
@@ -33,6 +34,7 @@ process.exitCode = await runCli(process.argv.slice(2), {
   resolveProvenanceSources,
   sourceTargetPlatform,
   warmNativeCaches,
+  mergeProfiles,
   run: (binary) =>
     new Promise<number>((resolveExit) => {
       let child;

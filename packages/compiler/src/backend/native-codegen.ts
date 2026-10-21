@@ -27,6 +27,11 @@ import {
   type NativeTargetSpec,
 } from "./targets.js";
 import { compilerReleaseVersion } from "../library/sidecar.js";
+import {
+  nativeProfileHelperArgs,
+  nativeProfileKey,
+  type NativeProfileOptions,
+} from "./native-profile.js";
 import { writeTextParts } from "../text-parts.js";
 
 import {
@@ -86,6 +91,8 @@ export interface NativeCodegenOptions {
   partitions?: number;
   /** Runtime bitcode whose small functions the helper imports for inlining. */
   importBitcode?: { paths: readonly string[]; digests: readonly string[] };
+  /** Profile-guided optimization: instrumentation or an indexed profile. */
+  profile?: NativeProfileOptions;
 }
 
 /** Writes LLVM text in large batches; see `writeTextParts`. */
@@ -298,6 +305,7 @@ function cacheKey(
         ? ""
         : `\0import:${options.importBitcode.digests.join(",")}`,
     )
+    .update(options.profile === undefined ? "" : `\0${nativeProfileKey(options.profile)}`)
     .digest("hex");
 }
 
@@ -317,6 +325,31 @@ async function installVerifiedCache(source: string, destination: string): Promis
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
+}
+
+/** `scriptc merge-profiles`: merges raw or indexed IR profiles into one
+ * indexed profile for `--profile-use`. */
+export async function mergeNativeProfiles(
+  outputPath: string,
+  inputPaths: readonly string[],
+  sparse = false,
+): Promise<void> {
+  const target = nativeCodegenTarget();
+  if (target === null) {
+    throw new NativeCodegenError(
+      "SC3002",
+      nativeCodegenTargetRefusal() ?? "profile merging is unsupported for this target",
+      "unsupported_target",
+    );
+  }
+  const helper = await resolveHelper(target);
+  await invoke(helper.binaryPath, [
+    "merge-profiles",
+    "--output",
+    outputPath,
+    ...(sparse ? ["--sparse"] : []),
+    ...inputPaths,
+  ]);
 }
 
 export async function emitNativeArtifact(
@@ -411,6 +444,7 @@ export async function emitNativeArtifact(
       options.sourcePath,
       ...(options.importBitcode?.paths ?? []).flatMap((path) => ["--import-bitcode", path]),
       ...(partitionCache === null ? [] : ["--cache-dir", partitionCache]),
+      ...nativeProfileHelperArgs(options.profile),
     ]);
     for (const stage of stages) {
       const emitted = await stat(stage).catch(() => null);

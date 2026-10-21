@@ -152,10 +152,11 @@ export function collectClassMethodMutations(
     const required = properties.filter(
       (property) => (property.flags & ts.SymbolFlags.Optional) === 0,
     );
-    if (required.some((property) => !FUNCTION_MEMBER_NAMES.has(property.name))) return true;
+    if (required.some((property) => !FUNCTION_MEMBER_NAMES.has(ts.symbolName(property))))
+      return true;
     return (
       required.length === 0 &&
-      properties.every((property) => !FUNCTION_MEMBER_NAMES.has(property.name))
+      properties.every((property) => !FUNCTION_MEMBER_NAMES.has(ts.symbolName(property)))
     );
   };
   // A string index whose values cannot be functions excludes callable
@@ -167,7 +168,7 @@ export function collectClassMethodMutations(
       .getIndexInfosOfType(lowerer.typeOf(value))
       .some(
         (index) =>
-          (index.keyType.flags & ts.TypeFlags.StringLike) !== 0 && functionFree(index.valueType),
+          (index.keyType.flags & ts.TypeFlags.StringLike) !== 0 && functionFree(index.type),
       );
   const literalLoopKeys = (key: ts.Expression): (string | number)[] | null => {
     if (!ts.isIdentifier(key)) return null;

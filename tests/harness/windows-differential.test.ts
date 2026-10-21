@@ -354,10 +354,13 @@ async function runWindowsNode(file: string): Promise<RunResult> {
   const nodep = directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l))
     ? "--no-deprecation "
     : "";
+  const codegen = directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l))
+    ? "--disallow-code-generation-from-strings "
+    : "";
   const shims = directiveHead(file).includes("// @no-node-shims")
     ? ""
     : "--import ./comptime-shim.mjs ";
-  return runOnBox(`node ${transform}${nodep}${shims}${entry}`);
+  return runOnBox(`node ${transform}${nodep}${codegen}${shims}${entry}`);
 }
 
 function programInputs(file: string): string[] {

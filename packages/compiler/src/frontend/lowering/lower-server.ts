@@ -53,7 +53,7 @@ import {
   sideEffectFreeOptionValue,
   TLS_SERVER_DOCUMENTED_OPTIONS,
 } from "./surfaces.js";
-import { conditionalSpreadOf } from "./expressions/object-literals.js";
+import { conditionalSpreadOf, lowerDynObjectLiteral } from "./expressions/object-literals.js";
 import { resultIsDiscarded } from "./call-position.js";
 import { lowerCallbackArg as lowerCallbackArgShared } from "./callback-arg.js";
 import { pairsSnapshotHelper } from "./pairs-snapshot.js";
@@ -719,7 +719,7 @@ export function lowerNetModuleCall(
       // ERR_INVALID_ARG_TYPE on 'options' before any server exists. DYN
       // result — the checked-dynamic lane's concise arrows box it, and
       // the throw means it never materializes.
-      if (isJsSourceFile(expr.getSourceFile())) {
+      if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         const t = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
         if (t !== null && (t.kind === "string" || t.kind === "f64" || t.kind === "bool")) {
           const raw = lowerer.lowerExpr(args[0]!);
@@ -770,7 +770,7 @@ export function lowerNetModuleCall(
     // invalid-input probes build theirs with computed keys): the
     // checked-dynamic walk validates Node-order and the compiler-rendered
     // fence is the post-validation tail.
-    if (args.length === 1 && isJsSourceFile(expr.getSourceFile())) {
+    if (args.length === 1 && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const t = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
       if (t !== null && (t.kind === "dyn" || t.kind === "record")) {
         const raw = lowerer.lowerExpr(args[0]!);
@@ -885,7 +885,7 @@ function lowerNetConnectOptions(
 ): IrExpr {
   const args = expr.arguments.nodes;
   const optsNode = args[0] as ts.ObjectLiteralExpression;
-  const isJs = isJsSourceFile(expr.getSourceFile());
+  const isJs = isJsSourceFile(ts.getSourceFileOfNode(expr));
   // The checked-dynamic option-bag route (JS sources): a literal with
   // computed keys (the invalid-input probes' spelling) or an objectMode-
   // trio member rides WHOLE to the runtime walk — Node's Socket-ctor
@@ -930,6 +930,7 @@ function lowerNetConnectOptions(
   let port: IrExpr | null = null;
   let host: IrExpr | null = null;
   let lookup: IrExpr | null = null;
+  let dynLookup: IrExpr | null = null;
   let autoSelect = false;
   let attempt: IrExpr | null = null;
   let optionThrow: IrExpr | null = null;
@@ -1037,7 +1038,23 @@ function lowerNetConnectOptions(
         );
       }
       lookup = lowerer.lowerExpr(initializer);
-      if (!lookupFnShapeOk(lowerer, lookup.type)) {
+      // A lookup of Node's own type (net.LookupFunction: options and a
+      // callback taking an address string or list) crosses as a checked-
+      // dynamic function the runtime calls the way Node's dial does.
+      if (
+        !lookupFnShapeOk(lowerer, lookup.type) &&
+        lookup.type.kind === "func" &&
+        lookup.type.params.length === 3 &&
+        canBoxFuncIntoDyn(
+          lookup.type,
+          (id) => lowerer.shapes.get(id),
+          (id) => lowerer.unions.get(id),
+        )
+      ) {
+        dynLookup = { kind: "dynFrom", value: lookup, type: DYN, loc: locOf(initializer) };
+      } else if (lookup.type.kind === "dyn") {
+        dynLookup = lookup;
+      } else if (!lookupFnShapeOk(lowerer, lookup.type)) {
         lowerer.noLowering(
           `a ${member} 'lookup' option of '${lowerer.fmt(lookup.type)}' values`,
           prop,
@@ -1076,6 +1093,22 @@ function lowerNetConnectOptions(
       kind: "libCall",
       fn: "net.connectAttempt",
       args: [port, host, attempt],
+      type: NETSOCKET_T,
+      loc,
+    };
+  }
+  if (dynLookup !== null) {
+    if (args.length !== 1) {
+      lowerer.noLowering(
+        `${member} with a lookup and a connect listener`,
+        expr,
+        "register the listener separately: socket.once('connect', ...)",
+      );
+    }
+    return {
+      kind: "libCall",
+      fn: "net.connectLookupDyn",
+      args: [port, host, dynLookup],
       type: NETSOCKET_T,
       loc,
     };
@@ -1524,7 +1557,7 @@ function lowerNetServerMethodCall(
         } else if (
           key === "signal" &&
           ts.isPropertyAssignment(prop) &&
-          isJsSourceFile(call.getSourceFile())
+          isJsSourceFile(ts.getSourceFileOfNode(call))
         ) {
           // A provably-non-AbortSignal signal (the invalid-input probes:
           // strings, numbers, plain records) throws Node's
@@ -1627,6 +1660,29 @@ function lowerNetServerMethodCall(
           : [receiver, port, host, v6only, reusePort, cbV],
       );
     }
+    // listen(path[, cb]): a string first argument names a Unix socket
+    // (the runtime takes a numeric string as a port, Node's isPipeName).
+    if (lowerer.mapTypeOf(lowerer.typeOf(args[0]!))?.kind === "string") {
+      if (args.length > 2) {
+        lowerer.noLowering(
+          `listen(path) with ${args.length} arguments`,
+          call,
+          "the supported form is listen(path[, callback])",
+        );
+      }
+      const path = lowerer.lowerExprExpecting(args[0]!, STRING);
+      if (args.length === 1) return listenResult("net.listenPath", [receiver, path]);
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "listen callbacks",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return listenResult("net.listenPathCb", [receiver, path, cb]);
+    }
     const port = lowerer.lowerExprExpecting(args[0]!, F64);
     // The optional middle host — listen(port, '127.0.0.1'[, cb]): a
     // string-typed second argument is the bind address (the net.connect
@@ -1681,6 +1737,21 @@ function lowerNetServerMethodCall(
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
     if (args.length === 0) {
       return { kind: "libCall", fn: "net.serverClose", args: [receiver], type: VOID, loc };
+    }
+    if (
+      lowerer.checker
+        .getCallSignatures(lowerer.typeOf(args[0]!))
+        .some((sig) => sig.getParameters().length > 0)
+    ) {
+      // close((err) => ...): undefined once the server closes, or Node's
+      // ERR_SERVER_NOT_RUNNING when it was not listening.
+      return {
+        kind: "libCall",
+        fn: "net.serverCloseDyn",
+        args: [receiver, lowerSocketDynListener(lowerer, args[0]!, "close callbacks")],
+        type: VOID,
+        loc,
+      };
     }
     const { cb } = lowerCallbackArg(
       lowerer,
@@ -2055,6 +2126,32 @@ function lowerNetServerMethodCall(
     const result = lowerer.mapTypeOf(lowerer.typeOf(call));
     if (result && isAddressInfoRecord(lowerer, result)) {
       const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
+      if (unixListenReachable(lowerer)) {
+        // A Unix-socket server's address() is its path, which this record
+        // cannot hold: the check throws for one before the record reads.
+        const local = lowerer.declareHiddenLocal("%addressServer", NETSERVER_T);
+        const server = (): IrExpr => varRef(local.id, NETSERVER_T, loc);
+        return {
+          kind: "seqExpr",
+          stmts: [
+            { kind: "varDecl", localId: local.id, init: receiver, loc },
+            {
+              kind: "exprStmt",
+              expr: {
+                kind: "libCall",
+                fn: "net.serverAddressCheck",
+                args: [server()],
+                type: VOID,
+                loc,
+              },
+              loc,
+            },
+          ],
+          result: { kind: "libCall", fn: "net.serverAddress", args: [server()], type: result, loc },
+          type: result,
+          loc,
+        };
+      }
       return { kind: "libCall", fn: "net.serverAddress", args: [receiver], type: result, loc };
     }
     // @types/node's `string | AddressInfo | null`: the record while the
@@ -2074,20 +2171,50 @@ function lowerNetServerMethodCall(
     const receiver = coerceToHandle(lowerer, access.expression, NETSERVER_T);
     const local = lowerer.declareHiddenLocal("%addressServer", NETSERVER_T);
     const server = varRef(local.id, NETSERVER_T, loc);
+    const recordArm: IrExpr = {
+      kind: "unionWrap",
+      unionId,
+      tag: lowerer.armTag(unionId, record),
+      value: { kind: "libCall", fn: "net.serverAddress", args: [server], type: record, loc },
+      type: result,
+      loc,
+    };
+    const stringTag = lowerer.armTag(unionId, STRING);
+    let listeningArm: IrExpr = recordArm;
+    const stmts: IrStmt[] = [{ kind: "varDecl", localId: local.id, init: receiver, loc }];
+    if (stringTag >= 0 && unixListenReachable(lowerer)) {
+      // Node answers a Unix-socket server's address() with its path.
+      const pathLocal = lowerer.declareHiddenLocal("%addressPath", STRING);
+      const path = (): IrExpr => varRef(pathLocal.id, STRING, loc);
+      stmts.push({
+        kind: "varDecl",
+        localId: pathLocal.id,
+        init: { kind: "libCall", fn: "net.serverUnixPath", args: [server], type: STRING, loc },
+        loc,
+      });
+      listeningArm = {
+        kind: "ternary",
+        cond: {
+          kind: "strEq",
+          negated: true,
+          left: path(),
+          right: strLit("", loc),
+          type: BOOL,
+          loc,
+        },
+        then: { kind: "unionWrap", unionId, tag: stringTag, value: path(), type: result, loc },
+        else_: recordArm,
+        type: result,
+        loc,
+      };
+    }
     return {
       kind: "seqExpr",
-      stmts: [{ kind: "varDecl", localId: local.id, init: receiver, loc }],
+      stmts,
       result: {
         kind: "ternary",
         cond: { kind: "libCall", fn: "net.serverListening", args: [server], type: BOOL, loc },
-        then: {
-          kind: "unionWrap",
-          unionId,
-          tag: lowerer.armTag(unionId, record),
-          value: { kind: "libCall", fn: "net.serverAddress", args: [server], type: record, loc },
-          type: result,
-          loc,
-        },
+        then: listeningArm,
         else_: {
           kind: "unionWrap",
           unionId,
@@ -2140,6 +2267,34 @@ function socketEncodingReachable(lowerer: Lowerer): boolean {
     if (reachable) break;
   }
   lowerer.socketEncodingReachable = reachable;
+  return reachable;
+}
+
+/** Whether some server in the program may listen on a Unix socket: a
+ * `.listen(x, ...)` call on a server (or an untyped value) whose first
+ * argument is string-typed. Only then does address() check for the socket
+ * path, so other programs keep the record-only lowering. */
+function unixListenReachable(lowerer: Lowerer): boolean {
+  if (lowerer.unixListenReachable !== null) return lowerer.unixListenReachable;
+  let reachable = false;
+  for (const file of lowerer.program.getSourceFiles()) {
+    if (file.isDeclarationFile || !file.text.includes("listen")) continue;
+    ts.walkPreorder(file, (node) => {
+      if (reachable) return "skip";
+      if (!ts.isCallExpression(node) || node.arguments.nodes.length === 0) return undefined;
+      const callee = node.expression;
+      if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "listen") return undefined;
+      const kind = lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(callee.expression))?.kind;
+      if (kind !== undefined && kind !== "netServer" && kind !== "dyn") return undefined;
+      const arg = lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(node.arguments.nodes[0]!));
+      // Only a string-typed argument lowers to listen(path) (an untyped
+      // one checks into a port).
+      if (arg?.kind === "string") reachable = true;
+      return undefined;
+    });
+    if (reachable) break;
+  }
+  lowerer.unixListenReachable = reachable;
   return reachable;
 }
 
@@ -2212,7 +2367,7 @@ function lowerNetSocketMethodCall(
         if (
           encT.value === "buffer" &&
           chunkT.kind === "string" &&
-          isJsSourceFile(call.getSourceFile())
+          isJsSourceFile(ts.getSourceFileOfNode(call))
         ) {
           lowerer.lowerExpr(args[0]!); // evaluation order (effect-free in practice)
           return nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", "Unknown encoding: buffer", VOID, loc);
@@ -2736,6 +2891,17 @@ function lowerNetSocketMethodCall(
                   : "net.sockOnConnect";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
     }
+    if (event === "lookup") {
+      // (err, address, family, host) after the host name resolves, before
+      // the connect: once per resolved address, or once with the error.
+      return {
+        kind: "libCall",
+        fn: "net.sockOnLookup",
+        args: [receiver, lowerSocketDynListener(lowerer, args[1]!, "lookup listeners"), once],
+        type: VOID,
+        loc,
+      };
+    }
     if (event === "finish") {
       // Fires once when the FIN goes out — once either way (the event
       // happens at most once per socket).
@@ -2795,7 +2961,7 @@ function lowerNetSocketMethodCall(
     lowerer.noLowering(
       `socket.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
       args[0]!,
-      '"data", "end", "close", "error", "connect", "ready", "timeout", "readable", "secureConnect", and "session" are the supported socket events (as literals)',
+      '"data", "end", "close", "error", "connect", "lookup", "ready", "timeout", "readable", "secureConnect", and "session" are the supported socket events (as literals)',
     );
   }
   lowerer.noLowering(
@@ -3971,6 +4137,30 @@ export function lowerServerProperty(
   if (lowerer.mapTypeOf(lowerer.typeOf(inner.expression))?.kind !== "netServer") return null;
   if (!lowerer.isStdlibMember(inner)) return null;
   const receiver = coerceToHandle(lowerer, inner.expression, NETSERVER_T);
+  if (unixListenReachable(lowerer)) {
+    const local = lowerer.declareHiddenLocal("%addressServer", NETSERVER_T);
+    const server = (): IrExpr => varRef(local.id, NETSERVER_T, loc);
+    return {
+      kind: "seqExpr",
+      stmts: [
+        { kind: "varDecl", localId: local.id, init: receiver, loc },
+        {
+          kind: "exprStmt",
+          expr: {
+            kind: "libCall",
+            fn: "net.serverAddressCheck",
+            args: [server()],
+            type: VOID,
+            loc,
+          },
+          loc,
+        },
+      ],
+      result: { kind: "libCall", fn: "net.serverPort", args: [server()], type: F64, loc },
+      type: F64,
+      loc,
+    };
+  }
   return { kind: "libCall", fn: "net.serverPort", args: [receiver], type: F64, loc };
 }
 
@@ -4694,7 +4884,7 @@ function tlsLiteralNeedsRuntimeWalk(
   node: ts.ObjectLiteralExpression,
   includeHttpTimeoutOptions = false,
 ): boolean {
-  const jsSource = isJsSourceFile(node.getSourceFile());
+  const jsSource = isJsSourceFile(ts.getSourceFileOfNode(node));
   return node.properties.nodes.some(
     (p) =>
       (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
@@ -4914,7 +5104,7 @@ function lowerTlsModuleCall(
     bi.member === "getCACertificates" &&
     args.length === 1 &&
     !args.some(ts.isSpreadElement) &&
-    isJsSourceFile(expr.getSourceFile())
+    isJsSourceFile(ts.getSourceFileOfNode(expr))
   ) {
     // The type-argument ladder (validateString + the documented name
     // set); the real CA list has no lowering, so a valid name meets the
@@ -5580,7 +5770,7 @@ function lowerHttp2ModuleCall(
         if (ts.isConditionalExpression(inner)) {
           const whenTrue = stripParensAndCasts(inner.whenTrue);
           const whenFalse = stripParensAndCasts(inner.whenFalse);
-          const condText = inner.condition.getText();
+          const condText = ts.getTextOfNode(inner.condition);
           const ok =
             ts.isObjectLiteralExpression(whenTrue) &&
             ts.isObjectLiteralExpression(whenFalse) &&
@@ -5591,7 +5781,7 @@ function lowerHttp2ModuleCall(
               ts.isStringLiteral(whenTrue.properties.nodes[0]!.name)) &&
             (whenTrue.properties.nodes[0]!.name as ts.Identifier | ts.StringLiteral).text ===
               "SNICallback" &&
-            whenTrue.properties.nodes[0]!.initializer.getText() === condText;
+            ts.getTextOfNode(whenTrue.properties.nodes[0]!.initializer) === condText;
           if (!ok) {
             lowerer.noLowering(
               "createSecureServer options with a conditional spread",
@@ -5827,6 +6017,44 @@ function lowerHttp2ModuleCall(
   );
 }
 
+/** The checked-dynamic options value of a request whose options the
+ * runtime reads: a non-literal options value (a RequestOptions variable —
+ * checked-dynamic storage — or a record that converts to one), or a
+ * literal the static walk cannot lower because it spreads another options
+ * value or sets socketPath. Null keeps the static literal walk (and its
+ * fences), which every other literal takes unchanged. */
+function runtimeRequestOptions(
+  lowerer: Lowerer,
+  optsNode: ts.Expression,
+  secureish: boolean,
+): IrExpr | null {
+  if (ts.isObjectLiteralExpression(optsNode)) {
+    const needsRuntime = optsNode.properties.nodes.some((prop) => {
+      if (ts.isSpreadAssignment(prop)) {
+        // the static walk's one spread: `...(c ? { rejectUnauthorized } : {})` on https
+        const cs = conditionalSpreadOf(prop.expression);
+        return !(
+          secureish &&
+          cs !== null &&
+          cs !== "unsupported" &&
+          cs.props.length === 1 &&
+          cs.props[0]!.name.text === "rejectUnauthorized"
+        );
+      }
+      return (
+        (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) &&
+        (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+        prop.name.text === "socketPath"
+      );
+    });
+    if (!needsRuntime) return null;
+    return lowerDynObjectLiteral(lowerer, optsNode);
+  }
+  const t = lowerer.mapTypeOf(lowerer.typeOf(optsNode));
+  if (!t || !(t.kind === "dyn" || (t.kind === "record" && lowerer.dynConvertible(t)))) return null;
+  return lowerer.coerceToExpected(lowerer.lowerExpr(optsNode), DYN);
+}
+
 /** http.request(options[, cb]) / http.get(options[, cb]) — the client.
  * The options argument must be an OBJECT LITERAL; the lowered keys are
  * hostname/host, port, path, method, timeout, and headers (a nested
@@ -5869,6 +6097,40 @@ function lowerHttpClientCall(
     );
   }
   const optsNode = args[0]!;
+  const runtimeOptions =
+    binding === null ? runtimeRequestOptions(lowerer, optsNode, secureish) : null;
+  if (runtimeOptions !== null) {
+    // The options record is read at run time (the ClientRequest
+    // constructor's walk in the runtime): a RequestOptions variable, or a
+    // literal that spreads one or sets socketPath.
+    const autoEnd = boolLit(member === "get", loc);
+    const secureDyn = secure === true;
+    if (args.length === 1) {
+      return {
+        kind: "libCall",
+        fn: secureDyn ? "https.requestDyn" : "http.requestDyn",
+        args: [runtimeOptions, autoEnd],
+        type: HTTPCLIENTREQ_T,
+        loc,
+      };
+    }
+    const { cb } = lowerCallbackArg(
+      lowerer,
+      args[1]!,
+      "response callbacks",
+      1,
+      (p) => p.kind === "httpReq",
+      "use (res) or ()",
+      [HTTPREQ_T],
+    );
+    return {
+      kind: "libCall",
+      fn: secureDyn ? "https.requestDynCb" : "http.requestDynCb",
+      args: [runtimeOptions, autoEnd, cb],
+      type: HTTPCLIENTREQ_T,
+      loc,
+    };
+  }
   if (!ts.isObjectLiteralExpression(optsNode)) {
     const t = lowerer.mapTypeOf(lowerer.typeOf(optsNode));
     if ((t?.kind === "string" || t?.kind === "url") && binding === null) {
@@ -7149,6 +7411,27 @@ function lowerHttpReqMethodCall(
     const event = evT.isStringLiteralType() ? evT.value : null;
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
     if (event === "data") {
+      const sigs = lowerer.checker.getCallSignatures(lowerer.typeOf(args[1]!));
+      const firstParam = sigs.length === 1 ? sigs[0]!.getParameters()[0] : undefined;
+      const param =
+        firstParam !== undefined
+          ? lowerer.mapTypeOf(lowerer.checker.getTypeOfSymbol(firstParam))
+          : null;
+      if (param !== null && param.kind === "string") {
+        // A chunk typed string (the setEncoding('utf8') shape), as on a
+        // socket: the listener takes the chunk through a checked
+        // boundary, so a string arrives after setEncoding and a Buffer
+        // without it fails the check instead of being decoded.
+        const boxed = lowerSocketDynListener(lowerer, args[1]!, "data listeners");
+        const cb: IrExpr = { kind: "dynCheck", value: boxed, type: funcOf([DYN], VOID), loc };
+        return {
+          kind: "libCall",
+          fn: "http.reqOnData",
+          args: [receiver, cb, once],
+          type: VOID,
+          loc,
+        };
+      }
       const { cb } = lowerCallbackArg(
         lowerer,
         args[1]!,
@@ -7283,7 +7566,7 @@ function lowerHttpResMethodCall(
   }
   if (name === "writeContinue" || name === "writeProcessing" || name === "writeEarlyHints") {
     requireStatementPosition(lowerer, call, `res.${name}(...)`);
-    if (lowerer.typeOf(access.expression).getSymbol()?.name === "Http2ServerResponse") {
+    if (ts.symbolNameOf(lowerer.typeOf(access.expression).getSymbol()) === "Http2ServerResponse") {
       lowerer.noLowering(
         `Http2ServerResponse.${name}`,
         call,
@@ -7392,7 +7675,7 @@ function lowerHttpResMethodCall(
   }
   if (name === "addTrailers") {
     requireStatementPosition(lowerer, call, "res.addTrailers(...)");
-    if (lowerer.typeOf(access.expression).getSymbol()?.name === "Http2ServerResponse") {
+    if (ts.symbolNameOf(lowerer.typeOf(access.expression).getSymbol()) === "Http2ServerResponse") {
       lowerer.noLowering(
         "Http2ServerResponse.addTrailers",
         call,
@@ -7710,6 +7993,30 @@ function lowerHttpResMethodCall(
       const fn: IrLibFn = name === "write" ? "http.resWriteDyn" : "http.resEndDyn";
       if (cbArg !== null) return endWithCb(fn, [receiver, data], cbArg);
       return { kind: "libCall", fn, args: [receiver, data], type: VOID, loc };
+    }
+    // end(payload ? text : undefined): an absent chunk ends without data,
+    // as end() does. The checked-dynamic end takes each arm at run time.
+    if (name === "end" && data.type.kind === "union" && lowerer.dynConvertible(data.type)) {
+      const arms = lowerer.unions.get(data.type.unionId)?.arms ?? [];
+      if (
+        arms.every(
+          (arm) =>
+            arm.kind === "string" ||
+            (arm.kind === "bytes" && arm.elem === "u8") ||
+            arm.kind === "undefinedT" ||
+            arm.kind === "nullT",
+        )
+      ) {
+        const dynData: IrExpr = { kind: "dynFrom", value: data, type: DYN, loc: locOf(dataNode) };
+        if (cbArg !== null) return endWithCb("http.resEndDyn", [receiver, dynData], cbArg);
+        return {
+          kind: "libCall",
+          fn: "http.resEndDyn",
+          args: [receiver, dynData],
+          type: VOID,
+          loc,
+        };
+      }
     }
     lowerer.noLowering(
       `${name} of '${lowerer.fmt(data.type)}' data`,

@@ -189,7 +189,7 @@ static void modes(void) {
   scr_map_set_f64_f64(map, 5, 5);
   assert(map->ndense >= 16 && !map->nbuckets);
   for (int i = 6; i < 1000; i++) scr_map_set_f64_f64(map, i, i);
-  assert(map->ndense >= 1000 && map->ndense <= 2048);
+  assert(map->ndense >= 1000 && map->ndense <= 1000 + 1000 / 4 + 64); /* near the largest key */
   scr_map_set_f64_f64(map, -0.0, 0); /* slot 0 */
   assert(map->ndense);
   double out;
@@ -412,7 +412,8 @@ static void delete_shrinks(void) {
   map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL);
   for (size_t i = 0; i < 4096; i++) scr_map_set_f64_f64(map, (double)i, (double)i);
   for (size_t i = 1024; i < 4096; i++) assert(scr_map_delete_f64(map, (double)i));
-  assert(map->ndense == 4096 && scr_map_iter_count(map) == 4096);
+  assert(map->ndense >= 4096 && map->ndense <= 4096 + 4096 / 4 + 64);
+  assert(scr_map_iter_count(map) == 4096);
   ScrMap *copy = scr_map_clone(map, false, NULL);
   assert(copy->ndense == 1024 && scr_map_size(copy) == 1024);
   double out;

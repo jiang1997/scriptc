@@ -73,7 +73,7 @@ function isBoundary(node: ts.Node): boolean {
 function containerOf(node: ts.Node): ts.Node {
   let n = node.parent;
   while (n && !isBoundary(n)) n = n.parent;
-  return n ?? node.getSourceFile();
+  return n ?? ts.getSourceFileOfNode(node);
 }
 
 function isLoop(node: ts.Node): boolean {
@@ -130,7 +130,7 @@ function writeOf(id: ts.Identifier): Write | null {
       const k = p.operatorToken.kind;
       if (p.left !== n || k < ts.SyntaxKind.FirstAssignment || k > ts.SyntaxKind.LastAssignment)
         return null;
-      const at = id.getStart();
+      const at = ts.tokenStartOfNode(id);
       if (destructured) return { at, step: null, value: null };
       if (k === ts.SyntaxKind.EqualsToken) return { at, step: null, value: p.right };
       const amount = integerLiteral(p.right);
@@ -146,15 +146,15 @@ function writeOf(id: ts.Identifier): Write | null {
         (p.operator !== ts.SyntaxKind.PlusPlusToken && p.operator !== ts.SyntaxKind.MinusMinusToken)
       )
         return null;
-      if (destructured) return { at: id.getStart(), step: null, value: null };
+      if (destructured) return { at: ts.tokenStartOfNode(id), step: null, value: null };
       return {
-        at: id.getStart(),
+        at: ts.tokenStartOfNode(id),
         step: p.operator === ts.SyntaxKind.PlusPlusToken ? 1 : -1,
         value: null,
       };
     }
     if (ts.isForOfStatement(p) || ts.isForInStatement(p))
-      return p.initializer === n ? { at: id.getStart(), step: null, value: null } : null;
+      return p.initializer === n ? { at: ts.tokenStartOfNode(id), step: null, value: null } : null;
     if (ts.isParenthesizedExpression(p)) {
       n = p;
       continue;
@@ -199,7 +199,7 @@ export class StringIndexBounds {
 
   private prove(read: ts.ElementAccessExpression): boolean {
     // JavaScript declarations are not checked against callers.
-    if (read.questionDotToken || isJsSourceFile(read.getSourceFile())) return false;
+    if (read.questionDotToken || isJsSourceFile(ts.getSourceFileOfNode(read))) return false;
     const textNode = read.expression;
     const indexNode = read.argumentExpression;
     if (!ts.isIdentifier(textNode) || !ts.isIdentifier(indexNode)) return false;
@@ -243,7 +243,8 @@ export class StringIndexBounds {
   /** Every write of a block-scoped local or parameter, or null for any
    * other binding (module imports, var, class members, ...). */
   private binding(symbol: ts.Symbol): Binding | null {
-    if (this.bindings.has(symbol)) return this.bindings.get(symbol)!;
+    const cached = this.bindings.get(symbol);
+    if (cached !== undefined) return cached;
     const result = this.scanBinding(symbol);
     this.bindings.set(symbol, result);
     return result;
@@ -268,7 +269,7 @@ export class StringIndexBounds {
         if (!(list.flags & ts.NodeFlags.Const)) return null;
       } else if (declaration.initializer) {
         writes.push({
-          at: declaration.name.getStart(),
+          at: ts.tokenStartOfNode(declaration.name),
           step: null,
           value: declaration.initializer,
         });
@@ -280,7 +281,7 @@ export class StringIndexBounds {
     const container = containerOf(declaration);
     let escapes = false;
     let assigned = 0;
-    for (const id of this.namesIn(container).get(symbol.name) ?? []) {
+    for (const id of this.namesIn(container).get(ts.symbolName(symbol)) ?? []) {
       if (id === nameNode) continue;
       const write = writeOf(id);
       if (!write) continue;

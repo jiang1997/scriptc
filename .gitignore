@@ -12,6 +12,8 @@ node_modules/
 !tests/fixtures/npm-static/nested/inner/node_modules/
 !tests/fixtures/npm-static/node_modules/*/node_modules/
 !tests/fixtures/npm/store/*/node_modules/
+!tests/fixtures/npm/node_modules/*/node_modules/
+!tests/fixtures/npm/workspace/*/node_modules/
 !tests/fixtures/npm/cases/*/node_modules/
 !tests/library-mode/*/node_modules/
 !tests/fixtures/provenance/node_modules/
@@ -49,3 +51,6 @@ tmp-*/
 .env.local
 .env*
 .env*.local
+# the vendored fs-extra corpus package: its lib/output module and jsonfile's own universalify
+!tests/corpus/fs-extra-package/node_modules/fs-extra/lib/output/
+!tests/corpus/fs-extra-package/node_modules/jsonfile/node_modules/

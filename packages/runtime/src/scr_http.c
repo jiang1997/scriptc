@@ -806,6 +806,8 @@ static bool scr_http_token_char(unsigned char ch) {
     (ch >= 'a' && ch <= 'z') || (ch != 0 && strchr("!#$%&'*+-.^_`|~", ch) != NULL);
 }
 
+static void scr_http_throw_invalid_header_name(ScrStr *name /*borrowed*/, ScrStr *label /*borrowed*/);
+
 /* node:http's public validators use the same token and field-vchar rules
  * as OutgoingMessage. Strings are UTF-8 here, so the Latin-1 obs-text
  * range accepted by Node's JS regex is C2/C3 plus one continuation byte. */
@@ -814,7 +816,12 @@ void scr_http_validate_header_name(ScrStr *name /*borrowed*/, ScrStr *label /*bo
   for (size_t i = 0; i < name->len && valid; i++)
     valid = scr_http_token_char((unsigned char)name->data[i]);
   if (valid) return;
+  scr_http_throw_invalid_header_name(name, label);
+}
 
+/* Node's ERR_INVALID_HTTP_TOKEN for a header name; `name` is the name's
+ * string form. */
+static void scr_http_throw_invalid_header_name(ScrStr *name /*borrowed*/, ScrStr *label /*borrowed*/) {
   ScrJsonBuf b;
   scr_jb_init(&b);
   ScrStr *shown = label->len ? label : NULL;
@@ -5582,6 +5589,18 @@ static void scr_http_agent_destroy(ScrHttpAgent *a) {
   }
 }
 
+/* The socketPath option of the next request built through
+ * scr_http_request_agent_ex (borrowed; the caller keeps it alive across
+ * the call), like https's servername: that request dials the Unix socket
+ * instead of host:port, and the agent keys its sockets by the path, as
+ * Node's getName does. */
+static SCR_TL ScrStr *scr_http_next_socket_path = NULL;
+/* The Unix-socket dialer, set by the runtime options path that sets the
+ * path; a pointer (not static) so ordinary requests do not link the
+ * Unix-socket half of the net unit. */
+extern SCR_TL ScrNetSocket *(*scr_http_socket_dialer)(ScrStr *path, bool deferred);
+SCR_TL ScrNetSocket *(*scr_http_socket_dialer)(ScrStr *path, bool deferred) = NULL;
+
 ScrHttpClientReq *scr_http_request_agent_ex(ScrStr *host /*borrowed*/, double port,
                                              ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
                                              double timeout_ms, ScrArr *header_pairs /*borrowed*/,
@@ -5590,6 +5609,8 @@ ScrHttpClientReq *scr_http_request_agent_ex(ScrStr *host /*borrowed*/, double po
                                              ScrHttpRespFn fn, int default_port,
                                              void (*wrap)(ScrNetSocket *, void *), void *wrap_ctx,
                                              ScrStr *pool_key /*borrowed, nullable*/) {
+  ScrStr *socket_path = scr_http_next_socket_path;
+  scr_http_next_socket_path = NULL;
   /* the null/undefined arms: the scheme's global agent, like Node */
   if (agent == NULL || agent->kind == SCR_DYN_UNDEF || agent->kind == SCR_DYN_NULL)
     agent = scr_http_global_agent(default_port == 443);
@@ -5619,8 +5640,10 @@ ScrHttpClientReq *scr_http_request_agent_ex(ScrStr *host /*borrowed*/, double po
       scr_arr_push_ref(copy, scr_str_new("close", 5));
       pairs = copy;
     }
+    ScrNetSocket *presock = socket_path != NULL ? scr_http_socket_dialer(socket_path, false) : NULL;
     ScrHttpClientReq *c = scr_http_request_impl(host, p, path, method, timeout_ms, pairs,
-                                                 auto_end, cb, fn, default_port, wrap, wrap_ctx, NULL);
+                                                 auto_end, cb, fn, default_port, wrap, wrap_ctx,
+                                                 presock);
     if (copy) scr_arr_release(copy);
     return c;
   }
@@ -5636,11 +5659,14 @@ ScrHttpClientReq *scr_http_request_agent_ex(ScrStr *host /*borrowed*/, double po
   char portbuf[16];
   int portn = snprintf(portbuf, sizeof portbuf, "%d", (int)p);
   ScrStr *name = scr_http_agent_name(host->data, host->len, portbuf, (size_t)portn,
-                                      NULL, 0, 0, NULL, 0);
+                                      NULL, 0, 0, socket_path ? socket_path->data : NULL,
+                                      socket_path ? socket_path->len : 0);
   /* a free pooled socket for the name serves the request right away */
   ScrHttpAgentFree *reuse = ag->keep_alive ? scr_http_agent_free_take(ag, name, pool_key) : NULL;
   bool queue = reuse == NULL && scr_http_agent_active(ag, name) >= ag->max_sockets;
-  ScrNetSocket *presock = queue || reuse ? scr_net_connect_deferred(p, host) : NULL;
+  ScrNetSocket *presock = socket_path != NULL ? scr_http_socket_dialer(socket_path, queue || reuse)
+                          : queue || reuse    ? scr_net_connect_deferred(p, host)
+                                              : NULL;
   ScrHttpClientReq *c = scr_http_request_impl(host, p, path, method, timeout_ms, header_pairs,
                                                auto_end, cb, fn, default_port, wrap, wrap_ctx,
                                                presock);
@@ -6966,5 +6992,478 @@ ScrHttpClientReq *scr_http_request_url(ScrStr *url /*borrowed*/, ScrStr *method 
   scr_arr_release(pairs);
   scr_str_release(host);
   scr_str_release(path);
+  return c;
+}
+
+/* ── http.request(options) with a runtime options record ─────────────────
+ *
+ * The options value of http.request/get when the compiler cannot see an
+ * object literal: a RequestOptions variable, or a literal that spreads one
+ * or sets socketPath. Node's ClientRequest constructor reads it at run
+ * time; so does this walk, in Node's validation order and with its error
+ * shapes. Documented options outside the implemented set throw the
+ * runtime fence when they carry a value, rather than being ignored;
+ * undocumented keys are ignored, as Node ignores them. */
+
+/* The documented options this walk does not implement. A truthy value
+ * fences; setHost and setDefaultHeaders fence only when false. */
+static const char *const SCR_HTTP_REQ_FENCED_OPTIONS[] = {
+  "auth", "createConnection", "family", "hints", "httpValidation", "insecureHTTPParser",
+  "joinDuplicateHeaders", "localAddress", "localPort", "lookup", "uniqueHeaders", NULL,
+};
+
+static const char SCR_HTTP_REQ_SUPPORTED[] =
+    "hostname/host, port, path, method, headers, timeout, agent, signal, socketPath, "
+    "defaultPort, protocol, and maxHeaderSize are the supported options";
+
+/* validateHeaderName and validateHeaderValue over one pair of the flat
+ * headers array: a name that is not a string throws
+ * ERR_INVALID_HTTP_TOKEN with its string form, and an array value
+ * validates each element. */
+static void scr_http_req_validate_header_pair(const ScrDyn *name, const ScrDyn *value) {
+  ScrStr *label = scr_str_new("", 0);
+  if (name->kind == SCR_DYN_STR) {
+    scr_http_validate_header_name(name->v.str, label);
+  } else {
+    ScrStr *text = scr_dyn_string_coerce_js(name);
+    if (text != NULL) {
+      scr_http_throw_invalid_header_name(text, label);
+      scr_str_release(text);
+    }
+  }
+  scr_str_release(label);
+  if (scr_exc_pending()) return;
+  if (value->kind == SCR_DYN_ARR) {
+    for (size_t k = 0; k < value->v.arr.len && !scr_exc_pending(); k++)
+      scr_http_validate_header_value(name->v.str, value->v.arr.items[k]);
+  } else {
+    scr_http_validate_header_value(name->v.str, value);
+  }
+}
+
+/* util.inspect's one-line rendering of a short array ("[ 'x-a', 5 ]"): up
+ * to six primitive entries whose rendering stays within inspect's
+ * 80-column break length (a start of n + 11, plus the separators and each
+ * entry). NULL when inspect would group or break the entries, or an entry
+ * is not a primitive or renders outside ASCII (inspect counts UTF-16
+ * units). */
+static ScrStr *scr_http_inspect_short_array(const ScrDyn *list) {
+  size_t n = list->v.arr.len;
+  if (n == 0 || n > 6) return NULL;
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "[ ");
+  size_t total = 2 * n + 11;
+  bool fits = true;
+  for (size_t i = 0; i < n && fits; i++) {
+    const ScrDyn *v = list->v.arr.items[i];
+    ScrStr *part = NULL;
+    switch (v->kind) {
+    case SCR_DYN_STR: part = scr_str_inspect_quoted(v->v.str, false); break;
+    case SCR_DYN_NUM:
+      part = v->v.num == 0 && signbit(v->v.num) ? scr_str_new("-0", 2) : scr_f64_to_scrstr(v->v.num);
+      break;
+    case SCR_DYN_BOOL: part = v->v.b ? scr_str_new("true", 4) : scr_str_new("false", 5); break;
+    case SCR_DYN_NULL: part = scr_str_new("null", 4); break;
+    case SCR_DYN_UNDEF: part = scr_str_new("undefined", 9); break;
+    default: break;
+    }
+    if (part == NULL) {
+      fits = false;
+      break;
+    }
+    for (size_t k = 0; k < part->len && fits; k++) fits = (unsigned char)part->data[k] < 0x80;
+    total += part->len;
+    if (total > 80) fits = false;
+    if (i > 0) scr_jb_puts(&b, ", ");
+    scr_jb_write(&b, part->data, part->len);
+    scr_str_release(part);
+  }
+  scr_jb_puts(&b, " ]");
+  ScrStr *out = scr_jb_finish(&b);
+  if (fits) return out;
+  scr_str_release(out);
+  return NULL;
+}
+
+/* Node's ERR_INVALID_ARG_VALUE for a flat headers array of odd length.
+ * Arrays whose inspected form scr_http_inspect_short_array cannot
+ * reproduce fence instead. */
+static void scr_http_req_odd_headers_fail(const char *api, const ScrDyn *list) {
+  ScrStr *shown = scr_http_inspect_short_array(list);
+  if (shown == NULL) {
+    scr_http_req_opts_fence(api, "headers",
+                            "the odd-length headers array error prints up to six short primitive entries here");
+    return;
+  }
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "The argument 'headers' is invalid. Received ");
+  scr_jb_write(&b, shown->data, shown->len);
+  scr_str_release(shown);
+  ScrStr *msg = scr_jb_finish(&b);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg->data, msg->len, "ERR_INVALID_ARG_VALUE");
+  scr_str_release(msg);
+}
+
+void scr_http_req_opts_fence(const char *api, const char *key, const char *hint) {
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, api);
+  scr_jb_puts(&b, " option '");
+  scr_jb_puts(&b, key);
+  scr_jb_puts(&b, "' has no static lowering — ");
+  scr_jb_puts(&b, hint);
+  scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
+}
+
+void scr_http_req_opts_free(ScrHttpReqOpts *o) {
+  scr_str_release(o->host);
+  scr_str_release(o->path);
+  scr_str_release(o->method);
+  scr_str_release(o->socket_path);
+  if (o->headers) scr_arr_release(o->headers);
+  scr_dyn_release(o->agent);
+  scr_dyn_release(o->signal);
+  scr_dyn_release(o->view);
+  memset(o, 0, sizeof *o);
+}
+
+/* A member of the options record, NULL when absent or undefined. */
+static const ScrDyn *scr_http_req_opt(const ScrDyn *opts, const char *key) {
+  const ScrDyn *v = scr_dyn_obj_get(opts, key, strlen(key));
+  return v == NULL || v->kind == SCR_DYN_UNDEF ? NULL : v;
+}
+
+static bool scr_http_req_truthy(const ScrDyn *v) { return v != NULL && scr_dyn_truthy(v); }
+
+/* validatePort's accepted values: an integer in [0, 65535] or a string
+ * holding one. NaN when the value is not a valid port. */
+static double scr_http_req_port_value(const ScrDyn *v) {
+  if (v->kind == SCR_DYN_NUM) {
+    double n = v->v.num;
+    return n == n && trunc(n) == n && n >= 0 && n <= 65535 ? n : NAN;
+  }
+  if (v->kind == SCR_DYN_STR) {
+    bool blank = true;
+    for (size_t i = 0; i < v->v.str->len && blank; i++)
+      blank = isspace((unsigned char)v->v.str->data[i]) != 0;
+    if (blank) return NAN;
+    ScrStr *s = scr_str_retain(v->v.str);
+    double n = scr_string_to_number(s);
+    scr_str_release(s);
+    return n == n && trunc(n) == n && n >= 0 && n <= 65535 ? n : NAN;
+  }
+  return NAN;
+}
+
+/* Reads `opts` (borrowed) into `o` in the ClientRequest constructor's
+ * order. False with the exception pending (`o` holds nothing). */
+bool scr_http_req_opts_read(const ScrDyn *opts, bool secure, const char *api, ScrHttpReqOpts *o) {
+  memset(o, 0, sizeof *o);
+  o->port = -1;
+  o->default_port = secure ? 443 : 80;
+  if (opts != NULL && opts->kind == SCR_DYN_TYPED_REF) {
+    o->view = scr_dyn_typed_ref_materialize(opts);
+    opts = o->view;
+  }
+  if (opts == NULL || opts->kind == SCR_DYN_UNDEF || opts->kind == SCR_DYN_NULL) {
+    opts = NULL; /* Node spreads it: every option takes its default */
+  } else if (opts->kind != SCR_DYN_OBJ) {
+    scr_http_req_opts_fence(api, "options", "pass an options object or a URL string");
+    scr_http_req_opts_free(o);
+    return false;
+  }
+#define OPT(key) (opts != NULL ? scr_http_req_opt(opts, key) : NULL)
+  /* agent: false, null/undefined (the global agent), or an Agent */
+  const ScrDyn *agent = OPT("agent");
+  if (agent != NULL && agent->kind != SCR_DYN_NULL &&
+      !(agent->kind == SCR_DYN_BOOL && !agent->v.b) &&
+      !(agent->kind == SCR_DYN_HANDLE && agent->v.handle.tag == SCR_DYNH_HTTP_AGENT)) {
+    scr_dyn_prop_type_fail("options.agent", "one of Agent-like Object, undefined, or false", agent);
+    scr_http_req_opts_free(o);
+    return false;
+  }
+  if (agent != NULL) o->agent = scr_dyn_retain((ScrDyn *)agent);
+  bool agent_secure = secure;
+  if (agent != NULL && agent->kind == SCR_DYN_HANDLE)
+    agent_secure = ((ScrHttpAgent *)agent->v.handle.ptr)->secure;
+  /* path: String(options.path) when truthy, without unescaped characters */
+  const ScrDyn *path = OPT("path");
+  if (scr_http_req_truthy(path)) {
+    o->path = scr_dyn_string_coerce_js(path);
+    if (o->path == NULL) {
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    bool bad = false;
+    for (size_t i = 0; i < o->path->len && !bad; i++) {
+      unsigned char ch = (unsigned char)o->path->data[i];
+      if (ch < 0x21) bad = true;
+      else if (ch >= 0x80) {
+        /* U+0080..U+00FF (lead byte C2/C3) pass; anything above is unescaped */
+        if (ch != 0xc2 && ch != 0xc3) bad = true;
+        else i++;
+      }
+    }
+    if (bad) {
+      static const char msg[] = "Request path contains unescaped characters";
+      scr_throw_error_msg_code(SCR_ERR_TYPE, msg, sizeof msg - 1, "ERR_UNESCAPED_CHARACTERS");
+      scr_http_req_opts_free(o);
+      return false;
+    }
+  } else {
+    o->path = scr_str_new("/", 1);
+  }
+  /* protocol: options.protocol || the agent's, which must match */
+  const ScrDyn *protocol = OPT("protocol");
+  const char *expected = agent_secure ? "https:" : "http:";
+  if (scr_http_req_truthy(protocol)) {
+    ScrStr *p = scr_dyn_string_coerce_js(protocol);
+    if (p == NULL) {
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    if (p->len != strlen(expected) || memcmp(p->data, expected, p->len) != 0) {
+      char msg[192];
+      int n = snprintf(msg, sizeof msg, "Protocol \"%.*s\" not supported. Expected \"%s\"",
+                       (int)(p->len < 64 ? p->len : 64), p->data, expected);
+      scr_str_release(p);
+      scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)n, "ERR_INVALID_PROTOCOL");
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    scr_str_release(p);
+  }
+  /* defaultPort, then port (validated when the dial is TCP) */
+  const ScrDyn *default_port = OPT("defaultPort");
+  if (scr_http_req_truthy(default_port) && default_port->kind == SCR_DYN_NUM)
+    o->default_port = (int)default_port->v.num;
+  else if (agent != NULL && agent->kind == SCR_DYN_HANDLE)
+    o->default_port = (int)((ScrHttpAgent *)agent->v.handle.ptr)->default_port;
+  const ScrDyn *port = OPT("port");
+  /* host: validateHost(hostname) || validateHost(host) || 'localhost' */
+  static const char *const host_keys[] = { "hostname", "host" };
+  for (size_t i = 0; i < 2; i++) {
+    const ScrDyn *h = OPT(host_keys[i]);
+    if (h == NULL || h->kind == SCR_DYN_NULL) continue;
+    if (h->kind != SCR_DYN_STR) {
+      char name[24];
+      snprintf(name, sizeof name, "options.%s", host_keys[i]);
+      scr_dyn_prop_type_fail(name, "of type string or one of undefined or null", h);
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    if (o->host == NULL && h->v.str->len > 0) o->host = scr_str_retain(h->v.str);
+  }
+  if (o->host == NULL) o->host = scr_str_new("localhost", 9);
+  const ScrDyn *set_host = OPT("setHost");
+  if (set_host != NULL && set_host->kind == SCR_DYN_BOOL && !set_host->v.b) {
+    scr_http_req_opts_fence(api, "setHost", "the Host header is always sent — leave setHost at its true default");
+    scr_http_req_opts_free(o);
+    return false;
+  }
+  const ScrDyn *set_default = OPT("setDefaultHeaders");
+  if (set_default != NULL && set_default->kind == SCR_DYN_BOOL && !set_default->v.b) {
+    scr_http_req_opts_fence(api, "setDefaultHeaders", "the default headers are always sent — leave setDefaultHeaders at its true default");
+    scr_http_req_opts_free(o);
+    return false;
+  }
+  const ScrDyn *socket_path = OPT("socketPath");
+  /* timeout: getTimerDuration(options.timeout, 'timeout') */
+  const ScrDyn *timeout = OPT("timeout");
+  if (timeout != NULL) {
+    if (timeout->kind != SCR_DYN_NUM) {
+      scr_dyn_arg_type_fail("timeout", "of type number", timeout);
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    double t = timeout->v.num;
+    if (!(t >= 0 && isfinite(t))) {
+      char recv[48], msg[192];
+      scr_num_received(t, recv);
+      int n = snprintf(msg, sizeof msg,
+                       "The value of \"timeout\" is out of range. It must be a non-negative finite number. Received %s",
+                       recv);
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)n, "ERR_OUT_OF_RANGE");
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    o->timeout = t;
+  }
+  /* method: a string token, upper-cased; GET when absent or empty */
+  const ScrDyn *method = OPT("method");
+  if (method != NULL && method->kind != SCR_DYN_NULL && method->kind != SCR_DYN_STR) {
+    scr_dyn_prop_type_fail("options.method", "of type string", method);
+    scr_http_req_opts_free(o);
+    return false;
+  }
+  if (method != NULL && method->kind == SCR_DYN_STR && method->v.str->len > 0) {
+    o->method = scr_str_new(method->v.str->data, method->v.str->len);
+    for (size_t i = 0; i < o->method->len; i++) {
+      if (!scr_http_token_char((unsigned char)o->method->data[i])) {
+        ScrJsonBuf b;
+        scr_jb_init(&b);
+        scr_jb_puts(&b, "Method must be a valid HTTP token [\"");
+        scr_jb_write(&b, o->method->data, o->method->len);
+        scr_jb_puts(&b, "\"]");
+        ScrStr *msg = scr_jb_finish(&b);
+        scr_throw_error_msg_code(SCR_ERR_TYPE, msg->data, msg->len, "ERR_INVALID_HTTP_TOKEN");
+        scr_str_release(msg);
+        scr_http_req_opts_free(o);
+        return false;
+      }
+    }
+    for (size_t i = 0; i < o->method->len; i++) {
+      unsigned char ch = (unsigned char)o->method->data[i];
+      if (ch >= 'a' && ch <= 'z') o->method->data[i] = (char)(ch - 'a' + 'A');
+    }
+  } else {
+    o->method = scr_str_new("GET", 3);
+  }
+  const ScrDyn *max_header = OPT("maxHeaderSize");
+  if (max_header != NULL) {
+    if (max_header->kind != SCR_DYN_NUM) {
+      scr_dyn_arg_type_fail("maxHeaderSize", "of type number", max_header);
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    o->max_header_size = max_header->v.num;
+    o->has_max_header_size = true;
+  }
+  for (size_t i = 0; SCR_HTTP_REQ_FENCED_OPTIONS[i] != NULL; i++) {
+    if (scr_http_req_truthy(OPT(SCR_HTTP_REQ_FENCED_OPTIONS[i]))) {
+      scr_http_req_opts_fence(api, SCR_HTTP_REQ_FENCED_OPTIONS[i], SCR_HTTP_REQ_SUPPORTED);
+      scr_http_req_opts_free(o);
+      return false;
+    }
+  }
+  /* headers: an object (String(number) values, arrays as repeated lines)
+   * or the flat [name, value, ...] array */
+  const ScrDyn *headers = OPT("headers");
+  ScrDyn *headers_view = NULL;
+  if (headers != NULL && headers->kind == SCR_DYN_TYPED_REF) {
+    headers_view = scr_dyn_typed_ref_materialize(headers);
+    headers = headers_view;
+  }
+  if (headers != NULL && headers->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < headers->v.obj.len; i++) {
+      const ScrDynEntry *e = &headers->v.obj.entries[i];
+      ScrStr *name = scr_str_new(e->key, e->key_len);
+      ScrStr *label = scr_str_new("", 0);
+      scr_http_validate_header_name(name, label);
+      scr_str_release(label);
+      const ScrDyn *v = e->value;
+      if (!scr_exc_pending()) {
+        if (v->kind == SCR_DYN_ARR) {
+          for (size_t k = 0; k < v->v.arr.len && !scr_exc_pending(); k++)
+            scr_http_validate_header_value(name, v->v.arr.items[k]);
+        } else {
+          scr_http_validate_header_value(name, v);
+        }
+      }
+      scr_str_release(name);
+      if (scr_exc_pending()) break;
+    }
+    if (!scr_exc_pending()) o->headers = scr_http_dynh_pairs(headers);
+  } else if (headers != NULL && headers->kind == SCR_DYN_ARR) {
+    /* Node's _storeHeader checks that the flat [name, value, ...] form has
+     * an even length, then validates each name and value. The
+     * [[name, value], ...] entry form is not modeled. */
+    size_t n = headers->v.arr.len;
+    if (n > 0 && headers->v.arr.items[0]->kind == SCR_DYN_ARR) {
+      scr_http_req_opts_fence(
+          api, "headers",
+          "headers is an object of string or number values or a flat [name, value, ...] array here");
+    } else if (n % 2 != 0) {
+      scr_http_req_odd_headers_fail(api, headers);
+    } else {
+      for (size_t i = 0; i < n && !scr_exc_pending(); i += 2)
+        scr_http_req_validate_header_pair(headers->v.arr.items[i], headers->v.arr.items[i + 1]);
+    }
+    if (!scr_exc_pending()) o->headers = scr_http_dynh_flat_pairs(headers);
+  } else if (headers != NULL && headers->kind != SCR_DYN_NULL) {
+    scr_http_req_opts_fence(api, "headers", "headers is an object of string or number values here");
+  }
+  scr_dyn_release(headers_view);
+  if (scr_exc_pending()) {
+    scr_http_req_opts_free(o);
+    return false;
+  }
+  if (o->headers == NULL) o->headers = scr_arr_new(SCR_ELEM_STR, 0);
+  const ScrDyn *signal = OPT("signal");
+  if (signal != NULL) o->signal = scr_dyn_retain((ScrDyn *)signal);
+  /* the connection: a Unix socket (net validates the path) or host:port */
+  if (scr_http_req_truthy(socket_path)) {
+    if (socket_path->kind != SCR_DYN_STR) {
+      scr_dyn_prop_type_fail("options.path", "of type string", socket_path);
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    o->socket_path = scr_str_retain(socket_path->v.str);
+    if (scr_http_req_truthy(port)) {
+      double n = scr_http_req_port_value(port);
+      if (n == n) o->port = n;
+    }
+  } else if (scr_http_req_truthy(port)) {
+    double n = scr_http_req_port_value(port);
+    if (n != n) {
+      char detail[96], msg[192];
+      const char *d = scr_dyn_specific_type(port, detail, sizeof detail);
+      int len = snprintf(msg, sizeof msg, "Port should be >= 0 and < 65536. Received %s.", d);
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_SOCKET_BAD_PORT");
+      scr_http_req_opts_free(o);
+      return false;
+    }
+    o->port = n;
+  }
+#undef OPT
+  return true;
+}
+
+/* Builds the request `o` describes (its references stay with `o`). The
+ * signal is checked before construction and attached after it, like the
+ * literal lowering's sequence. +1, or NULL with the exception pending. */
+ScrHttpClientReq *scr_http_req_opts_send(ScrHttpReqOpts *o, bool auto_end,
+                                         ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn,
+                                         ScrDyn *(*add_abort)(ScrDyn *signal, ScrDyn *listener),
+                                         void (*wrap)(ScrNetSocket *, void *), void *wrap_ctx,
+                                         ScrStr *pool_key /*borrowed, nullable*/) {
+  if (o->signal != NULL) {
+    scr_http_client_signal_check(o->signal);
+    if (scr_exc_pending()) {
+      if (cb) scr_closure_release(cb);
+      return NULL;
+    }
+  }
+  /* without a port option the agent's default port applies (< 0), and
+   * without an agent the scheme's */
+  double port = o->port >= 0 ? o->port : o->agent != NULL && o->agent->kind == SCR_DYN_HANDLE ? -1
+                                                                                     : o->default_port;
+  scr_http_next_socket_path = o->socket_path;
+  scr_http_socket_dialer = &scr_net_connect_path;
+  ScrHttpClientReq *c = scr_http_request_agent_ex(
+      o->host, port, o->path, o->method, o->timeout, o->headers, auto_end, o->agent, cb, fn,
+      o->default_port, wrap, wrap_ctx, pool_key);
+  if (c == NULL) return NULL;
+  if (o->has_max_header_size) {
+    scr_http_client_max_header_size(c, o->max_header_size);
+    if (scr_exc_pending()) return c;
+  }
+  if (o->signal != NULL) scr_http_client_add_abort_signal(c, o->signal, add_abort);
+  return c;
+}
+
+/* http.request/http.get(options[, cb]) with a runtime options record. */
+ScrHttpClientReq *scr_http_request_dyn(const ScrDyn *opts /*borrowed*/, bool auto_end,
+                                       ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn,
+                                       ScrDyn *(*add_abort)(ScrDyn *signal, ScrDyn *listener)) {
+  ScrHttpReqOpts o;
+  if (!scr_http_req_opts_read(opts, false, "http.request", &o)) {
+    if (cb) scr_closure_release(cb);
+    return NULL;
+  }
+  ScrHttpClientReq *c = scr_http_req_opts_send(&o, auto_end, cb, fn, add_abort, NULL, NULL, NULL);
+  scr_http_req_opts_free(&o);
   return c;
 }

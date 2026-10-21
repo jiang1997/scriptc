@@ -24,6 +24,17 @@
 #include "scr_runtime.h"
 #include "scr_key.h"
 
+/* Programs with dynamic-tier code link the SCR_JS_TIER build of this unit:
+ * its object nodes carry the tier's hidden class (ScrDyn.v.obj.shape), and
+ * every allocation and change to an object's key set resets it so the
+ * tier recomputes it on its next cache miss. Other programs link the
+ * ordinary build, where this expands to nothing. */
+#ifdef SCR_JS_TIER
+#define SCR_JS_SHAPE_RESET(d) ((d)->v.obj.shape = NULL)
+#else
+#define SCR_JS_SHAPE_RESET(d) ((void)0)
+#endif
+
 static SCR_TL ScrDyn *scr_builtin_object_prototype;
 
 /* Constructor capsules expose identity and name/length, but do not model
@@ -91,8 +102,26 @@ static bool scr_iterator_object(const ScrDyn *value) {
 
 ScrDyn *scr_dyn_iterator_result(ScrDyn *value) {
   if (!scr_iterator_object(value)) {
-    static const char message[] = "Iterator result is not an object";
-    scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+    /* V8 names a primitive result: "Iterator result 5 is not an object". */
+    bool primitive = value->kind == SCR_DYN_NUM || value->kind == SCR_DYN_STR || value->kind == SCR_DYN_BOOL ||
+                     value->kind == SCR_DYN_UNDEF || value->kind == SCR_DYN_NULL ||
+                     value->kind == SCR_DYN_BIGINT || value->kind == SCR_DYN_SYMBOL;
+    ScrStr *text = primitive ? scr_dyn_string_constructor(value) : NULL;
+    if (!text) {
+      static const char message[] = "Iterator result is not an object";
+      scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+      return NULL;
+    }
+    static const char head[] = "Iterator result ", tail[] = " is not an object";
+    ScrStr *a = scr_str_new(head, sizeof head - 1);
+    ScrStr *b = scr_str_concat(a, text);
+    ScrStr *c = scr_str_new(tail, sizeof tail - 1);
+    ScrStr *message = scr_str_concat(b, c);
+    scr_str_release(a);
+    scr_str_release(b);
+    scr_str_release(c);
+    scr_str_release(text);
+    scr_throw_error(SCR_ERR_TYPE, message);
     return NULL;
   }
   return scr_dyn_retain(value);
@@ -933,6 +962,7 @@ static ScrDyn *scr_dyn_alloc(ScrDynKind kind) {
     } else if (kind == SCR_DYN_OBJ) {
       d->v.obj.len = 0; /* cap/entries preserved */
       d->v.obj.region = NULL;
+      SCR_JS_SHAPE_RESET(d);
       if (d->v.obj.cap <= SCR_DYN_KEY_CACHE_SLOTS) {
         for (size_t i = 0; i < d->v.obj.cap; i++) {
           ScrDynEntry *entry = &d->v.obj.entries[i];
@@ -957,6 +987,9 @@ static ScrDyn *scr_dyn_alloc(ScrDynKind kind) {
   fresh->prototype = NULL;
   fresh->symbol_properties = NULL;
   fresh->symbol_keys = NULL;
+#ifdef SCR_JS_TIER
+  if (kind == SCR_DYN_OBJ) SCR_JS_SHAPE_RESET(fresh);
+#endif
 #ifdef SCR_RC_AUDIT
   scr_live_dyns++;
 #endif
@@ -1601,6 +1634,7 @@ static void scr_dyn_obj_put(ScrDyn *obj, const char *key, size_t key_len, ScrDyn
     obj->v.obj.entries = entries;
     obj->v.obj.cap = cap;
   }
+  SCR_JS_SHAPE_RESET(obj);
   ScrDynEntry *e = &obj->v.obj.entries[obj->v.obj.len++];
   if (!e->key || e->key_len != key_len || !scr_key_equal(e->key, key, key_len)) {
     char *owned = scr_dyn_key_copy(key, key_len);
@@ -3573,6 +3607,9 @@ ScrDyn *scr_dyn_bytes_key_get(const ScrDyn *value, const ScrStr *key) {
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (key->len == 6 && memcmp(key->data, "length", 6) == 0) return scr_dyn_new_num(scr_bytes_len(bytes));
+  /* Each typed array kind's prototype carries its element size. */
+  if (key->len == 17 && memcmp(key->data, "BYTES_PER_ELEMENT", 17) == 0)
+    return scr_dyn_new_num((double)scr_bytes_elem_size(bytes->elem));
   if (key->len == 11 && memcmp(key->data, "constructor", 11) == 0) {
     if (!value->buffer) return scr_bytes_constructor_for(bytes->elem);
     /* Buffer retains its separate builtin identity. */
@@ -4428,6 +4465,7 @@ static void scr_dyn_descriptor_fields_drop(ScrDyn **fields) {
 }
 static bool scr_dyn_key_is_index(const char *key, size_t len, double *out);
 static void scr_error_sync_cause(ScrDyn *view, const ScrStr *key);
+static void scr_error_sync_slots(const ScrDyn *view, ScrDyn *obj, const ScrStr *key);
 
 /* Property tables belong to closures, not temporary checked wrappers. Seed
  * the configurable, non-writable builtin members once so redefinitions and
@@ -5783,6 +5821,10 @@ int scr_dyn_iterable_kind(const ScrDyn *value) {
 }
 
 ScrDyn *scr_dyn_from_iterator(const ScrDyn *value, int *kind) {
+  return scr_dyn_open_iterator(value, kind, false);
+}
+
+ScrDyn *scr_dyn_open_iterator(const ScrDyn *value, int *kind, bool generators) {
   *kind = 0;
   if (value->kind == SCR_DYN_NULL || value->kind == SCR_DYN_UNDEF) return NULL;
   ScrDyn *method = NULL;
@@ -5814,7 +5856,7 @@ ScrDyn *scr_dyn_from_iterator(const ScrDyn *value, int *kind) {
   ScrDyn *iterator = scr_iterator_call(
       method, value, *kind == 2 ? "iterable[SymbolAsyncIterator]" : "iterable[SymbolIterator]");
   scr_dyn_release(method);
-  if (iterator && scr_dyn_generator(iterator)) {
+  if (iterator && !generators && scr_dyn_generator(iterator)) {
     /* a compiled generator is stepped through typed helpers only */
     scr_dyn_release(iterator);
     iterator = NULL;
@@ -6719,6 +6761,10 @@ ScrStr *scr_dyn_format_j(const ScrDyn *d) {
 typedef struct {
   ScrError *err; /* retained (pins the address — no pointer reuse) */
   ScrDyn *dyn;   /* retained */
+  /* An own `code` that is not a string (`err.code = undefined`), retained,
+   * or NULL. The code slot holds only strings, and a subclass's typed view
+   * rebuilds its properties from the slots on every read. */
+  ScrDyn *code;
 } ScrErrDynEnt;
 
 static SCR_TL ScrErrDynEnt *scr_errdyn_cache = NULL;
@@ -6822,6 +6868,7 @@ static void scr_errdyn_sweep(void) {
   for (size_t i = 0; i < n_dead; i++) {
     scr_error_release(dead[i].err);
     scr_errdyn_release_node(dead[i].dyn);
+    scr_dyn_release(dead[i].code);
   }
   free(dead);
 }
@@ -6842,6 +6889,7 @@ static void scr_errdyn_append(ScrError *e, ScrDyn *d) {
   }
   scr_errdyn_cache[scr_errdyn_n].err = scr_error_retain(e);
   scr_errdyn_cache[scr_errdyn_n].dyn = scr_dyn_retain(d);
+  scr_errdyn_cache[scr_errdyn_n].code = NULL;
   scr_errdyn_n++;
   if (scr_errdyn_n * 2 > scr_errdyn_slots) {
     free(scr_errdyn_by_err);
@@ -6897,6 +6945,7 @@ static void scr_errdyn_teardown(void) {
   for (size_t i = 0; i < n; i++) {
     scr_error_release(cache[i].err);
     scr_errdyn_release_node(cache[i].dyn);
+    scr_dyn_release(cache[i].code);
   }
   free(cache);
 }
@@ -7048,7 +7097,13 @@ ScrDyn *scr_error_dyn_fields(const ScrError *e) {
     /* errno rides fs errors (with syscall) and zlib errors (without). */
     if (e->system_call || e->system_errno != 0)
       scr_dyn_obj_set(d, "errno", 5, scr_dyn_new_num(e->system_errno));
-    if (e->code) scr_dyn_obj_set(d, "code", 4, scr_dyn_new_str(e->code));
+    if (e->code) {
+      scr_dyn_obj_set(d, "code", 4, scr_dyn_new_str(e->code));
+    } else {
+      size_t hit = scr_errdyn_find(e, true);
+      if (hit != SIZE_MAX && scr_errdyn_cache[hit].code != NULL)
+        scr_dyn_obj_set(d, "code", 4, scr_dyn_retain(scr_errdyn_cache[hit].code));
+    }
     if (e->system_call) scr_dyn_obj_set(d, "syscall", 7, scr_dyn_new_str(e->system_call));
   }
   if (!e->errno_order && e->system_path) scr_dyn_obj_set(d, "path", 4, scr_dyn_new_str(e->system_path));
@@ -7108,6 +7163,7 @@ void scr_error_dyn_place_name(ScrDyn *view, const char *after, size_t after_len)
   memmove(&entries[from], &entries[from + 1], (n - from - 1) * sizeof *entries);
   memmove(&entries[at + 1], &entries[at], (n - 1 - at) * sizeof *entries);
   entries[at] = name;
+  SCR_JS_SHAPE_RESET(view);
   free(view->v.obj.index);
   view->v.obj.index = NULL;
 }
@@ -7250,18 +7306,35 @@ ScrError *scr_errdyn_err_of(const ScrDyn *d) {
 
 void scr_errdyn_put(ScrError *e, ScrDyn *d) { scr_errdyn_append(e, d); }
 
-/* Error.cause has one live value even when the Error already crossed a
- * checked-value boundary. Reflective data-property edits update its slot. */
-static void scr_error_sync_cause(ScrDyn *view, const ScrStr *key) {
+/* An Error's slots (name, message, stack, cause, code) have one live value
+ * even when the Error already crossed a checked-value boundary: writes and
+ * deletes of those own properties through its checked-dynamic node update
+ * the slots typed reads use. `view` is the error's node; `obj` holds the
+ * properties (the node itself, or a typed view's materialized object). */
+static void scr_error_sync_slots(const ScrDyn *view, ScrDyn *obj, const ScrStr *key) {
   bool cause = key->len == 5 && memcmp(key->data, "cause", 5) == 0;
   bool stack = key->len == 5 && memcmp(key->data, "stack", 5) == 0;
   bool name = key->len == 4 && memcmp(key->data, "name", 4) == 0;
   bool message = key->len == 7 && memcmp(key->data, "message", 7) == 0;
-  if (!cause && !stack && !name && !message) return;
+  bool code = key->len == 4 && memcmp(key->data, "code", 4) == 0;
+  if (!cause && !stack && !name && !message && !code) return;
+  if (obj == NULL || obj->kind != SCR_DYN_OBJ) return;
   size_t hit = scr_errdyn_find(view, false);
   if (hit == SIZE_MAX) return;
-  ScrDynEntry *entry = scr_dyn_entry(view, key);
+  ScrDynEntry *entry = scr_dyn_entry(obj, key);
   ScrError *e = scr_errdyn_cache[hit].err;
+  if (code) {
+    /* A string takes the slot; any other value clears it and stays an own
+     * property, which the entry keeps for views rebuilt from the slots. */
+    bool string = entry && !entry->accessor && entry->value->kind == SCR_DYN_STR;
+    ScrStr *next = string ? scr_str_retain(entry->value->v.str) : NULL;
+    scr_str_release(e->code);
+    e->code = next;
+    ScrDyn *other = entry && !string && !entry->accessor ? scr_dyn_retain(entry->value) : NULL;
+    scr_dyn_release(scr_errdyn_cache[hit].code);
+    scr_errdyn_cache[hit].code = other;
+    return;
+  }
   if (name || message) {
     /* The native error's toString and inspect read these fields. */
     if (!entry || entry->accessor || entry->value->kind != SCR_DYN_STR) return;
@@ -7290,6 +7363,10 @@ static void scr_error_sync_cause(ScrDyn *view, const ScrStr *key) {
   scr_dyn_release(e->error_cause);
   e->error_cause = replacement;
   e->cause_enumerable = entry && entry->enumerable;
+}
+
+static void scr_error_sync_cause(ScrDyn *view, const ScrStr *key) {
+  scr_error_sync_slots(view, view, key);
 }
 
 /* Error.prototype.toString over the checked-dynamic error encoding (an
@@ -8323,7 +8400,12 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
     if (scr_event_ref_hooks && scr_event_ref_hooks->set(recv, key, value)) return;
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(recv);
     scr_dyn_key_set(materialized, key, value);
-    if (!scr_exc_pending()) scr_dyn_typed_ref_commit(recv);
+    if (!scr_exc_pending()) {
+      scr_dyn_typed_ref_commit(recv);
+      /* An Error subclass's class commit writes its declared fields; the
+       * slots it inherits from Error take the write here. */
+      scr_error_sync_slots(recv, materialized, key);
+    }
     scr_dyn_release(materialized);
     return;
   }
@@ -9287,6 +9369,7 @@ static void scr_dyn_obj_append_shared(ScrDyn *obj, char *key, size_t key_len, Sc
     obj->v.obj.entries = entries;
     obj->v.obj.cap = cap;
   }
+  SCR_JS_SHAPE_RESET(obj);
   ScrDynEntry *e = &obj->v.obj.entries[obj->v.obj.len++];
   if (e->key != key) {
     ((ScrDynKey *)(key - offsetof(ScrDynKey, bytes)))->rc++;
@@ -10070,6 +10153,7 @@ static void scr_json_delete_member(ScrDyn *object, const ScrStr *key) {
     ScrDynEntry removed = *entry;
     memmove(entry, entry + 1, (object->v.obj.len - i - 1) * sizeof *entry);
     object->v.obj.len--;
+    SCR_JS_SHAPE_RESET(object);
     free(object->v.obj.index);
     object->v.obj.index = NULL;
     /* The moved tail aliases a live entry; spare slots own only their own
@@ -10097,7 +10181,10 @@ void scr_dyn_key_delete(ScrDyn *recv, const ScrStr *key, bool strict) {
                scr_dyn_entry(materialized, key) != NULL;
     if (!scr_exc_pending()) scr_dyn_key_delete(materialized, key, strict);
     bool deleted = own && !scr_exc_pending();
-    if (!scr_exc_pending()) scr_dyn_typed_ref_commit(recv);
+    if (!scr_exc_pending()) {
+      scr_dyn_typed_ref_commit(recv);
+      scr_error_sync_slots(recv, materialized, key);
+    }
     scr_dyn_release(materialized);
     if (deleted && scr_exc_pending()) {
       /* The native layout requires this field, so the commit rejected the
@@ -10760,8 +10847,8 @@ void scr_jb_put_dyn_entries(ScrJsonBuf *b, void *rec, ScrMap *map, bool *first) 
   uint32_t count = map->nentries;
   bool indexed = false;
   for (uint32_t i = 0; i < count && !indexed; i++) {
-    if (!map->entries[i].hash) continue;
-    const ScrStr *key = (const ScrStr *)(uintptr_t)map->entries[i].key;
+    if (!scr_map_entry_live(map, i)) continue;
+    const ScrStr *key = (const ScrStr *)(uintptr_t)scr_map_entry_at(map, i)->key;
     uint32_t index;
     indexed = scr_key_array_index(key->data, key->len, &index);
   }
@@ -12478,7 +12565,17 @@ ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
   if (target->kind == SCR_DYN_TYPED_REF) {
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(target);
     ScrDyn *assigned = scr_dyn_assign(materialized, src);
-    if (!scr_exc_pending()) scr_dyn_typed_ref_commit(target);
+    if (!scr_exc_pending()) {
+      scr_dyn_typed_ref_commit(target);
+      /* An Error subclass's inherited slots take the copied values. */
+      static const char *const slots[] = { "name", "message", "stack", "cause", "code" };
+      for (size_t i = 0; i < sizeof slots / sizeof slots[0]; i++) {
+        ScrStr *key = scr_str_new(slots[i], strlen(slots[i]));
+        if (materialized->kind == SCR_DYN_OBJ && scr_dyn_entry(materialized, key) != NULL)
+          scr_error_sync_slots(target, materialized, key);
+        scr_str_release(key);
+      }
+    }
     scr_dyn_release(assigned);
     scr_dyn_release(materialized);
     return scr_exc_pending() ? NULL : scr_dyn_retain(target);
@@ -14602,4 +14699,95 @@ ScrDyn *scr_dyn_iter_take(const ScrDyn *src, size_t n, const char *spell) {
 
 bool scr_dyn_iterates_by_protocol(const ScrDyn *value) {
   return scr_dyn_sync_generator(value);
+}
+
+#ifdef SCR_JS_TIER
+/* ── dynamic-tier primitives (scr_dyn.h, SCR_JS_TIER) ─────────────────── */
+
+const ScrDyn *scr_dyn_tier_object_prototype(void) { return scr_builtin_object_prototype; }
+
+char *scr_dyn_tier_key_copy(const char *key, size_t key_len) { return scr_dyn_key_copy(key, key_len); }
+
+void scr_dyn_tier_key_release(char *key, size_t key_len) { scr_dyn_key_release(key, key_len); }
+
+void scr_dyn_tier_append(ScrDyn *obj, char *key, size_t key_len, ScrDyn *value) {
+  scr_dyn_obj_append_shared(obj, key, key_len, value);
+}
+#endif
+
+/* The program's writes onto compiled errors (scr_error.h). Kept at the end
+ * of the file, after every function they call, so the rest of the unit
+ * emits in its existing order. */
+
+/* `err.code = s` from the program (an Error asserted to carry `code`):
+ * the same slot every coded throw stamps, so reads and `'code' in err`
+ * observe the write. Borrows both. */
+void scr_error_set_code_value(ScrError *e, ScrStr *code) {
+  scr_str_release(e->code);
+  e->code = scr_str_retain(code);
+  /* An error that already crossed into the checked-dynamic tree renders
+   * and reads through that node, so the write lands there too. */
+  ScrDyn *view = scr_errdyn_view_of(e);
+  if (view != NULL && view->kind == SCR_DYN_OBJ) scr_dyn_obj_set(view, "code", 4, scr_dyn_new_str(code));
+}
+
+void scr_error_set_code_dyn(ScrError *e, ScrDyn *value) {
+  if (value != NULL && value->kind == SCR_DYN_STR) {
+    scr_error_set_code_value(e, value->v.str);
+    return;
+  }
+  scr_str_release(e->code);
+  e->code = NULL;
+  ScrDyn *view = scr_dyn_from_error(e);
+  ScrStr *key = scr_str_new("code", 4);
+  scr_dyn_key_set(view, key, value);
+  scr_str_release(key);
+  scr_dyn_release(view);
+}
+
+/* Object.assign(err, ...sources) onto a compiled error: each source's own
+ * members land on the error's checked-dynamic node, then the slots that
+ * typed reads use (name, message, stack, cause, code) take the result.
+ * Borrows both; throws what the copy throws (a nullish source is skipped,
+ * as in JS). */
+void scr_error_assign_dyn(ScrError *e, const ScrDyn *sources) {
+  ScrDyn *view = scr_dyn_from_error(e);
+  ScrDyn *r = scr_dyn_assign_all(view, sources);
+  if (r != NULL) {
+    scr_dyn_release(r);
+    if (view->kind == SCR_DYN_OBJ) {
+      scr_error_commit_dyn(e, view);
+      if (!scr_exc_pending()) {
+        ScrDyn *code = scr_dyn_obj_get(view, "code", 4);
+        ScrStr *next = code != NULL && code->kind == SCR_DYN_STR ? scr_str_retain(code->v.str) : NULL;
+        scr_str_release(e->code);
+        e->code = next;
+      }
+    }
+  }
+  scr_dyn_release(view);
+}
+
+/* `'code' in err`: the code slot holds a string, or the error has an own
+ * `code` property with another value (`err.code = undefined`), which lives
+ * on its checked-dynamic node. Borrows; never throws. */
+bool scr_error_has_code(ScrError *e) {
+  if (e->code != NULL) return true;
+  const ScrDyn *view = scr_errdyn_view_of(e);
+  if (view == NULL) return false;
+  ScrStr *key = scr_str_new("code", 4);
+  bool own = scr_dyn_has_own(view, key);
+  scr_str_release(key);
+  return own;
+}
+
+/* `key in err` for a key no compiled class of the receiver declares: an own
+ * property set at runtime, which lives on the error's checked-dynamic node
+ * (that node exists once anything reflected or wrote through it), or a
+ * member of Object.prototype. Borrows both; never throws. */
+bool scr_error_has_key(ScrError *e, const ScrStr *key) {
+  const ScrDyn *view = scr_errdyn_view_of(e);
+  if (view != NULL && view->kind == SCR_DYN_OBJ && scr_dyn_find_entry(view, key->data, key->len) != NULL)
+    return true;
+  return scr_dyn_object_proto_name(key);
 }

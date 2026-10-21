@@ -5179,7 +5179,21 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
    * arrays, and plain objects (with the ordinary JS object coercion
    * protocol), while null and undefined continue to mean no body. */
   ScrDyn *coerced_body = NULL;
-  if (body_present && body->kind != SCR_DYN_STR &&
+  /* A URLSearchParams body is its serialization, sent as
+   * application/x-www-form-urlencoded;charset=UTF-8 (extract a body). */
+  bool form_body = false;
+  if (body_present && body->kind == SCR_DYN_HANDLE &&
+      body->v.handle.tag == SCR_DYNH_SEARCH_PARAMS) {
+    coerced_body = scr_dyn_handle_ops_of(body)->invoke(body->v.handle.ptr, (ScrDyn *)body,
+                                                       "toString", NULL, 0, "URLSearchParams");
+    if (!coerced_body || coerced_body->kind != SCR_DYN_STR) {
+      scr_dyn_release(coerced_body);
+      return sf_reject_now(promise, "fetch failed");
+    }
+    body = coerced_body;
+    form_body = true;
+  }
+  if (body_present && !form_body && body->kind != SCR_DYN_STR &&
       body->kind != SCR_DYN_BYTES && !body_stream) {
     ScrStr *text = scr_dyn_string_coerce_js(body);
     if (!text) {
@@ -5322,7 +5336,10 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
   /* Fetch Metadata is controlled by the fetch implementation. Undici
    * replaces a caller-provided sec-fetch-mode with "cors". */
   sf_strip_header(&headers, "sec-fetch-mode");
-  if (body && body->kind == SCR_DYN_STR &&
+  if (form_body && !sf_pairs_have(headers, "content-type")) {
+    sf_push_header_text(headers, "content-type",
+                        "application/x-www-form-urlencoded;charset=UTF-8", 47);
+  } else if (body && body->kind == SCR_DYN_STR &&
       !sf_pairs_have(headers, "content-type")) {
     sf_push_header_text(headers, "content-type",
                         "text/plain;charset=UTF-8", 24);

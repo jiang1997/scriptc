@@ -268,9 +268,10 @@ if (process.argv.includes("--check")) {
 // declarations, and require every wire property to have a declared getter.
 const declarations = readFileSync(join(packageRoot, "dist/api/node/node.generated.d.ts"), "utf8");
 const names = [...new Set(Object.values(protocol.childProperties).flat())].sort();
-// These views adapt TS7's shared postfix slot and reparsed JSDoc bodies.
-// Their implementations live outside the generated region in AstNode.
-const adaptedGetters = new Set(["body", "questionToken"]);
+// These views adapt TS7's shared postfix slot and reparsed JSDoc bodies, and
+// return modifiers as a modifier list. Their implementations live outside the
+// generated region in AstNode.
+const adaptedGetters = new Set(["body", "modifiers", "questionToken"]);
 const getters = names
   .filter((name) => !adaptedGetters.has(name))
   .map((name) => {

@@ -179,11 +179,15 @@ test("the zero-cost gate fails differing programs unless they match the signatur
     allowed = false,
     baseline: object = ok,
     candidate: object = ok,
-  ) => programVerdict({ baseline, candidate, artifacts, allowed });
+    required = false,
+  ) => programVerdict({ baseline, candidate, artifacts, allowed, required });
   expect(verdict(same)).toEqual({ verdict: "identical", fails: false });
   expect(verdict(differs)).toEqual({ verdict: "differs", fails: true });
   expect(verdict(differs, true)).toEqual({ verdict: "allowed", fails: false });
   const failed = { ok: false, error: "SC1090" };
   expect(verdict({}, false, failed, failed)).toEqual({ verdict: "both-fail", fails: false });
+  // A benchmark or the self-hosted compiler that neither checkout builds
+  // was never compared.
+  expect(verdict({}, false, failed, failed, true)).toEqual({ verdict: "both-fail", fails: true });
   expect(verdict({}, true, ok, failed)).toEqual({ verdict: "build-error", fails: true });
 });

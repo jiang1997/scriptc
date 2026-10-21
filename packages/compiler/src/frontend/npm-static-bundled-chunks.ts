@@ -24,6 +24,13 @@
 import * as ts from "./ts7/syntax.js";
 import { helperTokens } from "./helper-tokens.js";
 import { canonicalBuiltinModule } from "./builtin-modules.js";
+import { getTextOfNode, tokenStartOfNode } from "./ts7/node-functions.js";
+import { bundledShimForwarder, packageShimForBundledFile } from "./package-shims.js";
+import {
+  builtinAliasOf,
+  versionedPackageOfKey,
+  type BuiltinAlias,
+} from "./builtin-package-aliases.js";
 
 export interface BundledChunkSplit {
   /** The bundle with chunk declarations blanked and calls respelled. */
@@ -366,16 +373,16 @@ function helperForm(
     const ret = stmts[0];
     if (stmts.length !== 1 || ret === undefined || !ts.isReturnStatement(ret) || !ret.expression)
       return null;
-    const actual = helperTokens(ret.expression.getText(sf));
+    const actual = helperTokens(getTextOfNode(ret.expression));
     if (actual === null) return null;
     // The own-key reader: esbuild's alias or the 0.11 spelling.
-    const keysRef = /\[\s*([A-Za-z_$][\w$]*(?:\.keys)?)\s*\(/.exec(ret.expression.getText(sf));
+    const keysRef = /\[\s*([A-Za-z_$][\w$]*(?:\.keys)?)\s*\(/.exec(getTextOfNode(ret.expression));
     const keys = keysRef?.[1];
     if (keys === undefined || (keys !== "Object.keys" && !ownNames(keys))) return null;
     return actual === template(KEYED_RETURN, cb, mod, keys) ? "keyed" : null;
   }
   if (ts.isArrowFunction(body) && body.parameters.nodes.length === 0 && !ts.isBlock(body.body)) {
-    const actual = helperTokens(body.body.getText(sf));
+    const actual = helperTokens(getTextOfNode(body.body));
     return actual !== null && actual === template(ARROW_BODY, cb, mod, "") ? "arrow" : null;
   }
   return null;
@@ -463,6 +470,8 @@ interface Chunk {
   body: ts.Block;
   path: string;
   spec: string;
+  /** The keyed helper form's module key (the bundled file's path). */
+  key: string | null;
 }
 
 interface TopLevel {
@@ -539,7 +548,7 @@ export function splitBundledChunks(
     const init = t.node.initializer;
     return (
       init !== undefined &&
-      helperTokens(init.getText(sf)) === helperTokens("Object.getOwnPropertyNames")
+      helperTokens(getTextOfNode(init)) === helperTokens("Object.getOwnPropertyNames")
     );
   };
   if (helperNames.length === 0) {
@@ -583,12 +592,14 @@ export function splitBundledChunks(
     )
       return { degrade: CHUNK_SHAPE_DEGRADE };
     let factory: ts.Node = call.arguments.nodes[0]!;
+    let key: string | null = null;
     if (form === "keyed") {
       if (!ts.isObjectLiteralExpression(factory) || factory.properties.nodes.length !== 1)
         return { degrade: CHUNK_SHAPE_DEGRADE };
       factory = factory.properties.nodes[0]!;
       if (!ts.isMethodDeclaration(factory) || ts.isComputedPropertyName(factory.name))
         return { degrade: CHUNK_SHAPE_DEGRADE };
+      if (ts.isStringLiteral(factory.name)) key = factory.name.text;
     } else {
       factory = unparen(factory as ts.Expression);
       if (!ts.isArrowFunction(factory) && !ts.isFunctionExpression(factory))
@@ -617,6 +628,7 @@ export function splitBundledChunks(
       body: fn.body,
       path: filePath.slice(0, filePath.length - base.length) + file,
       spec: `./${file}`,
+      key,
     });
   }
   if (chunks.size === 0) return null;
@@ -624,9 +636,12 @@ export function splitBundledChunks(
   // Every factory reference is a direct zero-argument call. Calls inside a
   // chunk body belong to that chunk's text, the rest to the bundle's.
   const callEdits: Edit[] = [];
+  const callNames: string[] = [];
+  const unaliased = new Set<string>();
   for (const r of allRefs) {
     const chunk = chunks.get(r.text);
     if (chunk === undefined) continue;
+    callNames.push(chunk.name);
     const call = r.parent;
     if (
       call === undefined ||
@@ -638,12 +653,29 @@ export function splitBundledChunks(
       return {
         degrade: `its bundled CommonJS module factory '${r.text}' is used other than as a direct call`,
       };
-    const forwarded = forwarderSpec(chunk);
+    const alias = builtinAliasOfChunk(chunk);
+    const aliased = alias === null ? null : aliasReplacement(call, alias);
+    if (alias !== null && aliased === null) unaliased.add(chunk.name);
+    const forwarded =
+      forwarderSpec(chunk) ?? (shimOfChunk(chunk) !== null ? shimSpec(chunk) : null);
     callEdits.push({
-      start: call.getStart(sf),
-      end: call.getEnd(),
-      text: `require(${JSON.stringify(forwarded ?? chunk.spec)})`,
+      start: tokenStartOfNode(call),
+      end: call.end,
+      text: aliased ?? `require(${JSON.stringify(forwarded ?? chunk.spec)})`,
     });
+  }
+  // A chunk keeps its module when any call site's use left the alias
+  // undetermined; every call site then requires the module.
+  if (unaliased.size > 0) {
+    for (let i = 0; i < callEdits.length; i++) {
+      const name = callNames[i]!;
+      if (!unaliased.has(name)) continue;
+      const chunk = chunks.get(name)!;
+      callEdits[i] = {
+        ...callEdits[i]!,
+        text: `require(${JSON.stringify(forwarderSpec(chunk) ?? chunk.spec)})`,
+      };
+    }
   }
   for (const name of chunks.keys()) {
     if (declaredAnywhere.has(name) && countDeclarations(sf, name) > 1)
@@ -654,9 +686,26 @@ export function splitBundledChunks(
   const out: BundledChunkSplit["chunks"] = [];
   const bundleEdits: Edit[] = [...callEdits];
   for (const chunk of chunks.values()) {
+    if (!unaliased.has(chunk.name) && builtinAliasOfChunk(chunk) !== null) {
+      // A chunk of a package that IS a builtin on Node 24 is that builtin.
+      bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
+      continue;
+    }
+    const shim = shimOfChunk(chunk);
+    if (shim !== null) {
+      // A bundled copy of a package scriptc implements itself is the
+      // package's shim (package-shims.ts), reached through a forwarder
+      // declaration the checker follows.
+      out.push({
+        path: shimDeclPath(chunk),
+        source: bundledShimForwarder(shimDeclPath(chunk), shim),
+      });
+      bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
+      continue;
+    }
     if (forwarderSpec(chunk) !== null) {
       // A chunk that only re-exports a builtin module is that module.
-      bundleEdits.push({ start: chunk.stmt.getStart(sf), end: chunk.stmt.getEnd(), text: "" });
+      bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
       continue;
     }
     const result = chunkSource(
@@ -672,12 +721,12 @@ export function splitBundledChunks(
     );
     if (typeof result !== "string") return result;
     out.push({ path: chunk.path, source: result });
-    bundleEdits.push({ start: chunk.stmt.getStart(sf), end: chunk.stmt.getEnd(), text: "" });
+    bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
   }
   return { text: applyEdits(source, 0, source.length, bundleEdits), chunks: out };
 }
 
-export function countDeclarations(sf: ts.SourceFile, name: string): number {
+export function countDeclarations(sf: ts.Node, name: string): number {
   let n = 0;
   ts.walkPreorder(sf, (node) => {
     if (
@@ -717,6 +766,132 @@ export function applyEdits(source: string, from: number, to: number, edits: Edit
     at = e.end;
   }
   return text + source.slice(at, to);
+}
+
+/* Use analysis for a require of a builtin-aliased module
+ * (npm-static-builtin-aliases.ts). */
+
+function isAssignmentTarget(node: ts.Node): boolean {
+  const p = node.parent;
+  return (
+    p !== undefined &&
+    ts.isBinaryExpression(p) &&
+    p.left === node &&
+    p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+    p.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+  );
+}
+
+/** The outermost expression the call's value flows through unchanged
+ * (parentheses). */
+function valueNode(call: ts.Expression): ts.Expression {
+  let e: ts.Expression = call;
+  while (e.parent !== undefined && ts.isParenthesizedExpression(e.parent)) e = e.parent;
+  return e;
+}
+
+type Use = "member" | "value" | "invalid";
+
+/** How one occurrence of the module value is used: a read of a carried
+ * member, any other value use (member reads of other names included, which
+ * the class itself answers), or a write that keeps the package. */
+function useOf(node: ts.Expression, names: ReadonlySet<string>): Use {
+  const p = node.parent;
+  if (p !== undefined && ts.isPropertyAccessExpression(p) && p.expression === node) {
+    if (isAssignmentTarget(p) || p.questionDotToken !== undefined) return "invalid";
+    return names.has(p.name.text) ? "member" : "value";
+  }
+  if (p !== undefined && ts.isElementAccessExpression(p) && p.expression === node) return "invalid";
+  return "value";
+}
+
+function scopeRoot(node: ts.Node): ts.Node {
+  for (let p = node.parent; p !== undefined; p = p.parent) {
+    if (ts.isFunctionLike(p) || ts.isSourceFile(p)) return p;
+  }
+  return node;
+}
+
+/** The text replacing a require of an aliased module, or null when its uses
+ * do not determine one or when the file declares the global the text
+ * starts with (`process`, `Array`): the text would read that binding
+ * instead of the builtin. `require` roots are the require the call site
+ * already uses. */
+export function aliasReplacement(call: ts.CallExpression, alias: BuiltinAlias): string | null {
+  const text = aliasUseReplacement(call, alias);
+  if (text === null) return null;
+  const root = /^[A-Za-z_$][\w$]*/.exec(text)?.[0];
+  if (
+    root !== undefined &&
+    root !== "require" &&
+    countDeclarations(ts.getSourceFileOfNode(call), root) > 0
+  )
+    return null;
+  return text;
+}
+
+function aliasUseReplacement(call: ts.CallExpression, alias: BuiltinAlias): string | null {
+  const members = alias.members;
+  if (members === undefined) return alias.whole;
+  const whole = alias.whole;
+  const node = valueNode(call);
+  const p = node.parent;
+  let uses: Use[];
+  if (p !== undefined && ts.isVariableDeclaration(p) && p.initializer === node) {
+    if (ts.isObjectBindingPattern(p.name)) {
+      const ok = p.name.elements.nodes.every((el) => {
+        if (el.dotDotDotToken !== undefined) return false;
+        const key = el.propertyName ?? el.name;
+        return ts.isIdentifier(key) && members.names.has(key.text);
+      });
+      return ok ? members.object : null;
+    }
+    if (!ts.isIdentifier(p.name)) return null;
+    const name = p.name.text;
+    const root = scopeRoot(p);
+    if (countDeclarations(root as ts.SourceFile, name) !== 1) return null;
+    const list = p.parent;
+    // `var` hoisting: a read before the declaration sees undefined.
+    if (list === undefined || !ts.isVariableDeclarationList(list)) return null;
+    uses = [];
+    for (const ref of references(root)) {
+      if (ref.text !== name) continue;
+      if (isWritten(ref) || ref.pos < p.end) return null;
+      uses.push(useOf(ref, members.names));
+    }
+  } else {
+    uses = [useOf(node, members.names)];
+  }
+  if (uses.includes("invalid")) return null;
+  if (uses.length > 0 && uses.every((u) => u === "member")) return members.object;
+  if (uses.every((u) => u === "value")) return whole;
+  return null;
+}
+
+/** The builtin a chunk's module is on Node 24, when its key names an
+ * aliased package at a checked version (builtin-package-aliases.ts). */
+function builtinAliasOfChunk(chunk: Chunk): BuiltinAlias | null {
+  if (chunk.key === null) return null;
+  const pkg = versionedPackageOfKey(chunk.key);
+  return pkg === null ? null : builtinAliasOf(pkg.name, pkg.version, pkg.subpath);
+}
+
+/** The shim module standing in for a chunk that is a bundled copy of a
+ * shimmed package's main file at a supported version, or null. */
+function shimOfChunk(chunk: Chunk): string | null {
+  if (chunk.key === null) return null;
+  const pkg = versionedPackageOfKey(chunk.key);
+  return pkg === null ? null : packageShimForBundledFile(pkg.name, pkg.version, pkg.subpath);
+}
+
+/** The forwarder declaration beside the bundle for a shimmed chunk, and
+ * the specifier its call sites require. */
+function shimDeclPath(chunk: Chunk): string {
+  return chunk.path.replace(/\.cjs$/, ".shim.d.ts");
+}
+
+function shimSpec(chunk: Chunk): string {
+  return chunk.spec.replace(/\.cjs$/, ".shim");
 }
 
 /** The builtin module a chunk forwards, or null: a body that is exactly
@@ -848,8 +1023,8 @@ function chunkSource(
         const p = r.parent;
         edits.push(
           ts.isShorthandPropertyAssignment(p)
-            ? { start: r.getStart(sf), end: r.getEnd(), text: `${name}: ${global}` }
-            : { start: r.getStart(sf), end: r.getEnd(), text: global },
+            ? { start: tokenStartOfNode(r), end: r.end, text: `${name}: ${global}` }
+            : { start: tokenStartOfNode(r), end: r.end, text: global },
         );
       }
       continue;
@@ -893,15 +1068,17 @@ function chunkSource(
   }
   // Declaration order of the bundle: a helper reads only earlier ones.
   const ordered = [...copied].sort(
-    (a, b) => top.get(a)!.node.getStart(sf) - top.get(b)!.node.getStart(sf),
+    (a, b) => tokenStartOfNode(top.get(a)!.node) - tokenStartOfNode(top.get(b)!.node),
   );
   for (const name of ordered) {
     const node = top.get(name)!.node;
-    header.push(ts.isFunctionDeclaration(node) ? node.getText(sf) : `var ${node.getText(sf)};`);
+    header.push(
+      ts.isFunctionDeclaration(node) ? getTextOfNode(node) : `var ${getTextOfNode(node)};`,
+    );
   }
 
   const bodyStrict = strictPrologue(body.statements.nodes);
-  const text = applyEdits(sf.text, body.getStart(sf) + 1, body.getEnd() - 1, edits);
+  const text = applyEdits(sf.text, tokenStartOfNode(body) + 1, body.end - 1, edits);
   const prologue = bundleStrict || bodyStrict ? '"use strict";\n' : "";
   return prologue + (header.length > 0 ? header.join("\n") + "\n" : "") + text + "\n";
 }

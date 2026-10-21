@@ -79,7 +79,7 @@ export function extendAssertedRecordMembers(
         symbol.declarations.length > 0 &&
         symbol.declarations.every(
           (d) =>
-            !lowerer.isStdlibFile(d.getSourceFile()) &&
+            !lowerer.isStdlibFile(ts.getSourceFileOfNode(d)) &&
             (ts.isTypeLiteralNode(d) ||
               ts.isInterfaceDeclaration(d) ||
               ts.isTypeAliasDeclaration(d)),

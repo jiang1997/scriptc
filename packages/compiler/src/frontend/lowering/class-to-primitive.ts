@@ -270,8 +270,8 @@ function refuse(lowerer: Lowerer, node: ts.Node, info: ClassInfo, what: string):
 }
 
 /** ToString(ToPrimitive(value, hint)) of a union whose arms are program
- * class instances and primitives (`Box | undefined`): each arm converts as
- * it would alone. Null for other unions. */
+ * class instances, URLs and primitives (`Box | undefined`, `string | URL`):
+ * each arm converts as it would alone. Null for other unions. */
 export function classUnionToString(
   lowerer: Lowerer,
   value: IrExpr,
@@ -281,9 +281,11 @@ export function classUnionToString(
   if (value.type.kind !== "union") return null;
   const unionId = value.type.unionId;
   const arms = lowerer.unions.get(unionId)?.arms;
-  if (!arms || !arms.some((arm) => arm.kind === "object")) return null;
+  if (!arms || !arms.some((arm) => arm.kind === "object" || arm.kind === "url")) return null;
   const convertible = (arm: IrType): boolean => {
     if (PRIMITIVE_KINDS.has(arm.kind)) return true;
+    // A URL arm converts through its href, like String(url).
+    if (arm.kind === "url") return true;
     if (arm.kind !== "object") return false;
     const info = lowerer.classes.get(arm.className);
     return info !== undefined && plainProgramClass(info);

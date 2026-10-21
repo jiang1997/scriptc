@@ -1512,6 +1512,74 @@ static ScrBytes *scr_tls_pem_dyn(const ScrDyn *v, const char *what, bool concat)
   return NULL;
 }
 
+/* https.request/get with a runtime options record: the http walk, then
+ * the TLS options the literal https path lowers (rejectUnauthorized, ca,
+ * servername). Other tls.connect options fence when they carry a value. */
+static const char *const SCR_HTTPS_REQ_FENCED_OPTIONS[] = {
+  "ALPNProtocols", "cert", "checkServerIdentity", "ciphers", "crl", "dhparam", "ecdhCurve",
+  "honorCipherOrder", "key", "maxVersion", "minVersion", "passphrase", "pfx", "secureContext",
+  "secureOptions", "secureProtocol", "session", "sessionIdContext", "sigalgs", NULL,
+};
+
+ScrHttpClientReq *scr_https_request_dyn(const ScrDyn *opts /*borrowed*/, bool auto_end,
+                                        ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn,
+                                        ScrDyn *(*add_abort)(ScrDyn *signal, ScrDyn *listener)) {
+  ScrHttpReqOpts o;
+  if (!scr_http_req_opts_read(opts, true, "https.request", &o)) {
+    if (cb) scr_closure_release(cb);
+    return NULL;
+  }
+  const ScrDyn *rec = o.view != NULL ? o.view : opts;
+  bool reject = true;
+  ScrBytes *ca = NULL;
+  ScrStr *servername = NULL;
+  bool ok = true;
+  if (rec != NULL && rec->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; ok && SCR_HTTPS_REQ_FENCED_OPTIONS[i] != NULL; i++) {
+      const char *key = SCR_HTTPS_REQ_FENCED_OPTIONS[i];
+      const ScrDyn *v = scr_dyn_obj_get(rec, key, strlen(key));
+      if (v != NULL && scr_tls_dyn_truthy(v)) {
+        scr_http_req_opts_fence("https.request", key,
+                                "rejectUnauthorized, ca, and servername are the supported TLS options");
+        ok = false;
+      }
+    }
+    const ScrDyn *r = ok ? scr_dyn_obj_get(rec, "rejectUnauthorized", 18) : NULL;
+    if (r != NULL && r->kind == SCR_DYN_BOOL && !r->v.b) reject = false;
+    const ScrDyn *c = ok ? scr_dyn_obj_get(rec, "ca", 2) : NULL;
+    if (c != NULL && c->kind != SCR_DYN_UNDEF && c->kind != SCR_DYN_NULL) {
+      ca = scr_tls_pem_dyn(c, "an https.request 'ca' option", true);
+      if (ca == NULL) ok = false;
+    }
+    const ScrDyn *sn = ok ? scr_dyn_obj_get(rec, "servername", 10) : NULL;
+    if (sn != NULL && sn->kind != SCR_DYN_UNDEF && sn->kind != SCR_DYN_NULL) {
+      if (sn->kind != SCR_DYN_STR) {
+        scr_dyn_prop_type_fail("options.servername", "of type string", sn);
+        ok = false;
+      } else {
+        servername = scr_str_retain(sn->v.str);
+      }
+    }
+  }
+  if (!ok) {
+    if (ca) scr_bytes_release(ca);
+    scr_http_req_opts_free(&o);
+    if (cb) scr_closure_release(cb);
+    return NULL;
+  }
+  const char *ca_data = ca ? (const char *)ca->data : NULL;
+  size_t ca_len = ca ? ca->len : 0;
+  ScrTlsCli *cli = scr_tls_cli_for(o.host, reject, ca_data, ca_len, servername);
+  ScrStr *key = scr_tls_pool_key(o.host, reject, ca_data, ca_len, servername);
+  scr_str_release(servername);
+  ScrHttpClientReq *req = scr_http_req_opts_send(&o, auto_end, cb, fn, add_abort,
+                                                 &scr_tls_cli_wrap, cli, key);
+  scr_str_release(key);
+  if (ca) scr_bytes_release(ca);
+  scr_http_req_opts_free(&o);
+  return req;
+}
+
 /* The literal path's runtime-valued cert/key extraction (the compiler's
  * tls.pemDyn libCall): `what` arrives precomposed. undefined throws — the
  * literal walk required the member's presence. */

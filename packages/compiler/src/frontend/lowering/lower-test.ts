@@ -86,8 +86,8 @@ function requireStatementPosition(lowerer: Lowerer, call: ts.CallExpression, wha
  * reports the `test` property's column), at the call for plain ones. */
 function atStringOf(expr: ts.CallExpression): string {
   const target = ts.isPropertyAccessExpression(expr.expression) ? expr.expression.name : expr;
-  const sf = expr.getSourceFile();
-  const pos = sf.getLineAndCharacterOfPosition(target.getStart());
+  const sf = ts.getSourceFileOfNode(expr);
+  const pos = sf.getLineAndCharacterOfPosition(ts.tokenStartOfNode(target));
   return `${sf.fileName}:${pos.line + 1}:${pos.character + 1}`;
 }
 

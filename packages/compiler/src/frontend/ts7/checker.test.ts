@@ -10,10 +10,10 @@ import { ts7Executable } from "./rpc-api.js";
 import { Ts7Session } from "./session.js";
 import { SemanticChecker } from "./semantic-checker.js";
 import { SemanticSnapshot } from "./semantic-model.js";
-import { TypeFlags } from "./enums.js";
+import { SignatureKind, SymbolFlags, TypeFlags } from "./enums.js";
 import { createProgram, Ts7Host } from "./program-adapter.js";
 import type { AstNode } from "./ast-node.js";
-import type { SourceFile } from "./ast-types.js";
+import type { Identifier, SourceFile } from "./ast-types.js";
 
 const tempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
 const protocolPath = (path: string) => path.replaceAll("\\", "/");
@@ -167,6 +167,12 @@ test("all public query and prefetch entry points reject a disposed facade before
     const calls: Record<string, () => unknown> = {
       getCallSignatures: () => facade.getCallSignatures(type),
       getConstructSignatures: () => facade.getConstructSignatures(type),
+      getSignaturesOfType: () => facade.getSignaturesOfType(type, SignatureKind.Call),
+      resolveName: () => facade.resolveName("value", SymbolFlags.Value, name),
+      getResolvedSymbol: () => facade.getResolvedSymbol(name as Identifier),
+      getAnyType: () => facade.getAnyType(),
+      getNeverType: () => facade.getNeverType(),
+      getBigIntType: () => facade.getBigIntType(),
       getPropertyOfType: () => facade.getPropertyOfType(type, "missing"),
       prefetchSourceFile: () => facade.prefetchSourceFile(root),
       prefetchSourceFileStructures: () => facade.prefetchSourceFileStructures([]),

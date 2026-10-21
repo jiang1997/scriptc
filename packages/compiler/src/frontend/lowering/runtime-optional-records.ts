@@ -351,7 +351,7 @@ export class RecordFlowClasses {
   private referencesOf(symbol: ts.Symbol): readonly ts.Identifier[] {
     let list = this.references.get(symbol);
     if (!list) {
-      list = (this.names.get(symbol.name) ?? []).filter(
+      list = (this.names.get(ts.symbolName(symbol)) ?? []).filter(
         (node) => this.host.symbolOf(node) === symbol,
       );
       this.references.set(symbol, list);
@@ -412,7 +412,7 @@ export class RecordFlowClasses {
       const symbol = ts.isIdentifier(base) ? this.host.symbolOf(base) : null;
       const target = symbol ? this.host.declarationOf(symbol) : undefined;
       if (!target || !ts.isClassDeclaration(target)) return true;
-      const file = target.getSourceFile();
+      const file = ts.getSourceFileOfNode(target);
       if (file.isDeclarationFile || isJsFile(file)) return true;
       current = target;
     }
@@ -591,7 +591,7 @@ export class RecordFlowClasses {
       } else {
         this.markOpen(slot);
       }
-      if (this.shorthandNames.has(symbol.name)) this.markOpen(slot);
+      if (this.shorthandNames.has(ts.symbolName(symbol))) this.markOpen(slot);
       for (const reference of this.referencesOf(symbol)) {
         if (declaration && (declaration as { name?: ts.Node }).name === reference) continue;
         if (!this.use(reference, slot)) this.markOpen(slot);
@@ -824,9 +824,9 @@ export function returnExpressions(fn: ts.FunctionLikeDeclaration): ts.Expression
     }
     if (ts.isFunctionLike(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node))
       return;
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  fn.body?.forEachChild(visit);
+  if (fn.body !== undefined) ts.forEachChild(fn.body, visit);
   return out;
 }
 
@@ -865,9 +865,9 @@ function usesArguments(body: ts.Node): boolean {
     if (found) return;
     if (ts.isIdentifier(node) && node.text === "arguments") found = true;
     else if (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node))
-      node.forEachChild(visit);
+      ts.forEachChild(node, visit);
   };
-  body.forEachChild(visit);
+  ts.forEachChild(body, visit);
   return found;
 }
 

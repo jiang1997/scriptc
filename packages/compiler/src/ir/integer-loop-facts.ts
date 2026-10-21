@@ -36,6 +36,11 @@ function variableIncrement(id: string, value: IrExpr): { localId: string; sign: 
  * filtering, breaks and continues can only reduce the budget. A nested
  * loop or opaque control region invalidates the bindings it writes.
  *
+ * A cursor may also be reset to an integer literal (`run = 0`) or set to
+ * another bounded binding (`longest = run`): every value it then holds is
+ * its entry value, a reset value or a value the source held, plus at most
+ * the increments of the whole loop.
+ *
  * The counter's step is a positive integer literal or a binding the loop
  * never writes whose entry fact is a positive integer range (the sieve's
  * `j += i`): every update then adds an exact integer in that range, so the
@@ -68,6 +73,8 @@ export function boundedIntegerLoopFacts(
     refused = new Set<string>();
   const lower = new Map<string, number>(),
     upper = new Map<string, number>();
+  const resets = new Map<string, IntegerRange>(),
+    copies = new Map<string, Set<string>>();
   let opaque = 0;
   const write = (id: string, delta: number | null): void => {
     written.add(id);
@@ -81,8 +88,29 @@ export function boundedIntegerLoopFacts(
     lower.set(id, lo);
     upper.set(id, hi);
   };
+  const assignment = (id: string, value: IrExpr): void => {
+    const delta = increment(id, value);
+    if (opaque || delta !== null) write(id, delta);
+    else if (
+      value.kind === "numLit" &&
+      Number.isSafeInteger(value.value) &&
+      !Object.is(value.value, -0)
+    ) {
+      written.add(id);
+      const range = resets.get(id);
+      resets.set(id, {
+        min: Math.min(range?.min ?? value.value, value.value),
+        max: Math.max(range?.max ?? value.value, value.value),
+      });
+    } else if (value.kind === "varRef" && value.localId !== id) {
+      written.add(id);
+      const sources = copies.get(id) ?? new Set<string>();
+      sources.add(value.localId);
+      copies.set(id, sources);
+    } else write(id, null);
+  };
   const expr = (e: IrExpr): boolean => {
-    if (e.kind === "assignExpr") write(e.localId, increment(e.localId, e.value));
+    if (e.kind === "assignExpr") assignment(e.localId, e.value);
     if (e.kind === "incDec") write(e.localId, e.op === "+" ? 1 : -1);
     return everyExprChild(e, expr, stmt);
   };
@@ -95,12 +123,19 @@ export function boundedIntegerLoopFacts(
       s.kind === "tryCatch" ||
       s.kind === "switch";
     if (region) opaque++;
-    if (s.kind === "assign") write(s.localId, increment(s.localId, s.value));
+    if (s.kind === "assign") assignment(s.localId, s.value);
     if (s.kind === "varDecl" || s.kind === "forOf") write(s.localId, null);
     const completed = everyStmtChild(s, expr, stmt);
     if (region) opaque--;
     return completed;
   };
+  // The condition and the update run on every pass too. A binding either
+  // one writes (`i < (src = next(), n)`) changes in ways the budget does
+  // not count, so it is neither a stable bound nor a copy source.
+  opaque++;
+  expr(loop.cond);
+  expr(loop.update.value);
+  opaque--;
   loop.body.every(stmt);
   if (written.has(counter)) return result;
   const stable = (id: string): boolean => {
@@ -147,15 +182,45 @@ export function boundedIntegerLoopFacts(
   // Header facts also cover the failing final condition and zero iterations.
   const maximum = Math.max(start.max, last + step.max);
   if (Number.isSafeInteger(maximum)) result.set(counter, { min: start.min, max: maximum });
-  for (const [id, hi] of upper) {
-    const range = initial.get(id);
-    if (!range || refused.has(id) || id === counter) continue;
-    const decrement = iterations * lower.get(id)!;
-    const increment = iterations * hi;
-    if (!Number.isSafeInteger(decrement) || !Number.isSafeInteger(increment)) continue;
-    const min = range.min + decrement;
-    const max = range.max + increment;
-    if (Number.isSafeInteger(min) && Number.isSafeInteger(max)) result.set(id, { min, max });
+  // Every value a copy reads lies in its source's range: a cursor bounded
+  // here, or a binding the loop never writes.
+  const source = (id: string): IntegerRange | undefined =>
+    result.get(id) ?? (stable(id) ? initial.get(id) : undefined);
+  // Copies wait for their sources; a cycle of copies stays unbounded.
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const id of written) {
+      const range = initial.get(id);
+      if (!range || refused.has(id) || id === counter || result.has(id)) continue;
+      let min = range.min,
+        max = range.max;
+      const reset = resets.get(id);
+      if (reset) {
+        min = Math.min(min, reset.min);
+        max = Math.max(max, reset.max);
+      }
+      let bounded = true;
+      const sources = copies.get(id);
+      if (sources)
+        for (const from of sources) {
+          const copied = source(from);
+          if (!copied) bounded = false;
+          else {
+            min = Math.min(min, copied.min);
+            max = Math.max(max, copied.max);
+          }
+        }
+      if (!bounded) continue;
+      const decrement = iterations * (lower.get(id) ?? 0);
+      const increment = iterations * (upper.get(id) ?? 0);
+      if (!Number.isSafeInteger(decrement) || !Number.isSafeInteger(increment)) continue;
+      min += decrement;
+      max += increment;
+      if (Number.isSafeInteger(min) && Number.isSafeInteger(max)) {
+        result.set(id, { min, max });
+        changed = true;
+      }
+    }
   }
   return result;
 }

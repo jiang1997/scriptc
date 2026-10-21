@@ -19,6 +19,11 @@ import { fenceNodeModuleMutation } from "../lower-node-module.js";
 import { globalSymbolKey } from "./global-symbols.js";
 import { tryLowerExpression } from "./try-lower-expression.js";
 import {
+  type KeyedFieldTarget,
+  keyedFieldTarget,
+  saveKeyedFieldKey,
+} from "./keyed-field-targets.js";
+import {
   eventAccessorRead,
   eventAccessorWrite,
   isEventWritableAccessor,
@@ -147,6 +152,7 @@ export function lowerShortCircuitAssignment(lowerer: Lowerer, expr: ts.BinaryExp
     } else {
       const receiver = save(lowerer.lowerExpr(target.expression), "%shortCircuitReceiver");
       let key = lowerer.lowerExpr(target.argumentExpression);
+      let keyed: KeyedFieldTarget | null = null;
       if (receiver.type.kind === "dyn") {
         key = save(
           {
@@ -245,6 +251,17 @@ export function lowerShortCircuitAssignment(lowerer: Lowerer, expr: ts.BinaryExp
           value: lowerer.coerceToExpected(value, indexValue),
           loc,
         });
+      } else if (
+        receiver.type.kind === "record" &&
+        (keyed = keyedFieldTarget(lowerer, target, false, { obj: receiver, key }))
+      ) {
+        // `totals[side] ??= v` through a literal-union key: the read and
+        // the write dispatch over the declared fields the key can name.
+        const field = keyed;
+        saveKeyedFieldKey(field, save);
+        storage = field.fieldType;
+        read = lowerer.fieldGetExpr(field, locOf(target), target);
+        write = (value) => lowerer.fieldSetStmt(field, value, loc, target);
       } else {
         lowerer.unsupported(
           "SC1090",

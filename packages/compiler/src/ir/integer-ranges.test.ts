@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import {
+  analyzeIntegerRangeFacts,
   analyzeIntegerRanges,
   bitwiseIdentityOperand,
   bitwiseRange,
@@ -867,6 +868,99 @@ test("an array length bounds while and for counters even when the body resizes t
   expect(analyzeIntegerRanges(g).get(cursor)).toEqual({ min: 0, max: 4294967295 });
 });
 
+test("a counter plus or minus a literal compared with a bound narrows the counter", () => {
+  // for (let i = 0; i + 1 < items.length; i++) { pair(items, i, i + 1); }
+  const ARR = { kind: "array", elem: F64 } as const;
+  const items: IrExpr = { loc, kind: "varRef", localId: "items", type: ARR };
+  const length: IrExpr = {
+    loc,
+    kind: "arrIntrinsic",
+    method: "length",
+    receiver: items,
+    args: [],
+    type: F64,
+  };
+  const inside = ref("i"),
+    next = bin("+", ref("i"), num(1)),
+    step = bin("+", ref("i"), num(1));
+  const call: IrStmt = {
+    loc,
+    kind: "exprStmt",
+    expr: { loc, kind: "call", callee: "pair", args: [items, inside, next], type: F64 },
+  };
+  const f = fn([
+    {
+      loc,
+      kind: "for",
+      init: { loc, kind: "varDecl", localId: "i", init: num(0) },
+      cond: condition("<", bin("+", ref("i"), num(1)), length),
+      update: { loc, kind: "assign", localId: "i", value: step },
+      body: [call],
+    },
+  ]);
+  f.locals.push(
+    { id: "i", name: "i", type: F64, mutable: true },
+    { id: "items", name: "items", type: ARR, mutable: false },
+  );
+  const ranges = analyzeIntegerRanges(f);
+  expect(ranges.get(inside)).toEqual({ min: 0, max: 4294967293 });
+  expect(ranges.get(next)).toEqual({ min: 1, max: 4294967294 });
+  expect(ranges.get(step)).toEqual({ min: 1, max: 4294967294 });
+
+  // if (1 + x < 10) observe(x); if (x - 2 >= 0) observe(x); with x in [0, 100]
+  const below = ref(),
+    above = ref(),
+    wide = ref();
+  const g = fn([
+    assign(bin("&", ref("unknown"), num(100))),
+    {
+      loc,
+      kind: "if",
+      cond: condition("<", bin("+", num(1), ref()), num(10)),
+      then: [observe(below)],
+      else_: null,
+    },
+    {
+      loc,
+      kind: "if",
+      cond: condition(">=", bin("-", ref(), num(2)), num(0)),
+      then: [observe(above)],
+      else_: null,
+    },
+    // A bound beyond 2^52 narrows nothing through an offset.
+    {
+      loc,
+      kind: "if",
+      cond: condition("<", bin("+", ref(), num(1)), num(2 ** 53)),
+      then: [observe(wide)],
+      else_: null,
+    },
+  ]);
+  const gRanges = analyzeIntegerRanges(g);
+  expect(gRanges.get(below)).toEqual({ min: 0, max: 8 });
+  expect(gRanges.get(above)).toEqual({ min: 2, max: 100 });
+  expect(gRanges.get(wide)).toEqual({ min: 0, max: 100 });
+});
+
+test("an offset comes off a fractional bound after the bound rounds to an integer", () => {
+  // x = unknown | 0; if (x + 2147483648 > -(2 ** -60)) observe(x): the sum is
+  // an integer, so the condition holds exactly when x + 2^31 >= 0. Subtracting
+  // the offset from the fractional bound first would round to -2^31 and drop
+  // x = -2^31 from the range.
+  const kept = ref();
+  const f = fn([
+    assign(bin("|", ref("unknown"), num(0))),
+    {
+      loc,
+      kind: "if",
+      cond: condition(">", bin("+", ref(), num(2147483648)), num(-(2 ** -60))),
+      then: [observe(kept)],
+      else_: null,
+    },
+  ]);
+  expect(analyzeIntegerRanges(f).get(kept)).toEqual({ min: -2147483648, max: 2147483647 });
+});
+
 test("whole-program slot facts seed parameters, field reads and call results", () => {
   const field: IrExpr = {
     loc,
@@ -1040,4 +1134,120 @@ test("bitwise identity operands follow ToInt32 and the shift-count mask", () => 
   expect(identity(">>", x, num(1))).toBeNull();
   expect(identity("<<", num(0), x)).toBeNull();
   expect(identity(">>>", num(0), x)).toBeNull();
+});
+
+test("a for loop bounds cursors it resets and copies, and their writes keep the loop range", () => {
+  // for (x = 0; x < 100; x++) { if (flag === 0) run = run + 1; else run = 0;
+  //   if (run > longest) longest = run; changes = changes + 1; }
+  const sum = bin("+", ref("run"), num(1)),
+    copied = ref("run"),
+    counted = bin("+", ref("changes"), num(1));
+  const write = (localId: string, value: IrExpr): IrStmt => ({
+    loc,
+    kind: "assign",
+    localId,
+    value,
+  });
+  const loop: IrStmt & { kind: "for" } = {
+    loc,
+    kind: "for",
+    init: { loc, kind: "varDecl", localId: "x", init: num(0) },
+    cond: condition("<", ref(), num(100)),
+    update: assign(bin("+", ref(), num(1))),
+    body: [
+      {
+        loc,
+        kind: "if",
+        cond: condition("===", ref("flag"), num(0)),
+        then: [write("run", sum)],
+        else_: [write("run", num(0))],
+      },
+      {
+        loc,
+        kind: "if",
+        cond: condition(">", ref("run"), ref("longest")),
+        then: [write("longest", copied)],
+        else_: null,
+      },
+      write("changes", counted),
+    ],
+  };
+  const declare = (localId: string): IrStmt => ({ loc, kind: "varDecl", localId, init: num(0) });
+  const f = fn([declare("run"), declare("longest"), declare("changes"), loop]);
+  f.locals.push(
+    ...["run", "longest", "changes", "flag"].map((id) => ({
+      id,
+      name: id,
+      type: F64,
+      mutable: true,
+    })),
+  );
+  const ranges = analyzeIntegerRanges(f);
+  // Each of the 100 passes adds at most one, so `run + 1` and
+  // `changes + 1` stay within the loop range though their operands reach it.
+  const range = { min: 0, max: 100 };
+  expect(ranges.get(sum)).toEqual({ min: 1, max: 100 });
+  expect(ranges.get(counted)).toEqual({ min: 1, max: 100 });
+  expect(ranges.get(copied)).toEqual({ min: 1, max: 100 });
+  expect(analyzeIntegerRangeFacts(f).loopRanges.get(loop)).toEqual(
+    new Map([
+      ["run", range],
+      ["longest", range],
+      ["changes", range],
+    ]),
+  );
+  for (const mutation of ["fraction", "cycle", "nested"] as const) {
+    const changed = structuredClone(f);
+    const body = (changed.body[3] as IrStmt & { kind: "for" }).body;
+    if (mutation === "fraction") body.push(write("run", num(0.5)));
+    // `run = longest` and `longest = run` bound neither.
+    if (mutation === "cycle") body.push(write("run", ref("longest")));
+    if (mutation === "nested")
+      body.push({
+        loc,
+        kind: "while",
+        cond: condition("<", ref("unknown"), num(1)),
+        body: [write("run", num(0))],
+      });
+    const cursors = analyzeIntegerRangeFacts(changed).loopRanges.get(changed.body[3]!);
+    expect(cursors?.has("run"), mutation).toBe(false);
+    expect(cursors?.get("changes"), mutation).toEqual(range);
+  }
+});
+
+test("a cursor of a loop over a typed array keeps its writes exact up to 2^53 - 1", () => {
+  // for (x = 0; x < bytes.length; x++) changes = changes + 1;
+  const bytes: IrExpr = {
+    loc,
+    kind: "varRef",
+    localId: "bytes",
+    type: { kind: "bytes", elem: "u8" },
+  };
+  const length: IrExpr = {
+    loc,
+    kind: "bytesIntrinsic",
+    method: "length",
+    receiver: bytes,
+    args: [],
+    type: F64,
+  };
+  const counted = bin("+", ref("changes"), num(1));
+  const f = fn([
+    { loc, kind: "varDecl", localId: "changes", init: num(0) },
+    {
+      loc,
+      kind: "for",
+      init: { loc, kind: "varDecl", localId: "x", init: num(0) },
+      cond: condition("<", ref(), length),
+      update: assign(bin("+", ref(), num(1))),
+      body: [{ loc, kind: "assign", localId: "changes", value: counted }],
+    },
+  ]);
+  f.locals.push(
+    { id: "changes", name: "changes", type: F64, mutable: true },
+    { id: "bytes", name: "bytes", type: { kind: "bytes", elem: "u8" }, mutable: false },
+  );
+  // The sum of the header range passes 2^53 - 1; the write takes the loop
+  // range instead.
+  expect(analyzeIntegerRanges(f).get(counted)).toEqual({ min: 0, max: Number.MAX_SAFE_INTEGER });
 });

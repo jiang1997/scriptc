@@ -34,9 +34,8 @@ const st = new Set(new Set([1, 2])); // string and array seeds lower; Set-valued
 const stack = new Error("boom").stack;
 // Unlowered members on lowered containers.
 const sinhMethod = Math.sinh; // fixed-arity Math function values now lower
-// (n-ary Math.min/max LOWER now — the variadic battery lives in the
-// corpus; the mixed spread/positional list is the form that stays fenced.)
-const clamped = Math.min(1, ...[2, 3]);
+// (n-ary Math.min/max, with spreads among the arguments, LOWER now — the
+// variadic battery lives in the corpus.)
 const entries = [1, 2].entries(); // array iterators lower now
 const arrAt = [1, 2].at(0);
 const norm = "abc".normalize();

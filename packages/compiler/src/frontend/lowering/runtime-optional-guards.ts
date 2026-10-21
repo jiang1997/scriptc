@@ -21,7 +21,7 @@ export function reassignedBindings(
     else if (ts.isArrayLiteralExpression(e) || ts.isObjectLiteralExpression(e)) {
       const walk = (n: ts.Node): void => {
         if (ts.isIdentifier(n)) mark(n);
-        else n.forEachChild(walk);
+        else ts.forEachChild(n, walk);
       };
       walk(e);
     }

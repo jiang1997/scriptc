@@ -860,6 +860,67 @@ static ScrStr *scr_insp_data_view(const ScrBytes *b, double recurse, double dept
 
 static ScrStr *scr_insp_dyn_error(ScrDyn *d, double recurse, double depth);
 
+/* An error's own `cause` property and whether it is enumerable, read where
+ * `e.cause` reads it: the error's checked-dynamic node when it has one,
+ * else its slot. NULL when it has none (borrowed; `view` holds a
+ * materialized node the caller releases). */
+static ScrDyn *insp_error_cause(ScrError *e, bool *enumerable, ScrDyn **view) {
+  *view = NULL;
+  ScrDyn *node = scr_errdyn_view_of(e);
+  if (node != NULL && node->kind == SCR_DYN_TYPED_REF) node = *view = scr_dyn_typed_ref_materialize(node);
+  if (node != NULL && node->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < node->v.obj.len; i++) {
+      ScrDynEntry *ent = &node->v.obj.entries[i];
+      if (ent->key_len == 5 && memcmp(ent->key, "cause", 5) == 0) {
+        *enumerable = ent->enumerable;
+        return ent->value;
+      }
+    }
+    return NULL;
+  }
+  *enumerable = e->cause_enumerable;
+  return e->error_cause;
+}
+
+/* Whether an error subclass instance's property bag (its properties
+ * created through untyped references) holds an enumerable property other
+ * than `cause`, which the error renderers print. Node's inspector shows no
+ * other non-enumerable property of an error. */
+bool scr_insp_error_bag_has_properties(ScrDyn *bag) {
+  if (bag == NULL || bag->kind != SCR_DYN_OBJ) return false;
+  for (size_t i = 0; i < bag->v.obj.len; i++) {
+    const ScrDynEntry *ent = &bag->v.obj.entries[i];
+    if (ent->enumerable && !(ent->key_len == 5 && memcmp(ent->key, "cause", 5) == 0)) return true;
+  }
+  return false;
+}
+
+/* Whether a program-declared error subclass instance has an own `cause`. */
+bool scr_insp_error_has_cause(ScrError *e) {
+  bool enumerable;
+  ScrDyn *view;
+  bool has = insp_error_cause(e, &enumerable, &view) != NULL;
+  scr_dyn_release(view);
+  return has;
+}
+
+/* The entry formatError prints for an error's own `cause`: `cause: value`
+ * when the property is enumerable (an assignment), `[cause]: value` when it
+ * is not (the constructor's options). The caller checked that it has one
+ * (scr_insp_error_has_cause). +1 */
+ScrStr *scr_insp_error_cause(ScrError *e, double recurse, double depth) {
+  bool enumerable;
+  ScrDyn *view;
+  ScrDyn *cause = insp_error_cause(e, &enumerable, &view);
+  ScrStr *value = cause != NULL ? scr_insp_dyn(cause, recurse, depth) : scr_str_new("undefined", 9);
+  scr_dyn_release(view);
+  InspBuf out = {0};
+  ib_cstr(&out, enumerable ? "cause: " : "[cause]: ");
+  ib_bytes(&out, value->data, value->len);
+  scr_str_release(value);
+  return ib_take(&out);
+}
+
 /* A runtime error through its node: the cached one, or one built from its
  * fields. */
 ScrStr *scr_insp_error_node(ScrError *e, double recurse, double depth) {
@@ -1009,6 +1070,16 @@ static ScrDyn *insp_assertion_ellipsis(ScrDyn *value) {
  * scr_insp_error: the stackless bracket form `[Name: message]`, then the
  * remaining enumerable own properties (code, errno, syscall, ...) in
  * Node's `{ ... }` tail. */
+/* An own non-enumerable entry of the error encoding, NULL when absent or
+ * enumerable (an enumerable one prints with the other own keys). */
+static const ScrDynEntry *insp_error_hidden_entry(const ScrDyn *d, const char *key, size_t len) {
+  for (size_t i = 0; i < d->v.obj.len; i++) {
+    const ScrDynEntry *ent = &d->v.obj.entries[i];
+    if (ent->key_len == len && memcmp(ent->key, key, len) == 0) return ent->enumerable ? NULL : ent;
+  }
+  return NULL;
+}
+
 static ScrStr *scr_insp_dyn_error(ScrDyn *d, double recurse, double depth) {
   /* An error already on the traversal stack (a spawnSync error's own
    * `error`): Node's [Circular *N], and <ref *N> on the outer rendering. */
@@ -1029,6 +1100,12 @@ static ScrStr *scr_insp_dyn_error(ScrDyn *d, double recurse, double depth) {
       continue;
     extra++;
   }
+  /* formatError shows a non-enumerable `cause`, and an AggregateError's
+   * `errors` array, after the enumerable keys: `[cause]`, `[errors]`. */
+  const ScrDynEntry *cause = insp_error_hidden_entry(d, "cause", 5);
+  const ScrDynEntry *errors = insp_error_hidden_entry(d, "errors", 6);
+  if (errors && errors->value->kind != SCR_DYN_ARR) errors = NULL;
+  extra += (cause != NULL) + (errors != NULL);
   InspBuf base = {0};
   ib_char(&base, '[');
   if (name != NULL) ib_str(&base, name->v.str);
@@ -1071,6 +1148,20 @@ static ScrStr *scr_insp_dyn_error(ScrDyn *d, double recurse, double depth) {
     scr_insp_entry(entry, false);
     scr_str_release(entry);
   }
+  const ScrDynEntry *hidden[] = {cause, errors};
+  for (size_t i = 0; i < 2; i++) {
+    if (!hidden[i]) continue;
+    ScrStr *val = scr_insp_dyn(hidden[i]->value, recurse + 1, value_depth);
+    InspBuf eb = {0};
+    ib_char(&eb, '[');
+    ib_bytes(&eb, hidden[i]->key, hidden[i]->key_len);
+    ib_cstr(&eb, "]: ");
+    ib_bytes(&eb, val->data, val->len);
+    scr_str_release(val);
+    ScrStr *entry = ib_take(&eb);
+    scr_insp_entry(entry, false);
+    scr_str_release(entry);
+  }
   ScrStr *b0 = scr_str_new("{", 1);
   ScrStr *b1 = scr_str_new("}", 1);
   ScrStr *body = scr_insp_end(base_str, b0, b1, recurse + 1, false, false);
@@ -1095,6 +1186,16 @@ static ScrStr *scr_insp_class_tag(const char *cls, const char *tail) {
     ib_char(&out, ']');
   }
   return ib_take(&out);
+}
+
+/* Node prints a @@toStringTag that ends with "." and the constructor name
+ * (WebAssembly.Module for Module) in place of the name, without the
+ * bracketed tag. */
+static bool insp_tag_names_class(const char *tag, const char *cls) {
+  if (!tag) return false;
+  size_t tag_len = strlen(tag), cls_len = strlen(cls);
+  return tag_len > cls_len + 1 && tag[tag_len - cls_len - 1] == '.' &&
+         memcmp(tag + tag_len - cls_len, cls, cls_len) == 0;
 }
 
 /* A native Set or Map held as a checked-dynamic value: `Set(n) { a, b }`,
@@ -1495,11 +1596,15 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
         ScrStr *body = scr_insp_dyn(view, recurse, depth);
         scr_dyn_release(view);
         InspBuf out = {0};
-        ib_cstr(&out, ops->cls);
-        if (ops->to_string_tag) {
-          ib_cstr(&out, " [");
+        if (insp_tag_names_class(ops->to_string_tag, ops->cls)) {
           ib_cstr(&out, ops->to_string_tag);
-          ib_char(&out, ']');
+        } else {
+          ib_cstr(&out, ops->cls);
+          if (ops->to_string_tag) {
+            ib_cstr(&out, " [");
+            ib_cstr(&out, ops->to_string_tag);
+            ib_char(&out, ']');
+          }
         }
         ib_char(&out, ' ');
         ib_bytes(&out, body->data, body->len);

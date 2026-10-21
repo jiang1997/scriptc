@@ -31,8 +31,10 @@ export function netAddressClassOf(lowerer: Lowerer, node: ts.Expression): NetAdd
 function netAddressValueClass(lowerer: Lowerer, node: ts.Expression): NetAddressClass | null {
   const type = lowerer.typeOf(node);
   const sym = type.getAliasSymbol() ?? type.getSymbol();
-  if (!sym || (sym.name !== "SocketAddress" && sym.name !== "BlockList")) return null;
-  return lowerer.isStdlibSymbol(sym) ? sym.name : null;
+  if (!sym) return null;
+  const name = ts.symbolName(sym);
+  if (name !== "SocketAddress" && name !== "BlockList") return null;
+  return lowerer.isStdlibSymbol(sym) ? name : null;
 }
 
 /** `new SocketAddress(options?)` and `new BlockList()`: the argument
@@ -127,7 +129,7 @@ export function lowerNetAddressCall(lowerer: Lowerer, call: ts.CallExpression): 
     kind: "dynInvoke",
     recv: lowerer.lowerExprExpecting(access.expression, DYN),
     method: name,
-    calleeName: access.getText(),
+    calleeName: ts.getTextOfNode(access),
     args: call.arguments.nodes.map((arg) => lowerer.lowerExprExpecting(arg, DYN)),
     type: DYN,
     loc,

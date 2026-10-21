@@ -73,6 +73,21 @@ describe("async_free detection over the IR", () => {
     );
   });
 
+  test("the event-loop metrics refuse", async () => {
+    expect(
+      await surfaceOf(
+        "eld",
+        `import { monitorEventLoopDelay } from "node:perf_hooks";\nconst h = monitorEventLoopDelay();\nconsole.log(h.enable());\n`,
+      ),
+    ).toContain("monitorEventLoopDelay");
+    expect(
+      await surfaceOf(
+        "elu",
+        `import { performance } from "node:perf_hooks";\nconsole.log(performance.eventLoopUtilization().idle >= 0);\n`,
+      ),
+    ).toContain("eventLoopUtilization");
+  });
+
   test("child_process refuses even in its synchronous spelling", async () => {
     expect(
       await surfaceOf(

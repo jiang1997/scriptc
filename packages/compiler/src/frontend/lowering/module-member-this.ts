@@ -70,9 +70,9 @@ function ignoresOwnThis(lowerer: Lowerer, fn: ts.Node, bindings: Bindings, depth
       for (const arg of node.arguments.nodes.slice(1)) visit(arg);
       return;
     }
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  fn.forEachChild(visit);
+  ts.forEachChild(fn, visit);
   return ignores;
 }
 
@@ -176,7 +176,7 @@ function mayRebind(lowerer: Lowerer, fn: ts.Node, param: ts.Identifier): boolean
       found = true;
       return;
     }
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
   // The function's own parameters declare the name; their defaults can write it.
   const params = (fn as { parameters?: ts.NodeArray<ts.ParameterDeclaration> }).parameters;
@@ -195,9 +195,9 @@ function returnedExpressions(fn: ts.Node): ts.Expression[] | null {
   const visit = (node: ts.Node): void => {
     if (ts.isFunctionLike(node) || ts.isClassLikeDeclaration(node)) return;
     if (ts.isReturnStatement(node) && node.expression) result.push(node.expression);
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  body.forEachChild(visit);
+  ts.forEachChild(body, visit);
   return result;
 }
 

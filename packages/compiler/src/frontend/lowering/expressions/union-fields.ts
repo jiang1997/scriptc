@@ -117,7 +117,7 @@ export function lowerUnionFieldRead(
   access: ts.PropertyAccessExpression,
   receiver: IrExpr,
 ): IrExpr | null {
-  if (receiver.type.kind !== "union" || isJsSourceFile(access.getSourceFile())) return null;
+  if (receiver.type.kind !== "union" || isJsSourceFile(ts.getSourceFileOfNode(access))) return null;
   const unionId = receiver.type.unionId;
   const arms = lowerer.unions.get(unionId)?.arms;
   if (!arms || arms.length < 2) return null;

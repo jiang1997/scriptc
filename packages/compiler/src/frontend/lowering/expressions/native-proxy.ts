@@ -25,7 +25,7 @@ export function lowerNativeProxy(lowerer: Lowerer, expr: ts.NewExpression): IrEx
   if (args.length !== 2 || args.some(ts.isSpreadElement))
     lowerer.noLowering("new Proxy with this argument list", expr);
   const handler = args[1]!;
-  if (isJsSourceFile(expr.getSourceFile()) && ts.isObjectLiteralExpression(handler)) {
+  if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && ts.isObjectLiteralExpression(handler)) {
     for (const prop of handler.properties.nodes) {
       const callback = ts.isMethodDeclaration(prop)
         ? prop

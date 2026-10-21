@@ -48,6 +48,7 @@ import {
 } from "./operating-system.js";
 import { lowerQuerystringParseCall, lowerQuerystringStringifyCall } from "./querystring.js";
 import { lowerFsGlobCallbackCall, lowerFsGlobSyncCall, lowerFspGlobCall } from "./fs-glob.js";
+import { lowerV8HeapStatisticsCall } from "./v8.js";
 
 export function lowerBuiltinModuleCall(
   lowerer: Lowerer,
@@ -56,7 +57,7 @@ export function lowerBuiltinModuleCall(
   fn: BuiltinModuleFn,
   loc: SrcLoc,
 ): IrExpr {
-  const name = expr.expression.getText();
+  const name = ts.getTextOfNode(expr.expression);
   if (bi.module === "util/types") {
     return lowerUtilTypeCall(lowerer, expr, bi, loc, name);
   }
@@ -133,6 +134,9 @@ export function lowerBuiltinModuleCall(
   }
   if (bi.module === "child_process" && (bi.member === "execFileSync" || bi.member === "execSync")) {
     return lowerer.lowerExecSyncCall(expr, bi.member === "execSync", loc);
+  }
+  if (bi.module === "v8" && bi.member === "getHeapStatistics") {
+    return lowerV8HeapStatisticsCall(lowerer, expr, loc);
   }
   if (bi.module === "os" && bi.member === "networkInterfaces") {
     return lowerOsNetworkInterfacesCall(lowerer, expr, loc);

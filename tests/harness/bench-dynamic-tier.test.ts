@@ -7,7 +7,7 @@
  * release binary the gate measures, so other hosts and the sanitized lane
  * skip the builds. */
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
@@ -17,6 +17,7 @@ import {
   definedFunctionNames,
   dynamicTierSymbols,
 } from "../../scripts/zero-cost-compare.mjs";
+import { readWorkloads } from "../../benchmarks/runtime/workloads.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
@@ -31,11 +32,8 @@ interface Workload {
 
 // One program per entry file, named after its first workload, as the gate
 // names them.
-const manifest = JSON.parse(readFileSync(join(suite, "workloads.json"), "utf8")) as {
-  workloads: Workload[];
-};
 const programs = new Map<string, string>();
-for (const w of manifest.workloads)
+for (const w of readWorkloads(suite) as Workload[])
   if (![...programs.values()].includes(w.entry)) programs.set(`bench/${w.name}`, w.entry);
 
 test("every workload the gate lists as dynamic is a bench program", () => {

@@ -1,5 +1,6 @@
 /* Binary operators: arithmetic, comparisons and equality, logical and nullish pairs, and string conversion for concatenation. */
 import * as ts from "../../ts7/adapter.js";
+import { cleanFuncAdaptable } from "../coercions/function-adapters.js";
 import { type Lowerer, jsFuncNameOf } from "../lowerer.js";
 import {
   BIGINT_T,
@@ -44,6 +45,7 @@ import { lowerElementCompoundParts } from "./element-access.js";
 import { InternalCompilerError } from "../../../errors.js";
 import { isJsSourceFile, locOf } from "../../program.js";
 import { storedClassValueType } from "../lower-classes.js";
+import { builtinClassKind } from "../builtins/builtin-class-dyn.js";
 import { hasRuntimeStatics } from "../class-runtime-statics.js";
 import { tryLowerExpression } from "./try-lower-expression.js";
 import { fenceNodeModuleMutation, lowerRequireCacheHas } from "../lower-node-module.js";
@@ -481,6 +483,22 @@ export function lowerNullishPair(
       );
     }
   }
+  // An optional callback defaulted to a function of another signature
+  // (`o.tags ?? (() => ({}))`, fewer parameters or a narrower result): the
+  // result is the callback's own function type, and the default adapts into
+  // it (JavaScript ignores surplus arguments). The checker's merged union
+  // signature would lose the callback's result shape.
+  if (present?.kind === "func" && present.rest !== true) {
+    const raw = lowerer.lowerExpr(expr.right);
+    if (
+      raw.type.kind === "func" &&
+      (typeEquals(raw.type, present) || cleanFuncAdaptable(lowerer, raw.type, present))
+    ) {
+      const right = lowerer.coerceInto(expr.right, raw, present);
+      lowerer.nullishFuncResults.add(expr);
+      return { kind: "nullish", left, right, type: present, loc };
+    }
+  }
   lowerer.unsupported(
     "SC1090",
     expr,
@@ -514,7 +532,7 @@ export function lowerNativeFunctionAssignment(
 ): IrExpr | null {
   const target = expr.left;
   if (
-    !isJsSourceFile(expr.getSourceFile()) ||
+    !isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
     (!ts.isPropertyAccessExpression(target) && !ts.isElementAccessExpression(target)) ||
     target.questionDotToken
   )
@@ -886,7 +904,7 @@ export function lowerCompoundValueToTarget(
   // catchable TypeError, as the expanded assignment does).
   if (
     (target.type.kind === "dyn" || rhs.type.kind === "dyn") &&
-    (isJsSourceFile(expr.getSourceFile()) ||
+    (isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
       (lowerer.dynConvertible(read.type) && lowerer.dynConvertible(rhs.type)))
   ) {
     const left = lowerer.coerceInto(expr.left, read, DYN);
@@ -1125,7 +1143,7 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
           recv &&
           (recv.type.kind === "dyn" ||
             (recv.type.kind === "array" &&
-              isJsSourceFile(expr.getSourceFile()) &&
+              isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
               lowerer.dynConvertible(recv.type)))
         ) {
           return lowerDynMemberAssignment(
@@ -1136,7 +1154,12 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
         }
         if (recv?.type.kind === "array" || recv?.type.kind === "bytes") {
           const receiver = lowerer.declareHiddenLocal("%setArray", recv.type);
-          const index = lowerer.lowerExpr(expr.left.argumentExpression);
+          const index = lowerOptionalNumber(
+            lowerer,
+            lowerer.lowerExpr(expr.left.argumentExpression),
+            locOf(expr.left.argumentExpression),
+            expr.left.argumentExpression,
+          );
           if (index.type.kind !== "f64")
             lowerer.unsupported(
               "SC1090",
@@ -1469,6 +1492,25 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
           loc,
         };
       }
+      // EventEmitter or a stream class against an untyped value in
+      // JavaScript: the untyped value can hold the class's untyped
+      // constructor (coerceToExpected), which compares by identity.
+      if (
+        dynSide.type.kind === "dyn" &&
+        isJsSourceFile(expr.getSourceFile()) &&
+        ((scalarSide.type.kind === "moduleNs" && scalarSide.type.moduleId === "builtin:events") ||
+          (scalarSide.kind === "classRef" && builtinClassKind(scalarSide.className) !== null))
+      ) {
+        const boxed = lowerer.coerceToExpected(scalarSide, DYN);
+        return {
+          kind: "dynScalarEq",
+          left: scalarSide === left ? boxed : left,
+          right: scalarSide === right ? boxed : right,
+          ...(negated ? { negated: true as const } : {}),
+          type: BOOL,
+          loc,
+        };
+      }
       if (
         dynSide.type.kind === "dyn" &&
         (scalarSide.type.kind === "f64" ||
@@ -1517,7 +1559,7 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
     // Numeric operators dispatch on ToNumeric's actual Number/BigInt
     // result, including values flowing through native callable properties.
     if (
-      isJsSourceFile(expr.getSourceFile()) ||
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
       op === ts.SyntaxKind.PlusToken ||
       [
         ts.SyntaxKind.LessThanToken,
@@ -1964,8 +2006,60 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
     case ts.SyntaxKind.LessThanLessThanToken:
     case ts.SyntaxKind.GreaterThanGreaterThanToken:
     case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken: {
-      if (!bothNum)
+      // Booleans take part as ToNumber converts them, true to 1 and false
+      // to 0: JavaScript code writes `isFn(a) ^ isFn(b)` and `flags | ok`.
+      // A hoisted JavaScript `var` can also hold undefined, and ToInt32
+      // maps ToNumber(undefined) (NaN) and ToNumber(null) to 0.
+      const optionalBoolTag = (e: IrExpr): number => {
+        if (e.type.kind !== "union") return -1;
+        const arms = lowerer.unions.get(e.type.unionId)?.arms ?? [];
+        const ok = arms.every(
+          (a) => a.kind === "bool" || a.kind === "undefinedT" || a.kind === "nullT",
+        );
+        return ok ? arms.findIndex((a) => a.kind === "bool") : -1;
+      };
+      const numeric = (e: IrExpr): boolean =>
+        e.type.kind === "f64" || e.type.kind === "bool" || optionalBoolTag(e) >= 0;
+      const boolBits = !bothNum && numeric(arithmeticLeft) && numeric(arithmeticRight);
+      if (!bothNum && !boolBits)
         operatorUnsupported(lowerer, expr, ts.tokenToString(op) ?? "?", [left.type, right.type]);
+      const bitPrefix: IrStmt[] = [];
+      const oneOrZero = (cond: IrExpr): IrExpr => ({
+        kind: "ternary",
+        cond,
+        then: numLit(1, loc),
+        else_: numLit(0, loc),
+        type: F64,
+        loc,
+      });
+      // The tag test reads an operand twice: when either side needs it,
+      // both sides evaluate once into temporaries, in source order. A left
+      // operand that is safe to repeat still takes a temporary when the
+      // right one does: the right operand runs first in the prefix, and it
+      // can assign what the left operand reads.
+      const stash = optionalBoolTag(arithmeticLeft) >= 0 || optionalBoolTag(arithmeticRight) >= 0;
+      const rightTemp = stash && !isSafeToRepeat(arithmeticRight);
+      const stable = (e: IrExpr, beforeTemp: boolean): IrExpr => {
+        if (!stash || (isSafeToRepeat(e) && !beforeTemp)) return e;
+        const tmp = lowerer.declareHiddenLocal("%bits", e.type);
+        bitPrefix.push({ kind: "varDecl", localId: tmp.id, init: e, loc });
+        return varRef(tmp.id, e.type, loc);
+      };
+      const bitOperand = (operand: IrExpr, beforeTemp: boolean): IrExpr => {
+        const e = stable(operand, beforeTemp);
+        if (e.type.kind === "bool") return oneOrZero(e);
+        const tag = optionalBoolTag(e);
+        if (tag < 0 || e.type.kind !== "union") return e;
+        const unionId = e.type.unionId;
+        return {
+          kind: "ternary",
+          cond: { kind: "unionIsTag", unionId, tag, negated: false, value: e, type: BOOL, loc },
+          then: oneOrZero({ kind: "unionNarrow", unionId, tag, value: e, type: BOOL, loc }),
+          else_: numLit(0, loc),
+          type: F64,
+          loc,
+        };
+      };
       const bitOp =
         op === ts.SyntaxKind.AmpersandToken
           ? "&"
@@ -1978,14 +2072,17 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
                 : op === ts.SyntaxKind.GreaterThanGreaterThanToken
                   ? ">>"
                   : ">>>";
-      return {
+      const bits: IrExpr = {
         kind: "bin",
         op: bitOp,
-        left: arithmeticLeft,
-        right: arithmeticRight,
+        left: bitOperand(arithmeticLeft, rightTemp),
+        right: bitOperand(arithmeticRight, false),
         type: F64,
         loc,
       };
+      return bitPrefix.length === 0
+        ? bits
+        : { kind: "seqExpr", stmts: bitPrefix, result: bits, type: F64, loc };
     }
     case ts.SyntaxKind.EqualsEqualsEqualsToken:
     case ts.SyntaxKind.ExclamationEqualsEqualsToken:
@@ -2392,7 +2489,7 @@ function lowerLogicalPair(lowerer: Lowerer, expr: ts.BinaryExpression, left: IrE
   }
 
   if (
-    isJsSourceFile(expr.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
     op === ts.SyntaxKind.AmpersandAmpersandToken &&
     left.type.kind === "union" &&
     lowerer.unions.get(left.type.unionId)?.arms.some((arm) => arm.kind === "bool") &&
@@ -2440,7 +2537,7 @@ function lowerLogicalPair(lowerer: Lowerer, expr: ts.BinaryExpression, left: IrE
       op === ts.SyntaxKind.AmpersandAmpersandToken &&
       target === null &&
       lowerer.implicitParamTypes !== null &&
-      npmStaticPackageOfPath(expr.getSourceFile().fileName) !== null &&
+      npmStaticPackageOfPath(ts.getSourceFileOfNode(expr).fileName) !== null &&
       (lowerer.typeOf(expr).flags & ts.TypeFlags.Any) !== 0 &&
       left.type.kind === "union"
     ) {
@@ -2601,7 +2698,7 @@ function lowerLogicalPair(lowerer: Lowerer, expr: ts.BinaryExpression, left: IrE
     // When both operands have native checked representations, preserve
     // the deciding value and short-circuit evaluation in that domain.
     if (
-      isJsSourceFile(expr.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       lowerer.dynConvertible(left.type) &&
       lowerer.dynConvertible(right.type)
     ) {

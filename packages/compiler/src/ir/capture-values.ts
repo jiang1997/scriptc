@@ -238,7 +238,7 @@ interface FunctionFacts {
   hoisted: Map<string, IrStmt>;
   /** Bindings called through `callValue` without a receiver. */
   callees: Set<string>;
-  /** Temporal-dead-zone bindings: the statement list holding both the
+  /** TDZ (temporal dead zone) bindings: the statement list holding both the
    * empty `varDecl` and the initializing `assign`, with their indexes. */
   tdzInits: Map<string, { body: readonly IrStmt[]; declared: number; initialized: number }>;
   classCaptured: Set<string>;

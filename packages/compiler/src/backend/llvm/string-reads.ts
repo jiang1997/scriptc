@@ -13,8 +13,8 @@
  * With `scan`, a string that is not proven ASCII is first compared with
  * the runtime's published scan receiver (ScrStrScan, scr_runtime.h): the
  * string an indexed scan converted to UTF-16 units, whose length and units
- * then read inline. Only targets whose runtime state is not thread-local
- * publish it to emitted code.
+ * then read inline. Where the runtime keeps it per thread, the declaration
+ * is thread-local.
  */
 
 import { exactIndexLines, sizeToDouble } from "./common.js";
@@ -53,8 +53,8 @@ export function stringScanType(sz: string): string {
   return `{ ptr, ptr, ${sz} }`;
 }
 
-export function stringScanDecl(sz: string): string {
-  return `@scr_str_scan = external global ${stringScanType(sz)}`;
+export function stringScanDecl(sz: string, threadLocal: boolean): string {
+  return `@scr_str_scan = external ${threadLocal ? "thread_local " : ""}global ${stringScanType(sz)}`;
 }
 
 /** The scan receiver test of `%s`: branches to `hit` with `%scan.n` (its

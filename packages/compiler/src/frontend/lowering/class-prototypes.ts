@@ -1,4 +1,5 @@
 import { dynUndefinedExpr, varRef } from "../../ir/build.js";
+import { builtinClassKind, builtinClassValue } from "./builtins/builtin-class-dyn.js";
 import * as ts from "../ts7/adapter.js";
 import {
   BOOL,
@@ -188,12 +189,16 @@ export function classPrototypeData(
         continue;
       const compiled = classMethodValue(lowerer, access, info, method, locOf(access));
       if (!compiled) continue;
+      // A method value without a checked-dynamic form (an async method's
+      // promise-returning signature) gets no data slot.
+      const boxedValue = lowerer.coerceToExpected(compiled, DYN);
+      if (boxedValue.type.kind !== "dyn") continue;
       const descriptor: IrExpr = {
         kind: "dynObjLit",
         fields: [
           {
             key: { kind: "strLit", value: "value", type: STRING, loc },
-            value: lowerer.coerceToExpected(compiled, DYN),
+            value: boxedValue,
           },
           {
             key: { kind: "strLit", value: "writable", type: STRING, loc },
@@ -450,6 +455,19 @@ export function lowerClassPrototypeData(
     exactClassOfReceiver(lowerer, expr.expression) ??
     (stored?.kind === "classval" ? lowerer.classes.get(stored.className) : undefined);
   if (!info) return null;
+  // EventEmitter.prototype and the stream prototypes: the untyped
+  // constructor's prototype object (builtin-class-dyn.ts).
+  const builtinKind = builtinClassKind(info.def.name);
+  if (builtinKind !== null) {
+    const loc = locOf(expr);
+    return {
+      kind: "dynKeyGet",
+      value: builtinClassValue(builtinKind, loc),
+      key: { kind: "strLit", value: "prototype", type: STRING, loc },
+      type: DYN,
+      loc,
+    };
+  }
   const parent = expr.parent;
   const descriptorKey =
     ts.isCallExpression(parent) &&

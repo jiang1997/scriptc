@@ -44,8 +44,9 @@ test("unreached blockers report in their own group", async () => {
 });
 
 test("WebAssembly modules the build can see report with their sources", async () => {
-  // A resolved path and an inline literal (glue.js), a packaged .wasm
-  // (wasm-fixture-pkg), and package.json's scriptc.wasm list.
+  // A resolved path, a resolved .so shared library and an inline literal
+  // (glue.js), a packaged .wasm (wasm-fixture-pkg), and package.json's
+  // scriptc.wasm list. A resolved .so that is not a module is not reported.
   await expect(report(fixture("wasm/main.ts"))).toMatchFileSnapshot(
     "__snapshots__/coverage-wasm.txt",
   );
@@ -61,6 +62,7 @@ test("WebAssembly modules the build can see report with their sources", async ()
   ).toEqual([
     ["inline", "valid", [], ["inline"]],
     ["tests/coverage-fixtures/wasm/add.wasm", "valid", [], ["path", "config"]],
+    ["tests/coverage-fixtures/wasm/ext.so", "valid", [], ["path"]],
     [
       "tests/coverage-fixtures/wasm/node_modules/wasm-fixture-pkg/lib/core.wasm",
       "invalid",
@@ -70,7 +72,7 @@ test("WebAssembly modules the build can see report with their sources", async ()
     ["tests/coverage-fixtures/wasm/build/generated.wasm", "unsupported", ["simd"], ["config"]],
   ]);
   const envelope = coverageEnvelope(coverage, { compilerVersion: "test" });
-  expect(envelope.wasmModules?.map((m) => m.sha256.length)).toEqual([64, 64, 64, 64]);
+  expect(envelope.wasmModules?.map((m) => m.sha256.length)).toEqual([64, 64, 64, 64, 64]);
 });
 
 test("divergences report as warnings, never as blockers", async () => {

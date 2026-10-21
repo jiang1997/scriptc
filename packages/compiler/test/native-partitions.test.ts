@@ -162,6 +162,31 @@ describe.runIf(helper !== null)("LLVM program partitions", () => {
     });
   }
 
+  test("a table written one element per line keeps the text partitioner and its reuse", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-partitions-table-"));
+    dirs.push(dir);
+    // The emitter writes interface dispatch tables one element per line.
+    const table = [
+      "@table = internal constant [2 x ptr] [",
+      "  ptr @step3,",
+      "  ptr @step9",
+      "]",
+    ].join("\n");
+    const source = (edit: number) =>
+      program(edit, table).replace(
+        "  %total = load i64, ptr @total",
+        "  %entry = load ptr, ptr @table\n  call void %entry(i64 0)\n  %total = load i64, ptr @total",
+      );
+    const cache = join(dir, "cache");
+    const first = await emit(dir, source(0), { outputs: 4, optLevel: "2", cache, name: "first" });
+    expect(await exitCode(dir, first, "first")).toBe(expectedExit());
+    const sources = await cacheEntries(cache, ".bc");
+    const edited = await emit(dir, source(7), { outputs: 4, optLevel: "2", cache, name: "edited" });
+    const after = await cacheEntries(cache, ".bc");
+    expect([...after].filter((entry) => !sources.has(entry))).toHaveLength(1);
+    expect(await exitCode(dir, edited, "edited")).toBe(expectedExit(7));
+  });
+
   test("inputs outside the text partitioner's grammar are still partitioned", async () => {
     const dir = await mkdtemp(join(tmpdir(), "scriptc-partitions-fallback-"));
     dirs.push(dir);

@@ -152,10 +152,14 @@ function nodeOracleArgs(file: string): string[] {
     ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
     : [];
   const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
+  // differential.test.ts's @disallow-code-generation directive.
+  const codegen = directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l))
+    ? ["--disallow-code-generation-from-strings"]
+    : [];
   // --import makes Node load even a CJS entry through its ESM loader,
   // changing an entry throw's uncaughtException origin to unhandledRejection.
   const shims = directiveHead(file).includes("// @no-node-shims") ? [] : ["--import", comptimeShim];
-  return [...transform, ...nodep, ...shims, nodeOracleFile(file)];
+  return [...transform, ...nodep, ...codegen, ...shims, nodeOracleFile(file)];
 }
 
 function programInputs(file: string): string[] {

@@ -56,7 +56,7 @@ export function inlineProgramRequireOf(
   if (!ts.isCallExpression(e) || !ts.isIdentifier(e.expression)) return null;
   const spec = requireSpecOf(e);
   if (spec === null || canonicalBuiltinModule(spec) !== null) return null;
-  const sf = e.getSourceFile();
+  const sf = ts.getSourceFileOfNode(e);
   if (!isCjsJsFile(sf, lowerer.program)) return null;
   if (!isCjsRequireGlobal(lowerer, e.expression)) return null;
   if (createRequireCalleeFileOf(lowerer, e.expression) !== null) return null;
@@ -201,7 +201,7 @@ export function lowerUncompiledRequireCall(
   call: ts.CallExpression,
 ): IrExpr | null {
   if (!ts.isIdentifier(call.expression) || call.expression.text !== "require") return null;
-  const sf = call.getSourceFile();
+  const sf = ts.getSourceFileOfNode(call);
   if (!isCjsJsFile(sf, lowerer.program) || !isCjsRequireGlobal(lowerer, call.expression))
     return null;
   if (createRequireCalleeFileOf(lowerer, call.expression) !== null) return null;
@@ -240,7 +240,7 @@ export function requireNestedPatternsOf(decl: ts.VariableDeclaration): ts.Bindin
   if (!ts.isObjectBindingPattern(decl.name) || decl.initializer === undefined) return [];
   const spec = requireSpecOf(decl.initializer);
   if (spec === null || canonicalBuiltinModule(spec) !== null) return [];
-  if (!isJsSourceFile(decl.getSourceFile())) return [];
+  if (!isJsSourceFile(ts.getSourceFileOfNode(decl))) return [];
   return decl.name.elements.nodes.filter(
     (e) =>
       e.name !== undefined &&

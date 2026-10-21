@@ -20,6 +20,7 @@
  * The decoder never evaluates anything and keeps no module contents beyond
  * the counts and the feature set it reports. It is plain TypeScript that
  * the native compiler also compiles. */
+import { readMemargFlags } from "./module.js";
 
 /** Proposals the summary can name, in report order. The first group is the
  * translatable set; the rest are reported as unsupported. */
@@ -1244,19 +1245,9 @@ class FunctionValidator {
   /** A memarg. A memory other than 0 stops typing (multi-memory). */
   memarg(naturalAlign: number): void {
     const r = this.r;
-    let align = r.u32();
-    let multi = false;
-    if (align >= 64 && align < 128) {
-      align -= 64;
-      multi = true;
-    } else if (align >= 64) {
-      r.malformed("malformed memop flags");
-    }
-    let memory = 0;
-    if (multi) {
-      memory = r.u32();
-      if (memory !== 0) this.otherMemory(memory);
-    }
+    const { align, memory } = readMemargFlags(() => r.u32());
+    if (align < 0) r.malformed("malformed memop flags");
+    if (memory !== 0) this.otherMemory(memory);
     if (this.m.memory64) r.u64();
     else r.u32();
     if (!this.typed) return;
@@ -1840,9 +1831,9 @@ class FunctionValidator {
 
   scanMemarg(): void {
     const r = this.r;
-    const align = r.u32();
-    if (align >= 128) r.malformed("malformed memop flags");
-    if (align >= 64 && r.u32() !== 0) this.m.feature("multi-memory");
+    const { align, memory } = readMemargFlags(() => r.u32());
+    if (align < 0) r.malformed("malformed memop flags");
+    if (memory !== 0) this.m.feature("multi-memory");
     if (this.m.memory64) r.u64();
     else r.u32();
   }

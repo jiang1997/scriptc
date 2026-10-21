@@ -201,12 +201,12 @@ test.for([1, 2, 3])("the darwin suite retains every darwin file with %i shards",
 /** Expands the ${{ }} expressions of a workflow value for one event: string
  * literals, ==, !=, !, &&, || and fromJSON, with matrix.shard left as
  * "{shard}". A value that is a single expression returns its result. */
-function expand(value: string, context: { event: string; macosFull: boolean | null }): unknown {
+function expand(value: string, context: { event: string; macosSuite: string | null }): unknown {
   const evaluate = (expression: string): unknown =>
     new Function(
       `return (${expression
         .replaceAll("github.event_name", JSON.stringify(context.event))
-        .replaceAll("inputs.macos_full", JSON.stringify(context.macosFull))
+        .replaceAll("inputs.macos_suite", JSON.stringify(context.macosSuite))
         .replaceAll("fromJSON", "JSON.parse")});`,
     )();
   const single = /^\$\{\{(.*)\}\}$/s.exec(value);
@@ -240,18 +240,17 @@ test("pull requests run the full suite on Linux and the darwin suite on macOS", 
   ).toBe("native-linux-x64-gnu");
   expect(macos["runs-on"]).toBe("macos-15");
   expect(macos.needs).toContain("native_macos");
-  // Pull requests, pushes to main and plain manual runs run the darwin suite in
-  // three slices; the nightly sweep and manual runs with macos_full run the
+  // Pull requests and manual runs with macos_suite set to darwin run the darwin
+  // suite in three slices; the nightly sweep and other manual runs run the
   // complete suite in ten.
-  for (const [event, macosFull, full] of [
+  for (const [event, macosSuite, full] of [
     ["pull_request", null, false],
-    ["push", null, false],
-    ["workflow_dispatch", false, false],
-    ["workflow_dispatch", true, true],
+    ["workflow_dispatch", "darwin", false],
+    ["workflow_dispatch", "full", true],
     ["schedule", null, true],
   ] as const) {
-    const context = { event, macosFull };
-    const label = `${event} ${macosFull}`;
+    const context = { event, macosSuite };
+    const label = `${event} ${macosSuite}`;
     expect(expand(String(macos.strategy.matrix.shard), context), label).toEqual(
       full ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] : [1, 2, 3],
     );

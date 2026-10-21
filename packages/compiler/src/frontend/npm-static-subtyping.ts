@@ -19,8 +19,8 @@ export function isNpmStaticSubclassArgument(
       symbol.declarations.some(
         (declaration) =>
           (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) &&
-          /\.[cm]?js$/.test(declaration.getSourceFile().fileName) &&
-          npmStaticPackageOfPath(declaration.getSourceFile().fileName) !== null,
+          /\.[cm]?js$/.test(ts.getSourceFileOfNode(declaration).fileName) &&
+          npmStaticPackageOfPath(ts.getSourceFileOfNode(declaration).fileName) !== null,
       )
     );
   };
@@ -50,12 +50,12 @@ export function isNpmStaticSubclassArgument(
   };
   let accepted = false;
   ts.walkPreorder(source, (node) => {
-    if (node.end < diagnostic.pos || node.getStart(source) > diagnostic.end) return "skip";
+    if (node.end < diagnostic.pos || ts.tokenStartOfNode(node) > diagnostic.end) return "skip";
     if (!ts.isCallExpression(node) && !ts.isNewExpression(node)) return undefined;
     const index =
       node.arguments?.nodes.findIndex(
         (argument) =>
-          argument.getStart(source) === diagnostic.pos && argument.end === diagnostic.end,
+          ts.tokenStartOfNode(argument) === diagnostic.pos && argument.end === diagnostic.end,
       ) ?? -1;
     if (index < 0) return undefined;
     const parameter = checker.getResolvedSignature(node)?.getParameters()[index];

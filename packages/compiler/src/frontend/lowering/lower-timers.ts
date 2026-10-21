@@ -393,10 +393,22 @@ function lowerTimerCall(
           );
     // An omitted delay is NaN, Node's undefined: the loop clamps it to
     // 1ms, and mock.timers queues it to run at the next tick.
-    const ms: IrExpr =
+    let ms: IrExpr =
       expr.arguments.nodes.length >= 2
         ? lowerer.lowerExpr(expr.arguments.nodes[1]!)
         : { kind: "numLit", value: NaN, type: F64, loc };
+    // A delay that may be a boolean (execa's `forceKillAfterTimeout = true`
+    // default flowing on to setTimeout): Node converts it with ToNumber
+    // (`after *= 1`).
+    if (ms.type.kind === "bool" || hasBoolArm(lowerer, ms.type)) {
+      ms = {
+        kind: "libCall",
+        fn: "dyn.numberConstructor",
+        args: [lowerer.coerceToExpected(ms, DYN)],
+        type: F64,
+        loc,
+      };
+    }
     if (member === "setInterval") {
       return { kind: "libCall", fn: "timers.setInterval", args: [cb, ms], type: F64, loc };
     }
@@ -420,7 +432,7 @@ function lowerTimerCall(
       lowerer.noLowering(`clearTimeout with ${expr.arguments.nodes.length} arguments`, expr);
     }
     let handle = lowerer.lowerExpr(expr.arguments.nodes[0]!);
-    if (handle.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile())) {
+    if (handle.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const stored = lowerer.declareHiddenLocal("%timer.clear", DYN);
       const ref = varRef(stored.id, DYN, loc);
       handle = {
@@ -509,4 +521,11 @@ function lowerTimerCall(
     return { kind: "libCall", fn: "timers.clearImmediate", args: [handle], type: VOID, loc };
   }
   return null;
+}
+
+function hasBoolArm(lowerer: Lowerer, type: IrType): boolean {
+  return (
+    type.kind === "union" &&
+    (lowerer.unions.get(type.unionId)?.arms.some((arm) => arm.kind === "bool") ?? false)
+  );
 }

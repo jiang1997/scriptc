@@ -192,6 +192,34 @@ test("runtime bitcode imports reach the helper and key the native cache", async 
   expect(calls[1]).toContain("--import-bitcode /pack/a.bc --import-bitcode /pack/b.bc");
 });
 
+test("profiles reach the helper and key the native cache by their bytes", async () => {
+  const pkg = await fakePackage();
+  const base = request(pkg.root, pkg.packageJson, join(pkg.root, "plain.o"));
+  await emitNativeArtifact(base);
+  await emitNativeArtifact({
+    ...base,
+    outputPath: join(pkg.root, "instrumented.o"),
+    profile: { generate: "/profiles/%p.profraw" },
+  });
+  const used = {
+    ...base,
+    outputPath: join(pkg.root, "used.o"),
+    profile: { use: { path: "/profiles/a.profdata", digest: "a".repeat(64) } },
+  };
+  await emitNativeArtifact(used);
+  await emitNativeArtifact({
+    ...used,
+    outputPath: join(pkg.root, "changed.o"),
+    profile: { use: { path: "/profiles/a.profdata", digest: "b".repeat(64) } },
+  });
+  await emitNativeArtifact({ ...used, outputPath: join(pkg.root, "again.o") });
+  const calls = (await readFile(pkg.log, "utf8")).trim().split("\n");
+  expect(calls).toHaveLength(4);
+  expect(calls[0]).not.toContain("--profile-");
+  expect(calls[1]).toContain("--profile-generate /profiles/%p.profraw");
+  expect(calls[2]).toContain("--profile-use /profiles/a.profdata");
+});
+
 test("chunked LLVM input preserves emitted bytes and the native cache identity", async () => {
   const pkg = await fakePackage();
   const first = request(pkg.root, pkg.packageJson, join(pkg.root, "chunks.o"));

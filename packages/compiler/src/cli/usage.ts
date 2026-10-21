@@ -15,6 +15,13 @@ Usage:
                                             contract sidecar JSON beside the archive
   scriptc cache warm [runtime|tls…] verify and load precompiled runtime families
                                             for the current compiler/SDK/target
+  scriptc merge-profiles -o <out.profdata> [--sparse] <profile…>
+                                            merge the raw profiles that
+                                            --profile-generate runs wrote (or
+                                            earlier merged profiles) into one
+                                            profile for --profile-use;
+                                            --sparse leaves out functions
+                                            that never ran (a smaller file)
 
 Options:
   -o, --out <path>   primary output path (default: .scriptc/<name><suffix>)
@@ -46,6 +53,19 @@ Options:
                      a helper process so the parent sees the exit sooner. The
                      helper keeps the executable mapped and its memory charged
                      for up to ~100 ms after exit (opt in; --emit=exe only)
+      --profile-generate <pattern>
+                     Linux: instrument the executable for profile-guided
+                     optimization. Each run writes a raw profile to the
+                     pattern (%p expands to the process id; the
+                     LLVM_PROFILE_FILE environment variable overrides it).
+                     Instrumented programs run slower (--emit=exe only)
+      --profile-use <file.profdata>
+                     optimize with a merged profile (scriptc merge-profiles):
+                     code is laid out, inlined and split by how the profiled
+                     runs used it. Code the profile does not describe, or
+                     describes from an older version of the program, is
+                     optimized as without one (release or speed; --emit=exe
+                     only)
       --keep-llvm    keep generated LLVM IR beside the executable (default)
       --no-keep-llvm delete generated LLVM IR after compiling
       --emit-ir      also write IR beside an executable or library archive;
@@ -99,6 +119,9 @@ export const CLI_OPTIONS = {
   strip: { type: "boolean", default: false },
   "windows-subsystem": { type: "string" },
   "detached-exit": { type: "boolean", default: false },
+  "profile-generate": { type: "string" },
+  "profile-use": { type: "string" },
+  sparse: { type: "boolean", default: false },
   "keep-llvm": { type: "boolean", default: true },
   "emit-ir": { type: "boolean", default: false },
   sanitize: { type: "boolean", default: false },

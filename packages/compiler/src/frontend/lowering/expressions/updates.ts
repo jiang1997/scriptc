@@ -42,6 +42,7 @@ import type { CompoundOp } from "../surfaces.js";
 import { tryLowerExpression } from "./try-lower-expression.js";
 import { hasRuntimeStatics } from "../class-runtime-statics.js";
 import { declareContextLocal } from "../function-context.js";
+import { keyedFieldTarget, keyedFieldWrite, saveKeyedFieldKey } from "./keyed-field-targets.js";
 
 /** Read-modify-write updates read the member first: an unassigned
  * deferred-init receiver throws Node's member-read TypeError. */
@@ -109,7 +110,7 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
       }
       // Match the checked numeric boundary used by JS binary arithmetic.
       const operand =
-        raw.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile())
+        raw.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))
           ? { kind: "dynCheck" as const, value: raw, type: F64, loc }
           : lowerOptionalNumber(lowerer, raw, loc, expr.operand);
       if (operand.type.kind !== "f64") operatorUnsupported(lowerer, expr, "-", [raw.type]);
@@ -260,9 +261,14 @@ export function lowerIncDec(
       (raw.type.kind === "array" || raw.type.kind === "bytes")
     ) {
       const receiver = save(raw, "%incrementArray");
-      const rawIndex = lowerer.lowerExpr(access.argumentExpression);
+      const rawIndex = lowerOptionalNumber(
+        lowerer,
+        lowerer.lowerExpr(access.argumentExpression),
+        locOf(access.argumentExpression),
+        access.argumentExpression,
+      );
       const index = save(
-        rawIndex.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile())
+        rawIndex.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))
           ? { kind: "libCall", fn: "dyn.toNumberCoerce", args: [rawIndex], type: F64, loc }
           : rawIndex,
         "%incrementIndex",
@@ -307,10 +313,13 @@ export function lowerIncDec(
     // class-backed protocol view): the expanded form `o.v = o.v + 1`, its
     // read checked into number like any other read of the member.
     const checkedNumber =
-      !isJsSourceFile(expr.getSourceFile()) &&
+      !isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       raw.type.kind === "dyn" &&
       lowerer.mapTypeOf(lowerer.typeOf(access))?.kind === "f64";
-    if ((isJsSourceFile(expr.getSourceFile()) || checkedNumber) && raw.type.kind === "dyn") {
+    if (
+      (isJsSourceFile(ts.getSourceFileOfNode(expr)) || checkedNumber) &&
+      raw.type.kind === "dyn"
+    ) {
       const receiver = save(raw, "%incrementReceiver");
       const key = save(
         ts.isElementAccessExpression(access)
@@ -337,10 +346,11 @@ export function lowerIncDec(
     }
     const target = ts.isPropertyAccessExpression(access)
       ? lowerer.fieldTarget(access)
-      : symbolFieldTarget(lowerer, access);
+      : (symbolFieldTarget(lowerer, access) ?? keyedFieldTarget(lowerer, access, true));
     if (target && lowerer.dynConvertible(target.fieldType)) {
       checkDeferredMemberReceiver(lowerer, target, access);
       target.obj = save(target.obj, "%incrementReceiver");
+      saveKeyedFieldKey(target, save);
       return finish(lowerer.fieldGetExpr(target, loc, access), (value) =>
         lowerer.fieldSetStmt(
           target,
@@ -350,7 +360,7 @@ export function lowerIncDec(
         ),
       );
     }
-    if (isJsSourceFile(expr.getSourceFile()) && lowerer.dynConvertible(raw.type)) {
+    if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && lowerer.dynConvertible(raw.type)) {
       const receiver = save(lowerer.coerceInto(access.expression, raw, DYN), "%incrementReceiver");
       const key = save(
         ts.isElementAccessExpression(access)
@@ -617,6 +627,7 @@ export function fieldSetStmt(
       };
     }
   }
+  if (target.container === "recordKeyed") return keyedFieldWrite(lowerer, target, value, loc);
   if (target.container === "dynamic")
     return {
       kind: "exprStmt",
@@ -815,7 +826,7 @@ export function lowerFieldCompoundValue(
         rhsNode ? lowerer.lowerExpr(rhsNode) : { kind: "numLit", value: 1, type: F64, loc },
         "%compoundRhs",
       );
-      if (isJsSourceFile(access.getSourceFile()) && lowerer.dynConvertible(rhs.type)) {
+      if (isJsSourceFile(ts.getSourceFileOfNode(access)) && lowerer.dynConvertible(rhs.type)) {
         const numeric = ["-", "*", "/", "%", "**"].includes(op);
         const right = lowerer.coerceToExpected(rhs, DYN);
         const value = save(
@@ -872,12 +883,13 @@ export function lowerFieldCompoundValue(
   const targetOf = (): FieldTarget | null =>
     ts.isPropertyAccessExpression(access)
       ? lowerer.fieldTarget(access)
-      : symbolFieldTarget(lowerer, access);
+      : (symbolFieldTarget(lowerer, access) ?? keyedFieldTarget(lowerer, access, true));
   const target = targetOf();
   if (!target)
     lowerer.unsupported("SC1090", access, "compound assignment to unsupported field targets");
   checkDeferredMemberReceiver(lowerer, target, access);
   target.obj = save(target.obj, "%compoundReceiver");
+  saveKeyedFieldKey(target, save);
   // Accessors observe getter, RHS side effects, then setter, all through
   // the saved receiver.
   const fieldRead = lowerer.fieldGetExpr(target, locOf(access), access);
@@ -908,7 +920,7 @@ export function lowerFieldCompoundValue(
     "%compoundRhs",
   );
   const numericRhs: IrExpr =
-    rhs.type.kind === "dyn" && isJsSourceFile(access.getSourceFile())
+    rhs.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(access))
       ? { kind: "dynCheck", value: rhs, type: F64, loc: rhs.loc }
       : lowerOptionalNumber(lowerer, rhs, loc);
   let value: IrExpr;
@@ -923,7 +935,7 @@ export function lowerFieldCompoundValue(
   } else if (bigintValue) {
     value = bigintValue;
   } else if (
-    (target.fieldType.kind === "dyn" && isJsSourceFile(access.getSourceFile())) ||
+    (target.fieldType.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(access))) ||
     // An untyped right operand: the expanded `o.f = o.f op rhs`; the field
     // write below checks the result into the declared field type.
     (rhs.type.kind === "dyn" &&

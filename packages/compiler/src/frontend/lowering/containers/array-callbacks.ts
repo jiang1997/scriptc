@@ -28,9 +28,12 @@ import {
 import { isJsSourceFile, locOf } from "../../program.js";
 import {
   type SortKeyOrder,
+  type SortKeyRead,
   buildArraySortFn,
   buildSortKeyFn,
   closureKeyOrder,
+  sortKeysId,
+  sortKeysOrder,
 } from "../lower-array-sort.js";
 import {
   arrayIndexPresent,
@@ -304,7 +307,7 @@ function lowerFastCallback(
     fastLoweringDepth > 0 ||
     slow.arity <= elemIndex ||
     !ts.isArrowFunction(argNode) ||
-    isJsSourceFile(argNode.getSourceFile()) ||
+    isJsSourceFile(ts.getSourceFileOfNode(argNode)) ||
     valueT?.kind !== "union" ||
     typeEquals(valueT, elem) ||
     elem.kind === "union" ||
@@ -1155,7 +1158,7 @@ function findResultRetag(
 /** The find-like predicate results whose ToBoolean has a static answer:
  * bool passes through; f64/string by value; checked values and
  * truthy-answerable unions by their runtime kind or arm. */
-function findPredicateOk(lowerer: Lowerer, fnRet: IrType): boolean {
+export function findPredicateOk(lowerer: Lowerer, fnRet: IrType): boolean {
   return (
     fnRet.kind === "bool" ||
     fnRet.kind === "f64" ||
@@ -1171,7 +1174,7 @@ function findPredicateOk(lowerer: Lowerer, fnRet: IrType): boolean {
 /** ToBoolean of a predicate result inside a synthesized HOF helper — the
  * ensureBool subset the find-like path admits (bool through; checked
  * values via dynTest; f64/string/truthy-answerable unions via toBool). */
-function predicateToBoolean(e: IrExpr): IrExpr {
+export function predicateToBoolean(e: IrExpr): IrExpr {
   if (e.type.kind === "bool") return e;
   if (e.type.kind === "dyn")
     return { kind: "dynTest", test: "truthy", value: e, type: BOOL, loc: e.loc };
@@ -1489,7 +1492,7 @@ export function lowerArrayFlatMapCall(
       kind: "dynInvoke",
       recv: { kind: "dynFrom", value: receiver, liveRef: true, type: DYN, loc },
       method: "flatMap",
-      calleeName: access.getText(),
+      calleeName: ts.getTextOfNode(access),
       args: [{ kind: "dynFrom", value: fnArg, type: DYN, loc }],
       type: DYN,
       loc,
@@ -2085,7 +2088,7 @@ export function lowerArraySortCall(
     // Arithmetic on inferred JS values retains a checked result because
     // it can produce BigInt. The sort callback still requires a number.
     const result =
-      fnArg.type.ret.kind === "dyn" && isJsSourceFile(argNode.getSourceFile())
+      fnArg.type.ret.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(argNode))
         ? F64
         : fnArg.type.ret;
     const expected = funcOf(
@@ -2112,8 +2115,10 @@ export function lowerArraySortCall(
     elem,
     elem.kind === "union" ? lowerer.unions.get(elem.unionId)?.arms : undefined,
   );
-  const keyed = native ? recognizedSortKey(lowerer, fnArg, elem) : null;
-  const key = `${method}:${typeKey(elem)}:${arity}${native ? ":native" : ""}${keyed ? `:keyed${keyed.order}${keyed.read ? ":field" : ""}` : ""}`;
+  const keyed = native ? recognizedSortKeys(lowerer, fnArg, elem) : null;
+  const reads = keyed?.every((k) => k.read !== null) ? keyed.map((k) => k.read!) : null;
+  const order = keyed ? sortKeysOrder(keyed) : 0;
+  const key = `${method}:${typeKey(elem)}:${arity}${native ? ":native" : ""}${keyed ? `:keyed${order}${reads ? `:field${reads.length}` : ""}` : ""}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
     helper = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
@@ -2128,41 +2133,46 @@ export function lowerArraySortCall(
         undefinedTag >= 0 ? undefinedTag : null,
         loc,
         native,
-        keyed && { order: keyed.order, key: keyed.read !== null },
+        keyed && { order, key: reads !== null, keys: keyed.length },
       ),
     );
   }
   const args = [receiver, fnArg];
-  if (keyed?.read) args.push(sortKeyReader(lowerer, elem, keyed.read, loc));
+  if (reads) args.push(sortKeyReader(lowerer, elem, reads, loc));
   return { kind: "call", callee: helper, args, type: arrT, loc };
 }
 
-/** The key order of a capture-free comparator closure the runtime can sort
- * by without calling it: over number elements, or over one number field
- * of record or class elements. */
-function recognizedSortKey(lowerer: Lowerer, fnArg: IrExpr, elem: IrType): SortKeyOrder | null {
+/** The keys of a capture-free comparator closure the runtime can sort by
+ * without calling it: number elements themselves, or number fields of
+ * record or class elements (one or several). */
+function recognizedSortKeys(
+  lowerer: Lowerer,
+  fnArg: IrExpr,
+  elem: IrType,
+): readonly SortKeyOrder[] | null {
   const keyed = closureKeyOrder(lowerer.liftedFns, fnArg);
   if (!keyed) return null;
-  if (keyed.read === null) return elem.kind === "f64" ? keyed : null;
+  if (keyed[0]!.read === null) return elem.kind === "f64" ? keyed : null;
   return elem.kind === "record" || elem.kind === "object" ? keyed : null;
 }
 
-/** A zero-capture closure over the shared `(x) => x.field` key reader. */
+/** A zero-capture closure over the shared key reader of these reads
+ * (buildSortKeyFn): `(x) => x.field`, or `(x, j) => key j` for several. */
 function sortKeyReader(
   lowerer: Lowerer,
   elem: IrType,
-  read: NonNullable<SortKeyOrder["read"]>,
+  reads: readonly SortKeyRead[],
   loc: SrcLoc,
 ): IrExpr {
-  const owner = read.kind === "recordGet" ? read.shapeId : read.className;
-  const cacheKey = `sortKey:${typeKey(elem)}:${read.kind}:${owner}:${read.field}`;
+  const cacheKey = `sortKey:${typeKey(elem)}:${sortKeysId(reads.map((read) => ({ order: 1, read })))}`;
   let reader = lowerer.arrHofHelpers.get(cacheKey);
   if (!reader) {
     reader = `%arr.sortKey.${lowerer.arrHofHelpers.size}`;
     lowerer.arrHofHelpers.set(cacheKey, reader);
-    lowerer.liftedFns.push(buildSortKeyFn(reader, elem, read, loc));
+    lowerer.liftedFns.push(buildSortKeyFn(reader, elem, reads, loc));
   }
-  return { kind: "closure", fnName: reader, captures: [], type: funcOf([elem], F64), loc };
+  const params = reads.length > 1 ? [elem, F64] : [elem];
+  return { kind: "closure", fnName: reader, captures: [], type: funcOf(params, F64), loc };
 }
 
 /** `d.filter(pred)` on a dyn receiver: the receiver must BE a dyn array
@@ -2223,7 +2233,7 @@ export function lowerDynArrayFilterCall(
       recv,
       fnArg,
       { kind: "strLit", value: access.name.text, type: STRING, loc },
-      { kind: "strLit", value: access.getText(), type: STRING, loc },
+      { kind: "strLit", value: ts.getTextOfNode(access), type: STRING, loc },
     ],
     type: arrayOf(elemT),
     loc,
@@ -2264,7 +2274,7 @@ export function lowerDynArrayFlatMapCall(
         kind: "dynInvoke",
         recv,
         method: "flatMap",
-        calleeName: access.getText(),
+        calleeName: ts.getTextOfNode(access),
         args: [boxed],
         type: DYN,
         loc,
@@ -2286,7 +2296,7 @@ export function lowerDynArrayFlatMapCall(
       recv,
       fnArg,
       { kind: "strLit", value: access.name.text, type: STRING, loc },
-      { kind: "strLit", value: access.getText(), type: STRING, loc },
+      { kind: "strLit", value: ts.getTextOfNode(access), type: STRING, loc },
     ],
     type: arrayOf(ret.elem),
     loc,

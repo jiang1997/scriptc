@@ -371,6 +371,40 @@ ScrHttpClientReq *scr_http_request_agent(ScrStr *host /*borrowed*/, double port,
                                           double timeout_ms, ScrArr *header_pairs /*borrowed*/,
                                           bool auto_end, const ScrDyn *agent /*borrowed*/,
                                           ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn); /* +1 */
+/* http.request/get with a runtime options record (a RequestOptions
+ * variable, or a literal spreading one or setting socketPath). The walk
+ * reads the record in the ClientRequest constructor's order; https adds
+ * its TLS options (scr_tls.c) and sends through the same path. */
+typedef struct ScrHttpReqOpts {
+  ScrStr *host;          /* +1: hostname || host || "localhost" */
+  double port;           /* < 0: no port option */
+  int default_port;      /* defaultPort, the agent's, or the scheme's */
+  ScrStr *path;          /* +1 */
+  ScrStr *method;        /* +1, upper-cased */
+  double timeout;        /* 0 = none */
+  ScrArr *headers;       /* +1 name/value pairs */
+  ScrDyn *agent;         /* +1, NULL = the global agent */
+  ScrDyn *signal;        /* +1, NULL = none */
+  ScrStr *socket_path;   /* +1, NULL = dial host:port */
+  double max_header_size;
+  bool has_max_header_size;
+  ScrDyn *view;          /* +1 materialized typed record, if any */
+} ScrHttpReqOpts;
+bool scr_http_req_opts_read(const ScrDyn *opts /*borrowed*/, bool secure, const char *api,
+                            ScrHttpReqOpts *o); /* false = exception pending */
+void scr_http_req_opts_free(ScrHttpReqOpts *o);
+void scr_http_req_opts_fence(const char *api, const char *key, const char *hint); /* throws */
+ScrHttpClientReq *scr_http_req_opts_send(ScrHttpReqOpts *o, bool auto_end,
+                                         ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn,
+                                         ScrDyn *(*add_abort)(ScrDyn *signal, ScrDyn *listener),
+                                         void (*wrap)(ScrNetSocket *, void *), void *wrap_ctx,
+                                         ScrStr *pool_key /*borrowed, nullable*/); /* +1 */
+ScrHttpClientReq *scr_http_request_dyn(const ScrDyn *opts /*borrowed*/, bool auto_end,
+                                       ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn,
+                                       ScrDyn *(*add_abort)(ScrDyn *signal, ScrDyn *listener)); /* +1 */
+ScrHttpClientReq *scr_https_request_dyn(const ScrDyn *opts /*borrowed*/, bool auto_end,
+                                        ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn,
+                                        ScrDyn *(*add_abort)(ScrDyn *signal, ScrDyn *listener)); /* +1 */
 #ifdef SCR_RC_AUDIT
 long scr_http_live_count(void);
 #endif

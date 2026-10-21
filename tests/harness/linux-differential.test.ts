@@ -199,6 +199,9 @@ async function runLinuxNode(file: string): Promise<RunResult> {
     ...(directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l))
       ? ["--no-deprecation"]
       : []),
+    ...(directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l))
+      ? ["--disallow-code-generation-from-strings"]
+      : []),
     ...(directiveHead(file).includes("// @no-node-shims")
       ? []
       : ["--import", inContainer(join(repoRoot, "tests/harness/comptime-shim.mjs")), "--import"]),

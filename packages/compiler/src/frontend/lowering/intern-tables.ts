@@ -142,7 +142,7 @@ interface TableTypes {
 /** The key and value types of an InternTable<K, V> checker type. */
 function tableTypes(lowerer: Lowerer, type: ts.Type, blame: ts.Node): TableTypes {
   const parts = type.isUnionType() ? ts.constituentTypes(type) : [type];
-  const table = parts.find((p) => p.getSymbol()?.name === "InternTable");
+  const table = parts.find((p) => ts.symbolNameOf(p.getSymbol()) === "InternTable");
   const args = table ? lowerer.checker.getTypeArguments(table as ts.TypeReference) : [];
   if (args.length !== 2) lowerer.noLowering("InternTable without type arguments", blame);
   const key = lowerer.mapTypeOf(args[0]!);

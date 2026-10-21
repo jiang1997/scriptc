@@ -59,7 +59,7 @@ export function lowerArrayCallback(
   if (
     ts.isIdentifier(argNode) &&
     argNode.text === "Boolean" &&
-    !isJsSourceFile(argNode.getSourceFile()) &&
+    !isJsSourceFile(ts.getSourceFileOfNode(argNode)) &&
     lowerer.isStdlibSymbol(lowerer.resolveValueSymbol(argNode) ?? undefined)
   ) {
     const valueT = lead[0];

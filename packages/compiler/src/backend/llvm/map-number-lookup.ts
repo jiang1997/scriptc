@@ -35,7 +35,8 @@ export function emitNumberMapEntry(host: LlvmEmitterContext, map: string, key: s
   return entry;
 }
 
-/** Load a found entry's value slot as `type` (double, i64 or ptr). */
+/** Load a found entry's value slot as `type` (double, i64 or ptr). The value
+ * is at byte 8 in both entry layouts (%ScrMapEntry, %ScrMapNumEntry). */
 export function emitNumberMapSlot(host: LlvmEmitterContext, entry: string, type: string): string {
   const B = host.B;
   const slot = B.tmp(),
@@ -190,13 +191,65 @@ export function emitNumberMapSetScalar(
 /** Declared by the inline Map/Set iteration steps; its presence makes the
  * emitter define sc_map_iter_entry and sc_map_iter_count (emitter.ts). */
 export const MAP_ITER_DECL = "declare zeroext i1 @scr_map_iter_live(ptr, double)";
+/** Declared by the iteration steps over a number-key Map/Set; its presence
+ * makes the emitter define sc_map_iter_entry_num and sc_map_iter_count. */
+export const MAP_ITER_NUM_DECL = "declare double @scr_map_iter_count(ptr)";
+/** scr_map.h SCR_MAP_NUM_DEAD: a dead number-key entry's key word. */
+export const SCR_MAP_NUM_DEAD = "9218868437227405313";
+
+/** The entry layout a Map or Set of key type `key` stores:
+ * - "num": number keys, whose entries are { key, val } (scr_map.h ScrMapNumEntry);
+ * - "entry": every other typed key, whose entries are { key, val, hash };
+ * - "either": checked (`unknown`) keys. A `Map<unknown, unknown>` or
+ *   `Set<unknown>` cast from a checked value keeps the collection's own
+ *   storage (scr_dyn_native_collection_check), which can have number keys. */
+export type MapEntryLayout = "num" | "entry" | "either";
+
+export function mapEntryLayout(key: IrType): MapEntryLayout {
+  return key.kind === "f64" ? "num" : key.kind === "dyn" ? "either" : "entry";
+}
 
 /** The entry at an iteration index, or null for a tombstone or an index at
- * or past the entry count (the scr_map_iter_live test). */
-export function emitMapIterEntry(host: LlvmEmitterContext, map: string, index: string): string {
+ * or past the entry count (the scr_map_iter_live test). With the "either"
+ * layout, the map's key kind (%ScrMapIx field 1, SCR_MAP_KEY_F64 = 0) picks
+ * the step at run time. */
+export function emitMapIterEntry(
+  host: LlvmEmitterContext,
+  map: string,
+  index: string,
+  layout: MapEntryLayout,
+): string {
+  const B = host.B;
+  const step = (num: boolean): string => {
+    host.declare(num ? MAP_ITER_NUM_DECL : MAP_ITER_DECL);
+    const entry = B.tmp();
+    const helper = num ? "sc_map_iter_entry_num" : "sc_map_iter_entry";
+    B.line(`${entry} = call ptr @${helper}(ptr ${map}, double ${index})`);
+    return entry;
+  };
+  if (layout !== "either") return step(layout === "num");
   host.declare(MAP_ITER_DECL);
-  const entry = host.B.tmp();
-  host.B.line(`${entry} = call ptr @sc_map_iter_entry(ptr ${map}, double ${index})`);
+  const kindPtr = B.tmp(),
+    kind = B.tmp(),
+    isNum = B.tmp();
+  B.line(`${kindPtr} = getelementptr inbounds %ScrMapIx, ptr ${map}, i32 0, i32 1`);
+  B.line(`${kind} = load i8, ptr ${kindPtr}`);
+  B.line(`${isNum} = icmp eq i8 ${kind}, 0`);
+  const numLabel = B.newLabel("mapit.num"),
+    entryLabel = B.newLabel("mapit.entry"),
+    join = B.newLabel("mapit.layout");
+  B.condBr(isNum, numLabel, entryLabel);
+  B.startBlock(numLabel);
+  const numEntry = step(true);
+  const numEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(entryLabel);
+  const otherEntry = step(false);
+  const entryEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(join);
+  const entry = B.tmp();
+  B.line(`${entry} = phi ptr [ ${numEntry}, %${numEnd} ], [ ${otherEntry}, %${entryEnd} ]`);
   return entry;
 }
 
@@ -230,9 +283,10 @@ export function emitMapIterSlot(
   access: "f64" | "bool" | "ref",
   type: IrType,
   runtime: { decl: string; symbol: string },
+  layout: MapEntryLayout,
 ): string {
   const B = host.B;
-  const entry = emitMapIterEntry(host, map, index);
+  const entry = emitMapIterEntry(host, map, index, layout);
   const found = B.tmp();
   B.line(`${found} = icmp ne ptr ${entry}, null`);
   const hit = B.newLabel("mapit.hit"),

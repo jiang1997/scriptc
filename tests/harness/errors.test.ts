@@ -855,6 +855,69 @@ try {
   });
 });
 
+// A curve Node lists in crypto.getCurves() but the runtime does not
+// implement throws a coded SC2020 error naming the curve when the name is
+// computed; literal names are refused at compile time (node-types-fenced).
+describe("unimplemented ECDH curves", () => {
+  test("a computed curve name throws SC2020 naming the curve", async () => {
+    const r = await compileAndRun(
+      "ecdh-computed-curve",
+      `import { createECDH, ECDH } from "node:crypto";
+const size = ["1", "6", "3"].join("");
+function report(error: unknown): void {
+  const e = error as Error & { code?: string };
+  console.log(e.name, e.code, e.message);
+}
+try {
+  createECDH("sect" + size + "k1");
+} catch (error) {
+  report(error);
+}
+try {
+  ECDH.convertKey(Buffer.from([0]), "sect" + size + "k1");
+} catch (error) {
+  report(error);
+}
+try {
+  createECDH("sect" + size + "x1");
+} catch (error) {
+  report(error);
+}
+`,
+    );
+    expect(r.exitCode).toBe(0);
+    const supported =
+      "has no native implementation; the supported curves are prime192v1, secp224r1, prime256v1, " +
+      "secp384r1, secp521r1, secp192k1, secp224k1, secp256k1, brainpoolP256r1, brainpoolP384r1 and " +
+      "brainpoolP512r1";
+    expect(r.stdout).toBe(
+      `Error SC2020 The curve 'sect163k1' ${supported}\n` +
+        `Error SC2020 The curve 'sect163k1' ${supported}\n` +
+        "TypeError ERR_CRYPTO_INVALID_CURVE Invalid EC curve name\n",
+    );
+    expect(r.stderr).toBe("");
+  });
+
+  test("ECDH property reads and writes throw SC2020", async () => {
+    const r = await compileAndRun(
+      "ecdh-properties",
+      `const crypto = require("node:crypto");
+const ecdh = crypto.createECDH("prime256v1");
+for (const run of [() => ecdh.getPublicKey.name, () => { ecdh.custom = 1; }]) {
+  try {
+    run();
+  } catch (e) {
+    console.log(e.name, e.code);
+  }
+}
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("Error SC2020\nError SC2020\n");
+  });
+});
+
 // Node formats an unknown output encoding with %s, which prints a
 // function's source text and calls a toString the encoding's class
 // defines. The cipher runtime has neither, so both throw a coded SC2020
@@ -1040,7 +1103,7 @@ describe("refused statements in speculatively lowered JavaScript functions", () 
       `(function () {
   var root = this;
   console.log("before");
-  console.log(root === eval("this"));
+  process.on("__proto__", () => root);
   console.log("after");
 }).call(this);
 `,
@@ -1051,7 +1114,7 @@ describe("refused statements in speculatively lowered JavaScript functions", () 
       "speculative-apply",
       `(function () {
   console.log("before");
-  console.log(typeof eval("1"));
+  process.on("__proto__", () => {});
 }).apply(null, []);
 `,
       "before\n",
@@ -1062,7 +1125,7 @@ describe("refused statements in speculatively lowered JavaScript functions", () 
       `class Base {}
 class Derived extends (function () {
   console.log("before");
-  console.log(typeof eval("1"));
+  process.on("__proto__", () => {});
   return Base;
 })() {}
 console.log(typeof Derived);
@@ -1076,7 +1139,7 @@ console.log(typeof Derived);
     expect(r.stdout).toBe(stdout);
     expect(r.stderr).toMatch(
       new RegExp(
-        `^Uncaught Error: values of type '\\(x: string\\) => any' cannot be compiled: .* \\[SC2009 at .*${name}\\.cjs:${line}\\]\\n$`,
+        `^Uncaught Error: 'process\\.on\\("__proto__", \\.\\.\\.\\)' is part of the standard library types but has no scriptc lowering yet \\[SC2020 at .*${name}\\.cjs:${line}\\]\\n$`,
       ),
     );
   });
@@ -1514,7 +1577,6 @@ describe("builtin constructor values (JS lane)", () => {
       ["Date.prototype", "Date.prototype"],
       ["RegExp.prototype", "RegExp.prototype"],
       ["Set.prototype", "Set.prototype"],
-      ["Promise.prototype", "Promise.prototype"],
       ["WeakMap.prototype", "WeakMap.prototype"],
       ["WeakSet.prototype", "WeakSet.prototype"],
       ["Date.prototype.getYear", "Date.prototype.getYear"],
@@ -1547,6 +1609,8 @@ function report(label, e) {
 ${reads.map(([label, read]) => `try { const value = ${read}; console.log(${JSON.stringify(label)}, "read", typeof value); } catch (e) { report(${JSON.stringify(label)}, e); }`).join("\n")}
 console.log(Date.length, RegExp.length, Promise.length, Object.length, Map.length, Set.length);
 console.log(Date.name, Map.name, Map.constructor === Function, Object.constructor === Function);
+const promisePrototype = Promise.prototype;
+console.log(typeof promisePrototype, typeof promisePrototype.then, promisePrototype.constructor === Promise);
 `;
     const r = await compileAndRun("builtin-constructor-members", source, "cjs");
     expect(r.stderr).toBe("");
@@ -1561,7 +1625,12 @@ console.log(Date.name, Map.name, Map.constructor === Function, Object.constructo
         ),
       ),
     );
-    expect(lines.slice(reads.length)).toEqual(["7 2 1 1 0 0", "Date Map true true"]);
+    // Promise.prototype reads as an object holding the runtime's methods.
+    expect(lines.slice(reads.length)).toEqual([
+      "7 2 1 1 0 0",
+      "Date Map true true",
+      "object function true",
+    ]);
   });
 });
 
@@ -1623,6 +1692,38 @@ await crypto.subtle.importKey("jwk", { kty: "oct", k: "c2VjcmV0" }, { name: "HMA
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
       /^Uncaught Error: 'crypto\.subtle\.importKey with the 'jwk' key format' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+    );
+  });
+});
+
+describe("inspecting error subclasses with properties created at run time (JS lane)", () => {
+  test("an instance whose constructor created a property is a named fence", async () => {
+    // Node prints `[Conditional [Error]: m] { extra: 'x' }`. The property
+    // lives in the instance's property bag, which the error rendering does
+    // not read, so the instance refuses instead of printing a partial
+    // object. One without such a property prints as Node prints it.
+    const r = await compileAndRun(
+      "error-subclass-runtime-properties",
+      `import * as util from "node:util";
+class Conditional extends Error {
+  constructor(message, extra) {
+    super(message);
+    if (extra) this.extra = extra;
+  }
+}
+const plain = new Conditional("plain");
+plain.stack = "";
+console.log(util.inspect(plain));
+const extra = new Conditional("extra", "x");
+extra.stack = "";
+console.log(util.inspect(extra));
+`,
+      "mjs",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("[Conditional [Error]: plain]\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: inspecting a 'Conditional' error with properties created at run time is not supported yet \[SC2020[^\]]*\]\n$/,
     );
   });
 });

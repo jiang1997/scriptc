@@ -23,7 +23,7 @@ export function mentionsReceiver(node: ts.Node): boolean {
       found = true;
       return;
     }
-    child.forEachChild(visit);
+    ts.forEachChild(child, visit);
   };
   visit(node);
   return found;
@@ -68,9 +68,9 @@ function containsReturn(node: ts.Node): boolean {
       found = true;
       return;
     }
-    child.forEachChild(visit);
+    ts.forEachChild(child, visit);
   };
-  node.forEachChild(visit);
+  ts.forEachChild(node, visit);
   return found;
 }
 
@@ -100,7 +100,7 @@ export function constructionEscape(inputs: ConstructionInputs): ConstructionEsca
       return !(ts.isIdentifier(node.name) && assigned.has(name) && inputs.isField(name));
     }
     let found = false;
-    node.forEachChild((child) => {
+    ts.forEachChild(node, (child) => {
       if (!found && mentionsReceiver(child)) found = exposes(child, depth);
     });
     return found;

@@ -175,7 +175,7 @@ export function tscInteropDefaultValueOf(
 export function isDeadTscHelperDecl(lowerer: Lowerer, stmt: ts.Statement): boolean {
   const name = tscHelperDeclName(stmt);
   if (name === null) return false;
-  const sf = stmt.getSourceFile();
+  const sf = ts.getSourceFileOfNode(stmt);
   const helperSpans = new Map<string, ts.Statement>();
   for (const s of sf.statements.nodes) {
     const n = tscHelperDeclName(s);
@@ -192,11 +192,11 @@ export function isDeadTscHelperDecl(lowerer: Lowerer, stmt: ts.Statement): boole
         const parent = node.parent;
         if (parent !== undefined && ts.isVariableDeclaration(parent) && parent.name === node)
           return undefined;
-        const at = node.getStart(sf);
-        if (at >= decl.getStart(sf) && at < decl.getEnd()) return undefined;
+        const at = ts.tokenStartOfNode(node);
+        if (at >= ts.tokenStartOfNode(decl) && at < decl.end) return undefined;
         for (const [other, otherDecl] of helperSpans) {
           if (other !== helper && dead.has(other)) {
-            if (at >= otherDecl.getStart(sf) && at < otherDecl.getEnd()) return undefined;
+            if (at >= ts.tokenStartOfNode(otherDecl) && at < otherDecl.end) return undefined;
           }
         }
         const call = parent;

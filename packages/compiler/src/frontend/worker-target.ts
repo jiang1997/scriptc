@@ -84,7 +84,8 @@ export function isWorkerConstructor(program: ts.Program, expression: ts.Expressi
 
 export function workerModulePath(program: ts.Program, expression: ts.Expression): string | null {
   if (ts.isIdentifier(expression) && expression.text === "__filename") {
-    if (isNodeGlobal(program, expression)) return resolve(expression.getSourceFile().fileName);
+    if (isNodeGlobal(program, expression))
+      return resolve(ts.getSourceFileOfNode(expression).fileName);
   }
   const value = staticForkString(program, expression);
   if (value === null) return null;

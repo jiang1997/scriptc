@@ -8,6 +8,7 @@ import type { Ts7FileSystem } from "./rpc-filesystem.js";
 import { Ts7SourceParser, type Ts7SourceKind } from "./source-parser.js";
 import { closeSourceParser, parseSourceFile } from "./source-parser-node.js";
 import * as ts from "./syntax.js";
+import { getTextOfNode, tokenStartOfNode } from "./node-functions.js";
 
 const parsers: Ts7SourceParser[] = [];
 const directories: string[] = [];
@@ -46,9 +47,9 @@ test("each parse owns its text and nodes across same-path edits, deletion and cl
   expect(restored.text).toBe(first.text);
   parser.close();
   parser.close();
-  expect(first.statements.nodes[0]!.getText()).toBe("export const first = 1;");
+  expect(getTextOfNode(first.statements.nodes[0]!)).toBe("export const first = 1;");
   expect(second.statements.nodes[0]!.parent).toBe(second);
-  expect(other.statements.nodes[0]!.getText()).toBe("exports.third = 3;");
+  expect(getTextOfNode(other.statements.nodes[0]!)).toBe("exports.third = 3;");
   expect(() => parser.parse("late.ts", "", "ts")).toThrow("closed");
 });
 
@@ -114,9 +115,9 @@ for (const { name, kind, source } of syntaxCases) {
     expect(file.isDeclarationFile).toBe(oracle.isDeclarationFile);
     expect(
       file.statements.nodes.map((statement) => ({
-        start: statement.getStart(),
+        start: tokenStartOfNode(statement),
         end: statement.end,
-        text: statement.getText(),
+        text: getTextOfNode(statement),
       })),
     ).toEqual(
       oracle.statements.map((statement) => ({
@@ -198,7 +199,11 @@ test("JSDoc callable types cannot replace method body views", () => {
   const expected = oracle.statements[0]!;
   if (!ts.isClassDeclaration(native) || !ts5.isClassDeclaration(expected))
     throw new Error("expected class");
-  expect(native.members.nodes.map((member) => member.body?.getText())).toEqual(
+  expect(
+    native.members.nodes.map((member) =>
+      member.body === undefined ? undefined : getTextOfNode(member.body),
+    ),
+  ).toEqual(
     expected.members.map((member) =>
       ts5.isMethodDeclaration(member) ? member.body?.getText() : undefined,
     ),
@@ -231,7 +236,7 @@ test("a parser starts a new server once it has parsed its source budget, and ear
   expect(servers).toHaveLength(2);
   const third = parser.parse("b.ts", "export const b = 3;", "ts");
   expect(servers).toHaveLength(2);
-  expect(first.statements.nodes[0]!.getText()).toBe(`export const a = ${"1 + ".repeat(20)}1;`);
-  expect(second.statements.nodes[0]!.getText()).toBe("export const b = 2;");
-  expect(third.statements.nodes[0]!.getText()).toBe("export const b = 3;");
+  expect(getTextOfNode(first.statements.nodes[0]!)).toBe(`export const a = ${"1 + ".repeat(20)}1;`);
+  expect(getTextOfNode(second.statements.nodes[0]!)).toBe("export const b = 2;");
+  expect(getTextOfNode(third.statements.nodes[0]!)).toBe("export const b = 3;");
 });

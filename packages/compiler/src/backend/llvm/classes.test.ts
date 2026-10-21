@@ -75,17 +75,25 @@ test("releases split into an inlinable fast path and an out-of-line remainder", 
   const llvm = emitLlvmModule(mod, { pointerBits: 64 });
   const body = (name: string): string =>
     new RegExp(`^define internal void @${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(llvm)?.[0] ?? "";
-  // A hierarchy rooted in the program: a surviving release decrements and
-  // takes the possible-root step without loading the vtable.
+  // A hierarchy rooted in the program: a surviving release decrements the
+  // count (the low half of the rc word, which keeps the class id in its high
+  // half) and takes the possible-root step without loading the vtable.
   const fast = body(mangleClassRelease("Node"));
-  expect(fast).toContain("%shared = icmp ult i64 %rcm2, -3");
+  expect(fast).toContain("%shared = icmp ult i32 %rcm2, -3");
   expect(fast).toContain("load i32, ptr %bufp");
   expect(fast).toContain(`call void @${mangleClassRelease("Node")}_slow(ptr %o)`);
   expect(fast).not.toContain("%ScrVt");
   // Only the last reference dispatches, from a noinline remainder.
   const slow = body(`${mangleClassRelease("Node")}_slow`);
   expect(slow).toMatch(/noinline/);
+  // The class id indexes the hierarchy's vtable array.
+  expect(slow).toContain("%vt.id = load i32, ptr %vt.idp");
+  expect(slow).toContain("ptr @sc_vta_Node, i64 0, i64 %vt.ix64");
   expect(slow).toContain("getelementptr inbounds %ScrVt, ptr %vt, i64 0, i32 2");
+  // 32-bit targets keep the vtable word.
+  const wasm = emitLlvmModule(mod, { pointerBits: 32 });
+  expect(wasm).toContain("; class Node (vt at 1)");
+  expect(wasm).not.toContain("@sc_vta_Node");
 });
 
 test("ProgramLifetime hierarchies are never freed and take no reference counts", () => {
@@ -121,9 +129,11 @@ test("ProgramLifetime hierarchies are never freed and take no reference counts",
     expect(body(mangleClassRetain(cls)), cls).toMatch(/entry:\n {2}ret ptr %o\n}/);
     expect(body(mangleClassRelease(cls)), cls).toMatch(/entry:\n {2}ret void\n}/);
     // new: no collector header (no descriptor, no scr_cyc_alloc) and the
-    // program-lifetime count 2^63, not SIZE_MAX (which means published).
+    // program-lifetime count 2^31 under the class id (Node's preorder number
+    // 0 + 1, Leaf's 1 + 1), not SIZE_MAX (which means published).
     const nw = body(mangleClassNew(cls));
-    expect(nw, cls).toContain("store i64 -9223372036854775808, ptr %o");
+    const id = cls === "Node" ? 1 : 2;
+    expect(nw, cls).toContain(`store i64 ${id * 2 ** 32 + 2 ** 31}, ptr %o.vt`);
     expect(nw, cls).not.toContain("store i64 -1, ptr %o");
     expect(nw, cls).not.toContain("scr_cyc_alloc");
     expect(llvm, cls).not.toContain(`@${mangleClassTrace(cls)}.cyctype`);
@@ -206,13 +216,15 @@ test("published ProgramLifetime instances use the published mark every other obj
   // a refusal restores the program-lifetime count); untraced, so it never
   // leaves a collector buffer.
   expect(llvm).toContain("call void @scr_publish(ptr");
-  expect(llvm).toMatch(/@scr_pub_mark\(ptr %ctx, ptr %o, i1 false, i32 4\)/);
-  // The frozen-object guard of the store tests the count against SIZE_MAX:
-  // an unpublished instance (2^63) stays writable.
+  // Kind 4 (an object) | 0x100 (the rc word keeps a class id: the mark
+  // writes only the count).
+  expect(llvm).toMatch(/@scr_pub_mark\(ptr %ctx, ptr %o, i1 false, i32 260\)/);
+  // The frozen-object guard of the store tests the count against UINT32_MAX:
+  // an unpublished instance (2^31) stays writable.
   const store =
     llvm.split(/^define /m).find((fn) => fn.includes("call void @scr_throw_published_field(")) ??
     "";
-  expect(store).toMatch(/icmp eq i64 %\S+, -1/);
+  expect(store).toMatch(/icmp eq i32 %\S+, -1/);
   expect(store).toContain("call void @scr_publish(ptr");
   // 32-bit targets use 2^31.
   const llvm32 = emitLlvmModule(mod, { pointerBits: 32 });

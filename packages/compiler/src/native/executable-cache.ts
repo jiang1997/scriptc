@@ -265,6 +265,9 @@ export function openNativeExecutableCache(
     cache === null ||
     toolchain.target.platform !== "darwin" ||
     options.sanitize ||
+    // The key names a profile by path, not by its bytes.
+    options.profileGenerate !== undefined ||
+    options.profileUse !== undefined ||
     process.env["SCRIPTC_LINKER"] !== undefined ||
     process.env["SCRIPTC_LLVM_HELPER"] !== undefined ||
     toolchain.linkerArgs.length !== 0 ||

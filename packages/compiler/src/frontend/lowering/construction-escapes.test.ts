@@ -16,7 +16,7 @@ function analyze(source: string, options: { derived?: boolean; baseEscapes?: boo
   const ctor = cls.members.nodes.find(ts.isConstructorDeclaration) ?? null;
   const fields = cls.members.nodes
     .filter(ts.isPropertyDeclaration)
-    .map((member) => ({ name: member.name.getText(), initializer: member.initializer }));
+    .map((member) => ({ name: ts.getTextOfNode(member.name), initializer: member.initializer }));
   const fieldNames = new Set(fields.map((field) => field.name));
   return constructionEscape({
     ctor,
@@ -30,7 +30,7 @@ function analyze(source: string, options: { derived?: boolean; baseEscapes?: boo
       const name = call.expression.name.text;
       const method = cls.members.nodes.find(
         (member): member is ts.MethodDeclaration =>
-          ts.isMethodDeclaration(member) && member.name.getText() === name,
+          ts.isMethodDeclaration(member) && ts.getTextOfNode(member.name) === name,
       );
       const isPrivate =
         method !== undefined &&

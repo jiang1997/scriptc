@@ -444,16 +444,17 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
     }
   }
 
-  // ── the WebAssembly global: every reached use refuses (webAssemblyDiag) ─
+  // ── the WebAssembly global (builtins/webassembly.ts, wasm/translate.ts):
+  // the core API lowers over modules translated at build time; the rest
+  // refuses at each use (webAssemblyDiag) ─
   {
     const refusal = webAssemblyDiag("WebAssembly", { file: "", start: 0, end: 0 });
     add({
       id: "stdlib.webassembly",
       kind: "stdlib",
       name: "globalThis.WebAssembly",
-      status: "unsupported",
-      code: refusal.code,
-      ...(refusal.hint !== undefined ? { note: refusal.hint } : {}),
+      status: "static",
+      note: `compile, instantiate, validate, the Module, Instance, Memory, Table and Global constructors, Module.imports, exports and customSections, instanceof, the error classes, exports, imports and Module transfer to workers, over the modules translated at build time; the rest refuses with ${refusal.code} (${refusal.hint ?? ""})`,
     });
   }
 

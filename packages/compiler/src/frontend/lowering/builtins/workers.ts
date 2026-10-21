@@ -174,10 +174,10 @@ function propertyNameText(name: ts.PropertyName): string | undefined {
 function isWorkerThreadsClass(lowerer: Lowerer, node: ts.Expression, name: string): boolean {
   const t = lowerer.checker.getTypeAtLocation(node);
   const sym = t.getSymbol();
-  if (sym?.name !== name) return false;
+  if (sym === undefined || ts.symbolName(sym) !== name) return false;
   return sym.declarations.some((d) => {
     if (!ts.isClassDeclaration(d) && !ts.isInterfaceDeclaration(d)) return false;
-    if (!lowerer.isStdlibFile(d.getSourceFile())) return false;
+    if (!lowerer.isStdlibFile(ts.getSourceFileOfNode(d))) return false;
     let up: ts.Node | undefined = d.parent;
     while (up) {
       if (ts.isModuleDeclaration(up) && ts.isStringLiteral(up.name))

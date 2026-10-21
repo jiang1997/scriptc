@@ -1,4 +1,10 @@
 - **Streams and readline:** Stream chunks are Buffers or strings.
+  `NodeJS.ReadableStream` and `NodeJS.WritableStream`, and `stream.Readable` and `stream.Writable` under `@types/node`, accept every stream: when a program passes file, zlib, or `node:stream` streams through them, child-process pipes and `process.stdout` and `process.stderr` join those streams as `Readable` and `Writable` instances.
+  `readable.pipe(process.stdout)` and `readable.pipe(process.stderr)` compile and, as in Node, do not end the process stream.
+  When an untyped value reaches `NodeJS.ReadableStream` or `NodeJS.WritableStream`, those two interfaces hold any value, so JavaScript stream objects (constructor-function streams, plain objects with `on` and `pipe`) pass through TypeScript functions typed with them and come back to JavaScript as the same objects.
+  Member calls on such a value use the native stream when it is one and call the object's own members otherwise; `readable.pipe()` into a JavaScript destination follows Node's pipe protocol.
+  A `pipeline` stage and a `for await` source that arrive as untyped values must be native streams at run time; other values throw a not-supported error.
+  Native streams expose no `emit` to JavaScript, so a JavaScript stream whose own `pipe()` emits on its destination (the legacy `Stream` pipe) cannot pipe into one.
   `Readable.from` accepts arrays, Sets, Map and Set iterators, generators, async generators, and class iterables and async iterables whose values are strings or Buffers, and in JavaScript any iterable or async iterable of them; a stream that mixes strings and Buffers is unsupported.
   In JavaScript, a sync iterator value with a `then` method that is not a promise, and an object whose `[Symbol.asyncIterator]` or `[Symbol.iterator]` method is a generator method, are unsupported.
   Object-mode streams of other values (including `Readable.from` over a `Map`, whose values are entry arrays) are unsupported.
@@ -11,6 +17,7 @@
   `stream.compose` accepts two or more streams, or one `Duplex`; functions, iterables, and web streams as stages are unsupported, and the `ERR_INVALID_ARG_VALUE` message for a stream that is no longer readable or writable names the stream's class instead of printing the stream.
   `pipeline` from `node:stream/promises` accepts a trailing `{ signal, end }` object, and `finished` accepts `readable`, `writable`, `error`, `cleanup`, and `signal` options, with boolean literals for the flags.
   Stream constructors accept a `signal` option in an options object literal, and `stream.addAbortSignal` accepts any stream.
+  A `transform` or `flush` option callback whose completion callback types `data` as `any`, as @types/node's `TransformCallback` does, may pass a Buffer, a string, or nothing; any other value throws a TypeError where the callback is called, instead of Node's `ERR_INVALID_ARG_TYPE` stream error.
   `node:readline` and `node:readline/promises` (also reached as `readline.promises`) interfaces, from `createInterface(options)` or `createInterface(input, output, completer, terminal)`, read `process.stdin` or a readable stream: `question`, `prompt`, `write` (with a key object literal of `name`, `ctrl`, `meta`, and `shift`), `pause`, `resume`, `'line'`/`'close'`/`'pause'`/`'resume'`/`'error'`/`'history'`/`'SIGINT'`/`'SIGTSTP'`/`'SIGCONT'` listeners, and `for await` compile.
   The `history`, `historySize`, `removeHistoryDuplicates`, `completer`, `tabSize`, and `escapeCodeTimeout` options are validated as in Node.
   With `terminal: true`, or with no `terminal` option and `process.stdout` as the output when it is a TTY, the interface runs Node's terminal mode: the editing keys, the kill ring, undo and redo, history recording and recall, Tab completion through the completer, Ctrl+C, Ctrl+D, and Ctrl+Z, `TERM=dumb`, and the same escape sequences written to the output.
@@ -26,3 +33,4 @@
   The `readline/promises` `Readline` class writes to the same outputs.
   `readline.emitKeypressEvents` emits `'keypress'` events on `process.stdin` or a readable stream, shared with terminal interfaces on that stream as in Node; a listener's first parameter must admit `undefined`, which it receives for escape sequences.
   Chained listener registration is unsupported.
+  `node:stream/web` exports the same `ReadableStream` class as the global; its other classes are unsupported.

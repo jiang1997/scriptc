@@ -250,7 +250,7 @@ export function lowerFsLadderCall(
     );
   }
   if (bi.module !== "fs" && bi.module !== "fs/promises") return null;
-  if (!isJsSourceFile(expr.getSourceFile())) return null;
+  if (!isJsSourceFile(ts.getSourceFileOfNode(expr))) return null;
   const args = expr.arguments.nodes;
   if (args.some(ts.isSpreadElement)) return null;
   // Every ladder argument crosses as a dyn value; an argument that
@@ -1580,7 +1580,7 @@ export function lowerDirentMethodCall(
   if (call.questionDotToken || access.questionDotToken) return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const recvSym = lowerer.typeOf(access.expression).getSymbol();
-  if (recvSym?.name !== "Dirent") return null;
+  if (recvSym === undefined || ts.symbolName(recvSym) !== "Dirent") return null;
   const receiver = lowerer.lowerExpr(access.expression);
   if (receiver.type.kind !== "record") return null;
   const shape = lowerer.shapes.get(receiver.type.shapeId);

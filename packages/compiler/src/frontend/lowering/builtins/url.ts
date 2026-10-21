@@ -842,7 +842,7 @@ export function lowerLegacyUrlCall(
   if (bi.member === "domainToASCII" || bi.member === "domainToUnicode") {
     args.push({ kind: "boolLit", value: expr.arguments.nodes.length === 0, type: BOOL, loc });
   } else {
-    const warn = !insideNodeModules(expr.getSourceFile().fileName);
+    const warn = !insideNodeModules(ts.getSourceFileOfNode(expr).fileName);
     args.push({ kind: "boolLit", value: warn, type: BOOL, loc });
   }
   return { kind: "libCall", fn: fn.fn, args, type: fn.result, loc };

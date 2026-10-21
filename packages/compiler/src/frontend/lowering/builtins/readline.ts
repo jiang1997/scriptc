@@ -46,10 +46,10 @@ function isReadlineModule(spec: string | null): boolean {
 export function isReadlineTyped(lowerer: Lowerer, node: ts.Expression): boolean {
   const t = lowerer.checker.getTypeAtLocation(node);
   const sym = t.getAliasSymbol() ?? t.getSymbol();
-  if (sym?.name !== "Interface") return false;
+  if (sym === undefined || ts.symbolName(sym) !== "Interface") return false;
   return sym.declarations.some((d) => {
     if (!ts.isClassDeclaration(d) && !ts.isInterfaceDeclaration(d)) return false;
-    if (!lowerer.isStdlibFile(d.getSourceFile())) return false;
+    if (!lowerer.isStdlibFile(ts.getSourceFileOfNode(d))) return false;
     return isReadlineModule(ambientModuleOf(d));
   });
 }
@@ -74,7 +74,7 @@ const RL_EVENT_LIST =
  * readline/promises question. */
 function returnsPromise(lowerer: Lowerer, call: ts.CallExpression): boolean {
   const t = lowerer.checker.getTypeAtLocation(call);
-  return (t.getSymbol()?.name ?? "") === "Promise";
+  return (ts.symbolNameOf(t.getSymbol()) ?? "") === "Promise";
 }
 
 /** The `{ signal }` options argument of the promise question: the signal
@@ -107,10 +107,10 @@ function questionSignal(lowerer: Lowerer, node: ts.Expression | undefined): ts.E
 function isReadlineUiTyped(lowerer: Lowerer, node: ts.Expression): boolean {
   const t = lowerer.checker.getTypeAtLocation(node);
   const sym = t.getAliasSymbol() ?? t.getSymbol();
-  if (sym?.name !== "Readline") return false;
+  if (sym === undefined || ts.symbolName(sym) !== "Readline") return false;
   return sym.declarations.some((d) => {
     if (!ts.isClassDeclaration(d) && !ts.isInterfaceDeclaration(d)) return false;
-    if (!lowerer.isStdlibFile(d.getSourceFile())) return false;
+    if (!lowerer.isStdlibFile(ts.getSourceFileOfNode(d))) return false;
     const spec = ambientModuleOf(d);
     return spec === "readline/promises" || spec === "node:readline/promises";
   });

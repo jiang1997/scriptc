@@ -29,6 +29,20 @@ void *scr_promise_retain_v(void *p);
 void scr_promise_release_v(void *p);
 
 typedef struct ScrFiber ScrFiber;
+/* Bytes of each async fiber's native stack (scr_async.c), mapped without a
+ * guard page: compiled code checks scr_stack_guard instead, which sits
+ * scr_stack_guard_for's reserve above the mapping's start. Deep enough for
+ * ordinary recursion inside async bodies and generators once that reserve
+ * is taken off; idle and shallow fibers only touch the pages they use.
+ * AddressSanitizer's larger frames get more. */
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SCR_FIBER_STACK (8 * 1024 * 1024)
+#endif
+#endif
+#ifndef SCR_FIBER_STACK
+#define SCR_FIBER_STACK (512 * 1024)
+#endif
 /* Spawn + run eagerly to the first suspension; returns the promise, +1. */
 ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack);
 /* `await f(...)` of a fiber-backed async f: spawn and await in one call,

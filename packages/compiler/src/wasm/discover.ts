@@ -6,7 +6,9 @@
  * 1. path: a `.wasm` path the compiler resolves from the source text
  *    (`require.resolve`, `createRequire(...).resolve`, `import.meta.resolve`,
  *    `new URL("./x.wasm", import.meta.url)`, and `path.join(__dirname, ...)`
- *    or `__dirname + "/x.wasm"`);
+ *    or `__dirname + "/x.wasm"`), or a `.so` path spelled the same ways
+ *    whose file is a module (WebAssembly shared libraries, such as
+ *    quickjs-wasi's extensions);
  * 2. inline: a string literal that decodes as base64 to a module, or an
  *    array literal of its bytes;
  * 3. package: every `.wasm` file shipped by a reached npm package whose
@@ -28,6 +30,9 @@ import {
   trackedReadFile,
 } from "../frontend/input-tracker.js";
 import { analyzeWasm, isWasmHeader, type WasmModuleSummary } from "./binary.js";
+import { decodeBase64 } from "./base64.js";
+
+export { decodeBase64 };
 
 export type WasmSourceKind = "path" | "inline" | "package" | "config";
 
@@ -56,6 +61,9 @@ export interface WasmDiscoveryInput {
   configured: readonly string[];
   /** require.resolve from `fromFile`, or null when it does not resolve. */
   resolveRequest: (fromFile: string, specifier: string) => string | null;
+  /** Receives each distinct module's bytes once, when it is first found
+   * (builds translate them). */
+  onModule?: (sha256: string, bytes: Uint8Array) => void;
 }
 
 const SCAN_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
@@ -72,6 +80,9 @@ const BASE64_MAGIC = "AGFzbQ";
 const BYTES_MAGIC = /\[\s*(?:0|0x0+)\s*,\s*(?:97|0x61)\s*,\s*(?:115|0x73)\s*,\s*(?:109|0x6d)\s*,/i;
 /** Package directories deeper than this are not searched for modules. */
 const PACKAGE_SCAN_DEPTH = 6;
+/** A `.so` path in a string literal: the cheap test before a file with no
+ * `.wasm` mention is walked for shared-library paths. */
+const SHARED_LIBRARY_PATH = /\.so["'`]/;
 /** Larger files are reported by size but not read. */
 const MAX_MODULE_BYTES = 256 * 1024 * 1024;
 
@@ -110,6 +121,7 @@ class Discovery {
       };
       this.byHash.set(sha256, report);
       this.order.push(sha256);
+      this.input.onModule?.(sha256, bytes);
     }
     if (report.path === undefined && path !== undefined) report.path = path;
     addSource(report, source);
@@ -132,6 +144,8 @@ class Discovery {
       return;
     }
     if (bytes.length > MAX_MODULE_BYTES) return;
+    // A shared-library path names a module only when the file is one.
+    if (source.kind === "path" && !path.endsWith(".wasm") && !isWasmHeader(bytes)) return;
     this.byPath.set(path, this.addBytes(bytes, path, source));
   }
 
@@ -139,13 +153,13 @@ class Discovery {
 
   scanFile(sf: ts.SourceFile): void {
     const text = sf.text;
-    const paths = text.includes(".wasm");
+    const paths = text.includes(".wasm") || SHARED_LIBRARY_PATH.test(text);
     const base64 = text.includes(BASE64_MAGIC);
     const bytes = BYTES_MAGIC.test(text);
     if (!paths && !base64 && !bytes) return;
     const file = sf.fileName;
     const lineOf = (node: ts.Node): number =>
-      ts.getLineAndCharacterOfPosition(sf, node.getStart()).line + 1;
+      ts.getLineAndCharacterOfPosition(sf, ts.tokenStartOfNode(node)).line + 1;
     ts.walkPreorder(
       sf,
       (node) => {
@@ -177,7 +191,8 @@ class Discovery {
     );
   }
 
-  /** The module path a resolution expression names, when it ends in .wasm. */
+  /** The module path a resolution expression names, when it ends in .wasm
+   * (or .so). */
   resolvedPath(sf: ts.SourceFile, node: ts.Node): string | null {
     const dir = dirname(sf.fileName);
     if (ts.isCallExpression(node)) {
@@ -238,7 +253,7 @@ class Discovery {
       if (!ts.isStringLiteral(arg) && !ts.isNoSubstitutionTemplateLiteral(arg)) return null;
       parts.push(arg.text);
     }
-    if (!parts[parts.length - 1]!.endsWith(".wasm")) return null;
+    if (!isModulePath(parts[parts.length - 1]!)) return null;
     let path = parts[0]!;
     for (let i = 1; i < parts.length; i++) path = resolve(path, parts[i]!);
     return path;
@@ -307,9 +322,15 @@ function addSource(report: WasmModuleReport, source: WasmSource): void {
   report.sources.push(source);
 }
 
+/** A path that may name a module: `.wasm`, or `.so` for WebAssembly shared
+ * libraries (addFile keeps those only when the file is a module). */
+function isModulePath(text: string): boolean {
+  return text.endsWith(".wasm") || text.endsWith(".so");
+}
+
 function wasmLiteral(node: ts.Expression): string | null {
   if (!ts.isStringLiteral(node) && !ts.isNoSubstitutionTemplateLiteral(node)) return null;
-  return node.text.endsWith(".wasm") ? node.text : null;
+  return isModulePath(node.text) ? node.text : null;
 }
 
 function isDirname(node: ts.Expression): boolean {
@@ -349,40 +370,6 @@ function byteArrayLiteral(node: ts.ArrayLiteralExpression): Uint8Array | null {
     out[i] = value;
   }
   return out;
-}
-
-const BASE64_VALUES = (() => {
-  const table = new Int16Array(128).fill(-1);
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  for (let i = 0; i < alphabet.length; i++) table[alphabet.charCodeAt(i)] = i;
-  // base64url spellings
-  table["-".charCodeAt(0)] = 62;
-  table["_".charCodeAt(0)] = 63;
-  return table;
-})();
-
-/** Decodes standard or URL-safe base64 (padding optional); null when the
- * text is not base64. */
-export function decodeBase64(text: string): Uint8Array | null {
-  let end = text.length;
-  while (end > 0 && text.charCodeAt(end - 1) === 61) end--;
-  if (text.length - end > 2 || end % 4 === 1) return null;
-  const out = new Uint8Array(Math.floor((end * 3) / 4));
-  let acc = 0;
-  let bits = 0;
-  let j = 0;
-  for (let i = 0; i < end; i++) {
-    const c = text.charCodeAt(i);
-    const v = c < 128 ? BASE64_VALUES[c]! : -1;
-    if (v < 0) return null;
-    acc = ((acc << 6) | v) & 0xffffff;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out[j++] = (acc >> bits) & 0xff;
-    }
-  }
-  return j === out.length ? out : out.subarray(0, j);
 }
 
 /** The root directory of the npm package that contains `file` (the

@@ -70,14 +70,6 @@ void __lsan_unregister_root_region(const void *p, size_t size) __attribute__((we
 #endif
 #endif
 
-#ifdef SCR_ASAN_FIBERS
-#define SCR_FIBER_STACK (8 * 1024 * 1024)
-#else
-/* Deep enough for ordinary recursion inside async bodies and generators
- * once the overflow guard's reserve is taken off; idle and shallow fibers
- * only touch the pages they use. */
-#define SCR_FIBER_STACK (512 * 1024)
-#endif
 
 #if !defined(_WIN32) && !defined(__wasi__)
 /* Keep stacks out of malloc's size classes. Reuse a bounded number during
@@ -4138,6 +4130,25 @@ static int scr_workers_pollfd(void) {
  * macrotask). */
 bool scr_loop_has_ready(void) { return scr_ready_len > 0 || scr_nt_head != NULL; }
 
+/* The poll phase runs once per loop iteration, like libuv's: the net unit
+ * drains the poller at most once between check phases. I/O that becomes
+ * ready while this iteration's callbacks run (a loopback connect started
+ * by one of them) waits for the next iteration, so immediates queued in
+ * the meantime fire first — Node's poll → check order. A full batch polls
+ * again without waiting, at most SCR_LOOP_IO_BATCHES times per phase (the
+ * count libuv's uv__io_poll uses); later events wait for the next
+ * iteration, so timers and immediates still run while sockets stay busy. */
+enum { SCR_LOOP_IO_BATCHES = 48 };
+static SCR_TL bool scr_loop_io_open = true;
+static SCR_TL int scr_loop_io_batches = 0;
+bool scr_loop_io_take(void) {
+  bool open = scr_loop_io_open;
+  scr_loop_io_open = false;
+  return open;
+}
+bool scr_loop_io_more(void) { return ++scr_loop_io_batches < SCR_LOOP_IO_BATCHES; }
+void scr_loop_io_reopen(void) { scr_loop_io_open = true; }
+
 /* The process.nextTick queue to exhaustion, ticks queued meanwhile
  * included. false: a tick threw (uncaught, pending). */
 static bool scr_loop_run_ticks(void) {
@@ -4408,6 +4419,8 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
 #ifdef SCR_WORKERS
     if (scr_workers_ready_fn && scr_workers_ready_fn()) due = now;
 #endif
+    /* An idle moment: a full pass the death rule deferred runs now. */
+    if (due > now && scr_cyc_collect_idle()) now = scr_now_ms();
 #if !defined(_WIN32) && !defined(__wasi__)
     if (due > now) scr_fiber_stacks_clear();
 #endif
@@ -4615,6 +4628,7 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
      * every macrotask; pending ticks or a woken fiber restart the turn
      * first (the timer loop's break above), so the phase only runs on a
      * drained checkpoint. */
+    bool check_ran = false;
     if (scr_ready_len == 0 && scr_nt_head == NULL && scr_nunhandled == 0 && scr_pending_immediates > 0) {
       size_t end = scr_nimmediates;
       while (scr_immediates_head < end) {
@@ -4645,6 +4659,15 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
         scr_immediates_head = 0;
         scr_nimmediates = 0;
       }
+      check_ran = true;
+    }
+    /* The next poll phase opens once this iteration's check phase ran (or
+     * had nothing to run). A check phase deferred for pending microtasks
+     * keeps it closed, so the next iteration reaches the check phase
+     * before polling again. */
+    if (check_ran || scr_pending_immediates == 0) {
+      scr_loop_io_open = true;
+      scr_loop_io_batches = 0;
     }
   }
   return rejection_failed;
@@ -4661,6 +4684,7 @@ void scr_loop_commonjs_entry(void) { scr_loop_cjs_entry = true; }
 bool scr_loop_run(ScrPromise *top_level) {
   /* The main module's body has returned: an enterWith it made ends here. */
   scr_loop_started = true;
+  scr_cyc_note_event_loop();
   if (scr_als_main_slot != NULL) scr_als_main_clear();
   bool first_checkpoint = !scr_loop_cjs_entry;
   bool rejection_failed;

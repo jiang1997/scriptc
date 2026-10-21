@@ -45,6 +45,7 @@ export type {
 } from "./compile-types.js";
 import { compilePackedLibrary } from "./backend/library-pack.js";
 import { InternalCompilerError } from "./errors.js";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -76,6 +77,11 @@ import { windowsSubsystemLinkerArgs, type WindowsSubsystem } from "./backend/tar
 import { createNativeLinkInfo } from "./backend/native-link-info.js";
 import { RuntimePackError, loadRuntimeBitcode } from "./backend/runtime-pack.js";
 import { createNativeLinkPlan } from "./backend/link-plan.js";
+import {
+  nativeProfileKey,
+  nativeProfileRefusal,
+  type NativeProfileOptions,
+} from "./backend/native-profile.js";
 import {
   executableLinkerEnvironmentFingerprint,
   linkNativeExecutable,
@@ -156,6 +162,7 @@ export {
   type WarmNativeCachesResult,
 } from "./backend/external-c.js";
 export { warmNativeCaches } from "./backend/warm-cache.js";
+export { mergeNativeProfiles as mergeProfiles } from "./backend/native-codegen.js";
 export {
   ANDROID_MIN_API,
   IPHONEOS_MIN_VERSION,
@@ -478,6 +485,7 @@ async function compileExecutableNative(
   programObjectDependencies: readonly NativeArtifactDependency[] = [],
   onArtifactReady?: NonNullable<Parameters<typeof compileExternalC>[0]["onArtifactReady"]>,
   programPartitions: readonly string[] = [],
+  profileGenerate = false,
 ): Promise<void> {
   const programIsObject = /\.(?:o|obj)$/.test(llvmPath);
   const runtimePackTarget = programIsObject && !sanitize ? nativeCodegenTarget() : null;
@@ -492,6 +500,7 @@ async function compileExecutableNative(
       optimization: features.optimization ?? "release",
       ...(strip ? { strip: true } : {}),
       ...(windowsSubsystem === undefined ? {} : { windowsSubsystem }),
+      ...(profileGenerate ? { profileGenerate: true } : {}),
       programObjectDependencies,
     });
     const cacheableLinker =
@@ -535,6 +544,7 @@ async function compileExecutableNative(
     fileHandle: features.fileHandle,
     fetch: features.fetch,
     ...(features.eventTarget ? { eventTarget: true } : {}),
+    ...(features.wasm ? { wasm: true } : {}),
     ...(features.warningReplace ? { warningReplace: true } : {}),
     ...(features.stdioExtended ? { stdioExtended: true } : {}),
     zlib: features.zlib,
@@ -544,18 +554,29 @@ async function compileExecutableNative(
     dc: features.dc,
     dynAsync: features.dynAsync,
     ...(features.dynTier ? { dynTier: true } : {}),
+    ...(features.streamDyn ? { streamDyn: true } : {}),
+    ...(features.handleProps ? { handleProps: true } : {}),
+    ...(features.dynForAwait ? { dynForAwait: true } : {}),
+    ...(features.eventsOnceSignal ? { eventsOnceSignal: true } : {}),
+    ...(features.dynBufferNum ? { dynBufferNum: true } : {}),
+    ...(features.builtinValues ? { builtinValues: true } : {}),
     events: features.events,
     emitter: features.emitter,
     symbol: features.symbol,
     bigint: features.bigint,
     searchParams: features.searchParams,
     qs: features.qs,
+    utilPromisify: features.utilPromisify,
+    dynBuiltinClass: features.dynBuiltinClass,
+    dynBuiltinStream: features.dynBuiltinStream,
     parseArgs: features.parseArgs,
     stream: features.stream,
     net: features.net,
     http: features.http,
     http2: features.http2,
     dgram: features.dgram,
+    dnsPromises: features.dnsPromises,
+    dgramDyn: features.dgramDyn,
     watch: features.watch,
     foreignFfi: features.foreignFfi,
     ...(features.workers ? { workers: true } : {}),
@@ -564,7 +585,9 @@ async function compileExecutableNative(
     tls: features.tls,
     tlsCa: features.tlsCa,
     cipher: features.cipher,
+    ecdh: features.ecdh,
     webcrypto: features.webcrypto,
+    perfLoop: features.perfLoop,
     ...(onArtifactReady === undefined ? {} : { onArtifactReady }),
     ...(ffi === null
       ? {}
@@ -589,6 +612,7 @@ async function emitNativeProgramObject(
   opts: CompileRequestOptions,
   llvm: string | readonly string[],
   features: EarlyExecutableNativeFeatures,
+  profile: NativeProfileOptions | undefined,
 ): Promise<NativeProgramObject> {
   const stem = basename(entryPath).replace(/\.(ts|mts|cts|js|mjs|cjs)$/, "");
   const artifactPath = join(opts.outDir, `${stem}.helper.o`);
@@ -634,6 +658,7 @@ async function emitNativeProgramObject(
       ...(runtimeBitcode === null
         ? {}
         : { importBitcode: { paths: runtimeBitcode.paths, digests: runtimeBitcode.digests } }),
+      ...(profile === undefined ? {} : { profile }),
     });
     return {
       linkPath,
@@ -654,6 +679,25 @@ async function removeNativeProgramObject(
   await Promise.all(
     [linkPath, ...partitionPaths].map((path) => rm(path, { force: true }).catch(() => undefined)),
   );
+}
+
+/** The request's profile. An indexed profile is read here so every cache keys
+ * its bytes. */
+async function readNativeProfile(
+  opts: CompileRequestOptions,
+): Promise<NativeProfileOptions | undefined> {
+  if (opts.profileGenerate !== undefined) return { generate: opts.profileGenerate };
+  if (opts.profileUse === undefined) return undefined;
+  const path = resolve(opts.profileUse);
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(path);
+  } catch (err) {
+    throw new Error(
+      `cannot read --profile-use file ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return { use: { path, digest: createHash("sha256").update(bytes).digest("hex") } };
 }
 
 function usesPrecompiledRuntimePack(opts: CompileRequestOptions, backend: "llvm"): boolean {
@@ -729,6 +773,7 @@ async function prepareExecutableInput(
         wasi: buildPlatform === "wasi",
         runtimeAbiMarker: outputKind === "obj",
         objectAudit: opts.sanitize === true,
+        ...(opts.sanitize === true ? { wasmBoundsChecks: true } : {}),
         ...inlineRcOption(opts.optimization, opts.sanitize === true),
       });
     } catch (err) {
@@ -794,6 +839,7 @@ async function prepareExecutableInput(
       wasi: buildPlatform === "wasi",
       runtimeAbiMarker: useRuntimePack,
       objectAudit: opts.sanitize === true,
+      ...(opts.sanitize === true ? { wasmBoundsChecks: true } : {}),
       ...inlineRcOption(opts.optimization, opts.sanitize === true),
       ...(opts.detachedExit === true ? { detachedExit: true } : {}),
     });
@@ -1031,6 +1077,26 @@ async function compileTracked(
       sourceTexts: new Map(),
     };
   }
+  const profileRefusal = nativeProfileRefusal({
+    ...opts,
+    outputKind,
+    optimization: opts.optimization ?? "release",
+    sanitize: opts.sanitize ?? false,
+    platform: buildPlatform,
+  });
+  let profile: NativeProfileOptions | undefined;
+  try {
+    if (profileRefusal !== null) throw new Error(profileRefusal);
+    profile = await readNativeProfile(opts);
+  } catch (err) {
+    return {
+      ok: false,
+      diagnostics: [
+        nativeCodegenDiag("SC3002", err instanceof Error ? err.message : String(err), entryPath),
+      ],
+      sourceTexts: new Map(),
+    };
+  }
   const cacheRoot =
     outputKind === "exe" && provenanceSources() === null
       ? await prepareBuildCacheRoot(buildCacheRoot())
@@ -1059,6 +1125,7 @@ async function compileTracked(
       ...(opts.strip ? { strip: true as const } : {}),
       ...(opts.windowsSubsystem === "gui" ? { windowsSubsystem: "gui" as const } : {}),
       ...(opts.detachedExit === true ? { detachedExit: true as const } : {}),
+      ...(profile === undefined ? {} : { profile: nativeProfileKey(profile) }),
       ...checkerField(),
       ...(youngNurseryRequested() ? { youngNursery: true as const } : {}),
       npmStatic: opts.npmStatic ?? null,
@@ -1132,6 +1199,7 @@ async function compileTracked(
           opts,
           await readFile(earlyHit.llvmPath, "utf8"),
           earlyHit.native,
+          profile,
         );
         nativeInputPath = nativeProgramObject.linkPath;
       } catch (err) {
@@ -1165,6 +1233,7 @@ async function compileTracked(
               });
             },
         nativeProgramObject?.partitionPaths,
+        profile?.generate !== undefined,
       );
       if (nativeProgramObject !== null && opts.nativeProgramObject === true) {
         await rename(nativeProgramObject.linkPath, nativeProgramObject.artifactPath);
@@ -1244,6 +1313,7 @@ async function compileTracked(
           opts,
           llvmSource,
           nativeFeatures,
+          profile,
         );
         timing("native-object");
       } catch (err) {
@@ -1279,6 +1349,7 @@ async function compileTracked(
             publishedExecutable = true;
           },
       nativeProgramObject?.partitionPaths,
+      profile?.generate !== undefined,
     );
     timing("native-link");
     if (nativeProgramObject !== null && opts.nativeProgramObject === true) {

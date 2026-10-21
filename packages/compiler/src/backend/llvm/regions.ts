@@ -36,7 +36,7 @@ import {
   mangleRecordStruct,
 } from "../mangle.js";
 import { threadHotAddressLines } from "./alloc.js";
-import { classFieldBase, type LlClassMeta } from "./classes.js";
+import { classFieldBase, classPreLines, type LlClassMeta } from "./classes.js";
 import { llvmCommentText } from "./common.js";
 import type { NullableRefFields } from "./nullable-fields.js";
 import { FN_ATTRS, rcMembers, releaseSym, vAdapters, type ShapeHost } from "./shapes.js";
@@ -389,9 +389,7 @@ export class LifetimeRegions {
         out.push(
           `define internal void ${walk}(ptr %o, ptr %w) ${FN_ATTRS} { ; region walk ${llvmCommentText(cls.name)} and its subclasses`,
           `entry:`,
-          `  %vtp = getelementptr inbounds ptr, ptr %o, i64 1`,
-          `  %vt = load ptr, ptr %vtp`,
-          `  %pre = load ${S}, ptr %vt`,
+          ...classPreLines(meta, mangleClassStruct(cls.name), "%o", "%pre", S),
           `  switch ${S} %pre, label %done [ ${members.map((m) => `${S} ${m.pre}, label %c${m.pre}`).join(" ")} ]`,
           ...members.flatMap((m) => [
             `c${m.pre}: ; ${llvmCommentText(m.def.name)}`,

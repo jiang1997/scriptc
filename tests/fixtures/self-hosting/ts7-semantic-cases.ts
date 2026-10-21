@@ -1,7 +1,8 @@
 import { AstFile, AstNode } from "../../../packages/compiler/src/frontend/ts7/ast-node.js";
 import { AstKind } from "../../../packages/compiler/src/frontend/ts7/ast-schema.generated.js";
 import { SemanticChecker } from "../../../packages/compiler/src/frontend/ts7/semantic-checker.js";
-import { SemanticSignature, SemanticSnapshot, SemanticSymbol, SemanticType } from "../../../packages/compiler/src/frontend/ts7/semantic-model.js";
+import { SemanticSignature, SemanticSnapshot, SemanticSymbol, SemanticType, symbolName, symbolNameOf } from "../../../packages/compiler/src/frontend/ts7/semantic-model.js";
+import type { __String } from "../../../packages/compiler/src/frontend/ts7/ast-types.js";
 import { SemanticSignatureKind, SemanticSymbolFlags, SemanticTypeFlags } from "../../../packages/compiler/src/frontend/ts7/semantic-schema.generated.js";
 
 export function semanticSource(): string {
@@ -113,7 +114,7 @@ export function checkSemanticModel(snapshot: SemanticSnapshot, checker: Semantic
   const pairTarget = pair.getTarget()!;
   check(pairTarget.isTupleType() && pairTarget.fixedLength === 2 && pairTarget.readonly === true && pairTarget.elementFlags!.length === 2, "tuple target metadata");
   check(checker.getTypeArguments(pair)[0] === intrinsicNumber && checker.getTypeArguments(pair)[1] === intrinsicString, "tuple argument identities");
-  check(pair.getAliasSymbol()!.name === "Pair" && pair.getAliasTypeArguments()[0] === intrinsicNumber, "alias metadata");
+  check(symbolName(pair.getAliasSymbol()!) === "Pair" && pair.getAliasTypeArguments()[0] === intrinsicNumber, "alias metadata");
 
   const box = declaration(root, "Box");
   const boxSymbol = symbolAt(checker, box.name!);
@@ -121,21 +122,21 @@ export function checkSemanticModel(snapshot: SemanticSnapshot, checker: Semantic
   check(boxType.isClassOrInterface() && boxType.getSymbol() === boxSymbol, "declared class type");
   // The checker instantiates a transient property symbol for a class type;
   // the binder's member symbol is distinct but refers to the same AST node.
-  const boundMember = boxSymbol.getMembers().get("value")!;
+  const boundMember = boxSymbol.getMembers().get("value" as __String)!;
   const checkedMember = checker.getPropertyOfType(boxType, "value")!;
   check(boundMember !== checkedMember && boundMember.declarationHandles[0]!.resolve() === checkedMember.declarationHandles[0]!.resolve(), "bound and instantiated member declarations");
   check(boxSymbol.getMembers() === boxSymbol.getMembers() && boxSymbol.getExports() === boxSymbol.getExports(), "symbol table cache");
   check(boxType.getBaseTypes()!.length === 0 && checker.getBaseTypes(boxType).length === 0, "empty base types");
   const child = checker.getDeclaredTypeOfSymbol(symbolAt(checker, declaration(root, "Child").name!));
   check(child.getBaseTypes()![0] === boxType && checker.getBaseTypes(child)[0] === boxType, "base type request identity");
-  check(checker.getPropertiesOfType(boxType).some((symbol) => symbol.name === "method"), "property query");
+  check(checker.getPropertiesOfType(boxType).some((symbol) => symbolName(symbol) === "method"), "property query");
   check(checker.getPropertyOfType(boxType, "missing") === undefined, "absent property");
   const nullable = typeAt(checker, declaration(root, "Nullable").type!);
   check(checker.getNonNullableType(nullable) === boxType, "non-nullable type");
   const dict = checker.getDeclaredTypeOfSymbol(symbolAt(checker, declaration(root, "Dict").name!));
   const index = checker.getIndexInfosOfType(dict)[0]!;
-  check(index.keyType === intrinsicString && index.valueType === intrinsicNumber && index.isReadonly, "index signature types");
-  check(index.declaration!.resolve() === declaration(root, "Dict").members?.nodes[0], "index signature declaration");
+  check(index.keyType === intrinsicString && index.type === intrinsicNumber && index.isReadonly, "index signature types");
+  check(index.declaration === declaration(root, "Dict").members?.nodes[0], "index signature declaration");
   const generic = checker.getDeclaredTypeOfSymbol(symbolAt(checker, declaration(root, "Generic").name!));
   const genericParameter = generic.getTypeParameters()[0]!;
   check(genericParameter.isTypeParameter() && generic.getLocalTypeParameters()[0] === genericParameter && generic.getOuterTypeParameters().length === 0, "interface type parameters");
@@ -147,7 +148,7 @@ export function checkSemanticModel(snapshot: SemanticSnapshot, checker: Semantic
   const signature = signatureAt(checker, identity);
   const signatureTypes = signature.getTypeParameters();
   check(signatureTypes.length === 1 && signatureTypes[0]!.isTypeParameter(), "signature type parameters");
-  check(signature.getParameters()[0]!.name === "value" && signature.getParameters()[0]!.declarationHandles[0]!.resolve() === identity.parameters?.nodes[0], "signature parameters");
+  check(symbolName(signature.getParameters()[0]!) === "value" && signature.getParameters()[0]!.declarationHandles[0]!.resolve() === identity.parameters?.nodes[0], "signature parameters");
   check(signature.declarationHandle!.resolve() === identity, "signature declaration");
   check(checker.getReturnTypeOfSignature(signature) === signatureTypes[0], "generic return identity");
   check(checker.getParameterType(signature, 0) === signatureTypes[0], "parameter type query");
@@ -159,7 +160,7 @@ export function checkSemanticModel(snapshot: SemanticSnapshot, checker: Semantic
   const ctor = checker.getSignaturesOfType(checker.getTypeOfSymbol(boxSymbol)!, SemanticSignatureKind.Construct)[0]!;
   check(ctor.isConstruct && !ctor.isAbstract && checker.getReturnTypeOfSignature(ctor) === boxType, "construct signature");
   const thisSignature = signatureAt(checker, declaration(root, "withThis"));
-  check(thisSignature.hasRestParameter && !thisSignature.isConstruct && thisSignature.getThisParameter()!.name === "this", "signature this/rest flags");
+  check(thisSignature.hasRestParameter && !thisSignature.isConstruct && symbolName(thisSignature.getThisParameter()!) === "this", "signature this/rest flags");
   check(checker.getRestTypeOfSignature(thisSignature) === intrinsicNumber && checker.isArrayLikeType(pair), "array predicates and rest element type");
   const predicate = checker.getTypePredicateOfSignature(signatureAt(checker, declaration(root, "isBox")))!;
   check(predicate.type === boxType && predicate.parameterIndex === 0 && predicate.parameterName === "value", "type predicate");
@@ -169,7 +170,7 @@ export function checkSemanticModel(snapshot: SemanticSnapshot, checker: Semantic
 
   const moduleSymbol = symbolAt(checker, root);
   const exports = moduleSymbol.getExports();
-  const renamed = exports.get("renamed")!;
+  const renamed = exports.get("renamed" as __String)!;
   check(checker.getAliasedSymbol(renamed) === answerSymbol && checker.getImmediateAliasedSymbol(renamed) === answerSymbol, "symbol alias targets");
   check(checker.getMemberInModuleExports(moduleSymbol, "answer") === answerSymbol, "module export lookup");
   check(checker.getExportsOfModule(moduleSymbol).some((symbol) => symbol === answerSymbol), "module exports identity");

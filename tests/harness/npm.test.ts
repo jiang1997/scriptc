@@ -58,9 +58,9 @@ const KNOWN: Record<string, Known> = {
     divergence:
       "Timeout handles are numbers (typeof) and lose their ref flag once fired or cleared",
   },
-  "island-web-plumbing": { build: "SC2013" },
+  "island-web-plumbing": { run: "SC2020" },
   "lazy-traps": { build: "SC2013" },
-  "misc-shims": { build: "SC2013" },
+  "misc-shims": { run: "SC2020" },
   "namespace": { build: "SC1013" },
   "node24-async-events": { run: "SC2020" },
   "node24-commonjs-metadata": { run: "SC2020" },
@@ -86,30 +86,35 @@ const KNOWN: Record<string, Known> = {
   "node24-timers-unref": { run: "SC2020" },
   "node24-url-factories": { run: "SC2020" },
   "node24-url-mutation": { run: "SC1090" },
-  "node24-util-adapters": { run: "SC2020" },
+  "node24-util-adapters": { run: "Object.create with this value is not supported yet" },
   "node24-util-types": { run: "SC1090" },
-  "node24-web-stream-encoding": { build: "SC2013" },
-  "node24-web-stream-errors": { build: "SC2013" },
-  "node24-web-stream-lifecycle": { build: "SC2013" },
-  "node24-web-stream-pipe-abort": { build: "SC2013" },
-  "node24-web-stream-pipe-errors": { build: "SC2013" },
-  "node24-web-stream-pipes": { build: "SC2013" },
-  "node24-web-stream-queues": { build: "SC2013" },
-  "node24-web-stream-readable-lifecycle": { build: "SC2013" },
-  "node24-web-stream-readers": { build: "SC2013" },
-  "node24-web-stream-tee": { build: "SC2013" },
-  "node24-web-stream-transforms": { build: "SC2013" },
+  "node24-web-stream-encoding": { run: "SC1090" },
+  "node24-web-stream-errors": { run: "SC1090" },
+  "node24-web-stream-lifecycle": { run: "SC1090" },
+  "node24-web-stream-pipe-abort": { run: "SC2020" },
+  "node24-web-stream-pipe-errors": { run: "SC1090" },
+  "node24-web-stream-pipes": { run: "SC1090" },
+  "node24-web-stream-queues": { run: "SC1090" },
+  "node24-web-stream-readable-lifecycle": { run: "SC2020" },
+  "node24-web-stream-readers": { run: "SC1090" },
+  "node24-web-stream-tee": { run: "SC2020" },
+  "node24-web-stream-transforms": { run: "SC1090" },
   "package-imports": { build: "SC2013" },
   "promise-bridge": { build: "SC1090" },
   "self-name": { build: "SC2013" },
   "stream-shims": { run: "SC1090" },
   "util-shims": { run: "SC2020" },
-  "web-streams": { build: "SC2013" },
+  "web-streams": { run: "SC1090" },
   "workspace-copied": { build: "SC2013" },
   "workspace-unclean": { build: "SC2013" },
 };
 
 const cases = shardSelect(npmCases(fixturesRoot), (c) => c.name);
+
+/** Per-case timeouts past the default 120 s: the undici cases compile the
+ * built-in undici implementation's module graph, which a sanitized build
+ * on a CI runner takes minutes to compile. */
+const TIMEOUTS: Record<string, number> = { undici5: 600_000, undici7: 600_000 };
 
 interface RunResult {
   stdout: Buffer;
@@ -233,7 +238,7 @@ describe(`npm native (${cases.length} programs${sanitize ? ", sanitized" : ""}${
         }
         await expectMatchesNode(c, built.binary);
       },
-      120_000,
+      TIMEOUTS[c.name] ?? 120_000,
     );
   }
 });

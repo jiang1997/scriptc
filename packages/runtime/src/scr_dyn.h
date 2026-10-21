@@ -154,8 +154,10 @@ typedef enum {
   X(CUSTOM_EVENT, 40) /* ScrEvent with detail — new CustomEvent() */ \
   X(DATE, 30) /* JavaScript Date with stable native identity */ \
   X(DECIPHER, 46) /* node:crypto Decipheriv (scr_cipher.c) */ \
+  X(DGRAM_SOCKET, 62) /* dgram.Socket (scr_dgram.c) */ \
   X(DIR, 44) /* fs.Dir (scr_lib.c) */ \
   X(DISPOSABLE_STACK, 49) /* DisposableStack (scr_symbol.c) */ \
+  X(ECDH, 64) /* node:crypto ECDH (scr_ecdh.c) */ \
   X(EVENT, 14) /* ScrEvent — new Event() and AbortSignal's abort events */ \
   X(EVENT_TARGET, 39) /* ScrEventTarget — new EventTarget() */ \
   X(FETCH_HEADERS, 13) /* native static-fetch response Headers */ \
@@ -191,6 +193,11 @@ typedef enum {
   X(SHARED_ARRAY_BUFFER, 37) \
   X(STDIO, 27) /* stable process stdin/stdout/stderr values */ \
   X(URL, 28) /* native WHATWG URL */ \
+  X(WASM_GLOBAL, 61) /* WebAssembly.Global */ \
+  X(WASM_INSTANCE, 58) /* WebAssembly.Instance */ \
+  X(WASM_MEMORY, 59) /* WebAssembly.Memory */ \
+  X(WASM_MODULE, 57) /* WebAssembly.Module (scr_wasm.c) */ \
+  X(WASM_TABLE, 60) /* WebAssembly.Table */ \
   X(WEAK_MAP, 23) /* native weak-key metadata */ \
   X(WEAK_SET, 24) /* native weak membership */ \
   X(WEB_CONTROLLER, 11) /* native ReadableStreamDefaultController */ \
@@ -365,6 +372,13 @@ struct ScrDyn {
        * clear it before release, so freelist reuse never sees it. */
       const char *class_name;
       struct ScrDynRegion *region; /* see ScrDynRegion */
+      /* The dynamic tier's hidden class (scr_js_object.c): the transition
+       * tree node naming this object's key sequence, or NULL while it has
+       * none. Only programs with dynamic-tier code read or maintain it:
+       * their runtime is built with SCR_JS_TIER, where every allocation and
+       * every change to the key set resets it. Other programs never look
+       * at it, so it may hold anything there. */
+      struct ScrJsShape *shape;
     } obj; /* owned */
     /* SCR_DYN_FUNC: the boxed closure (owned) + its call descriptor. `sig`
      * and `name` are static compiler-emitted literals (never freed); name
@@ -434,6 +448,9 @@ _Static_assert(offsetof(ScrDyn, v.typed_ref.type_key) == 16 + 3 * sizeof(void *)
 _Static_assert(sizeof(((ScrDyn *)0)->v.arr) <= sizeof(((ScrDyn *)0)->v.typed_ref) &&
                sizeof(((ScrDyn *)0)->v.obj) <= sizeof(((ScrDyn *)0)->v.typed_ref),
                "dyn region links must not grow the node");
+/* Dynamic-tier inline caches read the shape word in place (64-bit). */
+_Static_assert(sizeof(void *) != 8 || offsetof(ScrDyn, v.obj.shape) == 80, "v.obj.shape offset");
+_Static_assert(sizeof(void *) != 8 || offsetof(ScrDyn, v.obj.region) == 72, "v.obj.region offset");
 
 /* ── intact parse regions ─────────────────────────────────────────────
  * Every heap dyn node carries a cycle header, so an ordinary release that
@@ -717,6 +734,9 @@ bool scr_dyn_arr_has_index(const ScrDyn *arr, size_t index);
 void scr_dyn_arr_push_hole(ScrDyn *arr);
 ScrDyn *scr_dyn_new_obj(void);
 ScrDyn *scr_dyn_iterator(const ScrDyn *value, const ScrStr *spell);
+/* for await over a checked-dynamic value (scr_dyn_for_await.c). */
+ScrDyn *scr_dyn_async_iterator_open(ScrDyn *value, ScrStr *spell);
+bool scr_dyn_async_iterator_was_sync(void);
 ScrDyn *scr_dyn_iterator_optional(const ScrDyn *value);
 /* from.js's probe: 2 when value[Symbol.asyncIterator] is set, 1 when
  * value[Symbol.iterator] is, 0 for neither, -1 with an error pending. */
@@ -727,6 +747,10 @@ int scr_dyn_iterable_kind(const ScrDyn *value);
  * with *kind -1 and the error pending (also for a compiled generator,
  * which only typed code can step). */
 ScrDyn *scr_dyn_from_iterator(const ScrDyn *value, int *kind);
+/* scr_dyn_from_iterator, also answering a compiled generator the method
+ * returns when `generators` is set (for await steps it through its
+ * checked-dynamic next/return members). */
+ScrDyn *scr_dyn_open_iterator(const ScrDyn *value, int *kind, bool generators);
 /* One field of an iterator result object (value, done), read the way the
  * for-of protocol reads it. +1, or NULL with the error pending. */
 ScrDyn *scr_dyn_iterator_result_get(const ScrDyn *result, const char *key, size_t len);
@@ -1129,6 +1153,10 @@ bool scr_dyn_strict_eq(const ScrDyn *a, const ScrDyn *b);
  * result owned (+1). MAY THROW (NULL with the exception pending). */
 ScrDyn *scr_dyn_prepare_method(ScrDyn *recv, const char *method);
 ScrDyn *scr_dyn_invoke_prepared(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args, size_t argc, const char *what);
+/* scr_dyn_invoke_prepared for the fixed-width Buffer read/write method names
+ * (scr_bytes_dyn.c): a Buffer receiver runs the method, any other takes the
+ * ordinary dispatch. */
+ScrDyn *scr_dyn_invoke_buffer_num(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args, size_t argc, const char *what);
 ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, size_t argc, const char *what);
 /* Keyed read on a FUNC node: the own-property table first (defineProperties
  * writes land there), then "name" (the box's best-effort static name; ""
@@ -1148,6 +1176,49 @@ ScrDyn *scr_dyn_define_prototype_props(ScrDyn *target, ScrDyn *descs, ScrDyn *pr
  * must be static literals (the box never frees them; name may be NULL). */
 ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, const char *sig, const char *name);
 ScrDyn *scr_dyn_new_class(ScrClassObj *cls, const char *type_key);
+/* EventEmitter and the stream constructors as untyped constructor values,
+ * and instanceof over untyped constructor functions
+ * (scr_dyn_builtin_class.c, linked with the dynBuiltinClass feature). */
+ScrDyn *scr_dyn_builtin_class(double kind);
+bool scr_dyn_builtin_instanceof(ScrDyn *value, double kind);
+bool scr_dyn_function_instanceof(ScrDyn *value, ScrDyn *callee);
+/* The stream half of those constructors (scr_dyn_builtin_stream.c, linked
+ * with the dynBuiltinStream feature), registered with
+ * scr_dyn_builtin_class_streams before the first stream class value is
+ * read: construct runs `Readable.call(this, opts)` and the other stream
+ * kinds (+1 or NULL with an exception pending), prototype installs a stream
+ * kind's methods, and event answers EventEmitter.prototype's methods for a
+ * receiver with stream state (true when it handled the call; *result +1 or
+ * NULL with an exception pending). */
+enum {
+  SCR_EE_M_ON, SCR_EE_M_PREPEND, SCR_EE_M_ONCE, SCR_EE_M_PREPEND_ONCE, SCR_EE_M_OFF,
+  SCR_EE_M_REMOVE_ALL, SCR_EE_M_EMIT, SCR_EE_M_LISTENERS, SCR_EE_M_RAW_LISTENERS,
+  SCR_EE_M_LISTENER_COUNT, SCR_EE_M_EVENT_NAMES, SCR_EE_M_SET_MAX, SCR_EE_M_GET_MAX,
+};
+typedef struct ScrDynStreamOps {
+  ScrDyn *(*construct)(int kind, ScrDyn *self, ScrDyn *const *args, size_t argc);
+  void (*prototype)(int kind, ScrDyn *prototype);
+  bool (*event)(int method, ScrDyn *self, ScrDyn *const *args, size_t argc, ScrDyn **result);
+} ScrDynStreamOps;
+void scr_dyn_builtin_class_streams(const ScrDynStreamOps *ops);
+/* A stream class value with its stream half (scr_dyn_builtin_stream.c),
+ * +1; the stream a JavaScript value stands for (a constructor-function
+ * stream or a boxed runtime stream), +1 or NULL; and the constructor-
+ * function object of a runtime stream, +1 or NULL. */
+ScrDyn *scr_dyn_builtin_stream_class(double kind);
+struct ScrStream *scr_dyn_builtin_stream_of(const ScrDyn *value);
+ScrDyn *scr_dyn_builtin_stream_object(struct ScrStream *s);
+/* The untyped view of a runtime stream in programs that link that unit
+ * (+1), a checked cast to a runtime stream class kind (+1 or NULL), and
+ * the stream.unboxDyn libCall in those programs (scr_stream_unbox_dyn's
+ * contract, also taking constructor-function streams). */
+ScrDyn *scr_dyn_builtin_stream_view(struct ScrStream *s);
+struct ScrStream *scr_dyn_builtin_stream_check(const ScrDyn *value, double kind);
+struct ScrStream *scr_dyn_builtin_stream_unbox(const ScrDyn *value, const ScrStr *message);
+/* stream.dynNative in those programs: scr_stream_dyn_native's contract,
+ * also taking constructor-function streams that keep the runtime's write
+ * and end (+1 or NULL). */
+struct ScrStream *scr_dyn_builtin_stream_dyn_native(const ScrDyn *value, double side);
 bool scr_dyn_class_is_key(const ScrDyn *value, const ScrStr *type_key);
 bool scr_dyn_class_is(const ScrDyn *value, const char *type_key);
 /* Calls a dyn value: a non-function kind throws the catchable TypeError
@@ -1281,7 +1352,8 @@ typedef struct ScrDynHandleOps {
    * inspector returns `this`) instead of the bare class name. */
   bool inspect_bracketed_past_depth;
   /* The @@toStringTag when it differs from cls: String() answers
-   * "[object <tag>]" and util.inspect prints `<cls> [<tag>] <view>`. */
+   * "[object <tag>]" and util.inspect prints `<cls> [<tag>] <view>`, or
+   * `<tag> <view>` when the tag ends with "." and cls, as Node does. */
   const char *to_string_tag;
   /* The view has no properties, so util.inspect prints it in full at any
    * depth, as Node prints `{}`. */
@@ -1476,5 +1548,18 @@ void scr_dyn_trace_v(void *d, ScrTraceVisit visit, void *ctx);
 #ifdef SCR_RC_AUDIT
 long scr_dyn_live_count(void);
 #endif
+
+/* Checked-object primitives the dynamic tier's shapes and caches build on
+ * (scr_js_object.c). They exist only in the SCR_JS_TIER build of
+ * scr_json.c, which programs with dynamic-tier code link. */
+/* The builtin Object.prototype node, or NULL before its first use. */
+const ScrDyn *scr_dyn_tier_object_prototype(void);
+/* Shared key bytes for `key` (+1, NUL-terminated), and their release. */
+char *scr_dyn_tier_key_copy(const char *key, size_t key_len);
+void scr_dyn_tier_key_release(char *key, size_t key_len);
+/* Appends an own data property (writable, enumerable, configurable) that
+ * `obj` does not have, sharing `key`'s bytes and taking ownership of
+ * `value`, exactly as an ordinary insertion would; leaves the shape reset. */
+void scr_dyn_tier_append(ScrDyn *obj, char *key, size_t key_len, ScrDyn *value);
 
 #endif /* SCR_DYN_H */

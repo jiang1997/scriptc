@@ -66,6 +66,10 @@ async function tryFastPath(): Promise<number | null> {
     values["emit-ir"] ||
     values.lib ||
     values["provenance-sources"] ||
+    // The full compiler keys these builds by the profile's bytes.
+    values["profile-generate"] !== undefined ||
+    values["profile-use"] !== undefined ||
+    values.sparse ||
     (values["external-types"] ?? []).length > 0
   )
     return null;

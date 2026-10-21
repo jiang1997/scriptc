@@ -36,6 +36,15 @@ export interface CompileBaseOptions {
    * executable mapped and the memory charged for up to ~100 ms after exit.
    * Executables only; no effect on other platforms. */
   detachedExit?: boolean;
+  /** Instrument the executable for profile-guided optimization. Each run
+   * writes a raw profile to this path pattern (`%p` expands to the process
+   * id; `LLVM_PROFILE_FILE` overrides the pattern at run time). Linux
+   * executables only. */
+  profileGenerate?: string;
+  /** Optimize the executable with this indexed profile (`scriptc
+   * merge-profiles`). Code the profile does not describe, or describes
+   * from an older version of the program, is optimized as without one. */
+  profileUse?: string;
 
   /** Eligible packages compile automatically. Explicit names override automatic selection heuristics. */
   npmStatic?: readonly string[] | "auto";

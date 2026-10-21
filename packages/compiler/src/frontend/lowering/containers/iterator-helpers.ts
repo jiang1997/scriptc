@@ -684,7 +684,7 @@ function isHelperReceiver(lowerer: Lowerer, expr: ts.Expression): boolean {
   return (
     mapped?.kind === "dyn" &&
     symbol !== undefined &&
-    ADAPTED_ITERATOR_TYPES.has(symbol.name) &&
+    ADAPTED_ITERATOR_TYPES.has(ts.symbolName(symbol)) &&
     lowerer.isStdlibSymbol(symbol)
   );
 }

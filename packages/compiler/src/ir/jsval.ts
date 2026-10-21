@@ -42,6 +42,7 @@
  * suspensions keep jsvals like any pointer) but keep the dyn result ABI. */
 import { exprFunctionReference, moduleFunctionReferences } from "./function-references.js";
 import { DYN, JSVAL, type IrExpr, type IrFunction, type IrModule, type IrStmt } from "./ir.js";
+import { JsIcSites } from "./js-ic.js";
 import {
   everyExprChild,
   everyStmtChild,
@@ -104,8 +105,12 @@ export function jsvalEligible(fn: IrFunction): boolean {
  * Returns the number of functions that now use jsval. */
 export function promoteJsvals(mod: IrModule): number {
   const results = jsvalResults(mod);
+  const sites = new JsIcSites(mod);
+  const storesJs = (e: IrExpr): boolean =>
+    e.kind === "call" && sites.site(e.callee)?.kind === "set";
   let count = 0;
-  for (const fn of mod.functions) if (jsvalEligible(fn) && promoteFunction(fn, results)) count++;
+  for (const fn of mod.functions)
+    if (jsvalEligible(fn) && promoteFunction(fn, results, storesJs)) count++;
   for (const fn of mod.functions) if (results.has(fn.name)) fn.returnType = JSVAL;
   return count;
 }
@@ -165,6 +170,7 @@ function promotableLocals(
   fn: IrFunction,
   producer: (e: IrExpr) => boolean,
   jsResult: boolean,
+  storesJs: (e: IrExpr) => boolean,
 ): Set<string> {
   const candidates = new Map<string, LocalCost>();
   for (const local of fn.locals) {
@@ -218,6 +224,14 @@ function promotableLocals(
           return;
         }
         break;
+      case "call":
+        // An inline-cache store takes its value as a jsval (S4).
+        if (storesJs(e)) {
+          expr(e.args[0]!, false, weight);
+          expr(e.args[1]!, true, weight);
+          return;
+        }
+        break;
       default:
         break;
     }
@@ -247,6 +261,17 @@ function promotableLocals(
   };
   const stmt = (s: IrStmt, weight: number): void => {
     switch (s.kind) {
+      case "exprStmt":
+        // A discarded sequence result (a compound assignment statement)
+        // is never boxed.
+        if (discardedSequence(s.expr)) {
+          for (const inner of s.expr.stmts) stmt(inner, weight);
+          expr(s.expr.result, true, weight);
+          return;
+        }
+        blockStmtReferences(s);
+        expr(s.expr, false, weight);
+        return;
       case "return":
         if (s.value !== null) expr(s.value, jsResult && s.value.type.kind === "dyn", weight);
         return;
@@ -300,15 +325,25 @@ function promotableLocals(
   return promoted;
 }
 
+/** A statement-level sequence whose result nothing reads. */
+function discardedSequence(e: IrExpr): e is Extract<IrExpr, { kind: "seqExpr" }> {
+  return e.kind === "seqExpr" && e.generatorDelegate === undefined && e.diverges === undefined;
+}
+
 /* ── the rewrite ─────────────────────────────────────────────────────── */
 
-function promoteFunction(fn: IrFunction, results: ReadonlySet<string>): boolean {
+function promoteFunction(
+  fn: IrFunction,
+  results: ReadonlySet<string>,
+  storesJs: (e: IrExpr) => boolean,
+): boolean {
   const resultCall = (e: IrExpr): boolean => e.kind === "call" && results.has(e.callee);
   const operatorCall = (e: IrExpr): boolean => isProducerCall(e);
   const promoted = promotableLocals(
     fn,
     (e) => operatorCall(e) || resultCall(e),
     results.has(fn.name),
+    storesJs,
   );
   const ownResult = results.has(fn.name);
   let changed = false;
@@ -371,6 +406,13 @@ function promoteFunction(fn: IrFunction, results: ReadonlySet<string>): boolean 
     if (s.kind === "return" && ownResult && s.value !== null) return { ...s, value: toJs(s.value) };
     // A discarded result stays a jsval: nothing boxes it.
     if (s.kind === "exprStmt" && producesJs(s.expr)) return { ...s, expr: toJs(s.expr) };
+    if (s.kind === "exprStmt" && discardedSequence(s.expr) && producesJs(s.expr.result)) {
+      const result = toJs(s.expr.result);
+      return {
+        ...s,
+        expr: { ...s.expr, stmts: s.expr.stmts.map(rewriteStmt), result, type: result.type },
+      };
+    }
     if (s.kind === "varDecl" && promoted.has(s.localId) && s.init !== null)
       return { ...s, init: toJs(s.init) };
     if (s.kind === "assign" && promoted.has(s.localId)) return { ...s, value: toJs(s.value) };

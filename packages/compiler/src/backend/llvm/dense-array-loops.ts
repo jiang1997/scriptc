@@ -22,7 +22,7 @@ import type { IntegerRange } from "../../ir/integer-ranges.js";
 import { preservesArrayLength } from "../../ir/array-length-stability.js";
 import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
-import { SCR_ARR_FIELD } from "./common.js";
+import { loadArrCount, SCR_ARR_FIELD } from "./common.js";
 
 export const INT32_MAX = 2147483647;
 
@@ -187,12 +187,10 @@ export function emitDenseLoopGuard(host: LlvmEmitterContext, loop: DenseArrayLoo
     return ptr;
   };
   const receiver = host.emitStableReceiver(loop.length, []);
-  const lenPtr = header(receiver.name, 1),
+  const lenPtr = header(receiver.name, SCR_ARR_FIELD.len),
     len = B.tmp(),
     small = B.tmp();
-  B.line(
-    `${len} = load ${size}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}${host.arrayLengthRange}`,
-  );
+  loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
   B.line(`${small} = icmp ule ${size} ${len}, ${INT32_MAX}`);
   let valid = small;
   for (const [id, ref] of loop.arrays) {

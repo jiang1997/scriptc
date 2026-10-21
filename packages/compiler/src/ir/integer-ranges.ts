@@ -15,6 +15,13 @@ export interface IntegerRange {
   max: number;
 }
 export type IntegerRanges = ReadonlyMap<IrExpr, IntegerRange | null>;
+/** Facts per expression, and per for loop the bindings its body writes only
+ * as bounded cursors (boundedIntegerLoopFacts): each holds an integer in its
+ * loop range on entry and at every write in the loop. */
+export interface IntegerRangeFacts {
+  ranges: IntegerRanges;
+  loopRanges: ReadonlyMap<IrStmt, ReadonlyMap<string, IntegerRange>>;
+}
 const SIGNED: IntegerRange = { min: -2147483648, max: 2147483647 };
 const UNSIGNED: IntegerRange = { min: 0, max: 4294967295 };
 /** Int32 and uint32 at once: the bound under which `%` (modeled only for
@@ -215,6 +222,24 @@ export interface IntegerSlotFacts {
   elements?: (arr: IrExpr) => boolean;
 }
 
+/** A local read, or a numeric local plus or minus an integer literal
+ * (`i + 1`, `1 + i`, `i - 2`): the local and its offset. */
+function offsetRef(e: IrExpr): { localId: string; offset: number } | null {
+  if (e.kind === "varRef") return { localId: e.localId, offset: 0 };
+  if (e.kind !== "bin" || (e.op !== "+" && e.op !== "-") || e.type.kind !== "f64") return null;
+  const literal = (x: IrExpr): number | null =>
+    x.kind === "numLit" && Number.isSafeInteger(x.value) && !Object.is(x.value, -0)
+      ? x.value
+      : null;
+  const right = literal(e.right);
+  if (e.left.kind === "varRef" && e.left.type.kind === "f64" && right !== null)
+    return { localId: e.left.localId, offset: e.op === "+" ? right : -right };
+  const left = literal(e.left);
+  if (e.op === "+" && e.right.kind === "varRef" && e.right.type.kind === "f64" && left !== null)
+    return { localId: e.right.localId, offset: left };
+  return null;
+}
+
 /** Structured local dataflow. Calls cannot write uncaptured local slots,
  * but argument expressions can; unknown evaluation forms invalidate all
  * syntactically written slots before their children are inspected. Loops
@@ -227,8 +252,17 @@ export interface IntegerSlotFacts {
  * range those writes and its entry value span across the region.
  * Suspensions and captured bindings deliberately remain outside the proof. */
 export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {}): IntegerRanges {
+  return analyzeIntegerRangeFacts(fn, slots).ranges;
+}
+
+/** analyzeIntegerRanges with the loop ranges of the function's for loops. */
+export function analyzeIntegerRangeFacts(
+  fn: IrFunction,
+  slots: IntegerSlotFacts = {},
+): IntegerRangeFacts {
   const ranges = new Map<IrExpr, IntegerRange | null>();
-  if (fn.async || fn.generator) return ranges;
+  const loopRanges = new Map<IrStmt, Map<string, IntegerRange>>();
+  if (fn.async || fn.generator) return { ranges, loopRanges };
   const captures = new Set(
     [...(fn.captures ?? []), ...(fn.classCaptures ?? [])].map((c) => c.localId),
   );
@@ -436,6 +470,26 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
     return result;
   }
 
+  // Loop ranges of the bindings the enclosing for loops bound
+  // (boundedIntegerLoopFacts) while their bodies are analyzed.
+  let counterRanges: ReadonlyMap<string, IntegerRange> = new Map();
+  /** The value a write stores in a binding a for loop bounds. Every value
+   * the binding holds in the loop lies in its loop range, so the written
+   * value takes that range even when its operands' ranges add past it
+   * (`changes = changes + 1` with `changes` at the loop's limit). */
+  function boundedWrite(id: string, value: IrExpr, facts: Facts): IntegerRange | null {
+    const bound = counterRanges.get(id);
+    const before = ranges.get(value);
+    const computed = expr(value, facts);
+    if (!bound) return computed;
+    const range = computed
+      ? { min: Math.max(computed.min, bound.min), max: Math.min(computed.max, bound.max) }
+      : bound;
+    if (range.min > range.max) return computed;
+    ranges.set(value, before === undefined ? range : before ? union(before, range) : null);
+    return range;
+  }
+
   function remember(e: IrExpr, range: IntegerRange | null): IntegerRange | null {
     // Shared IR objects have to satisfy the proof at every occurrence.
     const previous = ranges.get(e);
@@ -508,7 +562,7 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
     let ref = condition.left;
     let bound = condition.right;
     let op: string = condition.op;
-    if (ref.kind !== "varRef" && bound.kind === "varRef") {
+    if (offsetRef(ref) === null && offsetRef(bound) !== null) {
       [ref, bound] = [bound, ref];
       op =
         (
@@ -518,18 +572,30 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
           >
         )[op] ?? "";
     }
-    if (ref.kind !== "varRef") return;
-    const boundRange =
+    const target = offsetRef(ref);
+    if (target === null) return;
+    const literalBound =
       bound.kind === "numLit" && Number.isFinite(bound.value)
         ? { min: bound.value, max: bound.value }
         : ranges.get(bound);
-    if (!boundRange) return;
+    if (!literalBound) return;
     // An Int32 contract local holds an int32 even where the dataflow has
     // no fact for it (loop headers, after unknown regions).
     const previous =
-      facts.get(ref.localId) ??
-      (eligible.has(ref.localId) ? (slots.locals?.(ref.localId) ?? undefined) : undefined);
+      facts.get(target.localId) ??
+      (eligible.has(target.localId) ? (slots.locals?.(target.localId) ?? undefined) : undefined);
     if (!previous) return;
+    // `x + c < b` bounds x as `x < b - c` does. A sum that rounds has a
+    // magnitude of at least 2^53, so against a bound within 2^52 every
+    // comparison answers as the exact sum would.
+    const offset = target.offset;
+    if (
+      offset !== 0 &&
+      (Math.abs(offset) > 2 ** 31 ||
+        Math.abs(literalBound.min) > 2 ** 52 ||
+        Math.abs(literalBound.max) > 2 ** 52)
+    )
+      return;
     if (!truth)
       op =
         (
@@ -538,21 +604,30 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
             string
           >
         )[op] ?? "";
+    // The sum `x + c` is an integer, so the bound rounds to an integer first
+    // and the offset comes off after: integer arithmetic below 2^53 is exact,
+    // where subtracting the offset from a fractional bound could round
+    // across an integer.
     let { min, max } = previous;
-    if (op === "<") max = Math.min(max, Math.ceil(boundRange.max) - 1);
-    else if (op === "<=") max = Math.min(max, Math.floor(boundRange.max));
-    else if (op === ">") min = Math.max(min, Math.floor(boundRange.min) + 1);
-    else if (op === ">=") min = Math.max(min, Math.ceil(boundRange.min));
+    if (op === "<") max = Math.min(max, Math.ceil(literalBound.max) - 1 - offset);
+    else if (op === "<=") max = Math.min(max, Math.floor(literalBound.max) - offset);
+    else if (op === ">") min = Math.max(min, Math.floor(literalBound.min) + 1 - offset);
+    else if (op === ">=") min = Math.max(min, Math.ceil(literalBound.min) - offset);
     else if (op === "===") {
-      min = Math.max(min, boundRange.min);
-      max = Math.min(max, boundRange.max);
-    } else if (op === "!==" && boundRange.min === boundRange.max) {
+      min = Math.max(min, Math.ceil(literalBound.min) - offset);
+      max = Math.min(max, Math.floor(literalBound.max) - offset);
+    } else if (
+      op === "!==" &&
+      literalBound.min === literalBound.max &&
+      Number.isInteger(literalBound.min)
+    ) {
       // Excluding one value narrows a range that ends at it.
-      if (min === boundRange.min) min += 1;
-      else if (max === boundRange.max) max -= 1;
+      const excluded = literalBound.min - offset;
+      if (min === excluded) min += 1;
+      else if (max === excluded) max -= 1;
     }
     if (min <= max && Number.isInteger(min) && Number.isInteger(max))
-      facts.set(ref.localId, { min, max });
+      facts.set(target.localId, { min, max });
   }
   function expr(e: IrExpr, facts: Facts): IntegerRange | null {
     let range: IntegerRange | null = null;
@@ -565,12 +640,17 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
         range = facts.get(e.localId) ?? boxedRange(e.localId);
         break;
       case "assignExpr":
-        range = expr(e.value, facts);
+        range = boundedWrite(e.localId, e.value, facts);
         set(facts, e.localId, range);
         break;
       case "incDec": {
         const before = facts.get(e.localId) ?? null;
-        const after = before ? integerArithmeticRange(e.op, before, { min: 1, max: 1 }) : null;
+        const bound = counterRanges.get(e.localId);
+        const sum = before ? integerArithmeticRange(e.op, before, { min: 1, max: 1 }) : null;
+        const after =
+          bound && sum
+            ? { min: Math.max(sum.min, bound.min), max: Math.min(sum.max, bound.max) }
+            : sum;
         set(facts, e.localId, after);
         range = e.prefix ? after : before;
         break;
@@ -756,11 +836,11 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
     for (const s of stmts) {
       switch (s.kind) {
         case "varDecl":
-        case "assign": {
-          const value = s.kind === "varDecl" ? s.init : s.value;
-          set(facts, s.localId, value ? expr(value, facts) : null);
+          set(facts, s.localId, s.init ? expr(s.init, facts) : null);
           break;
-        }
+        case "assign":
+          set(facts, s.localId, boundedWrite(s.localId, s.value, facts));
+          break;
         case "exprStmt":
           expr(s.expr, facts);
           break;
@@ -831,7 +911,31 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
           if (s.cond) expr(s.cond, loop);
           const inside = new Map(loop);
           if (s.cond) refine(s.cond, true, inside);
-          body(s.body, inside);
+          // Only the body's writes are the ones the bound counted.
+          const outer = counterRanges;
+          const headWrites = s.cond ? writes(s.cond) : new Set<string>();
+          if (s.update) for (const id of writes(s.update)) headWrites.add(id);
+          const cursors = new Map<string, IntegerRange>();
+          for (const [id, range] of bounded)
+            if (id !== counter?.id && !headWrites.has(id)) cursors.set(id, range);
+          // A loop analyzed again (inside another loop) keeps the bindings
+          // every analysis bounds, with the union of their ranges.
+          const previous = loopRanges.get(s);
+          if (!previous) loopRanges.set(s, cursors);
+          else
+            for (const [id, range] of previous) {
+              const other = cursors.get(id);
+              if (other) previous.set(id, union(range, other));
+              else previous.delete(id);
+            }
+          const active = new Map(outer);
+          for (const [id, range] of cursors) active.set(id, range);
+          counterRanges = active;
+          try {
+            body(s.body, inside);
+          } finally {
+            counterRanges = outer;
+          }
           // Continue can bypass any body assignment. The update therefore
           // starts from header invariants rather than the body's exit facts,
           // plus what the condition proved about bindings the body never
@@ -919,5 +1023,5 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
   const entry: Facts = new Map();
   if (slots.params) for (const [id, range] of slots.params) set(entry, id, range);
   body(fn.body, entry);
-  return ranges;
+  return { ranges, loopRanges };
 }

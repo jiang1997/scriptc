@@ -10,6 +10,7 @@
  * too; inferred checked values validate at the ordinary return boundary. */
 
 import * as ts from "./ts7/syntax.js";
+import { getTextOfNode, tokenStartOfNode } from "./ts7/node-functions.js";
 
 export interface NpmStaticOverloadParameter {
   name: string;
@@ -56,11 +57,11 @@ export function applyNpmStaticJsDocNamepaths(
       for (const tag of doc.tags?.nodes ?? []) {
         const expression = tag.typeExpression;
         if (expression?.kind !== ts.SyntaxKind.JSDocTypeExpression) continue;
-        const start = expression.getStart(sourceFile);
+        const start = tokenStartOfNode(expression);
         if (source[start] !== "{") continue;
         let depth = 1;
         let quote = "";
-        for (let i = start + 1; i < tag.getEnd() && depth > 0; i++) {
+        for (let i = start + 1; i < tag.end && depth > 0; i++) {
           const char = source[i]!;
           if (quote !== "") {
             if (char === "\\") i++;
@@ -80,7 +81,7 @@ export function applyNpmStaticJsDocNamepaths(
             continue;
           }
           const name = /^[$A-Z_a-z][$\w]*(?:[.#~][$A-Z_a-z][$\w]*)*/.exec(
-            source.slice(i, tag.getEnd()),
+            source.slice(i, tag.end),
           )?.[0];
           if (!name) continue;
           if (name.includes("~") || name.includes("#")) replacements.set(i, name.length);
@@ -171,7 +172,7 @@ export function applyNpmStaticNullableClassFields(
         hasModifier(member, ts.SyntaxKind.StaticKeyword)
       )
         continue;
-      const leading = source.slice(member.getFullStart(), member.getStart(sourceFile));
+      const leading = source.slice(member.pos, tokenStartOfNode(member));
       if (jsDocTypeOf(member) !== undefined || leading.includes("@type")) continue;
       fields.set(member.name.text, { member, invalid: false });
     }
@@ -285,7 +286,7 @@ export function applyNpmStaticNullableClassFields(
     for (const field of fields.values()) {
       if (field.invalid || field.className === undefined) continue;
       inserts.push({
-        offset: field.member.getStart(sourceFile),
+        offset: tokenStartOfNode(field.member),
         text: `/** @type {${field.className} | null} */ `,
       });
     }
@@ -358,7 +359,7 @@ export function applyNpmStaticFindReturnWidening(
         (returnType.typeArguments?.nodes.length ?? 0) !== 0
       )
         continue;
-      insertions.push({ offset: returnType.getEnd(), length: " | undefined".length });
+      insertions.push({ offset: returnType.end, length: " | undefined".length });
     }
   }
   if (insertions.length === 0) return null;
@@ -428,26 +429,22 @@ function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
   );
 }
 
-function safeTypeText(
-  node: ts.TypeNode,
-  sourceFile: ts.SourceFile,
-  className: string,
-): string | null {
-  if (SAFE_KEYWORD_TYPES.has(node.kind) || ts.isThisTypeNode(node)) return node.getText(sourceFile);
+function safeTypeText(node: ts.TypeNode, className: string): string | null {
+  if (SAFE_KEYWORD_TYPES.has(node.kind) || ts.isThisTypeNode(node)) return getTextOfNode(node);
   if (ts.isLiteralTypeNode(node) && node.literal.kind === ts.SyntaxKind.NullKeyword) return "null";
   if (ts.isParenthesizedTypeNode(node)) {
-    const inner = safeTypeText(node.type, sourceFile, className);
+    const inner = safeTypeText(node.type, className);
     return inner === null ? null : `(${inner})`;
   }
   if (ts.isArrayTypeNode(node)) {
-    const element = safeTypeText(node.elementType, sourceFile, className);
+    const element = safeTypeText(node.elementType, className);
     return element === null ? null : `${element}[]`;
   }
   if (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword) {
-    return safeTypeText(node.type, sourceFile, className);
+    return safeTypeText(node.type, className);
   }
   if (ts.isUnionTypeNode(node)) {
-    const arms = node.types.nodes.map((type) => safeTypeText(type, sourceFile, className));
+    const arms = node.types.nodes.map((type) => safeTypeText(type, className));
     return arms.some((arm) => arm === null) ? null : arms.join(" | ");
   }
   if (
@@ -483,7 +480,7 @@ function overloadSignature(
   ) {
     return null;
   }
-  const returnType = safeTypeText(method.type, sourceFile, className);
+  const returnType = safeTypeText(method.type, className);
   if (returnType === null) return null;
   const parameters: NpmStaticOverloadParameter[] = [];
   for (const parameter of method.parameters.nodes) {
@@ -496,7 +493,7 @@ function overloadSignature(
     ) {
       return null;
     }
-    const type = safeTypeText(parameter.type, sourceFile, className);
+    const type = safeTypeText(parameter.type, className);
     if (type === null) return null;
     parameters.push({
       name: parameter.name.text,
@@ -553,13 +550,9 @@ export function parseNpmStaticDeclarationOverloads(
   return classes;
 }
 
-function nullableSelfType(
-  node: ts.TypeNode,
-  sourceFile: ts.SourceFile,
-  className: string,
-): string | null {
+function nullableSelfType(node: ts.TypeNode, className: string): string | null {
   if (!ts.isUnionTypeNode(node) || node.types.nodes.length !== 2) return null;
-  const arms = node.types.nodes.map((type) => safeTypeText(type, sourceFile, className));
+  const arms = node.types.nodes.map((type) => safeTypeText(type, className));
   return arms.includes(className) && arms.includes("null") ? `${className} | null` : null;
 }
 
@@ -613,8 +606,7 @@ export function parseNpmStaticDeclarationProperties(
         continue;
       }
       const type =
-        nullableSelfType(member.type, sourceFile, className) ??
-        nullableVoidCallbackType(member.type);
+        nullableSelfType(member.type, className) ?? nullableVoidCallbackType(member.type);
       if (type !== null) properties.set(member.name.text, type);
     }
     if (properties.size > 0) classes.set(className, properties);
@@ -1012,13 +1004,10 @@ export function applyNpmStaticDeclarationOverloads(
           ) {
             continue;
           }
-          const leading = source.slice(
-            bodyStatement.getFullStart(),
-            bodyStatement.getStart(sourceFile),
-          );
+          const leading = source.slice(bodyStatement.pos, tokenStartOfNode(bodyStatement));
           if (!leading.includes("@type")) {
             inserts.push({
-              offset: bodyStatement.getStart(sourceFile),
+              offset: tokenStartOfNode(bodyStatement),
               text: `/** @type {${backing.type}} */ `,
             });
           }
@@ -1036,13 +1025,13 @@ export function applyNpmStaticDeclarationOverloads(
             (parameter) => parameter.optional && !existing.includes(`[${parameter.name}]`),
           );
           if (missingOptional)
-            inserts.push({ offset: member.getStart(sourceFile), text: `${implementation} ` });
+            inserts.push({ offset: tokenStartOfNode(member), text: `${implementation} ` });
           else if (
             jsDocs.length === 0 &&
             member.parameters.nodes.length === 0 &&
             SCALAR_METHOD_RETURNS.has(signatures[0]!.returnType)
           ) {
-            inserts.push({ offset: member.getStart(sourceFile), text: `${implementation} ` });
+            inserts.push({ offset: tokenStartOfNode(member), text: `${implementation} ` });
           }
         }
         continue;
@@ -1050,7 +1039,9 @@ export function applyNpmStaticDeclarationOverloads(
       const implementation =
         jsDocs.length === 0 ? implementationComment(statement.name.text, member, signatures) : null;
       if (jsDocs.length === 0 && implementation === null) continue;
-      const offset = jsDocs[0]?.getStart(sourceFile) ?? member.getStart(sourceFile);
+      const offset =
+        (jsDocs[0] === undefined ? undefined : tokenStartOfNode(jsDocs[0])) ??
+        tokenStartOfNode(member);
       const text = `${signatures.map(overloadComment).join(" ")} ${implementation === null ? "" : implementation + " "}`;
       inserts.push({ offset, text });
     }
@@ -1158,9 +1149,9 @@ export function applyNpmStaticDeclarationProperties(
           !callbackInitializer(member.initializer))
       )
         continue;
-      const leading = source.slice(member.getFullStart(), member.getStart(sourceFile));
+      const leading = source.slice(member.pos, tokenStartOfNode(member));
       if (jsDocTypeOf(member) !== undefined || leading.includes("@type")) continue;
-      inserts.push({ offset: member.getStart(sourceFile), text: `/** @type {${type}} */ ` });
+      inserts.push({ offset: tokenStartOfNode(member), text: `/** @type {${type}} */ ` });
     }
     const constructor = statement.members.nodes.find(
       (member): member is ts.ConstructorDeclaration =>
@@ -1184,12 +1175,9 @@ export function applyNpmStaticDeclarationProperties(
       }
       const type = properties.get(left.name.text);
       if (type === undefined) continue;
-      const leading = source.slice(
-        bodyStatement.getFullStart(),
-        bodyStatement.getStart(sourceFile),
-      );
+      const leading = source.slice(bodyStatement.pos, tokenStartOfNode(bodyStatement));
       if (leading.includes("@type")) continue;
-      inserts.push({ offset: bodyStatement.getStart(sourceFile), text: `/** @type {${type}} */ ` });
+      inserts.push({ offset: tokenStartOfNode(bodyStatement), text: `/** @type {${type}} */ ` });
     }
   }
   if (inserts.length === 0) return null;

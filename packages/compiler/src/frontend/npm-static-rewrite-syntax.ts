@@ -6,6 +6,7 @@ import {
   isModuleExports,
 } from "./cjs-syntax.js";
 import { rewriteBundledFunctionImports } from "./npm-static-bundled-cjs.js";
+import { getTextOfNode, tokenStartOfNode } from "./ts7/node-functions.js";
 
 /** Resolution stays with the compilation host. Syntax never reads disk or
  * starts a parser implicitly, so native and Node hosts run the same pass. */
@@ -57,7 +58,7 @@ function liveExportTableFirst(
   };
   let sawTable = false;
   for (const stmt of sf.statements.nodes) {
-    if (stmt.getStart(sf) >= installAt) return sawTable;
+    if (tokenStartOfNode(stmt) >= installAt) return sawTable;
     if (ts.isFunctionDeclaration(stmt) || ts.isEmptyStatement(stmt)) continue;
     if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)) continue;
     if (ts.isVariableStatement(stmt)) {
@@ -146,7 +147,7 @@ function chaseValue(e: ts.Expression): { kind: "ident" | "hoist"; text: string }
     cur.kind === ts.SyntaxKind.FalseKeyword ||
     cur.kind === ts.SyntaxKind.NullKeyword
   ) {
-    return { kind: "hoist", text: cur.getText() };
+    return { kind: "hoist", text: getTextOfNode(cur) };
   }
   // ident-rooted member chains: this.x / a.b.c / a["k"].d — side-effect
   // free reads the tail const can evaluate once.
@@ -161,7 +162,7 @@ function chaseValue(e: ts.Expression): { kind: "ident" | "hoist"; text: string }
   ) {
     walk = walk.expression;
   }
-  if (ts.isIdentifier(walk)) return { kind: "hoist", text: cur.getText() };
+  if (ts.isIdentifier(walk)) return { kind: "hoist", text: getTextOfNode(cur) };
   return null;
 }
 
@@ -182,7 +183,7 @@ function chaseObjectLiteral(e: ts.Expression): { kind: "hoist"; text: string } |
     )
       return null;
   }
-  return { kind: "hoist", text: cur.getText() };
+  return { kind: "hoist", text: getTextOfNode(cur) };
 }
 
 /** The getter body's returned expression for the two descriptor getter
@@ -326,7 +327,7 @@ function recognizedToEsmDecl(d: ts.VariableDeclaration): boolean {
   let to: ts.Expression = expr.arguments.nodes[0]!;
   while (ts.isParenthesizedExpression(to)) to = to.expression;
   if (!ts.isConditionalExpression(to)) return false;
-  const condText = to.condition.getText();
+  const condText = getTextOfNode(to.condition);
   if (!condText.includes(isNodeMode) || !condText.includes("__esModule")) return false;
   let stamp: ts.Expression = to.whenTrue;
   while (ts.isParenthesizedExpression(stamp)) stamp = stamp.expression;
@@ -443,7 +444,7 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
     ) {
       if (parent.name.text === "default" && defaultIsModule) {
         if (!readOnlyAccess(parent)) return fail(TO_ESM_ESCAPE_DEGRADE);
-        pads.push({ start: child.getEnd(), end: parent.getEnd() });
+        pads.push({ start: child.end, end: parent.end });
       }
     } else {
       return fail(TO_ESM_ESCAPE_DEGRADE);
@@ -451,8 +452,8 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
     // the wrapper itself: callee + '(' down, and everything after the
     // require argument (`, 1` included) — the bare require survives at its
     // original offsets.
-    pads.push({ start: call.getStart(sf), end: arg0!.getStart(sf) });
-    pads.push({ start: arg0!.getEnd(), end: call.getEnd() });
+    pads.push({ start: tokenStartOfNode(call), end: tokenStartOfNode(arg0!) });
+    pads.push({ start: arg0!.end, end: call.end });
   }
 
   if (bindings.size > 0) {
@@ -513,7 +514,7 @@ function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteH
           violated = true;
           return;
         }
-        pads.push({ start: n.expression.getEnd(), end: n.getEnd() });
+        pads.push({ start: n.expression.end, end: n.end });
       }
     };
     ts.walkPreorder(sf, padDefaults);
@@ -628,8 +629,8 @@ export function rewriteBundlerCjsSyntax(
         ts.isIdentifier(rhs.arguments.nodes[0]!)
       ) {
         esbuildMainTarget = (rhs.arguments.nodes[0] as ts.Identifier).text;
-        tablePos = stmt.getStart(sf);
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        tablePos = tokenStartOfNode(stmt);
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -662,9 +663,9 @@ export function rewriteBundlerCjsSyntax(
           names,
           finalRhs: cur,
           viaBareExports,
-          pos: stmt.getStart(sf),
-          start: stmt.getStart(sf),
-          end: stmt.getEnd(),
+          pos: tokenStartOfNode(stmt),
+          start: tokenStartOfNode(stmt),
+          end: stmt.end,
         });
         continue; // classified later (only when a rewrite actually happens)
       }
@@ -684,7 +685,7 @@ export function rewriteBundlerCjsSyntax(
         isModuleExports(inner.left) &&
         ts.isObjectLiteralExpression(inner.right)
       ) {
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -695,7 +696,7 @@ export function rewriteBundlerCjsSyntax(
     const table = exportCallOf(e);
     if (table !== null) {
       exportTables.push(table);
-      neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+      neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
       sawBundleShape = true;
       continue;
     }
@@ -705,7 +706,7 @@ export function rewriteBundlerCjsSyntax(
       const spec = bareRequireSpecOf(e.arguments.nodes[0]!);
       if (spec !== null) {
         addStarSpec(spec);
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -716,7 +717,7 @@ export function rewriteBundlerCjsSyntax(
       const spec = bareRequireSpecOf(e.arguments.nodes[1]!);
       if (spec !== null) {
         addStarSpec(spec);
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
         continue;
       }
@@ -725,7 +726,7 @@ export function rewriteBundlerCjsSyntax(
     const def = definePropertyExportOf(e);
     if (def !== null) {
       if (def.esModuleStamp) {
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         // the canonical table re-stamps it (lexer-visibly — merve detects
         // this defineProperty form, so parity wants a visible entry)
         continue;
@@ -733,7 +734,7 @@ export function rewriteBundlerCjsSyntax(
       const chased = def.value !== null ? chaseValue(def.value) : null;
       if (chased !== null) {
         definePropEntries.push({ name: def.name, value: def.value });
-        neutralize.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        neutralize.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         sawBundleShape = true;
       }
       // unchaseable descriptor: LEAVE the statement (its runtime fence
@@ -792,7 +793,7 @@ export function rewriteBundlerCjsSyntax(
         // The table feeding module.exports keeps a getter it cannot chase
         // as a live accessor rather than a snapshot.
         if (spec.kind === "any" && value !== null && t.target === esbuildMainTarget)
-          claim(name, { name, kind: "getter", value: value.getText() });
+          claim(name, { name, kind: "getter", value: getTextOfNode(value) });
         else claim(name, spec);
       }
     }
@@ -951,8 +952,8 @@ export function rewriteBundlerCjsSyntax(
         helperDecls.set(
           d.name.text,
           decls.length === 1
-            ? { start: stmt.getStart(sf), end: stmt.getEnd() }
-            : { start: d.getStart(sf), end: d.getEnd() },
+            ? { start: tokenStartOfNode(stmt), end: stmt.end }
+            : { start: tokenStartOfNode(d), end: d.end },
         );
       }
       if (anyHelper && decls.length > 1) helperStmts.push(stmt);
@@ -966,8 +967,8 @@ export function rewriteBundlerCjsSyntax(
         if (parent !== undefined && ts.isVariableDeclaration(parent) && parent.name === node)
           return;
         const list = refs.get(node.text);
-        if (list === undefined) refs.set(node.text, [node.getStart(sf)]);
-        else list.push(node.getStart(sf));
+        if (list === undefined) refs.set(node.text, [tokenStartOfNode(node)]);
+        else list.push(tokenStartOfNode(node));
       }
     };
     ts.walkPreorder(sf, record);
@@ -999,12 +1000,12 @@ export function rewriteBundlerCjsSyntax(
       const deadAt = decls.map((d) => {
         if (!ts.isIdentifier(d.name) || !removed.has(d.name.text)) return false;
         const span = helperDecls.get(d.name.text)!;
-        if (span.start !== d.getStart(sf)) return false;
+        if (span.start !== tokenStartOfNode(d)) return false;
         declaratorSpans.add(span);
         return true;
       });
       if (deadAt.every((x) => x)) {
-        declaratorPads.push({ start: stmt.getStart(sf), end: stmt.getEnd() });
+        declaratorPads.push({ start: tokenStartOfNode(stmt), end: stmt.end });
         continue;
       }
       // Dead declarators before the last live one take their trailing
@@ -1015,8 +1016,8 @@ export function rewriteBundlerCjsSyntax(
         const d = decls[i]!;
         declaratorPads.push(
           i < lastLive
-            ? { start: d.getStart(sf), end: decls[i + 1]!.getStart(sf) }
-            : { start: decls[lastLive]!.getEnd(), end: d.getEnd() },
+            ? { start: tokenStartOfNode(d), end: tokenStartOfNode(decls[i + 1]!) }
+            : { start: decls[lastLive]!.end, end: d.end },
         );
       }
     }

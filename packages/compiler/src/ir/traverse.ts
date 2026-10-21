@@ -1,5 +1,43 @@
 import type { IrExpr, IrModule, IrStmt, IrType, SrcLoc } from "./ir.js";
 
+// Child lists are walked with these loops rather than with `every` or `map`
+// and an arrow function: the arrow would be a new closure at every visited
+// node, which the native compiler allocates and releases per node.
+
+function everyOf<T>(children: readonly T[], visit: (child: T) => boolean): boolean {
+  const length = children.length;
+  for (let i = 0; i < length; i++) if (!visit(children[i]!)) return false;
+  return true;
+}
+
+function everyValue(
+  children: readonly { value: IrExpr }[],
+  expr: (expr: IrExpr) => boolean,
+): boolean {
+  const length = children.length;
+  for (let i = 0; i < length; i++) if (!expr(children[i]!.value)) return false;
+  return true;
+}
+
+function everyEntry(
+  children: readonly { key: IrExpr; value: IrExpr }[],
+  expr: (expr: IrExpr) => boolean,
+): boolean {
+  const length = children.length;
+  for (let i = 0; i < length; i++) {
+    const child = children[i]!;
+    if (!expr(child.key) || !expr(child.value)) return false;
+  }
+  return true;
+}
+
+function mapOf<T>(children: readonly T[], map: (child: T) => T): T[] {
+  const length = children.length;
+  const result: T[] = [];
+  for (let i = 0; i < length; i++) result.push(map(children[i]!));
+  return result;
+}
+
 /** The type tree contains structural children; named shapes are references.
  * Module traversal visits each shape definition separately. */
 export function everyTypeChild(node: IrType, visit: (node: IrType) => boolean): boolean {
@@ -134,13 +172,13 @@ export function everyExprChild(
     case "varRef":
       return true;
     case "call":
-      return node.args.every((child) => expr(child));
+      return everyOf(node.args, expr);
     case "dynFrom":
       return expr(node.value);
     case "strLit":
       return true;
     case "libCall":
-      return node.args.every((child) => expr(child));
+      return everyOf(node.args, expr);
     case "dynCheck":
       return expr(node.value);
     case "strEq":
@@ -158,13 +196,13 @@ export function everyExprChild(
     case "unitLit":
       return true;
     case "seqExpr":
-      return node.stmts.every((child) => stmt(child)) && expr(node.result);
+      return everyOf(node.stmts, stmt) && expr(node.result);
     case "dynCall":
       return (
         expr(node.callee) &&
         (node.receiver === undefined || expr(node.receiver)) &&
         (node.calleeNameValue === undefined || expr(node.calleeNameValue)) &&
-        node.args.every((child) => expr(child))
+        everyOf(node.args, expr)
       );
     case "dynTest":
       return expr(node.value);
@@ -203,15 +241,15 @@ export function everyExprChild(
     case "chainRecv":
       return true;
     case "strIntrinsic":
-      return expr(node.receiver) && node.args.every((child) => expr(child));
+      return expr(node.receiver) && everyOf(node.args, expr);
     case "regexLit":
       return true;
     case "templateStrings":
       return true;
     case "regexIntrinsic":
-      return expr(node.receiver) && node.args.every((child) => expr(child));
+      return expr(node.receiver) && everyOf(node.args, expr);
     case "arrayLit":
-      return node.elems.every((child) => expr(child));
+      return everyOf(node.elems, expr);
     case "arrayNewLen":
       return expr(node.length);
     case "arrayGet":
@@ -221,28 +259,26 @@ export function everyExprChild(
     case "arrayState":
       return expr(node.arr) && expr(node.index);
     case "arrIntrinsic":
-      return expr(node.receiver) && node.args.every((child) => expr(child));
+      return expr(node.receiver) && everyOf(node.args, expr);
     case "bytesNew":
       return node.source === null || expr(node.source);
     case "bytesIntrinsic":
-      return expr(node.receiver) && node.args.every((child) => expr(child));
+      return expr(node.receiver) && everyOf(node.args, expr);
     case "mapNew":
-      return (
-        node.seed === undefined || node.seed.every((child) => expr(child.key) && expr(child.value))
-      );
+      return node.seed === undefined || everyEntry(node.seed, expr);
     case "mapIntrinsic":
-      return expr(node.receiver) && node.args.every((child) => expr(child));
+      return expr(node.receiver) && everyOf(node.args, expr);
     case "setNew":
       return node.seed === undefined || expr(node.seed);
     case "setIntrinsic":
-      return expr(node.receiver) && node.args.every((child) => expr(child));
+      return expr(node.receiver) && everyOf(node.args, expr);
     case "ffiCall":
-      return node.args.every((child) => expr(child));
+      return everyOf(node.args, expr);
     case "callValue":
       return (
         expr(node.callee) &&
         (node.receiver === undefined || expr(node.receiver)) &&
-        node.args.every((child) => expr(child))
+        everyOf(node.args, expr)
       );
     case "selfRef":
       return true;
@@ -259,11 +295,11 @@ export function everyExprChild(
     case "promiseWithResolvers":
       return true;
     case "new":
-      return node.args.every((child) => expr(child));
+      return everyOf(node.args, expr);
     case "classRef":
       return true;
     case "newValue":
-      return expr(node.callee) && node.args.every((child) => expr(child));
+      return expr(node.callee) && everyOf(node.args, expr);
     case "instanceOfValue":
       return expr(node.value) && expr(node.classValue);
     case "promiseVoidWiden":
@@ -273,11 +309,11 @@ export function everyExprChild(
     case "instanceOf":
       return expr(node.value);
     case "virtualCall":
-      return node.args.every((child) => expr(child));
+      return everyOf(node.args, expr);
     case "recordLit":
-      return node.fields.every((child) => expr(child.value));
+      return everyValue(node.fields, expr);
     case "recordClone":
-      return expr(node.source) && node.overrides.every((child) => expr(child.value));
+      return expr(node.source) && everyValue(node.overrides, expr);
     case "recordGet":
       return expr(node.obj);
     case "recordKeyGet":
@@ -286,15 +322,12 @@ export function everyExprChild(
       return (
         expr(node.recv) &&
         (node.calleeNameValue === undefined || expr(node.calleeNameValue)) &&
-        node.args.every((child) => expr(child))
+        everyOf(node.args, expr)
       );
     case "dynArrLit":
-      return node.elems.every((child) => expr(child));
+      return everyOf(node.elems, expr);
     case "dynObjLit":
-      return (
-        node.fields === undefined ||
-        node.fields.every((child) => expr(child.key) && expr(child.value))
-      );
+      return node.fields === undefined || everyEntry(node.fields, expr);
     case "dynKeyGet":
       return expr(node.key) && expr(node.value);
     case "dynHasKey":
@@ -338,7 +371,7 @@ export function everyExprChild(
     case "unionEq":
       return expr(node.left) && expr(node.right);
     case "intrinsic":
-      return node.args.every((child) => expr(child));
+      return everyOf(node.args, expr);
     case "jsonStringify":
       return expr(node.value);
   }
@@ -360,8 +393,8 @@ export function everyStmtChild(
     case "if":
       return (
         expr(node.cond) &&
-        node.then.every((child) => stmt(child)) &&
-        (node.else_ === null || node.else_.every((child) => stmt(child)))
+        everyOf(node.then, stmt) &&
+        (node.else_ === null || everyOf(node.else_, stmt))
       );
     case "varDecl":
       return node.init === null || expr(node.init);
@@ -370,27 +403,29 @@ export function everyStmtChild(
     case "assign":
       return expr(node.value);
     case "block":
-      return node.body.every((child) => stmt(child));
+      return everyOf(node.body, stmt);
     case "fieldSet":
       return expr(node.obj) && expr(node.value);
     case "while":
-      return expr(node.cond) && node.body.every((child) => stmt(child));
+      return expr(node.cond) && everyOf(node.body, stmt);
     case "doWhile":
-      return node.body.every((child) => stmt(child)) && expr(node.cond);
-    case "switch":
-      return (
-        expr(node.disc) &&
-        node.cases.every(
-          (child) =>
-            (child.test === null || expr(child.test)) && child.body.every((child) => stmt(child)),
-        )
-      );
+      return everyOf(node.body, stmt) && expr(node.cond);
+    case "switch": {
+      if (!expr(node.disc)) return false;
+      const length = node.cases.length;
+      for (let i = 0; i < length; i++) {
+        const child = node.cases[i]!;
+        if (child.test !== null && !expr(child.test)) return false;
+        if (!everyOf(child.body, stmt)) return false;
+      }
+      return true;
+    }
     case "for":
       return (
         (node.init === null || stmt(node.init)) &&
         (node.cond === null || expr(node.cond)) &&
         (node.update === null || stmt(node.update)) &&
-        node.body.every((child) => stmt(child))
+        everyOf(node.body, stmt)
       );
     case "arraySet":
       return expr(node.arr) && expr(node.index) && expr(node.value);
@@ -403,7 +438,7 @@ export function everyStmtChild(
     case "bytesSet":
       return expr(node.arr) && expr(node.index) && expr(node.value);
     case "forOf":
-      return expr(node.iterable) && node.body.every((child) => stmt(child));
+      return expr(node.iterable) && everyOf(node.body, stmt);
     case "recordSet":
       return expr(node.obj) && expr(node.value);
     case "recordKeySet":
@@ -422,9 +457,9 @@ export function everyStmtChild(
       return true;
     case "tryCatch":
       return (
-        node.tryBody.every((child) => stmt(child)) &&
-        (node.catchBody === null || node.catchBody.every((child) => stmt(child))) &&
-        (node.finallyBody === null || node.finallyBody.every((child) => stmt(child)))
+        everyOf(node.tryBody, stmt) &&
+        (node.catchBody === null || everyOf(node.catchBody, stmt)) &&
+        (node.finallyBody === null || everyOf(node.finallyBody, stmt))
       );
   }
   node satisfies never;
@@ -443,13 +478,13 @@ export function mapExprChildren(
     case "varRef":
       return node;
     case "call":
-      return { ...node, args: node.args.map((child) => expr(child)) };
+      return { ...node, args: mapOf(node.args, expr) };
     case "dynFrom":
       return { ...node, value: expr(node.value) };
     case "strLit":
       return node;
     case "libCall":
-      return { ...node, args: node.args.map((child) => expr(child)) };
+      return { ...node, args: mapOf(node.args, expr) };
     case "dynCheck":
       return { ...node, value: expr(node.value) };
     case "strEq":
@@ -467,12 +502,12 @@ export function mapExprChildren(
     case "unitLit":
       return node;
     case "seqExpr":
-      return { ...node, stmts: node.stmts.map((child) => stmt(child)), result: expr(node.result) };
+      return { ...node, stmts: mapOf(node.stmts, stmt), result: expr(node.result) };
     case "dynCall": {
       const result: Extract<IrExpr, { kind: "dynCall" }> = { ...node, callee: expr(node.callee) };
       if (node.receiver !== undefined) result.receiver = expr(node.receiver);
       if (node.calleeNameValue !== undefined) result.calleeNameValue = expr(node.calleeNameValue);
-      result.args = node.args.map((child) => expr(child));
+      result.args = mapOf(node.args, expr);
       return result;
     }
     case "dynTest":
@@ -515,7 +550,7 @@ export function mapExprChildren(
       return {
         ...node,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     case "regexLit":
       return node;
@@ -525,10 +560,10 @@ export function mapExprChildren(
       return {
         ...node,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     case "arrayLit":
-      return { ...node, elems: node.elems.map((child) => expr(child)) };
+      return { ...node, elems: mapOf(node.elems, expr) };
     case "arrayNewLen":
       return { ...node, length: expr(node.length) };
     case "arrayGet":
@@ -541,7 +576,7 @@ export function mapExprChildren(
       return {
         ...node,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     case "bytesNew":
       return { ...node, source: node.source === null ? null : expr(node.source) };
@@ -549,7 +584,7 @@ export function mapExprChildren(
       return {
         ...node,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     case "mapNew":
       return node.seed === undefined
@@ -566,7 +601,7 @@ export function mapExprChildren(
       return {
         ...node,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     case "setNew":
       return node.seed === undefined ? node : { ...node, seed: expr(node.seed) };
@@ -574,19 +609,18 @@ export function mapExprChildren(
       return {
         ...node,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     case "ffiCall":
-      return { ...node, args: node.args.map((child) => expr(child)) };
+      return { ...node, args: mapOf(node.args, expr) };
     case "callValue": {
       const callee = expr(node.callee);
-      if (node.receiver === undefined)
-        return { ...node, callee, args: node.args.map((child) => expr(child)) };
+      if (node.receiver === undefined) return { ...node, callee, args: mapOf(node.args, expr) };
       return {
         ...node,
         callee,
         receiver: expr(node.receiver),
-        args: node.args.map((child) => expr(child)),
+        args: mapOf(node.args, expr),
       };
     }
     case "selfRef":
@@ -604,11 +638,11 @@ export function mapExprChildren(
     case "promiseWithResolvers":
       return node;
     case "new":
-      return { ...node, args: node.args.map((child) => expr(child)) };
+      return { ...node, args: mapOf(node.args, expr) };
     case "classRef":
       return node;
     case "newValue":
-      return { ...node, callee: expr(node.callee), args: node.args.map((child) => expr(child)) };
+      return { ...node, callee: expr(node.callee), args: mapOf(node.args, expr) };
     case "instanceOfValue":
       return { ...node, value: expr(node.value), classValue: expr(node.classValue) };
     case "promiseVoidWiden":
@@ -618,7 +652,7 @@ export function mapExprChildren(
     case "instanceOf":
       return { ...node, value: expr(node.value) };
     case "virtualCall":
-      return { ...node, args: node.args.map((child) => expr(child)) };
+      return { ...node, args: mapOf(node.args, expr) };
     case "recordLit":
       return {
         ...node,
@@ -637,11 +671,11 @@ export function mapExprChildren(
     case "dynInvoke": {
       const result: Extract<IrExpr, { kind: "dynInvoke" }> = { ...node, recv: expr(node.recv) };
       if (node.calleeNameValue !== undefined) result.calleeNameValue = expr(node.calleeNameValue);
-      result.args = node.args.map((child) => expr(child));
+      result.args = mapOf(node.args, expr);
       return result;
     }
     case "dynArrLit":
-      return { ...node, elems: node.elems.map((child) => expr(child)) };
+      return { ...node, elems: mapOf(node.elems, expr) };
     case "dynObjLit":
       return node.fields === undefined
         ? node
@@ -696,7 +730,7 @@ export function mapExprChildren(
     case "unionEq":
       return { ...node, left: expr(node.left), right: expr(node.right) };
     case "intrinsic":
-      return { ...node, args: node.args.map((child) => expr(child)) };
+      return { ...node, args: mapOf(node.args, expr) };
     case "jsonStringify":
       return { ...node, value: expr(node.value) };
   }
@@ -719,8 +753,8 @@ export function mapStmtChildren(
       return {
         ...node,
         cond: expr(node.cond),
-        then: node.then.map((child) => stmt(child)),
-        else_: node.else_ === null ? null : node.else_.map((child) => stmt(child)),
+        then: mapOf(node.then, stmt),
+        else_: node.else_ === null ? null : mapOf(node.else_, stmt),
       };
     case "varDecl":
       return { ...node, init: node.init === null ? null : expr(node.init) };
@@ -729,13 +763,13 @@ export function mapStmtChildren(
     case "assign":
       return { ...node, value: expr(node.value) };
     case "block":
-      return { ...node, body: node.body.map((child) => stmt(child)) };
+      return { ...node, body: mapOf(node.body, stmt) };
     case "fieldSet":
       return { ...node, obj: expr(node.obj), value: expr(node.value) };
     case "while":
-      return { ...node, cond: expr(node.cond), body: node.body.map((child) => stmt(child)) };
+      return { ...node, cond: expr(node.cond), body: mapOf(node.body, stmt) };
     case "doWhile":
-      return { ...node, body: node.body.map((child) => stmt(child)), cond: expr(node.cond) };
+      return { ...node, body: mapOf(node.body, stmt), cond: expr(node.cond) };
     case "switch":
       return {
         ...node,
@@ -743,7 +777,7 @@ export function mapStmtChildren(
         cases: node.cases.map((child) => ({
           ...child,
           test: child.test === null ? null : expr(child.test),
-          body: child.body.map((child) => stmt(child)),
+          body: mapOf(child.body, stmt),
         })),
       };
     case "for":
@@ -752,7 +786,7 @@ export function mapStmtChildren(
         init: node.init === null ? null : stmt(node.init),
         cond: node.cond === null ? null : expr(node.cond),
         update: node.update === null ? null : stmt(node.update),
-        body: node.body.map((child) => stmt(child)),
+        body: mapOf(node.body, stmt),
       };
     case "arraySet":
       return { ...node, arr: expr(node.arr), index: expr(node.index), value: expr(node.value) };
@@ -768,7 +802,7 @@ export function mapStmtChildren(
       return {
         ...node,
         iterable: expr(node.iterable),
-        body: node.body.map((child) => stmt(child)),
+        body: mapOf(node.body, stmt),
       };
     case "recordSet":
       return { ...node, obj: expr(node.obj), value: expr(node.value) };
@@ -789,10 +823,9 @@ export function mapStmtChildren(
     case "tryCatch":
       return {
         ...node,
-        tryBody: node.tryBody.map((child) => stmt(child)),
-        catchBody: node.catchBody === null ? null : node.catchBody.map((child) => stmt(child)),
-        finallyBody:
-          node.finallyBody === null ? null : node.finallyBody.map((child) => stmt(child)),
+        tryBody: mapOf(node.tryBody, stmt),
+        catchBody: node.catchBody === null ? null : mapOf(node.catchBody, stmt),
+        finallyBody: node.finallyBody === null ? null : mapOf(node.finallyBody, stmt),
       };
   }
   node satisfies never;

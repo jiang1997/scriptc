@@ -9,7 +9,9 @@ import type { IrModule } from "../src/ir/ir.js";
 // list above the constructor. The initializer lowers speculatively first,
 // which hoists the constructor and the helper it calls. Those bodies are
 // kept, so their failing statements must keep runtime fences; dropping
-// them left `isNum` without its return (an SC9002 trap at load).
+// them left `isNum` without its return (an SC9002 trap at load). isNum's
+// return reads the prototype through Reflect.getPrototypeOf, which has no
+// lowering, so it fences.
 const source = `
 function clone(config) {
   var P = (Num.prototype = { constructor: Num, toString: null }),
@@ -20,7 +22,7 @@ function clone(config) {
     x.v = isNum(v) ? 0 : v * unit;
   }
   function isNum(v) {
-    return v instanceof Num || (!!v && v._isNum === true);
+    return Reflect.getPrototypeOf(v) === P || (!!v && v._isNum === true);
   }
   P._isNum = true;
   return Num;
@@ -59,6 +61,6 @@ test("speculatively hoisted JavaScript functions keep their statement fences", a
   const mod = await lower();
   const isNum = mod.functions.find((fn) => fn.name.endsWith("_isNum"));
   expect(isNum).toBeDefined();
-  expect(fenceCodes(isNum!.body)).toEqual(["SC1090"]);
+  expect(fenceCodes(isNum!.body)).toEqual(["SC2020"]);
   expect(mod.functions.flatMap((fn) => fenceCodes(fn.body))).not.toContain("SC9002");
 });

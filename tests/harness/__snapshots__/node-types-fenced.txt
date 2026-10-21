@@ -210,24 +210,42 @@ fenced.ts:99:1 - error SC2020: 'Cipheriv/Decipheriv.on' is part of the standard 
    98 | const cipherStream = createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
    99 | cipherStream.on("data", () => {});
       | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  100 | /* WebCrypto beyond the HMAC slice: @types/node declares the whole
+  100 | /* ECDH on a curve Node knows but the runtime does not implement, and
 
   hint: update(), final(), setAAD(), setAutoPadding(), getAuthTag(), and setAuthTag() are supported; cipher streams are not
 
-fenced.ts:104:9 - error SC2020: 'crypto.subtle.encrypt' is part of the standard library types but has no scriptc lowering yet
+fenced.ts:104:12 - error SC2020: 'crypto.createECDH with curve 'sect163k1'' is part of the standard library types but has no scriptc lowering yet
 
-  103 | async function encryptWithWebCrypto(key: import("node:crypto").webcrypto.CryptoKey): Promise<void> {
-  104 |   await crypto.subtle.encrypt({ name: "AES-GCM", iv: new Uint8Array(12) }, key, new Uint8Array(1));
+  103 | import { createECDH } from "node:crypto";
+  104 | createECDH("sect163k1");
+      |            ^~~~~~~~~~~
+  105 | createECDH("prime256v1").computeSecret(Buffer.alloc(65), "hex");
+
+  hint: the supported curves are prime192v1, secp224r1, prime256v1, secp384r1, secp521r1, secp192k1, secp224k1, secp256k1, brainpoolP256r1, brainpoolP384r1, and brainpoolP512r1
+
+fenced.ts:105:1 - error SC2020: 'ECDH.computeSecret(key, encoding) with a Buffer or view key' is part of the standard library types but has no scriptc lowering yet
+
+  104 | createECDH("sect163k1");
+  105 | createECDH("prime256v1").computeSecret(Buffer.alloc(65), "hex");
+      | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  106 | /* WebCrypto beyond the HMAC slice: @types/node declares the whole
+
+  hint: Node reads the second argument as the key's input encoding and answers a Buffer; pass the output encoding third: computeSecret(key, undefined, encoding)
+
+fenced.ts:110:9 - error SC2020: 'crypto.subtle.encrypt' is part of the standard library types but has no scriptc lowering yet
+
+  109 | async function encryptWithWebCrypto(key: import("node:crypto").webcrypto.CryptoKey): Promise<void> {
+  110 |   await crypto.subtle.encrypt({ name: "AES-GCM", iv: new Uint8Array(12) }, key, new Uint8Array(1));
       |         ^~~~~~~~~~~~~~~~~~~~~
-  105 | }
+  111 | }
 
   hint: the native WebCrypto surface is crypto.subtle.importKey('raw', ...) for HMAC keys, sign and verify with HMAC, and digest with SHA-1, SHA-256, SHA-384 or SHA-512, each called directly on crypto.subtle
 
-fenced.ts:109:15 - error SC2020: 'navigator.hardwareConcurrency' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:115:15 - error SC2020: 'navigator.hardwareConcurrency' is typed by @types/node but has no scriptc lowering yet
 
-  108 |  * compile; the other members fence by name. */
-  109 | const cores = navigator.hardwareConcurrency;
+  114 |  * compile; the other members fence by name. */
+  115 | const cores = navigator.hardwareConcurrency;
       |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  110 | void cores;
+  116 | void cores;
 
   hint: of Node's navigator global only typeof navigator and navigator.userAgent compile

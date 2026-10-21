@@ -889,10 +889,7 @@ class Int32Contracts {
             const value = s.kind === "varDecl" ? s.init : s.value;
             if (note && value && !int32(value))
               fail(note, value, value.loc, "the value stored into");
-          } else if (
-            s.kind === "forOf" ||
-            (s.kind === "tryCatch" && s.catchLocalId !== undefined)
-          ) {
+          } else if (s.kind === "forOf" || (s.kind === "tryCatch" && s.catchLocalId !== null)) {
             const id = s.kind === "forOf" ? s.localId : s.catchLocalId!;
             const note = localNote(id);
             if (note)

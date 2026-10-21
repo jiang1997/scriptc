@@ -52,10 +52,10 @@ export function blobClassOf(lowerer: Lowerer, node: ts.Expression): BlobClass | 
 function blobReceiverClass(lowerer: Lowerer, node: ts.Expression): BlobClass | null {
   const type = lowerer.checker.getBaseTypeOfLiteralType(lowerer.typeOf(node));
   const sym = type.getAliasSymbol() ?? type.getSymbol();
-  if (!sym || (sym.name !== "Blob" && sym.name !== "File") || !lowerer.isStdlibSymbol(sym)) {
-    return null;
-  }
-  return sym.name;
+  if (!sym) return null;
+  const name = ts.symbolName(sym);
+  if ((name !== "Blob" && name !== "File") || !lowerer.isStdlibSymbol(sym)) return null;
+  return name;
 }
 
 function memberNameOf(access: ts.PropertyAccessExpression | ts.ElementAccessExpression) {

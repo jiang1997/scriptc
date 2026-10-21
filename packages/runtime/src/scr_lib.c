@@ -2100,6 +2100,14 @@ static void scr_detach_teardown(void) {
 }
 #endif
 
+#if defined(__linux__)
+/* LLVM's profile writer. Instrumented builds (--profile-generate) link the
+ * profile runtime, which writes the profile from an atexit handler that the
+ * _Exit below skips, so the exit writes it first. Every other build leaves the
+ * weak reference null. */
+extern int __llvm_profile_write_file(void) __attribute__((weak));
+#endif
+
 void scr_process_exit(double code) {
   /* process.exit(code) assigns process.exitCode first, so a code that is
    * not a safe integer throws its RangeError and the program continues. */
@@ -2123,6 +2131,7 @@ void scr_process_exit(double code) {
    * expected). scr_init's flush-at-exit is also skipped — flush here. */
   fflush(stdout);
 #if defined(__linux__)
+  if (__llvm_profile_write_file != NULL) (void)__llvm_profile_write_file();
   scr_detach_teardown();
 #endif
   _Exit((int)code);
@@ -11140,9 +11149,6 @@ double scr_date_utc(double y, double mo, double d,
 typedef struct ScrDateParts {
   long long year;
   int month, date, day, hours, minutes, seconds, milliseconds;
-  /* Local fields: tm_isdst at the instant (or its surrogate). It fills the
-   * padding before timezone_offset, so the struct keeps its size. */
-  bool isdst;
   double timezone_offset;
 } ScrDateParts;
 
@@ -11179,12 +11185,29 @@ static void scr_date_utc_parts_unchecked(double t, ScrDateParts *out) {
   out->seconds = (int)(msday / 1000 % 60);
   out->milliseconds = (int)(msday % 1000);
   out->timezone_offset = 0;
-  out->isdst = false;
 }
+
+/* The thread's last UTC decomposition: reading several UTC fields of one
+ * Date (getUTCFullYear, getUTCMonth, ...) decomposes it once. */
+typedef struct {
+  bool valid;
+  double ms;
+  ScrDateParts parts;
+} ScrDateUtcCache;
+static SCR_TL ScrDateUtcCache scr_date_utc_cache;
 
 static bool scr_date_utc_parts(double ms, ScrDateParts *out) {
   if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
-  scr_date_utc_parts_unchecked(trunc(ms), out);
+  double clipped = trunc(ms);
+  ScrDateUtcCache *c = &scr_date_utc_cache;
+  if (c->valid && c->ms == clipped) {
+    *out = c->parts;
+    return true;
+  }
+  scr_date_utc_parts_unchecked(clipped, out);
+  c->valid = true;
+  c->ms = clipped;
+  c->parts = *out;
   return true;
 }
 
@@ -11211,6 +11234,176 @@ static SCR_TL ScrDateLocalCache scr_date_local_cache;
 
 static bool scr_date_local_parts_uncached(double clipped, ScrDateParts *out);
 
+/* The local zone's offset at an instant, cached the way Node's V8 date cache
+ * (src/date/date.cc, DateCache::LocalOffsetInMs) caches it, so the answers
+ * match Node's in every order of reads. V8 keeps 32 segments of instants with
+ * one offset each and takes an offset that matches 19 days apart as constant
+ * in between (kDefaultTimeZoneOffsetDeltaInMs). A zone that changed its offset
+ * twice within 19 days (America/Argentina/Tucuman in June 2004) breaks that
+ * assumption, and Node's answers between the two changes then depend on the
+ * order of the reads; this cache gives the same answers for the same order
+ * (corpus date-zone-intervals.ts). Segments hold offsets only, as V8's do;
+ * zone names decide daylight time at the instant (scr_date_zone_name). */
+#define SCR_DATE_ZONE_DELTA_MS (19LL * 86400000LL)
+#define SCR_DATE_ZONE_SEGMENTS 32
+typedef struct {
+  long long start_ms, end_ms; /* empty when start_ms > end_ms */
+  double offset;              /* local minus UTC, seconds */
+  int last_used;
+} ScrDateZoneSegment;
+typedef struct {
+  bool valid;
+  unsigned generation;
+  int usage;
+  ScrDateZoneSegment segments[SCR_DATE_ZONE_SEGMENTS];
+  ScrDateZoneSegment *before, *after;
+} ScrDateZoneCache;
+static SCR_TL ScrDateZoneCache scr_date_zone_cache;
+
+static bool scr_date_zone_offset(double clipped, double *offset, bool *isdst);
+
+static void scr_date_zone_clear(ScrDateZoneSegment *segment) {
+  segment->start_ms = 0;
+  segment->end_ms = -1;
+  segment->offset = 0;
+  segment->last_used = 0;
+}
+
+static bool scr_date_zone_empty(const ScrDateZoneSegment *segment) {
+  return segment->start_ms > segment->end_ms;
+}
+
+static void scr_date_zone_reset(ScrDateZoneCache *z, unsigned generation) {
+  for (int i = 0; i < SCR_DATE_ZONE_SEGMENTS; i++) scr_date_zone_clear(&z->segments[i]);
+  z->usage = 0;
+  z->before = &z->segments[0];
+  z->after = &z->segments[1];
+  z->valid = true;
+  z->generation = generation;
+}
+
+/* V8's LeastRecentlyUsedCacheItem: the least recently used segment other
+ * than `skip`, cleared. */
+static ScrDateZoneSegment *scr_date_zone_lru(ScrDateZoneCache *z, ScrDateZoneSegment *skip) {
+  ScrDateZoneSegment *result = NULL;
+  for (int i = 0; i < SCR_DATE_ZONE_SEGMENTS; i++) {
+    ScrDateZoneSegment *s = &z->segments[i];
+    if (s == skip) continue;
+    if (!result || result->last_used > s->last_used) result = s;
+  }
+  scr_date_zone_clear(result);
+  return result;
+}
+
+/* V8's ProbeCache: the segment starting at or before `t` and the one after. */
+static void scr_date_zone_probe(ScrDateZoneCache *z, long long t) {
+  ScrDateZoneSegment *before = NULL, *after = NULL;
+  for (int i = 0; i < SCR_DATE_ZONE_SEGMENTS; i++) {
+    ScrDateZoneSegment *s = &z->segments[i];
+    if (scr_date_zone_empty(s)) continue;
+    if (s->start_ms <= t) {
+      if (!before || before->start_ms < s->start_ms) before = s;
+    } else if (t < s->end_ms) {
+      if (!after || after->end_ms > s->end_ms) after = s;
+    }
+  }
+  if (!before) before = scr_date_zone_empty(z->before) ? z->before : scr_date_zone_lru(z, after);
+  if (!after)
+    after = scr_date_zone_empty(z->after) && before != z->after ? z->after : scr_date_zone_lru(z, before);
+  z->before = before;
+  z->after = after;
+}
+
+/* V8's ExtendTheAfterSegment. */
+static void scr_date_zone_extend_after(ScrDateZoneCache *z, long long t, double offset) {
+  ScrDateZoneSegment *after = z->after;
+  if (!scr_date_zone_empty(after) && after->offset == offset &&
+      after->start_ms - SCR_DATE_ZONE_DELTA_MS <= t && t <= after->end_ms) {
+    after->start_ms = t;
+    return;
+  }
+  if (!scr_date_zone_empty(after)) after = z->after = scr_date_zone_lru(z, z->before);
+  after->start_ms = after->end_ms = t;
+  after->offset = offset;
+  after->last_used = ++z->usage;
+}
+
+static bool scr_date_zone_lookup(double clipped, double *offset) {
+  bool isdst; /* scr_date_zone_offset's flag, unused here */
+  ScrDateZoneCache *z = &scr_date_zone_cache;
+  unsigned generation = scr_date_tz_generation;
+  if (!z->valid || z->generation != generation) scr_date_zone_reset(z, generation);
+  long long t = (long long)clipped;
+  if (z->usage >= INT_MAX - 10) {
+    z->usage = 0;
+    for (int i = 0; i < SCR_DATE_ZONE_SEGMENTS; i++) scr_date_zone_clear(&z->segments[i]);
+  }
+  ScrDateZoneSegment *before = z->before;
+  if (before->start_ms <= t && t <= before->end_ms) {
+    before->last_used = ++z->usage;
+    *offset = before->offset;
+    return true;
+  }
+  scr_date_zone_probe(z, t);
+  before = z->before;
+  if (scr_date_zone_empty(before)) {
+    if (!scr_date_zone_offset(clipped, offset, &isdst)) return false;
+    before->start_ms = before->end_ms = t;
+    before->offset = *offset;
+    before->last_used = ++z->usage;
+    return true;
+  }
+  if (t <= before->end_ms) {
+    before->last_used = ++z->usage;
+    *offset = before->offset;
+    return true;
+  }
+  if (t - SCR_DATE_ZONE_DELTA_MS > before->end_ms) {
+    if (!scr_date_zone_offset(clipped, offset, &isdst)) return false;
+    scr_date_zone_extend_after(z, t, *offset);
+    ScrDateZoneSegment *swap = z->before;
+    z->before = z->after;
+    z->after = swap;
+    return true;
+  }
+  before->last_used = ++z->usage;
+  long long ahead = before->end_ms + SCR_DATE_ZONE_DELTA_MS;
+  if (scr_date_zone_empty(z->after) || ahead <= z->after->start_ms) {
+    double ahead_offset;
+    if (!scr_date_zone_offset((double)ahead, &ahead_offset, &isdst)) return false;
+    scr_date_zone_extend_after(z, ahead, ahead_offset);
+  } else {
+    z->after->last_used = ++z->usage;
+  }
+  ScrDateZoneSegment *after = z->after;
+  if (before->offset == after->offset) {
+    before->end_ms = after->end_ms;
+    scr_date_zone_clear(after);
+    *offset = before->offset;
+    return true;
+  }
+  /* Binary search for the change point, giving up after five probes (the
+   * last one reads `t` itself). */
+  for (int i = 4; i >= 0; i--) {
+    long long delta = after->start_ms - before->end_ms;
+    long long middle = i == 0 ? t : before->end_ms + delta / 2;
+    if (!scr_date_zone_offset((double)middle, offset, &isdst)) return false;
+    if (before->offset == *offset) {
+      before->end_ms = middle;
+      if (t <= before->end_ms) return true;
+    } else {
+      after->start_ms = middle;
+      if (t >= after->start_ms) {
+        ScrDateZoneSegment *swap = z->before;
+        z->before = z->after;
+        z->after = swap;
+        return true;
+      }
+    }
+  }
+  return true;
+}
+
 static bool scr_date_local_parts(double ms, ScrDateParts *out) {
   if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
   double clipped = trunc(ms);
@@ -11229,6 +11422,17 @@ static bool scr_date_local_parts(double ms, ScrDateParts *out) {
 }
 
 static bool scr_date_local_parts_uncached(double clipped, ScrDateParts *out) {
+  double local_offset;
+  if (!scr_date_zone_lookup(clipped, &local_offset)) return false;
+  scr_date_utc_parts_unchecked(clipped + local_offset * 1000.0, out);
+  double timezone_offset = trunc(-local_offset / 60.0);
+  out->timezone_offset = timezone_offset == 0 ? 0 : timezone_offset;
+  return true;
+}
+
+/* The local zone's offset (local minus UTC, in seconds) and DST flag at a
+ * clipped instant, from the host's localtime. */
+static bool scr_date_zone_offset(double clipped, double *offset, bool *isdst) {
   long long cms = (long long)clipped;
   double secd = (double)(cms / 1000 - (cms % 1000 < 0));
   struct tm tmv;
@@ -11259,11 +11463,8 @@ static bool scr_date_local_parts_uncached(double clipped, ScrDateParts *out) {
   double local_as_utc =
     scr_days_from_civil((long long)tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday) * 86400.0 +
     tmv.tm_hour * 3600.0 + tmv.tm_min * 60.0 + tmv.tm_sec;
-  double local_offset = local_as_utc - basis_secd;
-  scr_date_utc_parts_unchecked(clipped + local_offset * 1000.0, out);
-  double timezone_offset = trunc(-local_offset / 60.0);
-  out->timezone_offset = timezone_offset == 0 ? 0 : timezone_offset;
-  out->isdst = tmv.tm_isdst > 0;
+  *offset = local_as_utc - basis_secd;
+  *isdst = tmv.tm_isdst > 0;
   return true;
 }
 
@@ -12299,7 +12500,9 @@ static ScrStr *scr_date_text(double ms, int mode) {
     *o++ = ' ';
     *o++ = '(';
     /* Zone names are at most 64 bytes (scr_timezone_data.h). */
-    const char *zone = scr_date_zone_name(ms, p.isdst);
+    /* The name's daylight flag is decided at the instant itself, as V8's
+     * LocalTimezone does, not from the offset cache. */
+    const char *zone = scr_date_zone_name(ms, -1);
     size_t zone_len = strlen(zone);
     memcpy(o, zone, zone_len);
     o += zone_len;
@@ -12709,7 +12912,7 @@ static bool scr_set_to_arr_sparse(const ScrMap *s, ScrArr *out) {
   /* scr_arr_new reserves dense storage for the live count; keep the
    * ordinary append path in case an allocation ever declines it. */
   for (size_t i = 0; i < s->nentries; i++) {
-    if (!s->entries[i].hash) continue;
+    if (!scr_map_entry_live(s, i)) continue;
     if (out->elem == SCR_ELEM_F64) scr_arr_push_f64(out, scr_map_iter_key_f64(s, (double)i));
     else if (out->elem == SCR_ELEM_BOOL) scr_arr_push_bool(out, scr_map_iter_key_bool(s, (double)i));
     else if (out->elem == SCR_ELEM_STR) scr_arr_push_ref(out, scr_map_iter_key_str(s, (double)i));
@@ -12721,10 +12924,11 @@ static bool scr_set_to_arr_sparse(const ScrMap *s, ScrArr *out) {
 ScrArr *scr_set_to_arr_f64(const ScrMap *s) {
   ScrArr *out = scr_arr_new(SCR_ELEM_F64, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
+  uint8_t *states = scr_arr_states_end(out);
   for (size_t i = 0; i < s->nentries; i++) {
-    if (!s->entries[i].hash) continue;
-    out->data[out->len] = s->entries[i].key;
-    out->present[out->len++] = SCR_ARR_VALUE;
+    if (!scr_map_entry_live(s, i)) continue;
+    out->data[out->len] = scr_map_entry_at(s, i)->key;
+    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
   }
   return out;
 }
@@ -12732,10 +12936,11 @@ ScrArr *scr_set_to_arr_f64(const ScrMap *s) {
 ScrArr *scr_set_to_arr_bool(const ScrMap *s) {
   ScrArr *out = scr_arr_new(SCR_ELEM_BOOL, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
+  uint8_t *states = scr_arr_states_end(out);
   for (size_t i = 0; i < s->nentries; i++) {
-    if (!s->entries[i].hash) continue;
-    scr_arr_dense_put(out, out->len, s->entries[i].key != 0);
-    out->present[out->len++] = SCR_ARR_VALUE;
+    if (!scr_map_entry_live(s, i)) continue;
+    scr_arr_dense_put(out, out->len, scr_map_entry_at(s, i)->key != 0);
+    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
   }
   return out;
 }
@@ -12743,11 +12948,12 @@ ScrArr *scr_set_to_arr_bool(const ScrMap *s) {
 ScrArr *scr_set_to_arr_str(const ScrMap *s) {
   ScrArr *out = scr_arr_new(SCR_ELEM_STR, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
+  uint8_t *states = scr_arr_states_end(out);
   for (size_t i = 0; i < s->nentries; i++) {
-    if (!s->entries[i].hash) continue;
-    scr_str_retain((ScrStr *)(uintptr_t)s->entries[i].key);
-    out->data[out->len] = s->entries[i].key;
-    out->present[out->len++] = SCR_ARR_VALUE;
+    if (!scr_map_entry_live(s, i)) continue;
+    scr_str_retain((ScrStr *)(uintptr_t)scr_map_entry_at(s, i)->key);
+    out->data[out->len] = scr_map_entry_at(s, i)->key;
+    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
   }
   return out;
 }
@@ -12755,11 +12961,12 @@ ScrArr *scr_set_to_arr_str(const ScrMap *s) {
 ScrArr *scr_set_to_arr_ref(const ScrMap *s, const ScrArrOps *ops) {
   ScrArr *out = scr_arr_new_ops(ops, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
+  uint8_t *states = scr_arr_states_end(out);
   for (size_t i = 0; i < s->nentries; i++) {
-    if (!s->entries[i].hash) continue;
-    ops->retain((void *)(uintptr_t)s->entries[i].key);
-    out->data[out->len] = s->entries[i].key;
-    out->present[out->len++] = SCR_ARR_VALUE;
+    if (!scr_map_entry_live(s, i)) continue;
+    ops->retain((void *)(uintptr_t)scr_map_entry_at(s, i)->key);
+    out->data[out->len] = scr_map_entry_at(s, i)->key;
+    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
   }
   return out;
 }

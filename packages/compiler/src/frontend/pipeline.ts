@@ -7,11 +7,14 @@ import { entryFunctionExports, type EntryExportInfo } from "./lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./lib-contract.js";
 import {
   canonicalBuiltinModule,
+  npmBuiltinAliasOf,
   checkPreflight,
   isNodeTypesPath,
   locOf,
+  npmStaticDepSf7,
   npmStaticLoadableFiles,
   requiresOf,
+  resolveImport,
   resolveNpmImport,
   type LoadResult,
 } from "./program.js";
@@ -23,6 +26,7 @@ import {
   npmStaticPackageOfPath,
 } from "./npm-static.js";
 import { clearResolveCaches, resolveBareModule, resolveWorkspaceSourceModule } from "./resolve.js";
+import { isShimmedImport } from "./package-shims.js";
 import { provenanceEntryFor } from "./provenance-registry.js";
 import { isJsSourceFileName } from "./tsc-codes.js";
 import { isRelativeSpecifier, packageNameOfSpecifier } from "./workspace-registry.js";
@@ -35,6 +39,7 @@ import {
   isStringLiteral,
   isStringLiteralLike,
   SyntaxKind,
+  type SourceFile,
 } from "./ts7/adapter.js";
 import { moduleSourceCandidates } from "./module-source-candidates.js";
 import { CONTRACT_TYPES_MODULE } from "./contract-types.js";
@@ -112,6 +117,65 @@ export type FrontendFactory = (
   libraryNpmStatic?: readonly string[],
 ) => Frontend;
 
+/** Adds the program modules a literal `import()` reaches to `scanned`,
+ * with their own static import graphs: they load at the call, outside the
+ * startup module order, and their npm imports are dependencies all the
+ * same (a workspace package loaded on demand, the vercel.ts config parser
+ * shape). An opted-in package's JavaScript reached that way joins too,
+ * with every file its literal require() and import edges load: those
+ * files are outside the module order as well, and the packages THEY
+ * require (a compiled CommonJS dist requiring a sibling package) are
+ * dependencies the selection must see. */
+function addDynamicImportGraph(load: LoadResult, scanned: Set<SourceFile>): void {
+  const queue = [...scanned];
+  const added = new Set<SourceFile>();
+  while (queue.length > 0) {
+    const sf = queue.pop()!;
+    const packageJs = sf.fileName.includes("/node_modules/");
+    if (packageJs && !added.has(sf)) continue;
+    const specs: { spec: string; kind: "import" | "require" }[] = [];
+    // Every literal import() in the file, read from the syntax: a comment
+    // can stand between the keyword and its parenthesis. A file without
+    // the keyword has none. Package JavaScript loads its literal require()
+    // calls the same way, nested ones included.
+    const calls =
+      packageJs || sf.text.includes("import") ? moduleSourceCandidates(load.program, sf).calls : [];
+    for (const call of calls) {
+      const arg = call.arguments.nodes[0];
+      if (arg === undefined || !isStringLiteralLike(arg)) continue;
+      if (call.expression.kind === SyntaxKind.ImportKeyword)
+        specs.push({ spec: arg.text, kind: "import" });
+      else if (packageJs && isIdentifier(call.expression) && call.expression.text === "require")
+        specs.push({ spec: arg.text, kind: "require" });
+    }
+    // The startup graph's static edges are already in the module order.
+    if (added.has(sf)) {
+      for (const stmt of sf.statements.nodes) {
+        if (
+          (isImportDeclaration(stmt) || isExportDeclaration(stmt)) &&
+          stmt.moduleSpecifier &&
+          isStringLiteral(stmt.moduleSpecifier) &&
+          !(isImportDeclaration(stmt) ? erasedTypeOnlyImport(stmt) : stmt.isTypeOnly)
+        )
+          specs.push({ spec: stmt.moduleSpecifier.text, kind: "import" });
+      }
+    }
+    for (const { spec, kind } of specs) {
+      if (canonicalBuiltinModule(spec) !== null) continue;
+      // Only the JavaScript of a package the selection already opted in:
+      // a package's declarations load nothing.
+      const dep =
+        resolveImport(load.program, sf, spec, kind) ??
+        npmStaticDepSf7(load.program, sf, spec, kind);
+      if (dep === null || scanned.has(dep)) continue;
+      if (dep.fileName.includes("/node_modules/") && !isJsSourceFileName(dep.fileName)) continue;
+      scanned.add(dep);
+      added.add(dep);
+      queue.push(dep);
+    }
+  }
+}
+
 function detectAutoPackages(
   load: LoadResult,
   statuses: NpmStaticStatus[],
@@ -134,6 +198,7 @@ function detectAutoPackages(
   // nested require() calls the graph walk does not model) still name its
   // dependencies.
   const scanned = new Set([...load.moduleOrder, load.entry]);
+  addDynamicImportGraph(load, scanned);
   const transitiveFiles =
     transitive.size === 0
       ? []
@@ -191,6 +256,9 @@ function detectAutoPackages(
       // Attested entries already resolve to program sources, so the
       // published package's declaration eligibility does not apply.
       if (provenanceEntryFor(spec) !== null) continue;
+      // Packages scriptc implements itself, or that the project marks never
+      // loaded, are not npm dependencies (package-shims.ts).
+      if (isShimmedImport(sf.fileName, spec)) continue;
       if (resolveWorkspaceSourceModule(sf.fileName, spec) !== null) continue;
       if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
       // Bare builtin names ("fs", "path") are the builtin machinery's
@@ -198,6 +266,9 @@ function detectAutoPackages(
       // never npm candidates. Auto keeps its original path (the
       // @types/node answer skips them below), unchanged.
       if (mode === "lib" && canonicalBuiltinModule(spec) !== null) continue;
+      // npm packages served as builtins (graceful-fs as fs) never compile
+      // their JavaScript.
+      if (npmBuiltinAliasOf(spec) !== null) continue;
       // Explicit attempts name the runtime package. Types-first resolution
       // may instead identify its @types twin, which has no runtime to admit.
       if (judged?.has(packageNameOfSpecifier(spec))) continue;
@@ -620,6 +691,7 @@ function loadFrontend(
         frontendServices: finalLoad.services,
         startupCrash: finalLoad.startupCrash ?? null,
         inlineRequireCycleCalls: finalLoad.inlineRequireCycleCalls,
+        moduleEdges: finalLoad.moduleEdges,
         projectCheckJs: finalLoad.typeWorld?.projectCheckJs ?? false,
         externalTypes: finalLoad.externalTypes,
         externalTypeSpecifiersByFile: finalLoad.externalTypeSpecifiersByFile,

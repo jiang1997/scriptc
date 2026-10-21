@@ -305,6 +305,46 @@ console.log("unreachable", c.host);
     );
   });
 
+  test("optional record member: the failure names the deepest path inside it", async () => {
+    // `Partial<T>` makes every member an `X | undefined` union. A present
+    // object that fails X used to report only the union's own path
+    // ("expected object | undefined at $.order, got object"); the record
+    // arm's builder now reports where inside it the value fails.
+    const r = await compileAndRun(
+      "optional-record-deep",
+      `interface Order {
+  owner: { id: string; plan: { tier: string } };
+  total: number;
+}
+interface Envelope { order: Order; tags?: string[] }
+const texts = [
+  '{"order":{"owner":{"id":"u1"},"total":3}}',
+  '{"order":{"owner":{"id":7,"plan":{"tier":"pro"}},"total":3}}',
+  '{"order":{"owner":{"id":"u1","plan":{"tier":"pro"}},"total":3},"tags":["a",2]}',
+  '{"order":5}',
+];
+for (const text of texts) {
+  try {
+    const e = JSON.parse(text) as Partial<Envelope>;
+    console.log("ok", e.order?.owner.id);
+  } catch (err) {
+    if (err instanceof TypeError) console.log(err.message);
+  }
+}
+`,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(
+      [
+        "expected object at $.order.owner.plan, got undefined",
+        "expected string at $.order.owner.id, got number",
+        "expected string at $.tags[1], got number",
+        "expected object | undefined at $.order, got number",
+        "",
+      ].join("\n"),
+    );
+  });
+
   test("JSON null matches nothing", async () => {
     const r = await compileAndRun(
       "null-value",

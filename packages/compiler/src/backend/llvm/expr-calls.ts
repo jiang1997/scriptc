@@ -34,6 +34,7 @@ import {
 } from "../mangle.js";
 import {
   classEnvironmentIndex,
+  classIdVtLines,
   classStructSym,
   vtEntriesFor,
   type LlClassMeta,
@@ -52,6 +53,7 @@ import {
   inputSuffixWrites,
 } from "./borrowed-inputs.js";
 import type { Writes } from "./reference-writes.js";
+import { emitJsIcCall, jsIcSiteOf } from "./js-ic.js";
 import { emitClassMembership, emitDowncastGuard } from "./narrow-guards.js";
 
 export function emitCallExpr(
@@ -87,6 +89,12 @@ export function emitCallExpr(
     case "call": {
       const callee = host.fnByName.get(e.callee);
       if (!callee) throw new InternalCompilerError(`llvm emitter bug: unknown callee ${e.callee}`);
+      if (!plainCall && !awaitEntry && !resultSlot && !stackResult) {
+        // A property helper called from dynamic-tier code is an inline
+        // cache site (two-tier design S4).
+        const site = jsIcSiteOf(host, e);
+        if (site) return emitJsIcCall(host, e, callee, site);
+      }
       if (callee.fastRead === "index" && !plainCall && !awaitEntry && !resultSlot) {
         const indexed = emitNumericIndexRead(host, e, callee);
         if (indexed) return indexed;
@@ -1193,15 +1201,20 @@ export function emitCallExpr(
         if (!borrowed.has(index)) host.toFrame(a);
       });
       const recv = args[0]!.name;
-      const vtp = B.tmp();
       const vt = B.tmp();
       const fnp = B.tmp();
       const fn = B.tmp();
-      B.line(
-        `${vtp} = getelementptr inbounds %${classStructSym(e.className)}, ptr ${recv}, i64 0, i32 1`,
-      );
       // Set once at allocation (classes.ts launders each new object).
-      B.line(`${vt} = load ptr, ptr ${vtp}, !invariant.group !{}`);
+      if (meta.idInRc)
+        for (const line of classIdVtLines(meta, recv, vt, ", !invariant.group !{}"))
+          B.line(line.trimStart());
+      else {
+        const vtp = B.tmp();
+        B.line(
+          `${vtp} = getelementptr inbounds %${classStructSym(e.className)}, ptr ${recv}, i64 0, i32 1`,
+        );
+        B.line(`${vt} = load ptr, ptr ${vtp}, !invariant.group !{}`);
+      }
       B.line(
         `${fnp} = getelementptr inbounds %${mangleVtStruct(meta.root.def.name)}, ptr ${vt}, i64 0, i32 ${slotIdx + 1}`,
       );

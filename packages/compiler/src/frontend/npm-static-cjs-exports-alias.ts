@@ -29,6 +29,7 @@ import {
   unparen,
   type Edit,
 } from "./npm-static-bundled-chunks.js";
+import { tokenStartOfNode } from "./ts7/node-functions.js";
 
 function isModuleExports(e: ts.Expression): e is ts.PropertyAccessExpression {
   const x = unparen(e);
@@ -132,7 +133,7 @@ export function normalizeCjsFunctionExports(sf: ts.SourceFile): string | null {
         continue;
       }
       // Without the rebinding, `exports` keeps the replaced object.
-      if (!whole.rebinds || r.getStart(sf) < whole.stmt.getEnd()) {
+      if (!whole.rebinds || tokenStartOfNode(r) < whole.stmt.end) {
         unsafe = true;
         continue;
       }
@@ -140,8 +141,8 @@ export function normalizeCjsFunctionExports(sf: ts.SourceFile): string | null {
       const shorthand =
         r.parent !== undefined && ts.isShorthandPropertyAssignment(r.parent) && r.parent.name === r;
       edits.push({
-        start: r.getStart(sf),
-        end: r.getEnd(),
+        start: tokenStartOfNode(r),
+        end: r.end,
         text: shorthand ? `exports: ${fnName}` : fnName,
       });
       continue;
@@ -168,8 +169,8 @@ export function normalizeCjsFunctionExports(sf: ts.SourceFile): string | null {
         (ts.isPropertyAccessExpression(outer) || ts.isElementAccessExpression(outer)) &&
         outer.expression === access
       ) {
-        if (access.getStart(sf) < whole.stmt.getEnd() && !insideFunction(access)) unsafe = true;
-        edits.push({ start: access.getStart(sf), end: access.getEnd(), text: fnName });
+        if (tokenStartOfNode(access) < whole.stmt.end && !insideFunction(access)) unsafe = true;
+        edits.push({ start: tokenStartOfNode(access), end: access.end, text: fnName });
       }
     }
   }
@@ -177,7 +178,7 @@ export function normalizeCjsFunctionExports(sf: ts.SourceFile): string | null {
   if (whole.rebinds) {
     // `exports = module.exports = W` → `module.exports = W`.
     const e = unparen(whole.stmt.expression) as ts.BinaryExpression;
-    edits.push({ start: e.getStart(sf), end: unparen(e.right).getStart(sf), text: "" });
+    edits.push({ start: tokenStartOfNode(e), end: tokenStartOfNode(unparen(e.right)), text: "" });
   }
   if (edits.length === 0) return null;
   return applyEdits(source, 0, source.length, edits);

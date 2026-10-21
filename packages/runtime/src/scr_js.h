@@ -180,4 +180,61 @@ ScrJsVal scr_js_increment(ScrJsVal value, bool increment);
 double scr_js_to_number(ScrJsVal value);
 bool scr_js_truthy(ScrJsVal value);
 
+/* ── shapes and inline caches (scr_js_object.c) ─────────────────────────
+ * A checked object's hidden class (ScrDyn.v.obj.shape) names its key
+ * sequence: a node of the thread's transition tree, whose depth is the
+ * entry count and whose last key sits at entry index depth - 1. Shapes are
+ * per thread and live until the thread's runtime state is torn down; a
+ * thread's shape count and the key bytes they hold are bounded, and an
+ * object whose key sequence would need a shape past either bound stays
+ * unshaped, as do immortal objects, which threads share. The tier
+ * computes an object's shape on a cache miss; the SCR_JS_TIER build of
+ * scr_json.c resets it on every change to the key set.
+ * Attributes stay in the entries and the prototype in the node: cache hits
+ * test both live, so a shape only ever proves which key sits at which entry
+ * index and which keys an object lacks.
+ *
+ * Each property site of compiled dynamic-tier code owns one zeroed,
+ * thread-local ScrJsIc. The code at the site is fixed: it tests entry 0
+ * inline and calls a probe for everything else. Probes never run user
+ * code: they answer from plain data properties or return a miss (NULL /
+ * false) with nothing done, and the site then runs its generic path.
+ *
+ *   load  entry: shape = receiver shape; target = NULL for an own property
+ *         (slot indexes the receiver's entries), else the shape of
+ *         `holder`, the receiver's prototype, whose entry `slot` holds it.
+ *   store entry: shape = receiver shape before the store; target == shape
+ *         replaces entry `slot`; any other target adds the key as entry
+ *         `slot` and moves the receiver to `target`. An add requires the
+ *         receiver's prototype to be `holder` (NULL or an object whose
+ *         shape is holder_shape and that lacks the key).
+ *   keyed entry: slot only; a hit compares the key bytes stored there. */
+typedef struct ScrJsShape ScrJsShape;
+
+typedef struct ScrJsIcEntry {
+  const ScrJsShape *shape;
+  const ScrJsShape *target;
+  const ScrDyn *holder;
+  const ScrJsShape *holder_shape;
+  size_t slot;
+} ScrJsIcEntry;
+
+#define SCR_JS_IC_WAYS 4
+typedef struct ScrJsIc {
+  ScrJsIcEntry entry[SCR_JS_IC_WAYS];
+  uint32_t count; /* filled entries */
+  uint32_t next;  /* the entry a full cache replaces next */
+} ScrJsIc;
+
+/* `receiver.key` for a plain data property: +1 value, or NULL. */
+ScrDyn *scr_js_load_probe(ScrDyn *receiver, const ScrStr *key, ScrJsIc *ic);
+/* `receiver.key = value` (value borrowed) when it replaces a writable own
+ * data property or adds one the prototype chain lacks: true when done. */
+bool scr_js_store_probe(ScrDyn *receiver, const ScrStr *key, ScrDyn *value, ScrJsIc *ic);
+/* `receiver[key]` for an array element or an own data property named by a
+ * string key: +1 value, or NULL. */
+ScrDyn *scr_js_keyed_probe(ScrDyn *receiver, const ScrDyn *key, ScrJsIc *ic);
+/* `receiver[index]` for a dense array element: +1 value, or NULL. */
+ScrDyn *scr_js_index_probe(ScrDyn *receiver, double index);
+
 #endif

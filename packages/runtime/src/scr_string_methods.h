@@ -27,7 +27,8 @@ double scr_str_utf16_len(ScrStr *s);
  * holds (scr_string.c), published so emitted length and charCodeAt reads of
  * that string are a compare and a load. Cleared whenever its entry drops
  * the units (release, append, eviction); all fields zero otherwise. Emitted
- * code reads it only where SCR_TL is empty. */
+ * code reads it where SCR_TL is empty, and in worker executables on ELF
+ * targets, whose thread-locals live in the executable's static TLS block. */
 typedef struct ScrStrScan {
   const ScrStr *s;
   const uint16_t *units;

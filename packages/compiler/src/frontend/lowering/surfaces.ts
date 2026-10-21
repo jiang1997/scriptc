@@ -1,5 +1,11 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
+import { staticCondition, staticallySelected } from "./static-typeof.js";
+
+function unparenthesized(e: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return e;
+}
 import { UNSUPPORTED } from "../../diagnostics/diagnostic.js";
 import {
   BOOL,
@@ -24,6 +30,7 @@ import {
 } from "../../ir/ir.js";
 import { isJsSourceFile, isNodeTypesPath, requireSpecOf } from "../program.js";
 import { ZLIB_CONSTANTS } from "./zlib-constants.js";
+import { V8_MEMBER_REASON } from "../builtin-modules.js";
 
 /** zlib stream instances: runtime Transform streams (scr_zlib_stream.c). */
 const ZLIB_STREAM: IrType = { kind: "object", className: "%Transform" };
@@ -1564,6 +1571,9 @@ export const BUILTIN_MODULE_FNS: Record<
     // Decipheriv handle (lowerCryptoModuleCall).
     createCipheriv: { fn: "crypto.cipherNew", params: [BOOL, DYN, DYN, DYN, DYN], result: DYN },
     createDecipheriv: { fn: "crypto.cipherNew", params: [BOOL, DYN, DYN, DYN, DYN], result: DYN },
+    // A checked-dynamic curve name; the result is a native ECDH handle
+    // (lowerCreateEcdh).
+    createECDH: { fn: "crypto.ecdhNew", params: [DYN], result: DYN },
   },
   zlib: {
     // The default-options convenience family is special-cased in
@@ -1908,6 +1918,18 @@ export const BUILTIN_MODULE_FNS: Record<
   // special-cased); the keys exist for the same reason net/http's do.
   dgram: {},
   dns: {},
+  // node:dns/promises rides the same spoke (lookup's promise form).
+  "dns/promises": {},
+  // node:v8: getHeapStatistics answers allocator-derived figures in
+  // Node's shape (builtins/v8.ts — the entry carries the canonical
+  // shape); every other member fences with the by-design reason
+  // (builtinFenceHintOf).
+  v8: {
+    getHeapStatistics: { fn: "process.memoryUsageTake", params: [], result: VOID },
+  },
+  // node:stream/web re-exports the web stream globals (the same objects);
+  // its members lower through the globals' own paths.
+  "stream/web": {},
   // node:assert lowers ENTIRELY through the assert spoke (lower-assert.ts
   // — every call shape is special-cased: optional messages complete, the
   // comparisons pick per-type libCalls, deep equality synthesizes
@@ -2055,6 +2077,9 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<
     readdirSync: ["fs.readdirTypesSync"],
     // The { throwIfNoEntry } probe form.
     statSync: ["fs.statProbeSync"],
+    // realpathSync and realpathSync.native read as function values.
+    realpathSync: ["fs.realpathValue"],
+    "realpathSync.native": ["fs.realpathValue"],
     lstatSync: ["fs.lstatProbeSync"],
     globSync: ["fs.globTypesSync"],
     // The JS-source validation-ladder variant (lowerFsLadderCall): the
@@ -2439,6 +2464,27 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     name: "perf_hooks.performance.clearMeasures",
     fns: ["perf.clearMeasures"],
   },
+  {
+    id: "node-builtin.perf_hooks.performance.eventLoopUtilization",
+    kind: "node-builtin",
+    name: "perf_hooks.performance.eventLoopUtilization",
+    fns: ["perf.loopStart", "perf.idleTime"],
+    note: "active time is the main thread's CPU time since the loop started; the one- and two-argument difference forms are supported",
+  },
+  {
+    id: "node-builtin.perf_hooks.monitorEventLoopDelay",
+    kind: "node-builtin",
+    name: "perf_hooks.monitorEventLoopDelay",
+    fns: [
+      "perf.eldNew",
+      "perf.eldEnable",
+      "perf.eldDisable",
+      "perf.eldReset",
+      "perf.eldPercentile",
+      "perf.eldStat",
+    ],
+    note: "an unref'd sampling interval records the delay histogram; enable, disable, reset, percentile and the min, max, mean, stddev, count and exceeds readings are supported",
+  },
   // ── the process global's ambient reads and authority calls
   // (lowerProcessProperty/lowerProcessMethodCall — process is a
   // provenance-checked global here, not an importable module).
@@ -2811,7 +2857,11 @@ export const FS_CALLBACK_MEMBERS = new Set([
  * inherited function into the diagnostic text). */
 export function builtinFenceHintOf(module: string, member: string): string | undefined {
   const mod = ownEntry(BUILTIN_MODULE_FENCE_HINTS, module);
-  return mod ? ownEntry(mod, member) : undefined;
+  const hint = mod ? ownEntry(mod, member) : undefined;
+  // node:v8's unlowered members observe the engine itself: the by-design
+  // reason, not a pending-surface hint (kept out of the hint table so the
+  // compatibility rows stay by-design rather than refused).
+  return hint === undefined && module === "v8" ? V8_MEMBER_REASON : hint;
 }
 
 /** BUILTIN_MODULE_CONSTS with the win32-target overrides applied — the
@@ -3014,7 +3064,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
         "createDiffieHellman",
         "createDiffieHellmanGroup",
         "getDiffieHellman",
-        "createECDH",
         "diffieHellman",
         "publicEncrypt",
         "publicDecrypt",
@@ -3121,8 +3170,8 @@ export function stdlibMemberFence(lowerer: Lowerer, access: ts.PropertyAccessExp
       "radix-free conversion is a template literal away: `${x}`; toString(radix) is unsupported";
   } else if (container === "Math" && (member === "min" || member === "max")) {
     hint =
-      `Math.${member} lowers with any number of plain arguments or ONE number[] spread — ` +
-      `mixed spread/positional lists don't: spread a single array (Math.${member}(...xs))`;
+      `Math.${member} lowers with number arguments and spreads of number[] values ` +
+      `(Math.${member}(...xs, y))`;
   } else if (
     recvIr?.kind === "array" &&
     member === "index" &&
@@ -3274,7 +3323,7 @@ export function isChildSurfaceMember(
   const decl = sym ? sym.declarations[0] : undefined;
   const iface = decl?.parent;
   if (!decl || !iface || !ts.isInterfaceDeclaration(iface)) return false;
-  if (lowerer.isStdlibFile(decl.getSourceFile())) return false;
+  if (lowerer.isStdlibFile(ts.getSourceFileOfNode(decl))) return false;
   return lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(iface.name))?.kind === "child";
 }
 
@@ -3284,7 +3333,9 @@ export function isChildSurfaceMember(
  * with lib interfaces, so a member can carry declarations from both. A
  * user's own declaration is in neither, so shadowing never matches. */
 export function isStdlibSymbol(lowerer: Lowerer, symbol: ts.Symbol | undefined): boolean {
-  return !!symbol && symbol.declarations.some((d) => lowerer.isStdlibFile(d.getSourceFile()));
+  return (
+    !!symbol && symbol.declarations.some((d) => lowerer.isStdlibFile(ts.getSourceFileOfNode(d)))
+  );
 }
 
 /** The canonical stdlib-global name `expr` denotes, or null. Three
@@ -3303,6 +3354,14 @@ export function isStdlibSymbol(lowerer: Lowerer, symbol: ts.Symbol | undefined):
  *     builtinClassAliasOf). */
 export function stdlibGlobalNameOf(lowerer: Lowerer, expr: ts.Expression): string | null {
   if (ts.isParenthesizedExpression(expr)) return stdlibGlobalNameOf(lowerer, expr.expression);
+  // The global-object detection chain (`typeof global < "u" ? global :
+  // typeof window < "u" ? window : {}`): a condition with static typeof
+  // answers selects one arm, and only that arm ever evaluates.
+  if (ts.isConditionalExpression(expr)) {
+    const taken = staticCondition(lowerer, expr.condition);
+    if (taken === null) return null;
+    return stdlibGlobalNameOf(lowerer, taken ? expr.whenTrue : expr.whenFalse);
+  }
   if (ts.isIdentifier(expr)) {
     const symbol = lowerer.checker.getSymbolAtLocation(expr);
     // `globalThis` itself: a reserved intrinsic — tsc rejects user
@@ -3342,20 +3401,27 @@ export function stdlibGlobalNameOf(lowerer: Lowerer, expr: ts.Expression): strin
       if (
         decl !== undefined &&
         (ts.isVariableDeclaration(decl) || ts.isBindingElement(decl)) &&
-        isJsSourceFile(decl.getSourceFile())
+        isJsSourceFile(ts.getSourceFileOfNode(decl))
       ) {
         const imported = lowerer.builtinImportOf(expr);
         if (imported?.module === "buffer" && imported.member === "Buffer") return "Buffer";
       }
       return null;
     }
-    return resolved.name === "global" ? "globalThis" : resolved.name;
+    return ts.symbolName(resolved) === "global" ? "globalThis" : ts.symbolName(resolved);
   }
   if (ts.isPropertyAccessExpression(expr) && !expr.questionDotToken) {
     if (stdlibGlobalNameOf(lowerer, expr.expression) !== "globalThis") return null;
-    const symbol = lowerer.checker.getSymbolAtLocation(expr.name);
+    // Through a detection chain the checker types the receiver as the
+    // union of every arm; the selected arm (the global object) owns the
+    // member.
+    const selected = staticallySelected(lowerer, expr.expression);
+    const symbol =
+      selected === expr.expression || ts.isIdentifier(unparenthesized(expr.expression))
+        ? lowerer.checker.getSymbolAtLocation(expr.name)
+        : lowerer.checker.getPropertyOfType(lowerer.typeOf(selected), expr.name.text);
     if (!symbol || !lowerer.isStdlibSymbol(symbol)) return null;
-    return symbol.name === "global" ? "globalThis" : symbol.name;
+    return ts.symbolName(symbol) === "global" ? "globalThis" : ts.symbolName(symbol);
   }
   return null;
 }
@@ -3441,6 +3507,10 @@ export function stdlibGlobalAliasNameOf(
     "Number",
     "String",
     "Boolean",
+    // Code generation from strings throws Node's EvalError at every call
+    // (code-generation.ts); zod 4 probes `const F = Function; new F("")`.
+    "Function",
+    "eval",
   ].includes(name)
     ? name
     : null;
@@ -3485,7 +3555,7 @@ export function nodeTypesOnlySymbol(lowerer: Lowerer, sym: ts.Symbol | null | un
   if (!decls || decls.length === 0) return false;
   let viaNode = false;
   for (const d of decls) {
-    const sf = d.getSourceFile();
+    const sf = ts.getSourceFileOfNode(d);
     if (sf.isDeclarationFile && isNodeTypesPath(sf.fileName)) viaNode = true;
     else if (lowerer.isStdlibFile(sf)) return false;
   }
