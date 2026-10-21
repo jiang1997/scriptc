@@ -21,7 +21,11 @@ import {
   trackedReadFile,
   trackedRealpath,
 } from "./input-tracker.js";
+<<<<<<< a761388bf (Merge main)
+import { looksUnminified, minifiedEntryRefusal, unminifiedTarget } from "./npm-static-minified.js";
+=======
 import { npmBuiltinAliasOf } from "./builtin-modules.js";
+>>>>>>> 200fe8d22 (Read http.request options at run time, speak HTTP over Unix sockets, and fill the boot path's net and fetch gaps (#1515))
 
 let activePackages: ReadonlySet<string> = new Set();
 let declarationOverloads: ReadonlyMap<string, NpmStaticDeclarationOverloads> = new Map();
@@ -216,7 +220,8 @@ function aliasedPackageName(pkgDir: string): string | null {
  *      runtime JS;
  *   2. preserve distinct import and require targets. Static compilation
  *      must execute the same module Node selects, including packages that
- *      ship separate ESM and CommonJS builds. */
+ *      ship separate ESM and CommonJS builds.
+ * npmStaticRespellMinifiedText then respells verified minified targets. */
 export function npmStaticTransformPkgJson(pkg: Record<string, unknown>): void {
   delete pkg["types"];
   delete pkg["typings"];
@@ -270,6 +275,66 @@ export function npmStaticTransformPkgJson(pkg: Record<string, unknown>): void {
   // (chalk 5's `"#supports-color": { node, default }`), so Node's "node"
   // target hoists there too.
   if (pkg["imports"] !== undefined) transform(pkg["imports"]);
+}
+
+/** Both resolution worlds' minified-entry step, over the package.json TEXT
+ * (compact JSON in both): every `.min.` "main"/"exports" target whose
+ * unminified sibling npm-static-minified.ts verifies is respelled to that
+ * sibling. A document without `.min.` comes back as the same string. The
+ * walk only reads the parsed document; the respelling replaces the quoted
+ * target where it appears as a value, never as a key. */
+export function npmStaticRespellMinifiedText(text: string, pkgDir: string): string {
+  if (!text.includes(".min.")) return text;
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return text;
+  const record = doc as Record<string, unknown>;
+  const targets = new Set<string>();
+  const main = record["main"];
+  if (typeof main === "string" && main.includes(".min.")) targets.add(main);
+  collectMinifiedTargets(record["exports"], targets);
+  let out = text;
+  for (const target of targets) {
+    // "main" may omit the leading "./" that exports targets require.
+    const spelled = target.startsWith("./") ? target : `./${target}`;
+    const respelled = unminifiedTarget(pkgDir, spelled);
+    if (respelled === spelled) continue;
+    const replacement = target.startsWith("./") ? respelled : respelled.slice(2);
+    out = replaceJsonStringValue(out, target, replacement);
+  }
+  return out;
+}
+
+function collectMinifiedTargets(value: unknown, into: Set<string>): void {
+  if (typeof value === "string") {
+    if (value.startsWith("./") && value.includes(".min.")) into.add(value);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectMinifiedTargets(item, into);
+    return;
+  }
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    collectMinifiedTargets(item, into);
+  }
+}
+
+/** Replaces the JSON string literal `from` with `to` wherever it is a value
+ * in compact JSON text (a key is followed by its colon). */
+function replaceJsonStringValue(text: string, from: string, to: string): string {
+  const quoted = JSON.stringify(from);
+  const parts = text.split(quoted);
+  let out = parts[0] ?? "";
+  for (let i = 1; i < parts.length; i++) {
+    const rest = parts[i] ?? "";
+    out += (rest.startsWith(":") ? quoted : JSON.stringify(to)) + rest;
+  }
+  return out;
 }
 
 /** npmStaticTransformPkgJson over a package.json TEXT (the fs shadow's
@@ -413,7 +478,9 @@ export function npmStaticFsShadow(services: FrontendServices): NpmStaticFsShadow
       if (path.endsWith("/package.json") || path.endsWith("\\package.json")) {
         try {
           const source = trackedReadFile(path);
-          return source === null ? undefined : npmStaticTransformPkgJsonText(source);
+          return source === null
+            ? undefined
+            : npmStaticRespellMinifiedText(npmStaticTransformPkgJsonText(source), dirname(path));
         } catch {
           return undefined;
         }
@@ -570,15 +637,6 @@ export function clearProgramBuiltinAliasCache(): void {
  * gracefully per-package-degraded when the attempt fails. */
 const TRANSFORM_MARKERS = ["__webpack_require__"];
 
-/** Unminified-JS heuristic over an entry source: at least two lines and
- * an average line length under 200 characters (minified dists are one
- * enormous line; readable code averages well under 100). */
-function looksUnminified(source: string): boolean {
-  const lines = source.split("\n");
-  if (lines.length < 2) return false;
-  return source.length / lines.length <= 200;
-}
-
 /** A whitespace/syntax-minified bundler dist whose interop helpers keep
  * their names (`var __toESM=…,__toCommonJS=mod=>…`): the recognizers
  * verify those shapes and refuse the package precisely when they cannot,
@@ -628,8 +686,12 @@ export function npmStaticIneligibleReason(
   if (jsEntry === null) return "no runtime JS entry resolves";
   const source = trackedReadFile(jsEntry);
   if (source === null) return `its runtime entry ${jsEntry} cannot be read`;
-  if (!looksUnminified(source) && !namedBundlerHelpers(source))
-    return "its shipped JS looks minified";
+  if (!looksUnminified(source) && !namedBundlerHelpers(source)) {
+    const detail = minifiedEntryRefusal(jsEntry);
+    return detail === null
+      ? "its shipped JS looks minified"
+      : `its shipped JS looks minified, and its per-file build cannot replace it: ${detail}`;
+  }
   if (hasTransformMarkers(source)) {
     return "its shipped JS carries build-transform markers (bundled/transpiled dist)";
   }

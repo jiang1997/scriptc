@@ -29,9 +29,15 @@ importers:
       effect:
         specifier: 3.22.2
         version: 3.22.2
+      glob:
+        specifier: 13.0.6
+        version: 13.0.6
       js-yaml:
         specifier: 4.3.0
         version: 4.3.0
+      lru-cache:
+        specifier: 11.5.3
+        version: 11.5.3
       oxfmt:
         specifier: 0.71.0
         version: 0.71.0
@@ -2113,6 +2119,10 @@ packages:
 
   lru-cache@11.5.2:
     resolution: {integrity: sha512-4pfM1Ff0x50o0tQwb5ucw/RzNyD0/YJME6IVcStalZuMWxdt3sR3huStTtxz4PUmvZfRguvDejasvQ2kifR11g==}
+    engines: {node: 20 || >=22}
+
+  lru-cache@11.5.3:
+    resolution: {integrity: sha512-U4N8FgzmWxc8k1VH8Kr6lQg18U7Fjvby6wXHVRX/ZZ7IwWbRMgrRbP0Wrb5q5NVinryp4SQampHKdvtecItxUg==}
     engines: {node: 20 || >=22}
 
   lru-cache@6.0.0:
@@ -4329,6 +4339,8 @@ snapshots:
   loupe@3.2.1: {}
 
   lru-cache@11.5.2: {}
+
+  lru-cache@11.5.3: {}
 
   lru-cache@6.0.0:
     dependencies:

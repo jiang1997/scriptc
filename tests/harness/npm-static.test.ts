@@ -69,7 +69,7 @@ async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise
   const hash = createHash("sha256");
   const inputs = [
     entry,
-    ...globSync(join(pilotRoot, "**/node_modules/**/*.{js,mjs,cjs,json,ts}")).sort(),
+    ...globSync(join(pilotRoot, "**/node_modules/**/*.{js,mjs,cjs,json,ts,map}")).sort(),
     ...globSync(
       join(fixturesRoot, "commander-calc/node_modules/**/*.{js,mjs,cjs,json,d.ts}"),
     ).sort(),
@@ -1729,6 +1729,75 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     const { coverage } = analyze(entry, { npmStatic: "auto" });
     expect(coverage.npmStatic).toEqual([{ package: "gtable", status: "static" }]);
     expect(coverage.preflightFailed).toBe(false);
+  }, 120_000);
+
+  // A minified entry compiles from its per-file build once the source maps
+  // prove the two are one program: the bundle's sources (its own modules
+  // and the minified-dep it inlined at build time) are exactly the ones the
+  // per-file graph loads, byte for byte, and both export the same names.
+  test("a verified minified entry compiles from its per-file build and byte-matches Node", async () => {
+    const entry = join(pilotRoot, "minified-pair-cli.ts");
+    const { coverage } = analyze(entry, { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([
+      { package: "minified-pair", status: "static" },
+      { package: "minified-dep", status: "static" },
+    ]);
+    expect(coverage.diagnostics).toEqual([]);
+    expect(coverage.runtimeFences ?? []).toEqual([]);
+    const binary = await buildStatic(entry, "auto");
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry]),
+      runBinary(binary, []),
+    ]);
+    expect(nodeRes.stdout.toString("utf8")).toContain("140 over");
+    expect(nativeRes.stdout).toEqual(nodeRes.stdout);
+    expect(comparableStderr(nativeRes.stderr)).toEqual(nodeRes.stderr);
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+  }, 180_000);
+
+  // The bundle inlined an older minified-dep than the one installed: the
+  // per-file build would run different code than Node runs, so the
+  // minified entry keeps its refusal and names the mismatch.
+  test("a minified entry whose bundle inlines another dependency version stays refused", () => {
+    const entry = join(pilotRoot, "minified-drift-cli.ts");
+    const { coverage } = analyze(entry, { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "minified-drift",
+        status: "refused",
+        detail:
+          "its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines a minified-dep/src/index.ts that differs from the installed one its per-file build loads",
+        hint: "to compile it anyway, name it with --npm-static=minified-drift (or --npm-static=minified-drift... to include its dependencies)",
+      },
+    ]);
+  }, 120_000);
+
+  // lru-cache 11 points every export at index.min.js. Its per-file build
+  // now joins the program, so the next blocker reports at a readable line
+  // of dist/esm/node/index.js instead of the minified-entry refusal.
+  test("lru-cache 11 compiles from its per-file build", () => {
+    const { coverage } = analyze(join(pilotRoot, "lru-cache-cli.ts"), { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([{ package: "lru-cache", status: "static" }]);
+    const files = coverage.diagnostics.map((d) => d.loc?.file ?? "");
+    expect(files.some((f) => f.endsWith(".min.js"))).toBe(false);
+    expect(files.some((f) => f.endsWith("/lru-cache/dist/esm/node/index.js"))).toBe(true);
+  }, 120_000);
+
+  // glob 13.0.6's bundle inlined the minimatch, path-scurry and lru-cache
+  // releases current at its build; the installed ones are newer, so the
+  // per-file build is a different program and the entry stays refused.
+  test("glob 13 with newer installed dependencies keeps the minified-entry refusal", () => {
+    const { coverage } = analyze(join(pilotRoot, "glob13-cli.ts"), { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "glob",
+        status: "refused",
+        detail: expect.stringMatching(
+          /^its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines a .* that differs from the installed one its per-file build loads$/,
+        ),
+        hint: "to compile it anyway, name it with --npm-static=glob (or --npm-static=glob... to include its dependencies)",
+      },
+    ]);
   }, 120_000);
 
   // The COPIED workspace shape classifies exactly like the symlinked one:

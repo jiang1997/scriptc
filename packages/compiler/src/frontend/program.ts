@@ -77,6 +77,8 @@ import {
   setNpmStaticDeclarationOverloads,
   setNpmStaticPackages,
 } from "./npm-static.js";
+import { setMinifiedEntryHost } from "./npm-static-minified.js";
+import { moduleEdgesOfFile, moduleExportsOfFile } from "./npm-static-minified-syntax.js";
 import { isPrunedNpmReexport, planNpmStaticReexports } from "./npm-static-prune.js";
 import { isNpmStaticSubclassArgument } from "./npm-static-subtyping.js";
 import {
@@ -1032,6 +1034,14 @@ export function loadProgram(
   }
   setNpmStaticPackages(npmStaticPackages);
   setNpmStaticDeclarationOverloads(declarationOverloads, declarationProperties);
+  // Minified-entry verification parses the per-file build and resolves its
+  // dependencies the way the opted-in program will (npm-static-minified.ts).
+  setMinifiedEntryHost({
+    moduleEdges: (path, source) => moduleEdgesOfFile(services.parse(path, source, "js")),
+    moduleExports: (path, source) => moduleExportsOfFile(services.parse(path, source, "js")),
+    resolveBare: (fromFile, specifier, kind) =>
+      resolveBareModule(fromFile, specifier, "js-only", kind)?.typesFile ?? null,
+  });
   // Workspace-package registrations reset per load (same discipline as the
   // npm-static set), then the opted-in names are probed UP FRONT: a
   // workspace-linked opt-in resolves to files whose realpaths carry no
