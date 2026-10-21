@@ -123,9 +123,9 @@ export interface CcOptions {
   /** events.once with options (events.onceSignal): compiles
    * scr_events_once_signal.c. */
   eventsOnceSignal?: boolean;
-  /** Fixed-width Buffer methods called on checked-dynamic values:
+  /** Buffer.prototype methods called on checked-dynamic values:
    * compiles scr_bytes_dyn.c. */
-  dynBufferNum?: boolean;
+  dynBuffer?: boolean;
   /** Builtin functions read as values: compiles scr_builtin_values.c. */
   builtinValues?: boolean;
   /** The program constructs EventTarget/Event/CustomEvent values or
