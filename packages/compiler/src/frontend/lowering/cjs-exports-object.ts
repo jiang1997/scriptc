@@ -35,7 +35,7 @@ import {
 import { cjsWholeExportValueOf, inlineProgramRequireOf } from "./cjs-inline-require.js";
 import { isCjsModuleGlobal } from "./lower-node-module.js";
 import { bindingNeverReassigned } from "./binding-analysis.js";
-import { DYN, type IrExpr, type IrGlobal } from "../../ir/ir.js";
+import { DYN, canConvertToDyn, type IrExpr, type IrGlobal } from "../../ir/ir.js";
 
 /** True for the CommonJS wrapper's `exports` binding (not shadowed by any
  * source declaration) in a CommonJS JS file. */
@@ -554,8 +554,7 @@ function requiredModuleOfMemberAccess(
   const dep = inlineProgramRequireOf(lowerer, declaration.initializer)?.dep ?? null;
   if (dep === null || !wholeExportIsFunction(lowerer, dep)) return null;
   // A member program code may write on the value is a runtime slot.
-  const writes = wholeExportWrites(lowerer, dep);
-  return writes === "any" || writes.has(access.name.text) ? null : dep;
+  return wholeExportMemberIsSlot(lowerer, dep, access.name.text) ? null : dep;
 }
 
 /** The function value of `sf`'s whole export (`module.exports = format`)
@@ -567,22 +566,43 @@ export function cjsWholeExportSlotOwner(
   sf: ts.SourceFile,
   name: string,
 ): ts.Identifier | null {
-  if (!wholeExportIsFunction(lowerer, sf)) return null;
-  const writes = wholeExportWrites(lowerer, sf);
-  if (writes !== "any" && !writes.has(name)) return null;
+  if (!wholeExportMemberIsSlot(lowerer, sf, name)) return null;
   const whole = cjsWholeExportValueOf(sf);
   return whole !== null && ts.isIdentifier(whole.rhs) ? whole.rhs : null;
+}
+
+/** True when member `name` of `sf`'s function whole export is a runtime
+ * property of the function: program code may write it, and its value has
+ * a dynamic form. A member whose value has none (a typed function such as
+ * cross-spawn's `spawnSync`) stays the export's static value. */
+function wholeExportMemberIsSlot(lowerer: Lowerer, sf: ts.SourceFile, name: string): boolean {
+  if (!wholeExportIsFunction(lowerer, sf)) return false;
+  const writes = wholeExportWrites(lowerer, sf);
+  if (writes !== "any" && !writes.has(name)) return false;
+  const symbol = lowerer.cjsModuleExportSymbol(sf, name);
+  const g = symbol ? lowerer.globalsBySymbol.get(symbol) : undefined;
+  return (
+    g !== undefined &&
+    canConvertToDyn(
+      g.type,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  );
 }
 
 /** The member names program files may write on `dep`'s whole export value
  * through a require of it: assignments, updates and deletes of `fmt.name`,
  * `fmt["name"]` or `require("./lib").name`, and the keys builtins such as
  * `Object.assign(fmt, { name })` and `Object.defineProperty(fmt, "name", …)`
- * write. "any" for a computed key. Writes by code the value is passed to
- * (`mutate(fmt)`) are not seen. */
+ * write, and those of a module that re-exports the value whole. "any" for
+ * a computed key and for any other use of the value, which hands it to code
+ * that can write any member (`mutate(fmt)`). */
 function wholeExportWrites(lowerer: Lowerer, dep: ts.SourceFile): ReadonlySet<string> | "any" {
   const cached = lowerer.cjsWholeExportWrites.get(dep);
   if (cached !== undefined) return cached;
+  // A re-export cycle reaching this module again counts every member.
+  lowerer.cjsWholeExportWrites.set(dep, "any");
   const names = new Set<string>();
   let any = false;
   const use = (value: ts.Node): void => {
@@ -605,6 +625,21 @@ function wholeExportWrites(lowerer: Lowerer, dep: ts.SourceFile): ReadonlySet<st
         `${parent.expression.expression.text}.${parent.expression.name.text}`,
         parent.arguments.nodes.slice(1),
       );
+    } else if (
+      !(ts.isCallExpression(parent) && parent.expression === value) &&
+      !ts.isTypeOfExpression(parent)
+    ) {
+      // A module that re-exports the value whole (`module.exports =
+      // require("./lib")`) hands it to its own requirers; any other use
+      // hands it to code that can write any member (`mutate(fmt)`).
+      const sf = value.getSourceFile();
+      if (sf !== dep && cjsWholeExportValueOf(sf)?.rhs === value) {
+        const writes = wholeExportWrites(lowerer, sf);
+        if (writes === "any") any = true;
+        else for (const name of writes) names.add(name);
+      } else {
+        any = true;
+      }
     }
   };
   // Builtins that write properties of their first argument.
