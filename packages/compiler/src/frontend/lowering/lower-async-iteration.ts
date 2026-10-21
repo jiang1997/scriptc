@@ -137,7 +137,9 @@ function literalBooleanOption(
 
 function nodeReadablePlan(lowerer: Lowerer, expression: ts.Expression): NodeReadablePlan | null {
   const direct =
-    lowerer.stageSourceType(expression) ?? lowerer.mapTypeOf(lowerer.typeOf(expression));
+    lowerer.receiverTypeOverrides.get(expression) ??
+    lowerer.stageSourceType(expression) ??
+    lowerer.mapTypeOf(lowerer.typeOf(expression));
   if (direct?.kind === "object") {
     const sides = streamSidesOf(lowerer, lowerer.classes.get(direct.className));
     if (sides === "r" || sides === "rw") {

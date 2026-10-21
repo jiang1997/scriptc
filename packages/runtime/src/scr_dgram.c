@@ -1394,6 +1394,7 @@ static void scr_dns_lookup_plain(const ScrDyn *hostname, const ScrDyn *options, 
   double family = 0;
   bool all = false;
   int order = scr_dns_default_order;
+  int ai_flags = 0;
   if (options->kind == SCR_DYN_NUM) {
     double f = options->v.num;
     if (f != 0 && f != 4 && f != 6) {
@@ -1412,10 +1413,15 @@ static void scr_dns_lookup_plain(const ScrDyn *hostname, const ScrDyn *options, 
         scr_dyn_prop_type_fail("options.hints", "of type number", v);
         return;
       }
-      if (v->v.num != 0) {
-        scr_throw_error_msg_code(SCR_ERR_ERROR, "dns.lookup hints are not supported yet", 38, "SC2020");
+      /* Node's validateHints: only dns.ADDRCONFIG, dns.V4MAPPED and
+       * dns.ALL (getaddrinfo's own flags), which then reach getaddrinfo */
+      double h = v->v.num;
+      int allowed = AI_ADDRCONFIG | AI_V4MAPPED | AI_ALL;
+      if (!(h == h && trunc(h) == h && h >= 0 && h <= 0x7fffffff) || ((int)h & ~allowed) != 0) {
+        scr_dyn_arg_value_fail("hints", "is invalid", v);
         return;
       }
+      ai_flags = (int)h;
     }
     v = scr_dyn_obj_get(options, "family", 6);
     if (v != NULL && v->kind != SCR_DYN_UNDEF && v->kind != SCR_DYN_NULL) {
@@ -1519,6 +1525,7 @@ static void scr_dns_lookup_plain(const ScrDyn *hostname, const ScrDyn *options, 
   memset(&hints, 0, sizeof hints);
   hints.ai_family = family == 4 ? AF_INET : family == 6 ? AF_INET6 : AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = ai_flags;
   struct addrinfo *res = NULL;
   int rc = getaddrinfo(host->data, NULL, &hints, &res);
   if (rc != 0 || res == NULL) {

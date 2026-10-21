@@ -304,7 +304,7 @@ function lowerFastCallback(
     fastLoweringDepth > 0 ||
     slow.arity <= elemIndex ||
     !ts.isArrowFunction(argNode) ||
-    isJsSourceFile(argNode.getSourceFile()) ||
+    isJsSourceFile(ts.getSourceFileOfNode(argNode)) ||
     valueT?.kind !== "union" ||
     typeEquals(valueT, elem) ||
     elem.kind === "union" ||
@@ -1489,7 +1489,7 @@ export function lowerArrayFlatMapCall(
       kind: "dynInvoke",
       recv: { kind: "dynFrom", value: receiver, liveRef: true, type: DYN, loc },
       method: "flatMap",
-      calleeName: access.getText(),
+      calleeName: ts.getTextOfNode(access),
       args: [{ kind: "dynFrom", value: fnArg, type: DYN, loc }],
       type: DYN,
       loc,
@@ -2085,7 +2085,7 @@ export function lowerArraySortCall(
     // Arithmetic on inferred JS values retains a checked result because
     // it can produce BigInt. The sort callback still requires a number.
     const result =
-      fnArg.type.ret.kind === "dyn" && isJsSourceFile(argNode.getSourceFile())
+      fnArg.type.ret.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(argNode))
         ? F64
         : fnArg.type.ret;
     const expected = funcOf(
@@ -2223,7 +2223,7 @@ export function lowerDynArrayFilterCall(
       recv,
       fnArg,
       { kind: "strLit", value: access.name.text, type: STRING, loc },
-      { kind: "strLit", value: access.getText(), type: STRING, loc },
+      { kind: "strLit", value: ts.getTextOfNode(access), type: STRING, loc },
     ],
     type: arrayOf(elemT),
     loc,
@@ -2264,7 +2264,7 @@ export function lowerDynArrayFlatMapCall(
         kind: "dynInvoke",
         recv,
         method: "flatMap",
-        calleeName: access.getText(),
+        calleeName: ts.getTextOfNode(access),
         args: [boxed],
         type: DYN,
         loc,
@@ -2286,7 +2286,7 @@ export function lowerDynArrayFlatMapCall(
       recv,
       fnArg,
       { kind: "strLit", value: access.name.text, type: STRING, loc },
-      { kind: "strLit", value: access.getText(), type: STRING, loc },
+      { kind: "strLit", value: ts.getTextOfNode(access), type: STRING, loc },
     ],
     type: arrayOf(ret.elem),
     loc,

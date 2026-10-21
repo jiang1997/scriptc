@@ -60,7 +60,7 @@ export function lowerMapMethodCall(
   if (!MAP_METHODS.has(name)) return null;
   let receiverIr = lowerer.mapTypeOf(lowerer.typeOf(access.expression));
   let probedUntyped = false;
-  if (receiverIr?.kind !== "map" && isJsSourceFile(access.getSourceFile())) {
+  if (receiverIr?.kind !== "map" && isJsSourceFile(ts.getSourceFileOfNode(access))) {
     const probed = tryLowerExpression(lowerer, access.expression);
     if (probed?.type.kind === "map") {
       receiverIr = probed.type;
@@ -427,7 +427,7 @@ export function lowerCollectionSpread(
         loc,
       },
       then: entries,
-      else_: nodeThrowExpr(1, "", `${node.getText()} is not iterable`, entries.type, loc),
+      else_: nodeThrowExpr(1, "", `${ts.getTextOfNode(node)} is not iterable`, entries.type, loc),
       type: entries.type,
       loc,
     },
@@ -526,6 +526,55 @@ export function lowerMapForEachCall(
   return { kind: "call", callee: helper, args: [receiver, fnArg], type: VOID, loc };
 }
 
+/** True when an arrow's expression body is lowered as a statement: the
+ * function being lowered returns void (`xs.forEach((x) => s.add(x))`) and
+ * the arrow's contextual signature returns void. An arrow that returns the
+ * Set (`(n) => s.add(n)`, a `map` callback) or a body inlined into a
+ * caller that reads its value is not. */
+function setAddArrowResultVoid(lowerer: Lowerer, arrow: ts.ArrowFunction): boolean {
+  if (lowerer.ctx.returnType.kind !== "void") return false;
+  const contextual = lowerer.checker.getContextualType(arrow);
+  if (contextual === undefined) return false;
+  const signatures = lowerer.checker.getCallSignatures(
+    lowerer.checker.getNonNullableType(contextual),
+  );
+  return (
+    signatures.length === 1 &&
+    (lowerer.checker.getReturnTypeOfSignature(signatures[0]!).flags & ts.TypeFlags.Void) !== 0
+  );
+}
+
+/** True when nothing reads an add() call's result: an expression
+ * statement, the expression body of an arrow whose result is void, a `void`
+ * operand, a for header's initializer or incrementor, a comma's left
+ * operand, or a conditional or comma result that is itself discarded. */
+function setAddResultDiscarded(lowerer: Lowerer, call: ts.CallExpression): boolean {
+  let node: ts.Node = call;
+  for (;;) {
+    let parent = node.parent;
+    while (parent !== undefined && ts.isParenthesizedExpression(parent)) {
+      node = parent;
+      parent = parent.parent;
+    }
+    if (parent === undefined) return false;
+    if (ts.isExpressionStatement(parent) || ts.isVoidExpression(parent)) return true;
+    if (ts.isArrowFunction(parent))
+      return parent.body === node && setAddArrowResultVoid(lowerer, parent);
+    if (ts.isForStatement(parent))
+      return parent.initializer === node || parent.incrementor === node;
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      if (parent.left === node) return true;
+      node = parent;
+      continue;
+    }
+    if (ts.isConditionalExpression(parent) && parent.condition !== node) {
+      node = parent;
+      continue;
+    }
+    return false;
+  }
+}
+
 /** Ambient Set method calls — Map's lowering with the value slot gone.
  * `add`/`has`/`delete`/`clear` lower to setIntrinsic; `forEach` desugars
  * like Map's over the shared iteration primitives. Null when this isn't
@@ -544,7 +593,7 @@ export function lowerSetMethodCall(
   // Set<union-of-signatures>, but the VALUE lowered as a real Set of
   // identity tokens (the new-Set probe) — the lowered receiver's type
   // is the honest dispatch key.
-  if (receiverIr?.kind !== "set" && isJsSourceFile(access.getSourceFile())) {
+  if (receiverIr?.kind !== "set" && isJsSourceFile(ts.getSourceFileOfNode(access))) {
     const probed = tryLowerExpression(lowerer, access.expression);
     if (probed?.type.kind === "set") {
       receiverIr = probed.type;
@@ -560,8 +609,8 @@ export function lowerSetMethodCall(
   const value = lowerer.lowerExpr(access.expression);
   const receiver =
     lowerer.runtimeOptionalPropertyReceiver(access.expression, value, receiverIr, name) ?? value;
-  // The lib's `add` returns the Set (chaining typechecks); the lowered
-  // add is a void statement — fence chained receivers like Map's set.
+  // A used add() result lowers to its receiver (below), so a chained
+  // receiver is a Set; anything else lowering to a non-Set stays fenced.
   if (receiver.type.kind !== "set") {
     lowerer.noLowering(
       "chained Set method calls",
@@ -584,7 +633,28 @@ export function lowerSetMethodCall(
   }
   if (name === "add") {
     const v = lowerer.lowerCollectionKey(call.arguments.nodes[0]!, receiverIr.elem);
-    return { kind: "setIntrinsic", method: "add", receiver, args: [v], type: VOID, loc };
+    if (setAddResultDiscarded(lowerer, call)) {
+      return { kind: "setIntrinsic", method: "add", receiver, args: [v], type: VOID, loc };
+    }
+    // add() returns its Set: a used result (`s.add(a).add(b)`,
+    // `s.add(x) === s`) reads the receiver once into a slot, adds, and
+    // answers the slot, as Map's set() does.
+    const slot = lowerer.declareHiddenLocal("%setAddReceiver", receiver.type);
+    const ref = varRef(slot.id, receiver.type, loc);
+    return {
+      kind: "seqExpr",
+      stmts: [
+        { kind: "varDecl", localId: slot.id, init: receiver, loc },
+        {
+          kind: "exprStmt",
+          expr: { kind: "setIntrinsic", method: "add", receiver: ref, args: [v], type: VOID, loc },
+          loc,
+        },
+      ],
+      result: ref,
+      type: receiver.type,
+      loc,
+    };
   }
   if (name === "has" || name === "delete") {
     const v = lowerer.lowerCollectionKey(call.arguments.nodes[0]!, receiverIr.elem);
@@ -973,7 +1043,7 @@ export function lowerSetSeedNew(
         {
           kind: "libCall",
           fn: "dyn.iterPack",
-          args: [source, strLit(node.getText(), loc)],
+          args: [source, strLit(ts.getTextOfNode(node), loc)],
           type: DYN,
           loc,
         },
@@ -1165,7 +1235,7 @@ export function lowerMapSeedNew(
   }
   if (ts.isArrayLiteralExpression(argNode)) {
     if (
-      isJsSourceFile(argNode.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(argNode)) &&
       argNode.elements.nodes.some((entry) => !ts.isArrayLiteralExpression(entry))
     ) {
       return mapFromSeedValue(lowerer, lowerer.lowerExprExpecting(argNode, DYN), mapT);

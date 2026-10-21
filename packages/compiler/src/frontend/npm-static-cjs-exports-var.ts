@@ -17,6 +17,7 @@
  * never reassigned. Other shapes answer null and keep their existing
  * treatment. */
 import * as ts from "./ts7/syntax.js";
+import { tokenStartOfNode } from "./ts7/node-functions.js";
 
 function unparen(e: ts.Expression): ts.Expression {
   let x = e;
@@ -219,14 +220,14 @@ export function normalizeCjsExportsVar(sf: ts.SourceFile): string | null {
       (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) &&
       p.expression === n
     ) {
-      edits.push({ start: n.getStart(sf), end: n.getEnd(), text: "exports" });
+      edits.push({ start: tokenStartOfNode(n), end: n.end, text: "exports" });
       return undefined;
     }
     ok = false; /* used as a value, assigned, or passed along */
     return undefined;
   });
   if (!ok || edits.length === 0) return null;
-  edits.push({ start: alias.stmt.getStart(sf), end: alias.stmt.getEnd(), text: "" });
+  edits.push({ start: tokenStartOfNode(alias.stmt), end: alias.stmt.end, text: "" });
   edits.sort((a, b) => a.start - b.start);
   let out = "";
   let at = 0;

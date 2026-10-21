@@ -27,6 +27,7 @@ import { availableParallelism } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { readWorkloads } from "../benchmarks/runtime/workloads.mjs";
 import {
   cachegrindCounts,
   compareArtifact,
@@ -173,9 +174,8 @@ function goodCodeSet() {
   const programs = [];
   if (sets.has("bench")) {
     const suite = join(programsRoot, "benchmarks/runtime");
-    const manifest = JSON.parse(readFileSync(join(suite, "workloads.json"), "utf8"));
     const seen = new Set();
-    for (const w of manifest.workloads) {
+    for (const w of readWorkloads(suite)) {
       const entry = join(suite, w.entry);
       if (seen.has(entry)) continue;
       seen.add(entry);

@@ -122,12 +122,14 @@ export function lowerChildMethodCall(
     }
     const listenerNode = stripTypeCasts(call.arguments.nodes[1]!);
     if (
-      isJsSourceFile(listenerNode.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(listenerNode)) &&
       (ts.isArrowFunction(listenerNode) || ts.isFunctionExpression(listenerNode)) &&
       listenerNode.parameters.nodes.some((param) => param.dotDotDotToken) &&
       listenerNode.parameters.nodes.every((param) => !param.type) &&
       !/@(?:param|type)\b/.test(
-        listenerNode.getSourceFile().text.slice(listenerNode.pos, listenerNode.getStart()),
+        ts
+          .getSourceFileOfNode(listenerNode)
+          .text.slice(listenerNode.pos, ts.tokenStartOfNode(listenerNode)),
       )
     ) {
       for (const param of listenerNode.parameters.nodes) lowerer.checkedCallbackParams.add(param);
@@ -142,10 +144,10 @@ export function lowerChildMethodCall(
         : lowerer.lowerExpr(call.arguments.nodes[1]!);
     if (
       narrowed.length > 0 ||
-      (isJsSourceFile(listenerNode.getSourceFile()) && cb.type.kind === "dyn") ||
+      (isJsSourceFile(ts.getSourceFileOfNode(listenerNode)) && cb.type.kind === "dyn") ||
       (cb.type.kind === "func" &&
         (cb.type.rest ||
-          (isJsSourceFile(listenerNode.getSourceFile()) &&
+          (isJsSourceFile(ts.getSourceFileOfNode(listenerNode)) &&
             cb.type.params.some((param) => param.kind === "dyn"))))
     ) {
       if (
@@ -756,7 +758,7 @@ function childStreamEncodedAt(
  * admit null. */
 function narrowedExitListenerParams(lowerer: Lowerer, listener: ts.Expression): ts.Symbol[] {
   if (!ts.isArrowFunction(listener) && !ts.isFunctionExpression(listener)) return [];
-  if (isJsSourceFile(listener.getSourceFile())) return [];
+  if (isJsSourceFile(ts.getSourceFileOfNode(listener))) return [];
   const symbols: ts.Symbol[] = [];
   const wanted: readonly string[] = ["f64", "string"];
   listener.parameters.nodes.slice(0, 2).forEach((param, i) => {

@@ -53,7 +53,11 @@ import {
   VOID,
   classJsName,
 } from "../../ir/ir.js";
-import { moduleRuntimeFeatures, moduleUsesMockTimers } from "../../ir/runtime-features.js";
+import {
+  moduleRuntimeFeatures,
+  moduleUsesDynBuiltinStream,
+  moduleUsesMockTimers,
+} from "../../ir/runtime-features.js";
 import { captureFreeFunctions, observesStacks } from "../stack-observations.js";
 import { type DenseArrayLoop } from "./dense-array-loops.js";
 import { findInitializedByteLoopBindings } from "./byte-windows.js";
@@ -262,6 +266,7 @@ import {
   buildClassGraph,
   classMembershipIntervals,
   classFieldIndex,
+  classPreLines,
   classStructSym,
   programLifetimeClass,
   type LlClassMeta,
@@ -617,13 +622,6 @@ export class LlEmitter {
     return `, !tbaa !${tag}`;
   }
 
-  /** The `!range` attachment of an array length load: a length is at most
-   * 2^32 - 1 (the runtime's SCR_ARR_MAX_LENGTH), so conversions to double
-   * and back fold. 32-bit targets load the full range anyway. */
-  get arrayLengthRange(): string {
-    return this.sizeType === "i64" ? ", !range !{i64 0, i64 4294967296}" : "";
-  }
-
   /** Whether an element access at `index` of `arr` lies in the hole-free
    * prefix: the counter of a dense array loop's fast copy indexing one of
    * the arrays its entry test covered. */
@@ -902,6 +900,11 @@ export class LlEmitter {
   /** Identity-preserving static→dyn capsules for program classes and Web
    * APIs whose values remain directly observable. */
   readonly liveDynRefAdapters = new Map<string, LlStreamTypedRefAdapter>();
+  private dynBuiltinStreamUse: boolean | undefined;
+  /** See moduleUsesDynBuiltinStream. */
+  get usesDynBuiltinStream(): boolean {
+    return (this.dynBuiltinStreamUse ??= moduleUsesDynBuiltinStream(this.mod));
+  }
   /** Runtime-arm dispatchers for live union values. */
   readonly liveDynUnionRefAdapters = new Map<string, string>();
   readonly dynPromiseAdapters = new Map<string, string>();
@@ -1405,6 +1408,7 @@ export class LlEmitter {
       fieldAbsentTestIn: (B, value, unionId) => this.fieldAbsentTestIn(B, value, unionId),
       absentInstanceRef: (unionId) => this.absentInstanceRef(unionId),
       liveDynRefAdapter: (type) => this.liveDynRefAdapter(type),
+      usesDynBuiltinStream: () => this.usesDynBuiltinStream,
       liveDynUnionRefAdapter: (type) => this.liveDynUnionRefAdapter(type),
       dynPromiseAdapter: (type) => this.dynPromiseAdapter(type),
       isErrorClass: (name) => this.classMeta.get(name)?.root.def.name === "%Error",
@@ -1461,7 +1465,7 @@ export class LlEmitter {
     // The class graph: base/children links, hierarchy membership, the
     // whole-program preorder numbering for instanceof over runtime and
     // compiled error objects, and the per-hierarchy virtual slot lists.
-    this.classMeta = buildClassGraph(mod, this.fnByName);
+    this.classMeta = buildClassGraph(mod, this.fnByName, this.sizeType);
     if (mod.lifetimeRegions === true) {
       this.regions = new LifetimeRegions(
         this.shapeHost,
@@ -2812,10 +2816,16 @@ export class LlEmitter {
     } else if (t.kind === "string") {
       this.declare(`declare void @scr_throw_str(ptr)`);
       B.line(`call void @scr_throw_str(ptr ${v.name})`);
-    } else if (t.kind === "object" && this.classMeta.get(t.className)?.hierarchy === true) {
+    } else if (
+      t.kind === "object" &&
+      this.classMeta.get(t.className)?.hierarchy === true &&
+      this.classMeta.get(t.className)?.idInRc !== true
+    ) {
       // Hierarchy instances carry a vtable word: the OBJ kind keeps the
       // dynamic class inspectable (catch-binding instanceof, the uncaught
-      // printer's "name: message" for Error instances).
+      // printer's "name: message" for Error instances). Instances that keep
+      // their class id in the rc word are never Errors and are thrown as
+      // REF payloads (narrow-guards.ts emitCaughtClassIdInstanceof).
       const rc = vAdapters(this.shapeHost, t);
       this.declare(`declare void @scr_throw_obj(ptr, ptr, ptr, ptr)`);
       B.line(
@@ -3148,20 +3158,20 @@ export class LlEmitter {
     return { ptr: p, type, inline: this.inlineUnions.classField(className, field) };
   }
 
-  /** `o->vt->pre` — the dynamic class's preorder number (borrowed object;
-   * the static class names which struct spelling carries the vt word). */
+  /** The dynamic class's preorder number (borrowed object; the static class
+   * names the struct spelling and where the number is, classPreLines). */
   loadVtPre(objName: string, staticClassName: string): string {
     const B = this.B;
-    const vtp = B.tmp();
-    const vt = B.tmp();
-    const prep = B.tmp();
     const pre = B.tmp();
-    B.line(
-      `${vtp} = getelementptr inbounds %${classStructSym(staticClassName)}, ptr ${objName}, i64 0, i32 1`,
-    );
-    B.line(`${vt} = load ptr, ptr ${vtp}`);
-    B.line(`${prep} = getelementptr inbounds %ScrVt, ptr ${vt}, i64 0, i32 0`);
-    B.line(`${pre} = load ${this.sizeType}, ptr ${prep}`);
+    const meta = this.classMetaOf(staticClassName);
+    for (const line of classPreLines(
+      meta,
+      classStructSym(staticClassName),
+      objName,
+      pre,
+      this.sizeType,
+    ))
+      B.line(line.trimStart());
     return pre;
   }
 
@@ -5093,6 +5103,7 @@ export class LlEmitter {
           pre: meta.pre,
           post: meta.post,
           runtimeRooted: meta.root.def.runtime === true,
+          idInRc: meta.idInRc,
           // Inline scalar-union fields are plain bits: nothing to push.
           fields: meta.def.fields.flatMap((f) =>
             this.inlineUnions.classField(className, f.name)
@@ -5131,15 +5142,17 @@ export class LlEmitter {
     return this.own({ name: value.name, type: e.type });
   }
 
-  /** Branches on "`obj` is published" (rc == SIZE_MAX); leaves the builder
-   * in the cold block and answers the continuation label. */
-  private emitPublishedTest(obj: string): string {
+  /** Branches on "`obj` is published" (rc == SIZE_MAX, or a count of
+   * UINT32_MAX in the low half for `count` i32: classes.ts
+   * LlClassMeta.idInRc); leaves the builder in the cold block and answers
+   * the continuation label. */
+  private emitPublishedTest(obj: string, count: "i32" | "i64" = this.sizeType): string {
     const B = this.B;
     const rc = B.tmp(),
       frozen = B.tmp(),
       expected = B.tmp();
-    B.line(`${rc} = load ${this.sizeType}, ptr ${obj}`);
-    B.line(`${frozen} = icmp eq ${this.sizeType} ${rc}, -1`);
+    B.line(`${rc} = load ${count}, ptr ${obj}`);
+    B.line(`${frozen} = icmp eq ${count} ${rc}, -1`);
     this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
     B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${frozen}, i1 false)`);
     const cold = B.newLabel("pub.frozen"),
@@ -5179,22 +5192,17 @@ export class LlEmitter {
     if (published === null) return;
     if (className !== null && !published.classGuarded(className)) return;
     const B = this.B;
-    const ok = this.emitPublishedTest(obj);
-    let owner: string;
     const meta = className === null ? undefined : this.classMeta.get(className);
+    const ok = this.emitPublishedTest(obj, meta?.idInRc === true ? "i32" : this.sizeType);
+    let owner: string;
     if (meta === undefined) owner = this.cstr("Object");
     else if (!meta.hierarchy) owner = this.cstr(meta.def.jsName ?? meta.def.name);
     else {
       // The DYNAMIC class names the object, as in Node.
       this.publishedNamesSym ??= "@sc_pub_class_names";
-      const vtp = B.tmp(),
-        vt = B.tmp(),
-        pre = B.tmp(),
+      const pre = this.loadVtPre(obj, meta.def.name),
         slot = B.tmp(),
         name = B.tmp();
-      B.line(`${vtp} = getelementptr inbounds ptr, ptr ${obj}, i64 1`);
-      B.line(`${vt} = load ptr, ptr ${vtp}`);
-      B.line(`${pre} = load ${this.sizeType}, ptr ${vt}`);
       B.line(
         `${slot} = getelementptr inbounds ptr, ptr ${this.publishedNamesSym}, ${this.sizeType} ${pre}`,
       );
@@ -5599,8 +5607,11 @@ export class LlEmitter {
     return emitterFixedAdapter(this, cbT);
   }
 
-  emitterOnceAdapter(boxerT: IrType & { kind: "func" }): { fn: string; shim: string } {
-    return emitterOnceAdapter(this, boxerT);
+  emitterOnceAdapter(
+    boxerT: IrType & { kind: "func" },
+    fire?: string,
+  ): { fn: string; shim: string } {
+    return emitterOnceAdapter(this, boxerT, fire);
   }
 
   wrapEmitterListener(target: string, adapterFn: string): string {

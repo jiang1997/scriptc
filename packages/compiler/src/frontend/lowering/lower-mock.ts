@@ -797,7 +797,7 @@ export function lowerMockMethod(
   const objShape = objType?.kind === "record" ? lowerer.shapes.get(objType.shapeId) : undefined;
   const fn = objShape?.fields.find((f) => f.name === field)?.type;
   if (!objType || !objShape || fn?.kind !== "func") {
-    const typeName = lowerer.typeOf(args[0]!).getSymbol()?.name;
+    const typeName = ts.symbolNameOf(lowerer.typeOf(args[0]!).getSymbol());
     lowerer.noLowering(
       typeName && !typeName.startsWith("__")
         ? `${what} on '${typeName}'`

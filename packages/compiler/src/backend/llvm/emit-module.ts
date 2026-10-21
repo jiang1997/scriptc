@@ -436,14 +436,15 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     `%ScrClosure = type { ${emitter.sizeType}, ptr, ${emitter.sizeType}, ptr, i32, i32, ptr, ptr }`,
     `%ScrFfiTable = type { ptr, ${emitter.sizeType}, ${emitter.sizeType}, ptr, i8, ptr, ptr, ${emitter.sizeType}, ${emitter.sizeType}, ${emitter.sizeType}, ptr, ptr }`,
     `%ScrRegex = type { ${emitter.sizeType}, ptr, ptr, ptr, double, ptr, ptr, ptr }`,
-    // ScrArr mirrors scr_runtime.h field-for-field: { rc, len, cap, elem,
-    // cyc, spare, filled, ops, data, present, ext } (field numbers in
-    // SCR_ARR_FIELD), where filled bounds the hole-free prefix, ops points at the element type's constant RC descriptor
+    // ScrArr mirrors scr_runtime.h field-for-field: { rc, len (i32), cap
+    // (i32), elem, cyc, spare, filled, ops, data, ext } (field numbers in
+    // SCR_ARR_FIELD), where the dense states follow the cap value slots at
+    // data, filled bounds the hole-free prefix, ops points at the element type's constant RC descriptor
     // (%ScrArrOps, SCR_ELEM_REF only) and ext at the out-of-line sparse,
     // property and metadata storage (NULL until first used). Live dynamic
     // stream commits swap its dense, presence and out-of-line storage while
     // preserving the target object's identity.
-    `%ScrArr = type { ${emitter.sizeType}, ${emitter.sizeType}, ${emitter.sizeType}, i8, i8, i16, i32, ptr, ptr, ptr, ptr }`,
+    `%ScrArr = type { ${emitter.sizeType}, i32, i32, i8, i8, i16, i32, ptr, ptr, ptr }`,
     `%ScrArrOps = type { ptr, ptr, ptr }`,
     // The ScrMap prefix { rc, key_kind, val_kind, traced } — the inline
     // RC fast paths test the traced byte (shapes.ts).
@@ -684,17 +685,23 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
   if (emitter.regexInstances.size > 0) out.push(``);
   for (const code of regexMatchers.values()) out.push(...code.lines, ``);
   for (const [, inst] of emitter.templateStringsInstances) {
-    // One immortal ScrArr per tagged-template site: a [N x ptr] data
-    // global of interned cooked-string literals, and the ScrArr header
-    // over it (rc == SIZE_MAX, len == cap == filled, SCR_ELEM_STR = 2,
-    // no REF entry points). Every dense slot is present; reads retain
-    // immortal strings — a no-op.
+    // One immortal ScrArr per tagged-template site: a data global of
+    // interned cooked-string literals followed by their states (the
+    // runtime finds them before data + cap * 9), and the ScrArr header over
+    // it (rc == SIZE_MAX, len == cap == filled, SCR_ELEM_STR = 2, no REF
+    // entry points). Every dense slot is present; reads retain immortal
+    // strings — a no-op. Slots are 8 bytes on every target: on 32-bit
+    // targets each holds the pointer in its low half and zero in its high
+    // half, so the states start where the runtime looks for them.
     const n = inst.slots.length;
     const present = n === 0 ? "zeroinitializer" : `[ ${inst.slots.map(() => "i8 1").join(", ")} ]`;
+    const wide = emitter.sizeType === "i64";
+    const slot = wide ? "ptr" : "<{ ptr, i32 }>";
+    const slotValue = (s: string): string =>
+      wide ? `ptr ${s}` : `<{ ptr, i32 }> <{ ptr ${s}, i32 0 }>`;
     out.push(
-      `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-      `@${inst.sym}_present = internal constant [${n} x i8] ${present}`,
-      `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, ${emitter.sizeType} ${n}, ${emitter.sizeType} ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null }`,
+      `@${inst.sym}_data = internal constant <{ [${n} x ${slot}], [${n} x i8] }> <{ [${n} x ${slot}] [ ${inst.slots.map(slotValue).join(", ")} ], [${n} x i8] ${present} }>, align 8`,
+      `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, i32 ${n}, i32 ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr null, ptr @${inst.sym}_data, ptr null }`,
     );
   }
   if (emitter.templateStringsInstances.size > 0) out.push(``);
@@ -1333,14 +1340,17 @@ export function helperDefs(emitter: LlEmitter): string[] {
   // of the capacity word (SCR_STR_ASCII_BIT, the low half's sign bit on
   // little-endian targets) makes UTF-16 units bytes. Unproven strings and
   // anything but an in-range index take the runtime's UTF-16 mapping.
-  // A scan's receiver reads inline too where runtime state is ordinary
-  // global storage (ScrStrScan; SCR_TL makes it thread-local otherwise).
-  const scanInline = emitter.mod.workers !== true && emitter.mod.lib?.threadInstances !== true;
+  // A scan's receiver reads inline too (ScrStrScan): from ordinary global
+  // storage, or, in worker executables, from the thread's static TLS block,
+  // one thread-pointer-relative load (see executableTls).
+  const scanInline =
+    emitter.executableTls ||
+    (emitter.mod.workers !== true && emitter.mod.lib?.threadInstances !== true);
   let scanDeclared = false;
   for (const helper of STRING_READ_HELPERS) {
     if (!emitter.decls.has(helper.decl)) continue;
     if (scanInline && !scanDeclared) {
-      defs.push(stringScanDecl(emitter.sizeType), ``);
+      defs.push(stringScanDecl(emitter.sizeType, emitter.executableTls), ``);
       scanDeclared = true;
     }
     defs.push(...helper.define(emitter.sizeType, FN_ATTRS, scanInline), ``);

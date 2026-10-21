@@ -119,7 +119,7 @@ export function markRequireEarlyBindings(lowerer: Lowerer): void {
     const tag = rawTag === "" ? "e." : rawTag.replace(/^%/, "");
     const bySymbol = new Map<ts.Symbol, { flag: RequireInitFlag; decl: ts.VariableDeclaration }>();
     for (const { decl } of declared) {
-      const flagId = `%g.${tag}%required.${decl.getStart(sf)}`;
+      const flagId = `%g.${tag}%required.${ts.tokenStartOfNode(decl)}`;
       lowerer.globalsList.push({ id: flagId, name: "%initialized", type: BOOL, mutable: true });
       const flag: RequireInitFlag = { flagId, names: new Map() };
       for (const id of boundNames(decl.name)) {
@@ -148,7 +148,7 @@ export function markRequireEarlyBindings(lowerer: Lowerer): void {
       if (owner === undefined) continue;
       if (boundNames(owner.decl.name).includes(id)) continue;
       // Code after the require runs after it, except inside functions.
-      if (id.getStart(sf) >= owner.decl.getEnd() && !inDeferredPosition(id)) continue;
+      if (ts.tokenStartOfNode(id) >= owner.decl.end && !inDeferredPosition(id)) continue;
       const body = enclosingBody(id);
       lowerer.requireEarlyReferences.push({
         flag: owner.flag,

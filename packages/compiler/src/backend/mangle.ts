@@ -109,6 +109,13 @@ export function mangleVtStruct(rootClassName: string): string {
 export function mangleVtInstance(className: string): string {
   return `sc_vtable_${sanitize(className)}`;
 }
+/** The per-HIERARCHY array of the vtables of its classes in preorder, for
+ * hierarchies whose instances keep their class id in the rc word
+ * (classes.ts LlClassMeta.idInRc). `sc_vta_` differs from `sc_vtable_` and
+ * `sc_vtt_` before any user-controlled text. */
+export function mangleVtArray(rootClassName: string): string {
+  return `sc_vta_${sanitize(rootClassName)}`;
+}
 /** A virtual slot's member name inside the vtable struct. Sibling
  * branches of one hierarchy can each declare a slot for the SAME method
  * name (root-most in their own subtree, overridden below — mixin layers

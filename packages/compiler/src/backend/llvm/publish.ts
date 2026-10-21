@@ -63,6 +63,9 @@ export interface PublishClassInfo {
   post: number;
   /** A runtime-provided root class (errors, emitters, streams). */
   runtimeRooted: boolean;
+  /** Instances keep their class id in the rc word (classes.ts
+   * LlClassMeta.idInRc). */
+  idInRc: boolean;
   /** The class's own and inherited fields: GEP index and storage type. */
   fields: { name: string; index: number; type: IrType }[];
 }
@@ -70,6 +73,12 @@ export interface PublishClassInfo {
 /** scr_pub_mark's object kinds (SCR_PUB_KIND_* in scr_runtime.h), for the RC audit. */
 const PUB_KIND_OBJECT = 4;
 const PUB_KIND_UNION = 5;
+/** SCR_PUB_CLASS_ID, or'ed into a kind: the object keeps its class id
+ * in the high half of its rc word (classes.ts LlClassMeta.idInRc). */
+const PUB_CLASS_ID = 0x100;
+/** SCR_PUB_LOG_COUNT (scr_publish.c), in a log entry's `buf`: `rc` is the
+ * count of the low half. */
+const PUB_LOG_COUNT = "-2147483648";
 
 const RUNTIME_WALKERS = {
   string: "@scr_pub_str_fn",
@@ -307,9 +316,18 @@ export class PublishWalkers {
     const lines = [
       head,
       `entry:`,
-      `  %vtp = getelementptr inbounds ptr, ptr %o, i64 1`,
-      `  %vt = load ptr, ptr %vtp`,
-      `  %pre = load ${this.host.sizeType}, ptr %vt`,
+      ...(info.idInRc
+        ? [
+            `  %idp = getelementptr inbounds i8, ptr %o, i64 4 ; the class id (classes.ts classIdRcWord)`,
+            `  %id = load i32, ptr %idp`,
+            `  %idpre = add i32 %id, -1`,
+            `  %pre = zext i32 %idpre to ${this.host.sizeType}`,
+          ]
+        : [
+            `  %vtp = getelementptr inbounds ptr, ptr %o, i64 1`,
+            `  %vt = load ptr, ptr %vtp`,
+            `  %pre = load ${this.host.sizeType}, ptr %vt`,
+          ]),
       `  switch ${this.host.sizeType} %pre, label %other [ ${cases.map((c) => `${this.host.sizeType} ${c.pre}, label %c${c.pre}`).join(" ")} ]`,
     ];
     for (const c of cases)
@@ -344,6 +362,7 @@ export class PublishWalkers {
       info.fields,
       path,
       loc,
+      info.idInRc,
     );
   }
 
@@ -355,20 +374,23 @@ export class PublishWalkers {
    * targets), and an object with a collector header leaves its candidate
    * buffer through scr_cyc_pub_take. Anything else calls scr_pub_mark, as
    * does every mark of an RC-audit build. */
-  private markLines(cyc: boolean, kind: number): string[] {
+  private markLines(cyc: boolean, kind: number, classId = false): string[] {
     const call = (name: string): string[] => [
-      `  %${name} = call zeroext i1 @scr_pub_mark(ptr %ctx, ptr %o, i1 ${cyc ? "true" : "false"}, i32 ${kind})`,
+      `  %${name} = call zeroext i1 @scr_pub_mark(ptr %ctx, ptr %o, i1 ${cyc ? "true" : "false"}, i32 ${classId ? kind | PUB_CLASS_ID : kind})`,
       `  br i1 %${name}, label %walk, label %done`,
     ];
     if (this.host.rcAudit === true) return call("m");
     const S = this.host.sizeType;
+    // An object that keeps its class id in the rc word is marked and
+    // logged through its count, the low half.
+    const C = classId ? "i32" : S;
     const field = (name: string, slot: number): string[] => [
       `  %${name}p = getelementptr inbounds ptr, ptr %ctx, i32 ${slot}`,
       `  %${name} = load ${S === "i64" ? "i64" : "i32"}, ptr %${name}p`,
     ];
     const lines = [
-      `  %mrc = load ${S}, ptr %o`,
-      `  %mimm = icmp eq ${S} %mrc, -1`,
+      `  %mrc = load ${C}, ptr %o`,
+      `  %mimm = icmp eq ${C} %mrc, -1`,
       `  br i1 %mimm, label %done, label %mtest`,
       `mtest:`,
       `  %mrefp = getelementptr inbounds ptr, ptr %ctx, i32 6`,
@@ -380,13 +402,13 @@ export class PublishWalkers {
       `  %mok1 = and i1 %mok0, %mroom`,
     ];
     let ok = "%mok1";
-    if (S === "i64") {
+    if (C === "i64") {
       // 0xfffffffe and up are the log's escapes (SCR_PUB_RC_LIFETIME, _BIG).
       lines.push(`  %msmall = icmp ult i64 %mrc, 4294967294`, `  %mok2 = and i1 %mok1, %msmall`);
       ok = "%mok2";
     }
     lines.push(`  br i1 ${ok}, label %mfast, label %mslow`, `mslow:`, ...call("ms"), `mfast:`);
-    let buf = "0";
+    let buf = classId ? String(PUB_LOG_COUNT) : "0";
     if (cyc) {
       // ScrCycHdr.buf, the word before the object: its top bit while the
       // object is a buffered candidate.
@@ -402,9 +424,10 @@ export class PublishWalkers {
         ...field("mtaken", 7),
         `  %mtaken1 = add ${S} %mtaken, 1`,
         `  store ${S} %mtaken1, ptr %mtakenp`,
+        ...(classId ? [`  %mix2 = or i32 %mix1, ${PUB_LOG_COUNT}`] : []),
         `  br label %mput`,
         `mput:`,
-        `  %mbuf = phi i32 [ 0, %mfast ], [ %mix1, %mtake ]`,
+        `  %mbuf = phi i32 [ ${buf}, %mfast ], [ %mix${classId ? 2 : 1}, %mtake ]`,
       );
       buf = "%mbuf";
     }
@@ -414,13 +437,13 @@ export class PublishWalkers {
       `  %me = getelementptr inbounds { ptr, i32, i32 }, ptr %mlog, ${S} %mlogged`,
       `  store ptr %o, ptr %me`,
       `  %merc = getelementptr inbounds { ptr, i32, i32 }, ptr %me, i32 0, i32 1`,
-      S === "i64" ? `  %mrc32 = trunc i64 %mrc to i32` : `  %mrc32 = add i32 %mrc, 0`,
+      C === "i64" ? `  %mrc32 = trunc i64 %mrc to i32` : `  %mrc32 = add i32 %mrc, 0`,
       `  store i32 %mrc32, ptr %merc`,
       `  %mebuf = getelementptr inbounds { ptr, i32, i32 }, ptr %me, i32 0, i32 2`,
       `  store i32 ${buf}, ptr %mebuf`,
       `  %mlogged1 = add ${S} %mlogged, 1`,
       `  store ${S} %mlogged1, ptr %mloggedp`,
-      `  store ${S} -1, ptr %o`,
+      `  store ${C} -1, ptr %o`,
       `  br label %walk`,
     );
     return lines;
@@ -431,13 +454,14 @@ export class PublishWalkers {
    * before) are the ones scr_pub_push skips: they are tested here, without
    * the call. The lines end in a fresh block labelled `pushed${id}`. */
   private push(v: string, fn: string, id: string): string[] {
-    const size = this.host.sizeType;
     return [
       `  %null${id} = icmp eq ptr ${v}, null`,
       `  br i1 %null${id}, label %pushed${id}, label %live${id}`,
       `live${id}:`,
-      `  %rc${id} = load ${size}, ptr ${v}`,
-      `  %immortal${id} = icmp eq ${size} %rc${id}, -1`,
+      // The count (the low half of a 64-bit rc word) is UINT32_MAX for an
+      // immortal object of every kind (scr_rc.h SCR_RC_COUNT).
+      `  %rc${id} = load i32, ptr ${v}`,
+      `  %immortal${id} = icmp eq i32 %rc${id}, -1`,
       `  br i1 %immortal${id}, label %pushed${id}, label %push${id}`,
       `push${id}:`,
       ...this.pushLines(v, fn, id),
@@ -480,8 +504,9 @@ export class PublishWalkers {
     members: { name: string; index: number; type: IrType }[],
     path: string,
     loc: SrcLoc,
+    classId = false,
   ): string[] {
-    const lines = [head, `entry:`, ...this.markLines(traced, PUB_KIND_OBJECT), `walk:`];
+    const lines = [head, `entry:`, ...this.markLines(traced, PUB_KIND_OBJECT, classId), `walk:`];
     let n = 0;
     for (const member of members) {
       const fn = this.walker(member.type, `${path}.${member.name}`, loc);

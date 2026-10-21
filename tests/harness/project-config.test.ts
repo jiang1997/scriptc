@@ -205,6 +205,24 @@ test("node-types: events.once over typed EventEmitter listeners under @types/nod
   expect(comparableStderr(native.stderr)).toBe(node.stderr);
 });
 
+test("node-types: events.once with a signal over streams, raced, under @types/node", async () => {
+  const outDir = outDirFor("events-once-signal-race");
+  const entry = join(nodeTypesDir, "events-once-signal-race.ts");
+  const result = await compile(entry, {
+    outPath: join(outDir, "events-once-signal-race"),
+    outDir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
 test("node-types: socket.address and resetAndDestroy under @types/node", async () => {
   const outDir = outDirFor("net-reset-address");
   const entry = join(nodeTypesDir, "net-reset-address.ts");
@@ -1011,6 +1029,20 @@ test("node-types: Cipheriv and Decipheriv match Node under @types/node", async (
   expect(comparableStderr(native.stderr)).toBe(node.stderr);
 });
 
+test("node-types: ECDH matches Node under @types/node", async () => {
+  const outDir = outDirFor("node-ecdh");
+  const entry = join(nodeTypesDir, "ecdh.ts");
+  const result = await compile(entry, { outPath: join(outDir, "ecdh"), outDir, sanitize });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
 test("node-types: WebCrypto HMAC matches Node under @types/node", async () => {
   const outDir = outDirFor("node-webcrypto-hmac");
   const entry = join(nodeTypesDir, "webcrypto-hmac.ts");
@@ -1163,6 +1195,24 @@ test("node-types: terminal properties and filesystem error metadata match Node",
   const entry = join(nodeTypesDir, "terminal-error-fields.ts");
   const result = await compile(entry, {
     outPath: join(outDir, "terminal-error-fields"),
+    outDir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
+test("node-types: process.versions entries @types/node declares as strings read undefined when absent", async () => {
+  const outDir = outDirFor("process-versions-absent");
+  const entry = join(nodeTypesDir, "process-versions-absent.ts");
+  const result = await compile(entry, {
+    outPath: join(outDir, "process-versions-absent"),
     outDir,
     sanitize,
   });

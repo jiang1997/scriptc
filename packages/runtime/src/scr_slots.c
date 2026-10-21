@@ -29,7 +29,7 @@ static uint32_t scr_slots_index(void *obj, uint32_t *word) {
   if (index != 0) return index;
   index = atomic_fetch_add_explicit(&scr_slots_next, 1, memory_order_relaxed);
   if (index == 0) scr_trap("scriptc: ThreadSlots ran out of slot indices\n");
-  if (*(size_t *)obj != SIZE_MAX) {
+  if (SCR_RC_COUNT(obj) != SCR_RC_IMMORTAL) {
     __atomic_store_n(word, index, __ATOMIC_RELAXED);
     return index;
   }

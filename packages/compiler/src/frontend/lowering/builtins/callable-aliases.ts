@@ -50,7 +50,7 @@ export function registerBuiltinCallableAlias(
   // These checked native functions retain a runtime slot in JavaScript so
   // aliases can escape without narrowing their arguments to string.
   if (
-    isJsSourceFile(nameNode.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(nameNode)) &&
     target.module === "util" &&
     ["stripVTControlCharacters", "toUSVString", "isDeepStrictEqual", "styleText"].includes(
       target.member,

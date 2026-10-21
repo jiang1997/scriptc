@@ -45,7 +45,7 @@ export function isPrivateSplitConsumer(
   )
     return false;
 
-  for (const use of identifiersNamed(lowerer, decl.getSourceFile(), name.text)) {
+  for (const use of identifiersNamed(lowerer, ts.getSourceFileOfNode(decl), name.text)) {
     if (use === decl.name || use === name) continue;
     if (lowerer.resolveValueSymbol(use) === symbol) return false;
   }

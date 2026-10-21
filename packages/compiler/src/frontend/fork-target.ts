@@ -12,7 +12,7 @@ export function isNodeGlobal(program: ts.Program, expression: ts.Identifier): bo
   return (
     declarations.length > 0 &&
     declarations.every((declaration) => {
-      const source = declaration.getSourceFile();
+      const source = ts.getSourceFileOfNode(declaration);
       return (
         source.isDeclarationFile &&
         (tsgoPath(source.fileName) === fallbackDtsPath() || isNodeTypesPath(source.fileName))
@@ -61,7 +61,7 @@ export function isBuiltinMemberImport(
   if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
     const target = checker.getAliasedSymbol(symbol);
     const targetDecl = target.declarations[0];
-    if (targetDecl !== undefined && targetDecl.getSourceFile().isDeclarationFile) {
+    if (targetDecl !== undefined && ts.getSourceFileOfNode(targetDecl).isDeclarationFile) {
       for (
         let parent: ts.Node | undefined = targetDecl.parent;
         parent !== undefined && !ts.isSourceFile(parent);
@@ -69,7 +69,8 @@ export function isBuiltinMemberImport(
       ) {
         if (ts.isModuleDeclaration(parent) && ts.isStringLiteral(parent.name)) {
           return (
-            canonicalBuiltinModule(parent.name.text) === moduleName && target.name === memberName
+            canonicalBuiltinModule(parent.name.text) === moduleName &&
+            ts.symbolName(target) === memberName
           );
         }
       }
@@ -188,7 +189,7 @@ function staticString(
 ): string | null {
   const current = strip(expr);
   if (ts.isStringLiteralLike(current)) return current.text;
-  if (importMetaUrl(current)) return pathToFileURL(current.getSourceFile().fileName).href;
+  if (importMetaUrl(current)) return pathToFileURL(ts.getSourceFileOfNode(current).fileName).href;
   if (ts.isTemplateExpression(current)) {
     let value = current.head.text;
     for (const span of current.templateSpans.nodes) {

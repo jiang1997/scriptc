@@ -1571,6 +1571,9 @@ export const BUILTIN_MODULE_FNS: Record<
     // Decipheriv handle (lowerCryptoModuleCall).
     createCipheriv: { fn: "crypto.cipherNew", params: [BOOL, DYN, DYN, DYN, DYN], result: DYN },
     createDecipheriv: { fn: "crypto.cipherNew", params: [BOOL, DYN, DYN, DYN, DYN], result: DYN },
+    // A checked-dynamic curve name; the result is a native ECDH handle
+    // (lowerCreateEcdh).
+    createECDH: { fn: "crypto.ecdhNew", params: [DYN], result: DYN },
   },
   zlib: {
     // The default-options convenience family is special-cased in
@@ -2074,6 +2077,9 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<
     readdirSync: ["fs.readdirTypesSync"],
     // The { throwIfNoEntry } probe form.
     statSync: ["fs.statProbeSync"],
+    // realpathSync and realpathSync.native read as function values.
+    realpathSync: ["fs.realpathValue"],
+    "realpathSync.native": ["fs.realpathValue"],
     lstatSync: ["fs.lstatProbeSync"],
     globSync: ["fs.globTypesSync"],
     // The JS-source validation-ladder variant (lowerFsLadderCall): the
@@ -3058,7 +3064,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
         "createDiffieHellman",
         "createDiffieHellmanGroup",
         "getDiffieHellman",
-        "createECDH",
         "diffieHellman",
         "publicEncrypt",
         "publicDecrypt",
@@ -3318,7 +3323,7 @@ export function isChildSurfaceMember(
   const decl = sym ? sym.declarations[0] : undefined;
   const iface = decl?.parent;
   if (!decl || !iface || !ts.isInterfaceDeclaration(iface)) return false;
-  if (lowerer.isStdlibFile(decl.getSourceFile())) return false;
+  if (lowerer.isStdlibFile(ts.getSourceFileOfNode(decl))) return false;
   return lowerer.mapTypeOf(lowerer.checker.getTypeAtLocation(iface.name))?.kind === "child";
 }
 
@@ -3328,7 +3333,9 @@ export function isChildSurfaceMember(
  * with lib interfaces, so a member can carry declarations from both. A
  * user's own declaration is in neither, so shadowing never matches. */
 export function isStdlibSymbol(lowerer: Lowerer, symbol: ts.Symbol | undefined): boolean {
-  return !!symbol && symbol.declarations.some((d) => lowerer.isStdlibFile(d.getSourceFile()));
+  return (
+    !!symbol && symbol.declarations.some((d) => lowerer.isStdlibFile(ts.getSourceFileOfNode(d)))
+  );
 }
 
 /** The canonical stdlib-global name `expr` denotes, or null. Three
@@ -3394,14 +3401,14 @@ export function stdlibGlobalNameOf(lowerer: Lowerer, expr: ts.Expression): strin
       if (
         decl !== undefined &&
         (ts.isVariableDeclaration(decl) || ts.isBindingElement(decl)) &&
-        isJsSourceFile(decl.getSourceFile())
+        isJsSourceFile(ts.getSourceFileOfNode(decl))
       ) {
         const imported = lowerer.builtinImportOf(expr);
         if (imported?.module === "buffer" && imported.member === "Buffer") return "Buffer";
       }
       return null;
     }
-    return resolved.name === "global" ? "globalThis" : resolved.name;
+    return ts.symbolName(resolved) === "global" ? "globalThis" : ts.symbolName(resolved);
   }
   if (ts.isPropertyAccessExpression(expr) && !expr.questionDotToken) {
     if (stdlibGlobalNameOf(lowerer, expr.expression) !== "globalThis") return null;
@@ -3414,7 +3421,7 @@ export function stdlibGlobalNameOf(lowerer: Lowerer, expr: ts.Expression): strin
         ? lowerer.checker.getSymbolAtLocation(expr.name)
         : lowerer.checker.getPropertyOfType(lowerer.typeOf(selected), expr.name.text);
     if (!symbol || !lowerer.isStdlibSymbol(symbol)) return null;
-    return symbol.name === "global" ? "globalThis" : symbol.name;
+    return ts.symbolName(symbol) === "global" ? "globalThis" : ts.symbolName(symbol);
   }
   return null;
 }
@@ -3548,7 +3555,7 @@ export function nodeTypesOnlySymbol(lowerer: Lowerer, sym: ts.Symbol | null | un
   if (!decls || decls.length === 0) return false;
   let viaNode = false;
   for (const d of decls) {
-    const sf = d.getSourceFile();
+    const sf = ts.getSourceFileOfNode(d);
     if (sf.isDeclarationFile && isNodeTypesPath(sf.fileName)) viaNode = true;
     else if (lowerer.isStdlibFile(sf)) return false;
   }

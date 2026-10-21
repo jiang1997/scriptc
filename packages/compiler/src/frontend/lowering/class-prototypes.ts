@@ -189,12 +189,16 @@ export function classPrototypeData(
         continue;
       const compiled = classMethodValue(lowerer, access, info, method, locOf(access));
       if (!compiled) continue;
+      // A method value without a checked-dynamic form (an async method's
+      // promise-returning signature) gets no data slot.
+      const boxedValue = lowerer.coerceToExpected(compiled, DYN);
+      if (boxedValue.type.kind !== "dyn") continue;
       const descriptor: IrExpr = {
         kind: "dynObjLit",
         fields: [
           {
             key: { kind: "strLit", value: "value", type: STRING, loc },
-            value: lowerer.coerceToExpected(compiled, DYN),
+            value: boxedValue,
           },
           {
             key: { kind: "strLit", value: "writable", type: STRING, loc },

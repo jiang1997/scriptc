@@ -21,7 +21,7 @@ function classes(source: string): {
   const symbolFor = (name: string): ts.Symbol => {
     let symbol = symbols.get(name);
     if (!symbol) {
-      symbol = { name, declarations: [] } as unknown as ts.Symbol;
+      symbol = { escapedName: name, declarations: [] } as unknown as ts.Symbol;
       symbols.set(name, symbol);
     }
     return symbol;

@@ -170,7 +170,7 @@ export function fsConstantMemberRead(expr: ts.PropertyAccessExpression): IrExpr 
     type: DYN,
     loc,
   };
-  return isJsSourceFile(expr.getSourceFile())
+  return isJsSourceFile(ts.getSourceFileOfNode(expr))
     ? read
     : { kind: "dynCheck", value: read, type: F64, loc };
 }

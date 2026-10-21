@@ -15,9 +15,13 @@
  * Stream is Node's legacy constructor: EventEmitter.call(this, opts) and a
  * prototype that inherits EventEmitter's. Readable, Writable, Duplex,
  * Transform and PassThrough have prototypes chained as in Node, so
- * util.inherits onto them and instanceof work, but their native state has
- * no dyn object form: calling one with a receiver throws the "not
- * supported yet" Error where the construction runs.
+ * util.inherits onto them and instanceof work. Their stream half (the
+ * prototypes' methods and `Readable.call(this, opts)`) lives in
+ * scr_dyn_builtin_stream.c, which registers itself through
+ * scr_dyn_builtin_class_streams in programs that link it; without it,
+ * calling one with a receiver throws the "not supported yet" Error where
+ * the construction runs. EventEmitter's methods hand a receiver with
+ * stream state to that unit, whose listeners live in the runtime stream.
  *
  * One constructor per kind and thread, so every boxing of the same class
  * value is the same function. All arguments are borrowed. */
@@ -58,6 +62,14 @@ enum { BC_SHAPE_MODE, BC_CAPTURE, BC_SYMBOLS };
 static SCR_TL ScrDyn *bc_symbols[BC_SYMBOLS];
 
 static ScrDyn *bc_class(int kind);
+
+/* The stream half, once registered (scr_dyn_builtin_stream.c). */
+static SCR_TL const ScrDynStreamOps *bc_stream_ops;
+
+/* EventEmitter.prototype's method on a receiver with stream state. */
+static bool bc_stream_event(int method, ScrDyn *self, ScrDyn *const *args, size_t argc, ScrDyn **result) {
+  return bc_stream_ops != NULL && bc_stream_ops->event(method, self, args, argc, result);
+}
 
 /* ── property helpers ───────────────────────────────────────────────── */
 
@@ -585,7 +597,12 @@ static ScrDyn *bc_once_wrap(ScrDyn *target, ScrDyn *type, ScrDyn *listener) {
 static ScrDyn *bc_on(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure;
   ScrDyn *self = bc_this();
-  ScrDyn *result = bc_require_object(self, "_events")
+  ScrDyn *result;
+  if (bc_stream_event(SCR_EE_M_ON, self, args, argc, &result)) {
+    scr_dyn_release(self);
+    return result;
+  }
+  result = bc_require_object(self, "_events")
       ? bc_add_listener(self, bc_arg(args, argc, 0), bc_arg(args, argc, 1), false) : NULL;
   scr_dyn_release(self);
   return result;
@@ -594,7 +611,12 @@ static ScrDyn *bc_on(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
 static ScrDyn *bc_prepend(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure;
   ScrDyn *self = bc_this();
-  ScrDyn *result = bc_require_object(self, "_events")
+  ScrDyn *result;
+  if (bc_stream_event(SCR_EE_M_PREPEND, self, args, argc, &result)) {
+    scr_dyn_release(self);
+    return result;
+  }
+  result = bc_require_object(self, "_events")
       ? bc_add_listener(self, bc_arg(args, argc, 0), bc_arg(args, argc, 1), true) : NULL;
   scr_dyn_release(self);
   return result;
@@ -605,6 +627,10 @@ static ScrDyn *bc_once_common(ScrDyn *const *args, size_t argc, bool prepend) {
   ScrDyn *type = bc_arg(args, argc, 0);
   ScrDyn *listener = bc_arg(args, argc, 1);
   ScrDyn *result = NULL;
+  if (bc_stream_event(prepend ? SCR_EE_M_PREPEND_ONCE : SCR_EE_M_ONCE, self, args, argc, &result)) {
+    scr_dyn_release(self);
+    return result;
+  }
   if (bc_check_listener(listener) && bc_require_object(self, "_events")) {
     ScrDyn *wrapper = bc_once_wrap(self, type, listener);
     if (wrapper) {
@@ -629,7 +655,12 @@ static ScrDyn *bc_prepend_once(ScrClosure *closure, ScrDyn *const *args, size_t 
 static ScrDyn *bc_off(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure;
   ScrDyn *self = bc_this();
-  ScrDyn *result = bc_require_object(self, "_events")
+  ScrDyn *result;
+  if (bc_stream_event(SCR_EE_M_OFF, self, args, argc, &result)) {
+    scr_dyn_release(self);
+    return result;
+  }
+  result = bc_require_object(self, "_events")
       ? bc_remove_listener(self, bc_arg(args, argc, 0), bc_arg(args, argc, 1)) : NULL;
   scr_dyn_release(self);
   return result;
@@ -641,6 +672,11 @@ static ScrDyn *bc_off(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
 static ScrDyn *bc_remove_all(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure;
   ScrDyn *self = bc_this();
+  ScrDyn *handled;
+  if (bc_stream_event(SCR_EE_M_REMOVE_ALL, self, args, argc, &handled)) {
+    scr_dyn_release(self);
+    return handled;
+  }
   if (!bc_require_object(self, "_events")) {
     scr_dyn_release(self);
     return NULL;
@@ -759,6 +795,11 @@ fail:
 static ScrDyn *bc_emit(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure;
   ScrDyn *self = bc_this();
+  ScrDyn *handled;
+  if (bc_stream_event(SCR_EE_M_EMIT, self, args, argc, &handled)) {
+    scr_dyn_release(self);
+    return handled;
+  }
   if (!bc_require_object(self, "_events")) {
     scr_dyn_release(self);
     return NULL;
@@ -844,6 +885,11 @@ fail_self:
 /* _listeners(target, type, unwrap): a fresh array. */
 static ScrDyn *bc_listeners_of(bool unwrap, ScrDyn *const *args, size_t argc) {
   ScrDyn *self = bc_this();
+  ScrDyn *handled;
+  if (bc_stream_event(unwrap ? SCR_EE_M_LISTENERS : SCR_EE_M_RAW_LISTENERS, self, args, argc, &handled)) {
+    scr_dyn_release(self);
+    return handled;
+  }
   if (!bc_require_object(self, "_events")) {
     scr_dyn_release(self);
     return NULL;
@@ -937,7 +983,12 @@ static ScrDyn *bc_count_listeners(ScrDyn *self, ScrDyn *type, ScrDyn *only) {
 static ScrDyn *bc_listener_count(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure;
   ScrDyn *self = bc_this();
-  ScrDyn *result = bc_require_object(self, "_events")
+  ScrDyn *result;
+  if (bc_stream_event(SCR_EE_M_LISTENER_COUNT, self, args, argc, &result)) {
+    scr_dyn_release(self);
+    return result;
+  }
+  result = bc_require_object(self, "_events")
       ? bc_count_listeners(self, bc_arg(args, argc, 0),
                            argc > 1 && !bc_undefined(args[1]) && args[1]->kind != SCR_DYN_NULL ? args[1] : NULL)
       : NULL;
@@ -964,6 +1015,11 @@ static ScrDyn *bc_event_names(ScrClosure *closure, ScrDyn *const *args, size_t a
   (void)args;
   (void)argc;
   ScrDyn *self = bc_this();
+  ScrDyn *handled;
+  if (bc_stream_event(SCR_EE_M_EVENT_NAMES, self, args, argc, &handled)) {
+    scr_dyn_release(self);
+    return handled;
+  }
   if (!bc_require_object(self, "_eventsCount")) {
     scr_dyn_release(self);
     return NULL;
@@ -1007,6 +1063,11 @@ static ScrDyn *bc_set_max(ScrClosure *closure, ScrDyn *const *args, size_t argc)
     scr_str_release(message);
     scr_dyn_release(self);
     return NULL;
+  }
+  ScrDyn *handled;
+  if (bc_stream_event(SCR_EE_M_SET_MAX, self, args, argc, &handled)) {
+    scr_dyn_release(self);
+    return handled;
   }
   if (!bc_require_object(self, "_maxListeners") || !bc_set(self, "_maxListeners", scr_dyn_retain(n))) {
     scr_dyn_release(self);
@@ -1056,6 +1117,11 @@ static ScrDyn *bc_get_max(ScrClosure *closure, ScrDyn *const *args, size_t argc)
   (void)args;
   (void)argc;
   ScrDyn *self = bc_this();
+  ScrDyn *handled;
+  if (bc_stream_event(SCR_EE_M_GET_MAX, self, args, argc, &handled)) {
+    scr_dyn_release(self);
+    return handled;
+  }
   double max = bc_require_object(self, "_maxListeners") ? bc_max_listeners(self) : -1;
   scr_dyn_release(self);
   if (scr_exc_pending()) return NULL;
@@ -1321,6 +1387,8 @@ static ScrDyn *bc_construct(ScrClosure *closure, ScrDyn *const *args, size_t arg
   ScrDyn *result = NULL;
   if (kind == BC_EMITTER || kind == BC_STREAM) {
     if (bc_emitter_init(self, bc_arg(args, argc, 0))) result = scr_dyn_retain(scr_dyn_undefined());
+  } else if (bc_stream_ops) {
+    result = bc_stream_ops->construct(kind, self, args, argc);
   } else {
     char message[160];
     snprintf(message, sizeof message,
@@ -1414,6 +1482,8 @@ static ScrDyn *bc_new_class(int kind, ScrDyn *parent) {
   } else if (kind == BC_STREAM) {
     ScrDyn *pipe = scr_dyn_new_func(scr_closure_new(NULL, 0), bc_pipe, 2, "native:stream", "pipe");
     bc_set(prototype, "pipe", pipe);
+  } else if (bc_stream_ops) {
+    bc_stream_ops->prototype(kind, prototype);
   }
   scr_dyn_release(prototype);
   if (scr_exc_pending()) scr_exc_clear();
@@ -1447,6 +1517,22 @@ static ScrDyn *bc_class(int kind) {
     if (scr_exc_pending()) scr_exc_clear();
   }
   return bc_ctors[kind];
+}
+
+/* Registers the stream half; constructors that already exist get their
+ * stream prototypes' methods now. */
+void scr_dyn_builtin_class_streams(const ScrDynStreamOps *ops) {
+  if (bc_stream_ops) return;
+  bc_stream_ops = ops;
+  for (int kind = BC_READABLE; kind < BC_COUNT; kind++) {
+    if (!bc_ctors[kind]) continue;
+    ScrDyn *prototype = bc_get(bc_ctors[kind], "prototype");
+    if (prototype) {
+      ops->prototype(kind, prototype);
+      scr_dyn_release(prototype);
+    }
+    if (scr_exc_pending()) scr_exc_clear();
+  }
 }
 
 /* The constructor value for kind (the BC_* order), +1. */

@@ -4,6 +4,8 @@ import {
   BOOL,
   F64,
   arrayOf,
+  mapOf,
+  setOf,
   type IrExpr,
   type IrFunction,
   type IrLocal,
@@ -109,6 +111,32 @@ test("captured receivers have no local proof", () => {
   const boxed = new Map(locals);
   boxed.set("a", { ...locals.get("a")!, boxed: true });
   expect(preserves([sum], "i", new Set(), boxed)).toBe(false);
+});
+
+test("Map and Set reads and checked union extractions run no user code", () => {
+  const counts: IrExpr = { kind: "varRef", localId: "m", type: mapOf(F64, F64), loc };
+  const seen: IrExpr = { kind: "varRef", localId: "v", type: setOf(F64), loc };
+  const onMap = (name: string, args: IrExpr[]): IrExpr =>
+    ({ kind: "mapIntrinsic", method: name, receiver: counts, args, type: F64, loc }) as IrExpr;
+  const onSet = (name: string, args: IrExpr[]): IrExpr =>
+    ({ kind: "setIntrinsic", method: name, receiver: seen, args, type: BOOL, loc }) as IrExpr;
+  const call = (callee: string): IrExpr => ({
+    kind: "call",
+    callee,
+    args: [ref("s")],
+    type: F64,
+    loc,
+  });
+  const key = read("a", ref("i"));
+  expect(
+    preserves([stmt(onMap("has", [key])), stmt(onMap("get", [key])), stmt(onMap("size", []))]),
+  ).toBe(true);
+  expect(preserves([stmt(onSet("has", [key])), stmt(onSet("size", []))])).toBe(true);
+  expect(preserves([stmt(call("%union.narrow.0"))])).toBe(true);
+  // Writes release replaced values; other calls run user code.
+  expect(preserves([stmt(onMap("set", [key, num(1)]))])).toBe(false);
+  expect(preserves([stmt(onSet("add", [key]))])).toBe(false);
+  expect(preserves([stmt(call("g"))])).toBe(false);
 });
 
 function fn(body: IrStmt[], params: string[] = []): IrFunction {

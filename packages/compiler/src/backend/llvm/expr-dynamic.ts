@@ -28,6 +28,7 @@ import { elemAccess, vAdapters } from "./shapes.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import type { LlvmEmitterContext, ExprOf, LlValue } from "./expr-context.js";
 import { emitUnionWiden } from "./expr-records.js";
+import { DYN_BUFFER_NUM_METHODS } from "../../ir/runtime-features.js";
 
 export function emitDynamicExpr(
   host: LlvmEmitterContext,
@@ -226,9 +227,12 @@ export function emitDynamicExpr(
         });
         argsPtr = arr;
       }
-      host.declare(
-        `declare ptr @scr_dyn_invoke_prepared(ptr, ptr, ptr, ptr, ${host.sizeType}, ptr)`,
-      );
+      // Fixed-width Buffer method names take scr_bytes_dyn.c's entry, which
+      // runs them on Buffer receivers and dispatches any other receiver.
+      const invoke = DYN_BUFFER_NUM_METHODS.has(e.method)
+        ? "scr_dyn_invoke_buffer_num"
+        : "scr_dyn_invoke_prepared";
+      host.declare(`declare ptr @${invoke}(ptr, ptr, ptr, ptr, ${host.sizeType}, ptr)`);
       let name = host.cstr(e.calleeName);
       if (e.calleeNameValue !== undefined) {
         const value = emitBorrowedInput(host, e.calleeNameValue);
@@ -237,7 +241,7 @@ export function emitDynamicExpr(
       }
       const t = B.tmp();
       B.line(
-        `${t} = call ptr @scr_dyn_invoke_prepared(ptr ${recv.name}, ptr ${prepared}, ptr ${host.cstr(e.method)}, ptr ${argsPtr}, ${host.sizeType} ${args.length}, ptr ${name})`,
+        `${t} = call ptr @${invoke}(ptr ${recv.name}, ptr ${prepared}, ptr ${host.cstr(e.method)}, ptr ${argsPtr}, ${host.sizeType} ${args.length}, ptr ${name})`,
       );
       const out = host.own({ name: t, type: e.type });
       host.emitPendingCheck();
@@ -1058,6 +1062,42 @@ export function emitDynamicExpr(
       host.declare(
         `declare ptr @scr_caught_check_obj(ptr, ${host.sizeType}, ${host.sizeType}, ptr)`,
       );
+      if (target.idInRc) {
+        // A REF payload (emitCaughtInstanceof): a match retains it through
+        // its adapter; anything else gets the runtime's TypeError from the
+        // check against an empty interval.
+        const ok = emitCaughtInstanceof(host, c.name, e.className);
+        const yes = B.newLabel("caught.cast"),
+          no = B.newLabel("caught.cast.fail"),
+          join = B.newLabel("caught.cast.done");
+        B.condBr(ok, yes, no);
+        B.startBlock(yes);
+        const payloadSlot = B.tmp(),
+          payload = B.tmp(),
+          retainSlot = B.tmp(),
+          retain = B.tmp(),
+          retained = B.tmp();
+        B.line(`${payloadSlot} = getelementptr inbounds %ScrCaught, ptr ${c.name}, i64 0, i32 4`);
+        B.line(`${payload} = load ptr, ptr ${payloadSlot}`);
+        B.line(`${retainSlot} = getelementptr inbounds %ScrCaught, ptr ${c.name}, i64 0, i32 5`);
+        B.line(`${retain} = load ptr, ptr ${retainSlot}`);
+        B.line(`${retained} = call ptr ${retain}(ptr ${payload})`);
+        const fromYes = B.currentLabel();
+        B.br(join);
+        B.startBlock(no);
+        const failed = B.tmp();
+        B.line(
+          `${failed} = call ptr @scr_caught_check_obj(ptr ${c.name}, ${host.sizeType} 1, ${host.sizeType} 0, ptr ${host.cstr(display)})`,
+        );
+        const fromNo = B.currentLabel();
+        B.br(join);
+        B.startBlock(join);
+        const t = B.tmp();
+        B.line(`${t} = phi ptr [ ${retained}, %${fromYes} ], [ ${failed}, %${fromNo} ]`);
+        const out = host.own({ name: t, type: e.type });
+        host.emitPendingCheck();
+        return out;
+      }
       let pre = String(target.pre);
       let post = String(target.post);
       const intervals = classMembershipIntervals(host.classMeta, target.def.name);

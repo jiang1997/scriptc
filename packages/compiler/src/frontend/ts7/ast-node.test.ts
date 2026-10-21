@@ -20,7 +20,13 @@ import { walkPreorder } from "./ast.js";
 import { ts7Executable } from "./rpc-api.js";
 import { Ts7RpcClient } from "./rpc-client.js";
 import { spawnTs7Wire } from "./rpc-process.js";
-import { isJSDocTypeLiteral, isJSDocPropertyTag } from "./ast-guards.generated.js";
+import {
+  isArrayLiteralExpression,
+  isCallExpression,
+  isJSDocTypeLiteral,
+  isJSDocPropertyTag,
+} from "./ast-guards.generated.js";
+import { ModifierFlags, SyntaxKind } from "./enums.js";
 
 const require = createRequire(import.meta.url);
 const sdkRoot = dirname(require.resolve("typescript/package.json"));
@@ -95,6 +101,8 @@ const cases: Record<string, string> = {
     '/** @typedef {Object} Options\n * @property {string} name\n * @property {number} count\n */\n/** @type {Options} */ const options = { name: "x", count: 2 };',
   "missing.ts": "const incomplete = ;\nfunction f( {\n",
   "empty.ts": "",
+  "lists.ts":
+    "const trailing = [1, 2 /* last */, ];\nconst plain = [1, 2];\nf(1, 2,);\nexport abstract class Flags { protected static readonly value = 1; }\n",
 };
 const decoded = new Map<string, { file: AstFile; oracle: OracleFile; bytes: Uint8Array }>();
 let directory: string;
@@ -158,6 +166,26 @@ function ids(
 ): (number | undefined)[] | undefined {
   return nodes?.map((n) => (n as OracleNode).index);
 }
+
+test("node lists report a trailing comma and modifier lists their flags", () => {
+  const { file } = decoded.get("lists.ts")!;
+  const lists: [SyntaxKind, boolean][] = [];
+  const modifiers: number[] = [];
+  walkPreorder(file.root, (node) => {
+    if (isArrayLiteralExpression(node)) lists.push([node.kind, node.elements.hasTrailingComma()]);
+    if (isCallExpression(node)) lists.push([node.kind, node.arguments.hasTrailingComma()]);
+    if (node.modifiers !== undefined) modifiers.push(node.modifiers.modifierFlags);
+  });
+  expect(lists).toEqual([
+    [SyntaxKind.ArrayLiteralExpression, true],
+    [SyntaxKind.ArrayLiteralExpression, false],
+    [SyntaxKind.CallExpression, true],
+  ]);
+  expect(modifiers).toEqual([
+    ModifierFlags.Export | ModifierFlags.Abstract,
+    ModifierFlags.Protected | ModifierFlags.Static | ModifierFlags.Readonly,
+  ]);
+});
 
 test("JSDoc property refinements describe the pinned native wire", () => {
   const { file, oracle } = decoded.get("properties.js")!;

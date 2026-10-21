@@ -57,7 +57,7 @@ export function lowerBuiltinModuleCall(
   fn: BuiltinModuleFn,
   loc: SrcLoc,
 ): IrExpr {
-  const name = expr.expression.getText();
+  const name = ts.getTextOfNode(expr.expression);
   if (bi.module === "util/types") {
     return lowerUtilTypeCall(lowerer, expr, bi, loc, name);
   }

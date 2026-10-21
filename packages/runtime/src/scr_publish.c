@@ -37,8 +37,13 @@
 typedef struct {
   uintptr_t obj;
   uint32_t rc;
-  uint32_t buf; /* a candidate taken out of its buffer: its index + 1, else 0 */
+  uint32_t buf; /* a candidate taken out of its buffer: its index + 1, else 0;
+                 * SCR_PUB_LOG_COUNT: `rc` is the count of the low half */
 } ScrPubLog;
+
+/* In ScrPubLog.buf: the object keeps its class id in the high half of
+ * its rc word (SCR_PUB_CLASS_ID), and `rc` is the count of the low half. */
+#define SCR_PUB_LOG_COUNT UINT32_C(0x80000000)
 
 #define SCR_PUB_DYN ((uintptr_t)1)
 #define SCR_PUB_RC_LIFETIME UINT32_C(0xfffffffe)
@@ -103,7 +108,7 @@ static void *scr_pub_grow(void *p, size_t *cap, size_t size, void *inline_buf) {
 void scr_pub_str_fn(void *v, ScrPub *ctx);
 
 void scr_pub_push(ScrPub *ctx, void *v, ScrPubFn fn) {
-  if (!v || *(size_t *)v == SIZE_MAX || ctx->refusal) return;
+  if (!v || SCR_RC_COUNT(v) == SCR_RC_IMMORTAL || ctx->refusal) return;
   if (fn == scr_pub_str_fn) { /* a leaf: mark it now */
     scr_pub_str_fn(v, ctx);
     return;
@@ -120,7 +125,9 @@ void scr_pub_push(ScrPub *ctx, void *v, ScrPubFn fn) {
  * touch the objects again. */
 bool scr_pub_mark(ScrPub *ctx, void *obj, bool cyc, int kind) {
   size_t *rc = obj;
-  if (*rc == SIZE_MAX || ctx->refusal) return false;
+  if (SCR_RC_COUNT(obj) == SCR_RC_IMMORTAL || ctx->refusal) return false;
+  bool class_id = (kind & SCR_PUB_CLASS_ID) != 0;
+  kind &= ~SCR_PUB_CLASS_ID;
   if (ctx->logged == ctx->log_cap)
     ctx->log = scr_pub_grow(ctx->log, &ctx->log_cap, sizeof *ctx->log, ctx->log_inline);
 #ifdef SCR_RC_AUDIT
@@ -135,10 +142,11 @@ bool scr_pub_mark(ScrPub *ctx, void *obj, bool cyc, int kind) {
     buf = scr_cyc_pub_take(obj) + 1;
     ctx->taken++;
   }
-  size_t count = *rc;
+  size_t count = class_id ? SCR_RC_COUNT(obj) : *rc;
   uint32_t logged = (uint32_t)count;
+  if (class_id) buf |= SCR_PUB_LOG_COUNT;
 #if SIZE_MAX > UINT32_MAX
-  if (count >= SCR_PUB_RC_LIFETIME) {
+  if (!class_id && count >= SCR_PUB_RC_LIFETIME) {
     if (count == (size_t)1 << 63) logged = SCR_PUB_RC_LIFETIME;
     else {
       if (ctx->nbig == ctx->big_cap) ctx->big = scr_pub_grow(ctx->big, &ctx->big_cap, sizeof *ctx->big, NULL);
@@ -148,7 +156,8 @@ bool scr_pub_mark(ScrPub *ctx, void *obj, bool cyc, int kind) {
   }
 #endif
   *e = (ScrPubLog){(uintptr_t)obj, logged, buf};
-  *rc = SIZE_MAX;
+  if (class_id) SCR_RC_COUNT(obj) = SCR_RC_IMMORTAL;
+  else *rc = SIZE_MAX;
   return true;
 }
 
@@ -196,8 +205,9 @@ void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem) {
   ScrPubFn fn = a->elem == SCR_ELEM_STR ? scr_pub_str_fn : a->elem == SCR_ELEM_REF ? elem : NULL;
   if (!fn) return;
   size_t dense = a->len < a->cap ? a->len : a->cap;
+  const uint8_t *states = scr_arr_states_end(a);
   for (size_t i = 0; i < dense; i++)
-    if (!a->present || a->present[i]) scr_pub_slot(ctx, a->data[i], fn);
+    if (!states || *scr_arr_state_in(states, i)) scr_pub_slot(ctx, a->data[i], fn);
   if (a->ext)
     for (size_t i = 0; i < a->ext->sparse_len; i++)
       if (a->ext->sparse[i].state) scr_pub_slot(ctx, a->ext->sparse[i].slot, fn);
@@ -372,7 +382,7 @@ static bool scr_pub_keep_ok(size_t bytes) {
 }
 
 void scr_publish(void *root, ScrPubFn fn) {
-  if (!root || *(size_t *)root == SIZE_MAX) return;
+  if (!root || SCR_RC_COUNT(root) == SCR_RC_IMMORTAL) return;
   ScrPub ctx;
   if (scr_pub_keep.stack) {
     ctx.stack = scr_pub_keep.stack;
@@ -417,13 +427,18 @@ void scr_publish(void *root, ScrPubFn fn) {
     for (size_t i = ctx.logged; i-- > 0;) {
       const ScrPubLog *e = &ctx.log[i];
       void *obj = scr_pub_log_obj(e);
-      size_t rc = e->rc;
+      uint32_t buf = e->buf & ~SCR_PUB_LOG_COUNT;
+      if (e->buf & SCR_PUB_LOG_COUNT) {
+        SCR_RC_COUNT(obj) = (ScrRcCount)e->rc;
+      } else {
+        size_t rc = e->rc;
 #if SIZE_MAX > UINT32_MAX
-      if (e->rc == SCR_PUB_RC_LIFETIME) rc = (size_t)1 << 63;
-      else if (e->rc == SCR_PUB_RC_BIG) rc = ctx.big[--ctx.nbig];
+        if (e->rc == SCR_PUB_RC_LIFETIME) rc = (size_t)1 << 63;
+        else if (e->rc == SCR_PUB_RC_BIG) rc = ctx.big[--ctx.nbig];
 #endif
-      *(size_t *)obj = rc;
-      if (e->buf) scr_cyc_pub_restore(obj, e->buf - 1);
+        *(size_t *)obj = rc;
+      }
+      if (buf) scr_cyc_pub_restore(obj, buf - 1);
     }
     if (ctx.taken) scr_cyc_pub_fill();
     scr_throw_error_msg(SCR_ERR_TYPE, ctx.refusal, strlen(ctx.refusal));

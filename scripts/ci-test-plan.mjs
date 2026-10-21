@@ -69,13 +69,14 @@ export function sideOwners(flavor, count) {
   return owners;
 }
 
-// Pull requests and pushes to main run the full suite on Linux. Their macOS
-// lane runs the darwin suite, which keeps the darwin clang/libc/kqueue
-// oracles: the Node differential corpus, plus every file whose assertions run
-// only on darwin or take darwin-specific branches (including the Mach-O
-// library localization arm and the arm64 runtime string oracle).
-// The nightly schedule and manual runs with macos_full run the full suite on
-// macOS.
+// Pull requests and pushes to main run the full suite on Linux. Pull requests
+// that change darwin code (scripts/ci-lanes.mjs) also run the darwin suite on
+// macOS, which keeps the darwin clang/libc/kqueue oracles: the Node
+// differential corpus, plus every file whose assertions run only on darwin or
+// take darwin-specific branches (including the Mach-O library localization arm
+// and the arm64 runtime string oracle). Pushes to main run no macOS jobs. The
+// nightly schedule and manual runs run the full suite on macOS, or the darwin
+// suite with macos_suite set to darwin.
 export const darwinCorpusFiles = ["tests/harness/differential.test.ts"];
 export const darwinFiles = [
   "packages/cli/test/bootstrap.test.ts",

@@ -64,8 +64,10 @@ typedef struct ScrArrOps {
 
 typedef struct ScrArr {
   size_t rc; /* SIZE_MAX = immortal (unused for arrays; kept per convention) */
-  size_t len;
-  size_t cap; /* dense capacity; sparse entries cover indices >= cap */
+  /* Length and dense capacity are at most SCR_ARR_MAX_LENGTH (2^32 - 1);
+   * sparse entries cover indices >= cap. */
+  uint32_t len;
+  uint32_t cap;
   /* One ScrElemKind. */
   uint8_t elem;
   /* 1 exactly when ops->trace is non-NULL: the element type carries a cycle
@@ -88,10 +90,10 @@ typedef struct ScrArr {
   /* SCR_ELEM_REF only; NULL for every other element kind. */
   const ScrArrOps *ops;
   /* Dense values: `cap` 8-byte slots, or `cap` bytes for SCR_ELEM_BOOL
-   * (scr_arr_slot_width). Sparse entries and properties keep 8-byte slots
-   * for every kind; a bool slot is 0 or 1 wherever it lives. */
+   * (scr_arr_slot_width), followed in the same allocation by one state byte
+   * per slot in reverse slot order (scr_arr_states_end). Sparse entries and properties keep 8-byte
+   * slots for every kind; a bool slot is 0 or 1 wherever it lives. */
   uint64_t *data;
-  uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
   /* Rarely used storage (sparse indices, noncanonical numeric properties,
    * match-result metadata) lives out of line: NULL until first needed, so
    * the common dense array stays small. */
@@ -114,18 +116,56 @@ typedef struct ScrArrExt {
 } ScrArrExt;
 /* The LLVM backend mirrors ScrArr as %ScrArr: its inline retain/release read
  * `cyc` (field 4, i8) to decide mark-live / candidate buffering exactly like
- * scr_arr_retain and scr_arr_release; its inline element access uses filled
- * (field 6, i32), data (field 8) and present (field 9). */
-_Static_assert(offsetof(ScrArr, cyc) == 3 * sizeof(size_t) + 1,
+ * scr_arr_retain and scr_arr_release; its inline element access uses len and
+ * cap (fields 1 and 2, i32), filled (field 6, i32) and data (field 8), and
+ * finds the state of slot i at data + cap * (slot width + 1) - 1 - i. */
+_Static_assert(offsetof(ScrArr, len) == sizeof(size_t) && sizeof(((ScrArr *)0)->len) == 4,
+               "emitted length reads load ScrArr.len as %ScrArr field 1, an i32");
+_Static_assert(offsetof(ScrArr, cap) == sizeof(size_t) + 4 && sizeof(((ScrArr *)0)->cap) == 4,
+               "emitted capacity reads load ScrArr.cap as %ScrArr field 2, an i32");
+_Static_assert(offsetof(ScrArr, cyc) == sizeof(size_t) + 9,
                "inline RC fast paths read ScrArr.cyc as %ScrArr field 4");
-_Static_assert(offsetof(ScrArr, filled) == 3 * sizeof(size_t) + 4,
+_Static_assert(offsetof(ScrArr, filled) == sizeof(size_t) + 12,
                "inline element access reads ScrArr.filled as %ScrArr field 6");
-_Static_assert(offsetof(ScrArr, data) == 3 * sizeof(size_t) + 8 + sizeof(void *),
+_Static_assert(offsetof(ScrArr, data) == sizeof(size_t) + 16 + sizeof(void *),
                "inline element reads use ScrArr.data as %ScrArr field 8");
+_Static_assert(sizeof(ScrArr) == sizeof(size_t) + 16 + 3 * sizeof(void *),
+               "ScrArr is 48 bytes on 64-bit targets");
 
 /* Bytes per dense value slot. */
 static inline size_t scr_arr_slot_width(const ScrArr *a) {
   return a->elem == SCR_ELEM_BOOL ? 1 : sizeof(uint64_t);
+}
+
+/* The dense states, one byte per slot, share the values' allocation (inline
+ * slots included). They follow the `cap` value slots in reverse slot order:
+ * the state of slot i is the byte i + 1 before scr_arr_states_end(a). Removing
+ * slots from the front (head room: `data` advances, `cap` drops) leaves every
+ * remaining state at its address. The address is computed on integers, so a
+ * NULL `data` stays NULL. */
+static inline uint8_t *scr_arr_states_end(const ScrArr *a) {
+  return (uint8_t *)((uintptr_t)a->data + (uintptr_t)a->cap * (scr_arr_slot_width(a) + 1));
+}
+
+/* scr_arr_states_end for an array whose slots are known to be `width`
+ * bytes wide: a constant multiple, with no element-kind test. */
+static inline uint8_t *scr_arr_states_end_w(const ScrArr *a, size_t width) {
+  return (uint8_t *)((uintptr_t)a->data + (uintptr_t)a->cap * (width + 1));
+}
+
+/* The state of dense slot `index` (< cap), given the end of the states. */
+static inline uint8_t *scr_arr_state_in(const uint8_t *end, size_t index) {
+  return (uint8_t *)end - 1 - index;
+}
+
+static inline uint8_t *scr_arr_state_ptr(const ScrArr *a, size_t index) {
+  return scr_arr_state_in(scr_arr_states_end(a), index);
+}
+
+/* The states of dense slots [from, from + count) are contiguous, in reverse
+ * order; this is their first byte (the state of slot from + count - 1). */
+static inline uint8_t *scr_arr_state_run(const ScrArr *a, size_t from, size_t count) {
+  return scr_arr_states_end(a) - from - count;
 }
 
 /* The dense value at `index` (< cap) as an 8-byte slot, and its store. */
@@ -145,18 +185,18 @@ static inline void scr_arr_cut(ScrArr *a, size_t index) {
   if (a->filled > index) a->filled = (uint32_t)index;
 }
 
-/* The first index in [f, end) whose state is not a present value (or end).
- * Compares eight states per step: bulk copies (slice, concat, spread) end
- * with this scan over the whole copied range. */
-static inline size_t scr_arr_value_run(const uint8_t *present, size_t f, size_t end) {
+/* The first index in [f, end) whose state is not a present value (or end),
+ * given the end of the states. Compares eight states per step: bulk copies
+ * (slice, concat, spread) end with this scan over the whole copied range. */
+static inline size_t scr_arr_value_run(const uint8_t *states_end, size_t f, size_t end) {
   const uint64_t values = 0x0101010101010101ull * SCR_ARR_VALUE;
   while (end - f >= 8) {
     uint64_t word;
-    memcpy(&word, present + f, sizeof word);
+    memcpy(&word, states_end - f - 8, sizeof word);
     if (word != values) break;
     f += 8;
   }
-  while (f < end && present[f] == SCR_ARR_VALUE) f++;
+  while (f < end && *scr_arr_state_in(states_end, f) == SCR_ARR_VALUE) f++;
   return f;
 }
 
@@ -165,7 +205,7 @@ static inline size_t scr_arr_value_run(const uint8_t *present, size_t f, size_t 
 static inline void scr_arr_refill(ScrArr *a) {
   size_t end = a->len < a->cap ? a->len : a->cap;
   size_t f = a->filled;
-  if (f < end) f = scr_arr_value_run(a->present, f, end);
+  if (f < end) f = scr_arr_value_run(scr_arr_states_end(a), f, end);
   a->filled = (uint32_t)f;
 }
 

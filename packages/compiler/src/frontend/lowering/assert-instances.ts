@@ -194,7 +194,7 @@ function onlyMethodCallReferences(lowerer: Lowerer, name: ts.Identifier): boolea
     }
     ts.forEachChild(node, visit);
   };
-  visit(name.getSourceFile());
+  visit(ts.getSourceFileOfNode(name));
   return ok;
 }
 

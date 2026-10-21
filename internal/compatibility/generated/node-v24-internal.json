@@ -191,9 +191,9 @@
       "apiEntries": 152,
       "static": {
         "supported": 6,
-        "partial": 39,
-        "refused": 21,
-        "not-implemented": 86,
+        "partial": 47,
+        "refused": 20,
+        "not-implemented": 79,
         "by-design": 0,
         "unreviewed": 0,
         "not-applicable": 0
@@ -296,9 +296,9 @@
       "apiEntries": 478,
       "static": {
         "supported": 0,
-        "partial": 8,
+        "partial": 10,
         "refused": 0,
-        "not-implemented": 470,
+        "not-implemented": 468,
         "by-design": 0,
         "unreviewed": 0,
         "not-applicable": 0
@@ -19874,11 +19874,18 @@
           "tests/corpus/5769-crypto-hash-unknown.cjs",
           "tests/corpus/6204-crypto-get-random-values.ts",
           "tests/corpus/6205-crypto-get-random-values.js",
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
           "tests/corpus/node24-crypto-kdf-errors.ts",
           "tests/corpus/node24-crypto-kdf-options.ts",
           "tests/corpus/node24-crypto-kdf.ts",
           "tests/corpus/node24-crypto-sha2.ts",
           "tests/fixtures/node-types/cipher.ts",
+          "tests/fixtures/node-types/ecdh.ts",
           "tests/harness/npm-static.test.ts"
         ]
       },
@@ -20388,8 +20395,17 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createECDH"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.createECDH",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22957,8 +22973,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ECDH",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22980,8 +23005,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.computeSecret",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23003,8 +23037,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.generateKeys",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23026,8 +23069,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.getPrivateKey",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23049,8 +23101,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.getPublicKey",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23072,8 +23133,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.setPrivateKey",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23095,8 +23165,17 @@
         "inherited": false
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.setPublicKey",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -25486,8 +25565,17 @@
       "anchor": "dep0031-ecdhsetpublickey",
       "nodeStability": null,
       "static": {
-        "status": "not-applicable",
-        "evidence": "compiler-chapter-policy:deprecations"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ecdh.setPublicKey",
+        "tests": [
+          "tests/corpus/6700-ecdh-shared-secret.ts",
+          "tests/corpus/6701-ecdh-formats.ts",
+          "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6703-ecdh-private-keys.ts",
+          "tests/corpus/6704-ecdh-set-public-key.cjs",
+          "tests/corpus/6705-ecdh-handles.ts",
+          "tests/fixtures/node-types/ecdh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -32669,6 +32757,7 @@
         "status": "partial",
         "evidence": "derived:descendants",
         "tests": [
+          "tests/corpus/6702-ecdh-errors.js",
           "tests/corpus/caught-system-error-fields.ts",
           "tests/corpus/error-stack-frames.ts",
           "tests/corpus/error-stack-limit.ts",
@@ -33785,8 +33874,11 @@
       "anchor": "err_crypto_ecdh_invalid_format",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:errors"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ERR_CRYPTO_ECDH_INVALID_FORMAT",
+        "tests": [
+          "tests/corpus/6702-ecdh-errors.js"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -33803,8 +33895,11 @@
       "anchor": "err_crypto_ecdh_invalid_public_key",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:errors"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
+        "tests": [
+          "tests/corpus/6702-ecdh-errors.js"
+        ]
       },
       "anchorSource": "exact"
     },

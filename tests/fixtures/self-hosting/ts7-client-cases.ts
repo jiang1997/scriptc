@@ -12,6 +12,7 @@ import { SyntaxKind, ScriptTarget, ModuleKind, ModuleResolutionKind, ModuleDetec
 import { Ts7Session } from "../../../packages/compiler/src/frontend/ts7/session.js";
 import { Ts7Paths, ts7DocumentFile } from "../../../packages/compiler/src/frontend/ts7/session-path.js";
 import { parseSemanticJson } from "../../../packages/compiler/src/frontend/ts7/semantic-json.js";
+import { symbolName, symbolNameOf } from "../../../packages/compiler/src/frontend/ts7/semantic-model.js";
 import { checkSemanticModel, semanticSource } from "./ts7-semantic-cases.js";
 import { checkAstViews } from "./ts7-ast-views.js";
 
@@ -313,7 +314,7 @@ export function runTs7Client(client: Ts7RpcClient, directory: string, report: st
     const timing = client.timing();
     check(timing.requests > 20 && timing.callbacks > 0 && reads > 0, "requests and filesystem callbacks executed");
     writeFileSync(report, JSON.stringify({
-      typeText, symbol: ownedSymbol.name, diagnostics: diagnostics.map((diagnostic) => diagnostic.code),
+      typeText, symbol: symbolName(ownedSymbol), diagnostics: diagnostics.map((diagnostic) => diagnostic.code),
       surrogateBoundary: checkSurrogateBoundary(),
       semanticSurrogateBoundary: checkSemanticSurrogateBoundary(), semanticModel: true, sessionLifecycle: true,
       echo: true, binaryAst: true, astIdentity: true, astViews: true, checkerFacade: true, checkerSnapshots: true, virtualFiles: true, retainedSnapshot: true, serverErrorRecovery: true, protocolFailures: true,

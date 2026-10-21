@@ -207,7 +207,7 @@ function isGeneratorMember(lowerer: Lowerer, access: ts.PropertyAccessExpression
       (d) =>
         ts.isInterfaceDeclaration(d.parent) &&
         (d.parent.name.text === "Generator" || d.parent.name.text === "AsyncGenerator") &&
-        lowerer.isStdlibFile(d.getSourceFile()),
+        lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
     )
   );
 }
@@ -272,7 +272,7 @@ export function isSettledIteratorValueRead(
         ts.isInterfaceDeclaration(d.parent) &&
         (d.parent.name.text === "IteratorYieldResult" ||
           d.parent.name.text === "IteratorReturnResult") &&
-        lowerer.isStdlibFile(d.getSourceFile()),
+        lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
     )
   )
     return false;
@@ -282,13 +282,13 @@ export function isSettledIteratorValueRead(
     sym.declarations.some(
       (d) =>
         (ts.isInterfaceDeclaration(d) || ts.isTypeAliasDeclaration(d)) &&
-        lowerer.isStdlibFile(d.getSourceFile()),
+        lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
     );
   const alias = receiver.getAliasSymbol();
   const symbol = receiver.getSymbol();
   if (
-    !(alias?.name === "IteratorResult" && stdlib(alias)) &&
-    !(symbol?.name === "IteratorReturnResult" && stdlib(symbol))
+    !(alias !== undefined && ts.symbolName(alias) === "IteratorResult" && stdlib(alias)) &&
+    !(symbol !== undefined && ts.symbolName(symbol) === "IteratorReturnResult" && stdlib(symbol))
   )
     return false;
   const checked = lowerer.mapTypeOf(lowerer.typeOf(node));

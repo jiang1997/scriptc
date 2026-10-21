@@ -81,10 +81,10 @@ export function isValueReturningConstructorClass(decl: ts.ClassDeclaration): boo
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return;
     if (ts.isReturnStatement(node) && node.expression !== undefined && !insideArrow(node, ctor!))
       returnsValue = true;
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  ctor.body.forEachChild(visit);
-  for (const parameter of ctor.parameters.nodes) parameter.forEachChild(visit);
+  ts.forEachChild(ctor.body, visit);
+  for (const parameter of ctor.parameters.nodes) ts.forEachChild(parameter, visit);
   return returnsValue && !observesThis;
 }
 
@@ -215,7 +215,7 @@ export function lowerValueReturningConstructorNew(
       "spread arguments when constructing a class whose constructor returns a value",
     );
   }
-  const key = `ctorValue:${decl.getSourceFile().fileName}:${decl.getStart()}`;
+  const key = `ctorValue:${ts.getSourceFileOfNode(decl).fileName}:${ts.tokenStartOfNode(decl)}`;
   let name = lowerer.valueHelpers.get(key);
   if (name === undefined) {
     name = `%ctorValue.${lowerer.valueHelpers.size}`;
@@ -235,7 +235,7 @@ export function lowerValueReturningConstructorNew(
         {
           kind: "runtimeFence",
           code: "SC1090",
-          message: `constructors that return no object (the bare instance of '${decl.name?.text ?? "class"}' has no representation here) are not supported yet [SC1090 at ${decl.getSourceFile().fileName}:${ts.getLineAndCharacterOfPosition(decl.getSourceFile(), ctor.getStart()).line + 1}]`,
+          message: `constructors that return no object (the bare instance of '${decl.name?.text ?? "class"}' has no representation here) are not supported yet [SC1090 at ${ts.getSourceFileOfNode(decl).fileName}:${ts.getLineAndCharacterOfPosition(ts.getSourceFileOfNode(decl), ts.tokenStartOfNode(ctor)).line + 1}]`,
           loc: locOf(ctor),
         },
       ];
@@ -261,8 +261,8 @@ export function lowerValueReturningConstructorNew(
     .map((arg) => ({ kind: "exprStmt", expr: lowerer.lowerExpr(arg), loc: locOf(arg) }));
   const result = lowerer.declareHiddenLocal("%constructed", DYN);
   const value: IrExpr = { kind: "varRef", localId: result.id, type: DYN, loc };
-  const sf = expr.getSourceFile();
-  const line = ts.getLineAndCharacterOfPosition(sf, expr.getStart()).line + 1;
+  const sf = ts.getSourceFileOfNode(expr);
+  const line = ts.getLineAndCharacterOfPosition(sf, ts.tokenStartOfNode(expr)).line + 1;
   const objectLike: IrExpr = {
     kind: "logical",
     op: "||",

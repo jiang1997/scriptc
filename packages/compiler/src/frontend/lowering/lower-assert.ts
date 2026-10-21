@@ -887,10 +887,10 @@ export function lowerAssertDirectCall(
  * call's SOURCE TEXT (Node re-reads the file at runtime — the frontend has
  * the same bytes at compile time). */
 function lowerAssertOk(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcLoc): IrExpr {
-  requireStatementPosition(lowerer, expr, expr.expression.getText());
+  requireStatementPosition(lowerer, expr, ts.getTextOfNode(expr.expression));
   if (expr.arguments.nodes.length < 1 || expr.arguments.nodes.length > 2) {
     lowerer.noLowering(
-      `${expr.expression.getText()} with ${expr.arguments.nodes.length} arguments`,
+      `${ts.getTextOfNode(expr.expression)} with ${expr.arguments.nodes.length} arguments`,
       expr,
       "the supported forms are assert(value) and assert(value, message)",
     );
@@ -912,7 +912,7 @@ function lowerAssertOk(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcLoc): 
     // Node reads the CALLSITE LINE and slices the expression out of it
     // (internal/errors/error_source.js) — a call spanning lines truncates
     // at the first newline, so the compile-time text does too.
-    const source = expr.getText().split("\n", 1)[0]!;
+    const source = ts.getTextOfNode(expr).split("\n", 1)[0]!;
     const text = `The expression evaluated to a falsy value:\n\n  ${source}\n`;
     msg = { kind: "strLit", value: text, type: STRING, loc };
     generated = true;

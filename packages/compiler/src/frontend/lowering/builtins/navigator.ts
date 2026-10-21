@@ -20,7 +20,8 @@ export function isNavigatorGlobal(lowerer: Lowerer, node: ts.Expression): boolea
   if (!ts.isIdentifier(expr) || expr.text !== "navigator") return false;
   if (lowerer.isStdlibGlobal(expr, "navigator")) return true;
   return (
-    isJsSourceFile(expr.getSourceFile()) && lowerer.checker.getSymbolAtLocation(expr) === undefined
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
+    lowerer.checker.getSymbolAtLocation(expr) === undefined
   );
 }
 

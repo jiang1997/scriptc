@@ -21,7 +21,7 @@ export function nameReadParams(lowerer: Lowerer, info: GenericFnInfo): Map<numbe
   const out = new Map<number, ts.Symbol>();
   // JavaScript generics read function names through the checked-value
   // box, which carries the runtime name already.
-  if (isJsSourceFile(info.decl.getSourceFile())) {
+  if (isJsSourceFile(ts.getSourceFileOfNode(info.decl))) {
     info.nameReadParams = out;
     return out;
   }

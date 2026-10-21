@@ -1,7 +1,8 @@
-/* Read-modify-write targets for computed record keys: `r[k] op= v`, `r[k]++` and `r[k] ??= v`. */
+/* Computed record keys: read-modify-write targets (`r[k] op= v`, `r[k]++`, `r[k] ??= v`) and runtime-keyed destructuring reads. */
 import * as ts from "../../ts7/adapter.js";
 import {
   BOOL,
+  DYN,
   F64,
   STRING,
   typeEquals,
@@ -44,7 +45,7 @@ export function literalFieldKeys(lowerer: Lowerer, keyNode: ts.Expression): stri
 export function isKeyedFieldAccess(lowerer: Lowerer, access: ts.ElementAccessExpression): boolean {
   if (
     access.questionDotToken ||
-    isJsSourceFile(access.getSourceFile()) ||
+    isJsSourceFile(ts.getSourceFileOfNode(access)) ||
     lowerer.isProcessEnv(access.expression)
   )
     return false;
@@ -153,19 +154,30 @@ function keyIs(key: IrExpr, field: string, loc: SrcLoc): IrExpr {
 }
 
 /** A key outside its literal type (smuggled through a cast) names no
- * declared field: a fixed-shape record cannot add the property, so the
- * update throws the TypeError of a keyed write miss. */
-function keyMiss(key: IrExpr, target: KeyedFieldTarget, loc: SrcLoc): IrExpr {
+ * declared field: a fixed-shape record cannot add the property, so an
+ * update throws the TypeError of a keyed write miss, and a plain read the
+ * keyed read miss's (no undefined is representable in the field type). */
+function keyMiss(key: IrExpr, target: KeyedFieldTarget, loc: SrcLoc, read = false): IrExpr {
   const message: IrExpr = {
     kind: "strConcat",
     left: {
       kind: "strConcat",
-      left: { kind: "strLit", value: "Cannot add property '", type: STRING, loc },
+      left: {
+        kind: "strLit",
+        value: read ? "record has no key '" : "Cannot add property '",
+        type: STRING,
+        loc,
+      },
       right: key,
       type: STRING,
       loc,
     },
-    right: { kind: "strLit", value: "' to a fixed-shape object", type: STRING, loc },
+    right: {
+      kind: "strLit",
+      value: read ? "' (typed slot — no undefined is representable)" : "' to a fixed-shape object",
+      type: STRING,
+      loc,
+    },
     type: STRING,
     loc,
   };
@@ -182,8 +194,15 @@ function keyMiss(key: IrExpr, target: KeyedFieldTarget, loc: SrcLoc): IrExpr {
   };
 }
 
-/** The current value of a keyed target. */
-export function keyedFieldRead(lowerer: Lowerer, target: KeyedFieldTarget, loc: SrcLoc): IrExpr {
+/** The current value of a keyed target. `read` marks a read that no
+ * write follows (a destructuring element), which words a key miss as a
+ * read. */
+export function keyedFieldRead(
+  lowerer: Lowerer,
+  target: KeyedFieldTarget,
+  loc: SrcLoc,
+  read = false,
+): IrExpr {
   const { obj, shapeId, key, fieldType } = target;
   if (!target.keys) {
     const type = target.missNaN
@@ -220,7 +239,7 @@ export function keyedFieldRead(lowerer: Lowerer, target: KeyedFieldTarget, loc: 
       type: fieldType,
       loc,
     }),
-    keyMiss(key, target, loc),
+    keyMiss(key, target, loc, read),
   );
 }
 
@@ -268,4 +287,77 @@ export function saveKeyedFieldKey(
   save: (value: IrExpr, name: string) => IrExpr,
 ): void {
   if (target.container === "recordKeyed" && target.key) target.key = save(target.key, "%keyedKey");
+}
+
+/** The value a destructuring element with a runtime computed key binds
+ * (`const { [name]: v } = source`), or null when the source's
+ * representation has no keyed read for that key. The key evaluates here,
+ * once, into `out` (element order), and converts with ToPropertyKey:
+ * - a checked-dynamic source (or a JavaScript record, through its checked
+ *   view) reads the live property, undefined when absent;
+ * - a pure index-signature record reads its entry, undefined when absent;
+ * - a record whose declared fields include every name the key's literal
+ *   type allows, all stored with one type, reads the field the key names. */
+export function runtimeKeyPatternRead(
+  lowerer: Lowerer,
+  keyNode: ts.Expression,
+  source: IrExpr,
+  out: IrStmt[],
+  loc: SrcLoc,
+): IrExpr | null {
+  const save = (value: IrExpr, name: string): IrExpr => {
+    const local = lowerer.declareHiddenLocal(name, value.type);
+    out.push({ kind: "varDecl", localId: local.id, init: value, loc });
+    return { kind: "varRef", localId: local.id, type: value.type, loc };
+  };
+  const jsRecord =
+    source.type.kind === "record" &&
+    isJsSourceFile(keyNode.getSourceFile()) &&
+    lowerer.dynConvertible(source.type);
+  if (source.type.kind === "dyn" || jsRecord) {
+    const raw = lowerer.lowerExpr(keyNode);
+    if (!lowerer.dynConvertible(raw.type)) return null;
+    const key = save(
+      {
+        kind: "libCall",
+        fn: "dyn.propertyKey",
+        args: [lowerer.coerceInto(keyNode, raw, DYN)],
+        type: DYN,
+        loc,
+      },
+      "%patternKey",
+    );
+    return { kind: "dynKeyGet", value: lowerer.coerceToExpected(source, DYN), key, type: DYN, loc };
+  }
+  if (source.type.kind !== "record") return null;
+  const shapeId = source.type.shapeId;
+  const shape = lowerer.shapes.get(shapeId);
+  if (!shape || shape.tuple) return null;
+  if (shape.fields.length === 0 && shape.indexValue) {
+    const raw = lowerer.lowerExpr(keyNode);
+    if (raw.type.kind !== "string") return null;
+    const type =
+      shape.indexValue.kind === "dyn"
+        ? shape.indexValue
+        : lowerer.withUndefinedArmOf(shape.indexValue);
+    if (!type) return null;
+    const key = save(raw, "%patternKey");
+    return { kind: "recordKeyGet", obj: source, shapeId, key, type, loc };
+  }
+  const keys = literalFieldKeys(lowerer, keyNode);
+  const fields = keys?.map((k) => shape.fields.find((f) => f.name === k));
+  const first = fields?.[0];
+  if (!keys || !first || fields!.some((f) => !f || !typeEquals(f.type, first.type))) return null;
+  const raw = lowerer.lowerExpr(keyNode);
+  if (raw.type.kind !== "string") return null;
+  const target: KeyedFieldTarget = {
+    container: "recordKeyed",
+    obj: source,
+    shapeId,
+    field: keys[0]!,
+    keys,
+    key: save(raw, "%patternKey"),
+    fieldType: first.type,
+  };
+  return keyedFieldRead(lowerer, target, loc, true);
 }

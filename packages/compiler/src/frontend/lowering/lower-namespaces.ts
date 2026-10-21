@@ -179,10 +179,10 @@ export function nsPathPrefix(node: ts.Node, modifierDecl?: ts.Node): string {
       const nested = p.parent !== undefined && ts.isModuleBlock(p.parent);
       const nonExported =
         nested && (ts.getCombinedModifierFlags(p) & ts.ModifierFlags.Export) === 0;
-      segs.unshift(p.name.text + (nonExported ? `%${p.getStart()}` : ""));
+      segs.unshift(p.name.text + (nonExported ? `%${ts.tokenStartOfNode(p)}` : ""));
     }
   }
-  return `${segs.join("%")}${exported ? "" : `%${parent.getStart()}`}.`;
+  return `${segs.join("%")}${exported ? "" : `%${ts.tokenStartOfNode(parent)}`}.`;
 }
 
 /** The registered namespace-block kind a symbol's declaration sits in
@@ -280,7 +280,11 @@ function moduleNsSourceFileOf(lowerer: Lowerer, e: ts.Expression): ts.SourceFile
         stmt.moduleSpecifier !== undefined &&
         ts.isStringLiteral(stmt.moduleSpecifier)
       ) {
-        const dep = resolveImport(lowerer.program, d.getSourceFile(), stmt.moduleSpecifier.text);
+        const dep = resolveImport(
+          lowerer.program,
+          ts.getSourceFileOfNode(d),
+          stmt.moduleSpecifier.text,
+        );
         if (dep && !dep.isDeclarationFile && lowerer.fileTag.has(dep)) return dep;
       }
     }
@@ -294,7 +298,7 @@ function moduleNsSourceFileOf(lowerer: Lowerer, e: ts.Expression): ts.SourceFile
       !ts.isStringLiteral(stmt.moduleSpecifier)
     )
       continue;
-    const from = d.getSourceFile();
+    const from = ts.getSourceFileOfNode(d);
     if (packageShimFor(from.fileName, stmt.moduleSpecifier.text) === null) continue;
     const dep = resolveImport(lowerer.program, from, stmt.moduleSpecifier.text);
     if (dep && !dep.isDeclarationFile && lowerer.fileTag.has(dep)) return dep;
@@ -353,7 +357,7 @@ export function ambientNsRootOf(lowerer: Lowerer, e: ts.Expression): ts.Identifi
       return null;
     }
     if (ts.isModuleDeclaration(d) && !ts.isIdentifier(d.name)) return null;
-    if (d.getSourceFile().isDeclarationFile) return null; // lib/@types keep their own fences
+    if (ts.getSourceFileOfNode(d).isDeclarationFile) return null; // lib/@types keep their own fences
     if (
       ts.isModuleDeclaration(d)
         ? !isAmbientModuleDecl(d)
@@ -451,7 +455,7 @@ export function ambientUndefVarRootOf(lowerer: Lowerer, e: ts.Expression): ts.Id
     if (decls.length === 0) return null;
     for (const d of decls) {
       if (!ts.isVariableDeclaration(d) || d.initializer !== undefined) return null;
-      if (d.getSourceFile().isDeclarationFile) return null; // lib/@types keep their own fences
+      if (ts.getSourceFileOfNode(d).isDeclarationFile) return null; // lib/@types keep their own fences
       if (!(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient)) return null;
     }
     return root;
@@ -510,7 +514,7 @@ export function trapDeclRootOf(
   if (root === null) return null;
   for (const nameNode of boundIdentifiersOf(decl.name)) {
     const sym = lowerer.checker.getSymbolAtLocation(nameNode);
-    if (sym && bindingEverWritten(lowerer, sym, decl.getSourceFile())) {
+    if (sym && bindingEverWritten(lowerer, sym, ts.getSourceFileOfNode(decl))) {
       const mapped = lowerer.mapTypeOf(lowerer.checker.getTypeOfSymbol(sym));
       if (mapped !== null && mapped.kind !== "void") return null;
     }
@@ -535,7 +539,7 @@ export function trapDeclRootOf(
  * initializer into an ordinary lowering that fences). ambientUndefVarRootOf
  * carries its own collect-guard, so the extra question stays a probe. */
 function bindingEverWritten(lowerer: Lowerer, sym: ts.Symbol, sf: ts.SourceFile): boolean {
-  const symText = sym.name;
+  const symText = ts.symbolName(sym);
   const namesSym = (e: ts.Node): boolean =>
     ts.isIdentifier(e) && e.text === symText && lowerer.checker.getSymbolAtLocation(e) === sym;
   const patternWrites = (target: ts.Node): boolean => {
@@ -544,9 +548,9 @@ function bindingEverWritten(lowerer: Lowerer, sym: ts.Symbol, sf: ts.SourceFile)
     const walk = (m: ts.Node): void => {
       if (hit) return;
       if (namesSym(m)) hit = true;
-      else m.forEachChild(walk);
+      else ts.forEachChild(m, walk);
     };
-    target.forEachChild(walk);
+    ts.forEachChild(target, walk);
     return hit;
   };
   let written = false;
@@ -591,9 +595,9 @@ function bindingEverWritten(lowerer: Lowerer, sym: ts.Symbol, sf: ts.SourceFile)
         written = true;
       }
     }
-    n.forEachChild(visit);
+    ts.forEachChild(n, visit);
   };
-  sf.forEachChild(visit);
+  ts.forEachChild(sf, visit);
   return written;
 }
 
@@ -654,7 +658,7 @@ export function ambientUndefinedFnSymbolOf(
     } else if (!ts.isModuleDeclaration(d) && !ts.isClassDeclaration(d)) {
       return null;
     }
-    if (d.getSourceFile().isDeclarationFile) return null;
+    if (ts.getSourceFileOfNode(d).isDeclarationFile) return null;
     if (!(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient)) return null;
   }
   return sawFn ? sym : null;
@@ -695,7 +699,7 @@ function initExecutingPosition(node: ts.Node): boolean {
 function earliestSameFileDeclStart(lowerer: Lowerer, sym: ts.Symbol, sf: ts.SourceFile): number {
   let earliest = Infinity;
   for (const d of sym.declarations) {
-    if (d.getSourceFile() === sf) earliest = Math.min(earliest, d.getStart());
+    if (ts.getSourceFileOfNode(d) === sf) earliest = Math.min(earliest, ts.tokenStartOfNode(d));
   }
   return earliest;
 }
@@ -710,10 +714,10 @@ export function fenceEarlyAliasUse(lowerer: Lowerer, ident: ts.Identifier, refNo
   const aliasDecl = sym.declarations.find(ts.isImportEqualsDeclaration);
   if (!aliasDecl || ts.isExternalModuleReference(aliasDecl.moduleReference)) return;
   if (!initExecutingPosition(refNode)) return;
-  const sf = refNode.getSourceFile();
-  if (aliasDecl.getSourceFile() !== sf) return; // cross-file: module init order applies
-  const aliasStart = aliasDecl.getStart();
-  if (refNode.getStart() < aliasStart) {
+  const sf = ts.getSourceFileOfNode(refNode);
+  if (ts.getSourceFileOfNode(aliasDecl) !== sf) return; // cross-file: module init order applies
+  const aliasStart = ts.tokenStartOfNode(aliasDecl);
+  if (ts.tokenStartOfNode(refNode) < aliasStart) {
     lowerer.unsupported(
       "SC1090",
       refNode,
@@ -749,8 +753,8 @@ export function fenceEarlyNsMemberRef(
   memberSym: ts.Symbol,
 ): void {
   if (!initExecutingPosition(access)) return;
-  const sf = access.getSourceFile();
-  const refStart = access.getStart();
+  const sf = ts.getSourceFileOfNode(access);
+  const refStart = ts.tokenStartOfNode(access);
   const memberStart = earliestSameFileDeclStart(lowerer, memberSym, sf);
   if (memberStart !== Infinity && refStart < memberStart) {
     lowerer.unsupported(

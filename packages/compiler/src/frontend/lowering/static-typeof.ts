@@ -118,7 +118,7 @@ export function declaresHoistedBinding(stmt: ts.Statement): boolean {
       found = true;
       return;
     }
-    n.forEachChild(visit);
+    ts.forEachChild(n, visit);
   };
   visit(stmt);
   return found;

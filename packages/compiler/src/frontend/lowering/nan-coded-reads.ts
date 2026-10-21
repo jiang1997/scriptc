@@ -365,20 +365,22 @@ export class NanCodedReads {
   private removalReason(slot: Slot): string {
     const badSource = slot.sources.find((s) => s === null || this.sourceInfo(s) === null);
     if (badSource !== undefined)
-      return `source ${badSource ? badSource.getText().slice(0, 60) : "<unknown>"}`;
+      return `source ${badSource ? ts.getTextOfNode(badSource).slice(0, 60) : "<unknown>"}`;
     const nan = this.genuineNaN.has(slot);
     const badUse = slot.uses.find((u) => !this.useSafe(u) && (nan || !this.reboxConsumer(u)));
-    if (badUse)
-      return `${nan ? "nan-use" : "use"} ${transparentParent(badUse).parent?.getText().slice(0, 80) ?? "?"}`;
+    if (badUse) {
+      const parent = transparentParent(badUse).parent;
+      return `${nan ? "nan-use" : "use"} ${parent === undefined ? "?" : ts.getTextOfNode(parent).slice(0, 80)}`;
+    }
     return "?";
   }
 
   private debugReport(reached: Set<Slot>): void {
     const name = (slot: Slot): string => {
       const decl = this.host.declarationOf(slot.symbol);
-      const sf = decl?.getSourceFile();
-      const where = sf && decl ? `${sf.fileName}:${decl.getStart()}` : "?";
-      return `${slot.kind} ${slot.symbol.name} @ ${where}`;
+      const sf = decl === undefined ? undefined : ts.getSourceFileOfNode(decl);
+      const where = sf && decl ? `${sf.fileName}:${ts.tokenStartOfNode(decl)}` : "?";
+      return `${slot.kind} ${ts.symbolName(slot.symbol)} @ ${where}`;
     };
     for (const slot of reached) {
       const ok = this.eligible.has(slot);
@@ -483,7 +485,11 @@ export class NanCodedReads {
       return true;
     }
     const decl = this.host.declarationOf(symbol);
-    if (!decl || isJsSourceFile(decl.getSourceFile()) || decl.getSourceFile().isDeclarationFile)
+    if (
+      !decl ||
+      isJsSourceFile(ts.getSourceFileOfNode(decl)) ||
+      ts.getSourceFileOfNode(decl).isDeclarationFile
+    )
       return false;
     let name: ts.Identifier;
     if (ts.isParameter(decl)) {
@@ -565,7 +571,7 @@ export class NanCodedReads {
       !nonNegativeIntegerLiteral(decl.initializer) ||
       !ts.isVariableDeclarationList(decl.parent) ||
       !(decl.parent.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) ||
-      isJsSourceFile(decl.getSourceFile())
+      isJsSourceFile(ts.getSourceFileOfNode(decl))
     )
       return false;
     const name = decl.name;
@@ -685,7 +691,7 @@ export class NanCodedReads {
       !(decl.parent.flags & ts.NodeFlags.Const) ||
       // A module binding can escape through an export.
       (ts.isVariableStatement(decl.parent.parent) && ts.isSourceFile(decl.parent.parent.parent)) ||
-      isJsSourceFile(decl.getSourceFile()) ||
+      isJsSourceFile(ts.getSourceFileOfNode(decl)) ||
       this.host.bytesElemOf(decl.name) === null
     )
       return null;
@@ -755,7 +761,7 @@ export class NanCodedReads {
     if (!decl || (!ts.isFunctionDeclaration(decl) && !ts.isMethodDeclaration(decl))) return null;
     if (!decl.body || decl.asteriskToken || decl.typeParameters?.nodes || !decl.name) return null;
     if (!ts.isIdentifier(decl.name)) return null;
-    const sf = decl.getSourceFile();
+    const sf = ts.getSourceFileOfNode(decl);
     if (isJsSourceFile(sf) || sf.isDeclarationFile) return null;
     const flags = ts.getCombinedModifierFlags(decl);
     if (flags & (ts.ModifierFlags.Async | ts.ModifierFlags.Abstract | ts.ModifierFlags.Ambient))
@@ -831,7 +837,7 @@ export class NanCodedReads {
   private scanBindingSlot(symbol: ts.Symbol): BindingSlot | null {
     const decl = this.host.declarationOf(symbol);
     if (!decl) return null;
-    const sf = decl.getSourceFile();
+    const sf = ts.getSourceFileOfNode(decl);
     if (isJsSourceFile(sf) || sf.isDeclarationFile) return null;
     let nameNode: ts.Identifier;
     const slot: BindingSlot = {
@@ -1362,7 +1368,7 @@ export class NanCodedReads {
         decl.initializer &&
         ts.isVariableDeclarationList(decl.parent) &&
         decl.parent.flags & ts.NodeFlags.Const &&
-        !isJsSourceFile(decl.getSourceFile())
+        !isJsSourceFile(ts.getSourceFileOfNode(decl))
       )
         return this.plainNumber(decl.initializer, depth + 1);
       return null;

@@ -1,3 +1,4 @@
+import { ts7Diagnostic, type Ts7Diagnostic } from "./diagnostic.js";
 import type { SourceFile } from "./ast-types.js";
 import { AstFile, AstNode } from "./ast-node.js";
 import { Ts7RpcClient } from "./rpc-client.js";
@@ -16,6 +17,24 @@ import type {
   Ts7SnapshotData,
   Ts7SourceMetadata,
 } from "./session-schema.generated.js";
+
+/** Project options tsgo still reports for a tsconfig but the TS 7 SDK
+ * schema no longer declares. scriptc adopts them (ADOPTED_OPTIONS), so the
+ * options a project reports are parsed with them declared: a native
+ * compiler keeps only declared fields when it parses the response. */
+export interface Ts7ProjectCompilerOptions extends Ts7CompilerOptionsData {
+  alwaysStrict?: boolean;
+  esModuleInterop?: boolean;
+  allowSyntheticDefaultImports?: boolean;
+}
+
+interface Ts7ReportedProjectData extends Ts7ProjectData {
+  compilerOptions: Ts7ProjectCompilerOptions;
+}
+
+interface Ts7ReportedSnapshotData extends Ts7SnapshotData {
+  projects: Ts7ReportedProjectData[];
+}
 
 export interface Ts7FileChanges {
   changed?: SemanticDocument[];
@@ -103,7 +122,7 @@ export class Ts7Session {
 
   updateSnapshot(params: Ts7Update = {}): Ts7SessionSnapshot {
     const paths = this.initialize();
-    const data = parseSemanticJson<Ts7SnapshotData>(
+    const data = parseSemanticJson<Ts7ReportedSnapshotData>(
       this.text("updateSnapshot", JSON.stringify(params)),
     );
     const snapshot = new Ts7SessionSnapshot(data, this, paths);
@@ -159,7 +178,7 @@ export class Ts7SessionSnapshot {
   private disposed = false;
 
   constructor(
-    data: Ts7SnapshotData,
+    data: Ts7ReportedSnapshotData,
     private readonly session: Ts7Session,
     readonly paths: Ts7Paths,
   ) {
@@ -188,7 +207,7 @@ export class Ts7SessionSnapshot {
   }
   getDefaultProjectForFile(file: SemanticDocument): Ts7SessionProject | undefined {
     this.ensureActive();
-    const data = this.session.request<Ts7ProjectData | null>("getDefaultProjectForFile", {
+    const data = this.session.request<Ts7ReportedProjectData | null>("getDefaultProjectForFile", {
       snapshot: this.id,
       file,
     });
@@ -214,12 +233,12 @@ export class Ts7SessionSnapshot {
 export class Ts7SessionProject {
   readonly id: string;
   readonly configFileName: string;
-  readonly compilerOptions: Ts7CompilerOptionsData;
+  readonly compilerOptions: Ts7ProjectCompilerOptions;
   readonly rootFiles: string[];
   readonly program: Ts7SessionProgram;
   readonly checker: SemanticChecker;
 
-  constructor(data: Ts7ProjectData, snapshot: Ts7SessionSnapshot, session: Ts7Session) {
+  constructor(data: Ts7ReportedProjectData, snapshot: Ts7SessionSnapshot, session: Ts7Session) {
     this.id = data.id;
     this.configFileName = data.configFileName;
     this.compilerOptions = data.compilerOptions;
@@ -260,7 +279,7 @@ export class Ts7SessionProgram {
       ...(file === undefined ? {} : { file }),
     };
   }
-  getCompilerOptions(): Ts7CompilerOptionsData {
+  getCompilerOptions(): Ts7ProjectCompilerOptions {
     this.ensureActive();
     return this.project.compilerOptions;
   }
@@ -314,31 +333,35 @@ export class Ts7SessionProgram {
   isSourceFileDefaultLibrary(file: AstNode): boolean {
     return this.getSourceFileMetadataByPath(file.path)?.isDefaultLibrary ?? false;
   }
-  private diagnostics(method: string, file?: SemanticDocument): Ts7DiagnosticData[] {
-    return this.session.request<Ts7DiagnosticData[] | null>(method, this.query(file)) ?? [];
+  private diagnostics(method: string, file?: SemanticDocument): Ts7Diagnostic[] {
+    const result: Ts7Diagnostic[] = [];
+    for (const data of this.session.request<Ts7DiagnosticData[] | null>(method, this.query(file)) ??
+      [])
+      result.push(ts7Diagnostic(data));
+    return result;
   }
-  getSyntacticDiagnostics(file?: SemanticDocument): Ts7DiagnosticData[] {
+  getSyntacticDiagnostics(file?: SemanticDocument): Ts7Diagnostic[] {
     return this.diagnostics("getSyntacticDiagnostics", file);
   }
-  getBindDiagnostics(file?: SemanticDocument): Ts7DiagnosticData[] {
+  getBindDiagnostics(file?: SemanticDocument): Ts7Diagnostic[] {
     return this.diagnostics("getBindDiagnostics", file);
   }
-  getSemanticDiagnostics(file?: SemanticDocument): Ts7DiagnosticData[] {
+  getSemanticDiagnostics(file?: SemanticDocument): Ts7Diagnostic[] {
     return this.diagnostics("getSemanticDiagnostics", file);
   }
-  getSuggestionDiagnostics(file?: SemanticDocument): Ts7DiagnosticData[] {
+  getSuggestionDiagnostics(file?: SemanticDocument): Ts7Diagnostic[] {
     return this.diagnostics("getSuggestionDiagnostics", file);
   }
-  getDeclarationDiagnostics(file?: SemanticDocument): Ts7DiagnosticData[] {
+  getDeclarationDiagnostics(file?: SemanticDocument): Ts7Diagnostic[] {
     return this.diagnostics("getDeclarationDiagnostics", file);
   }
-  getProgramDiagnostics(): Ts7DiagnosticData[] {
+  getProgramDiagnostics(): Ts7Diagnostic[] {
     return this.diagnostics("getProgramDiagnostics");
   }
-  getGlobalDiagnostics(): Ts7DiagnosticData[] {
+  getGlobalDiagnostics(): Ts7Diagnostic[] {
     return this.diagnostics("getGlobalDiagnostics");
   }
-  getConfigFileParsingDiagnostics(): Ts7DiagnosticData[] {
+  getConfigFileParsingDiagnostics(): Ts7Diagnostic[] {
     return this.diagnostics("getConfigFileParsingDiagnostics");
   }
   dispose(): void {

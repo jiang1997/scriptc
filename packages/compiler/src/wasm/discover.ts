@@ -159,7 +159,7 @@ class Discovery {
     if (!paths && !base64 && !bytes) return;
     const file = sf.fileName;
     const lineOf = (node: ts.Node): number =>
-      ts.getLineAndCharacterOfPosition(sf, node.getStart()).line + 1;
+      ts.getLineAndCharacterOfPosition(sf, ts.tokenStartOfNode(node)).line + 1;
     ts.walkPreorder(
       sf,
       (node) => {

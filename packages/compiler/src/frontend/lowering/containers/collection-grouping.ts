@@ -67,7 +67,7 @@ export function lowerGroupByStaticCall(
   const fNode = call.arguments.nodes[1]!;
   // An unannotated JavaScript callback parameter takes the element.
   const f =
-    isJsSourceFile(fNode.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(fNode)) &&
     (ts.isArrowFunction(fNode) || ts.isFunctionExpression(fNode))
       ? lowerArrayCallback(lowerer, fNode, [elem], groupT, true).fnArg
       : lowerer.lowerExpr(fNode);

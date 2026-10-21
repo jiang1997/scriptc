@@ -84,6 +84,97 @@ test("a computed key reads the stack when the program spells it", () => {
   expect(observesStacks(mod([fn("%main", [computed])]))).toBe(false);
 });
 
+test('a computed key that cannot be "stack" reads no stack', () => {
+  const value: IrExpr = { loc, kind: "varRef", localId: "d", type: DYN };
+  const spelled: IrStmt = {
+    loc,
+    kind: "exprStmt",
+    expr: { loc, kind: "strLit", value: "stack", type: STRING },
+  };
+  const read = (key: IrExpr): IrStmt => ({
+    loc,
+    kind: "exprStmt",
+    expr: { loc, kind: "dynKeyGet", value, key, type: DYN },
+  });
+  const index: IrExpr = { loc, kind: "varRef", localId: "i", type: F64 };
+  const indexText: IrExpr = { loc, kind: "toString", operand: index, type: STRING };
+  // A number key, and a key converted from one.
+  expect(observesStacks(mod([fn("%main", [read(index), spelled])]))).toBe(false);
+  expect(observesStacks(mod([fn("%main", [read(indexText), spelled])]))).toBe(false);
+  // An immutable local answers with its initializer (the shape of the
+  // dispatch helpers' formatted index keys).
+  const key: IrExpr = { loc, kind: "varRef", localId: "key", type: STRING };
+  const local = (init: IrExpr, mutable = false): IrFunction => ({
+    ...fn("%main", [{ loc, kind: "varDecl", localId: "key", init }, read(key), spelled]),
+    locals: [{ id: "key", name: "key", type: STRING, mutable }],
+  });
+  expect(observesStacks(mod([local(indexText)]))).toBe(false);
+  expect(observesStacks(mod([local(indexText, true)]))).toBe(true);
+  // A parameter of a function called by name answers with its arguments.
+  const helper: IrFunction = {
+    ...fn("readKey", [read(key)]),
+    params: [{ localId: "key", name: "key", type: STRING }],
+    locals: [{ id: "key", name: "key", type: STRING, mutable: false }],
+  };
+  const callWith = (arg: IrExpr): IrStmt => ({
+    loc,
+    kind: "exprStmt",
+    expr: { loc, kind: "call", callee: "readKey", args: [arg], type: DYN },
+  });
+  const numbers = mod([fn("%main", [callWith(indexText), spelled]), helper]);
+  expect(observesStacks(numbers)).toBe(false);
+  const stack = mod([
+    fn("%main", [
+      callWith(indexText),
+      callWith({ loc, kind: "strLit", value: "stack", type: STRING }),
+    ]),
+    helper,
+  ]);
+  expect(observesStacks(stack)).toBe(true);
+});
+
+test("a key forwarded through functions with several call sites is searched once", () => {
+  // f0 calls f1 twice, f1 calls f2 twice, and so on, each passing its
+  // parameter on: 2^40 call paths reach the read in f40.
+  const depth = 40;
+  const value: IrExpr = { loc, kind: "varRef", localId: "d", type: DYN };
+  const key: IrExpr = { loc, kind: "varRef", localId: "key", type: STRING };
+  const forward = (callee: string): IrStmt => ({
+    loc,
+    kind: "exprStmt",
+    expr: { loc, kind: "call", callee, args: [key], type: VOID },
+  });
+  const chain = (root: IrExpr): IrModule => {
+    const functions: IrFunction[] = [];
+    for (let i = 0; i <= depth; i++) {
+      const body: IrStmt[] =
+        i < depth
+          ? [forward(`f${i + 1}`), forward(`f${i + 1}`)]
+          : [{ loc, kind: "exprStmt", expr: { loc, kind: "dynKeyGet", value, key, type: DYN } }];
+      functions.push({
+        ...fn(`f${i}`, body),
+        params: [{ localId: "key", name: "key", type: STRING }],
+        locals: [{ id: "key", name: "key", type: STRING, mutable: false }],
+      });
+    }
+    const spelled: IrStmt = {
+      loc,
+      kind: "exprStmt",
+      expr: { loc, kind: "strLit", value: "stack", type: STRING },
+    };
+    const start: IrStmt = {
+      loc,
+      kind: "exprStmt",
+      expr: { loc, kind: "call", callee: "f0", args: [root], type: VOID },
+    };
+    return mod([fn("%main", [start, spelled]), ...functions]);
+  };
+  expect(observesStacks(chain({ loc, kind: "strLit", value: "message", type: STRING }))).toBe(
+    false,
+  );
+  expect(observesStacks(chain({ loc, kind: "strLit", value: "stack", type: STRING }))).toBe(true);
+});
+
 test("programs without stack reads are not", () => {
   expect(observesStacks(mod([fn("%main", [call("helper")]), fn("helper", [ret])]))).toBe(false);
 });

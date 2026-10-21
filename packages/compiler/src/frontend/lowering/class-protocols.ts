@@ -6,6 +6,8 @@ export class ClassProtocols {
   private implemented: Set<ts.Symbol> | null = null;
   private readonly methods = new Map<string, ts.ClassLikeDeclaration[]>();
   private readonly answers = new Map<ts.Type, boolean>();
+  /** The program classes each Pick or Omit view accepts (classesAcceptedBy). */
+  private readonly accepted = new Map<ts.Type, ts.Symbol[]>();
   /** What markIdentityFlows learned about the program, while it runs. */
   private facts: FlowFacts | null = null;
 
@@ -46,9 +48,9 @@ export class ClassProtocols {
             )
           )
             continue;
-          const entries = this.methods.get(property.name) ?? [];
+          const entries = this.methods.get(ts.symbolName(property)) ?? [];
           entries.push(node);
-          this.methods.set(property.name, entries);
+          this.methods.set(ts.symbolName(property), entries);
         }
       }
       if (
@@ -414,6 +416,14 @@ export class ClassProtocols {
         for (const part of ts.constituentTypes(type)) add(part);
         return;
       }
+      // A Pick or Omit view's values are instances of the class it views,
+      // or of any other program class that has the view's members.
+      if (this.pickOfProgramClass(type)) {
+        add(type.getAliasTypeArguments()[0]!);
+        for (const other of this.classesAcceptedBy(type))
+          for (const related of this.classFamily(other, facts)) out.add(related);
+        return;
+      }
       const symbol = type.getSymbol();
       if (symbol === undefined) return;
       if (this.isProgramClassInstance(type)) {
@@ -427,6 +437,30 @@ export class ClassProtocols {
       if (element !== undefined) add(element);
     } else add(source);
     return out;
+  }
+
+  /** The program classes with methods whose instances are assignable to
+   * `type`. */
+  private classesAcceptedBy(type: ts.Type): ts.Symbol[] {
+    const known = this.accepted.get(type);
+    if (known !== undefined) return known;
+    this.index();
+    const found = new Set<ts.Symbol>();
+    for (const entries of this.methods.values())
+      for (const declaration of entries) {
+        const symbol = declaration.name
+          ? this.checker.getSymbolAtLocation(declaration.name)
+          : undefined;
+        if (
+          symbol !== undefined &&
+          !found.has(symbol) &&
+          this.checker.isTypeAssignableTo(this.checker.getDeclaredTypeOfSymbol(symbol), type)
+        )
+          found.add(symbol);
+      }
+    const result = [...found];
+    this.accepted.set(type, result);
+    return result;
   }
 
   /** A class symbol with its base classes and the program classes that
@@ -472,7 +506,7 @@ export class ClassProtocols {
     if (facts.observed.has(symbol) || facts.written.has(symbol)) return true;
     const target = facts.targets.get(symbol);
     if (target === undefined) return true;
-    const names = new Set(this.checker.getPropertiesOfType(target).map((p) => p.name));
+    const names = new Set(this.checker.getPropertiesOfType(target).map((p) => ts.symbolName(p)));
     const origins = facts.origins.get(symbol) ?? new Set<ts.Symbol>();
     const writesNames = (written: Set<string> | "all"): boolean =>
       written === "all" || [...written].some((name) => names.has(name));
@@ -517,7 +551,7 @@ export class ClassProtocols {
       .getPropertiesOfType(declared)
       .some(
         (property) =>
-          names.has(property.name) &&
+          names.has(ts.symbolName(property)) &&
           property.declarations.some(
             (declaration) =>
               ts.isGetAccessorDeclaration(declaration) || ts.isSetAccessorDeclaration(declaration),
@@ -570,12 +604,28 @@ export class ClassProtocols {
     }
   }
 
+  /** `Pick<C, K>` or `Omit<C, K>` over a program class instance type: a
+   * view of the class's own members, spelled inline instead of as an
+   * interface. Like an interface the class matches, a view that exposes a
+   * method needs a live receiver (see protocol). */
+  private pickOfProgramClass(type: ts.Type): boolean {
+    const alias = type.getAliasSymbol();
+    if (alias === undefined || (ts.symbolName(alias) !== "Pick" && ts.symbolName(alias) !== "Omit"))
+      return false;
+    if (!alias.declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile))
+      return false;
+    const source = type.getAliasTypeArguments()[0];
+    return source !== undefined && this.isProgramClassInstance(source);
+  }
+
   private isProgramClassInstance(type: ts.Type): boolean {
     const symbol = type.getSymbol();
     return (
       symbol !== undefined &&
       (symbol.flags & ts.SymbolFlags.Class) !== 0 &&
-      symbol.declarations.some((declaration) => !declaration.getSourceFile().isDeclarationFile) &&
+      symbol.declarations.some(
+        (declaration) => !ts.getSourceFileOfNode(declaration).isDeclarationFile,
+      ) &&
       // `typeof C` (the class value) shares the class symbol.
       this.checker.getConstructSignatures(type).length === 0
     );
@@ -590,6 +640,8 @@ export class ClassProtocols {
       return element !== undefined && this.carriesIdentity(element, marked);
     }
     if (this.isProgramClassInstance(type)) return true;
+    // A live Pick or Omit view of a program class holds the instance itself.
+    if (this.pickOfProgramClass(type) && this.usesCheckedIdentity(type)) return true;
     const symbol = type.getSymbol();
     if (symbol === undefined) return false;
     if (marked.has(symbol)) return true;
@@ -598,7 +650,8 @@ export class ClassProtocols {
       this.methods.size > 0 &&
       symbol.declarations.some(
         (declaration) =>
-          ts.isInterfaceDeclaration(declaration) && !declaration.getSourceFile().isDeclarationFile,
+          ts.isInterfaceDeclaration(declaration) &&
+          !ts.getSourceFileOfNode(declaration).isDeclarationFile,
       ) &&
       this.protocol(type)
     );
@@ -617,7 +670,7 @@ export class ClassProtocols {
     const declarations = symbol.declarations;
     return (
       declarations.length > 0 &&
-      declarations.every((declaration) => !declaration.getSourceFile().isDeclarationFile)
+      declarations.every((declaration) => !ts.getSourceFileOfNode(declaration).isDeclarationFile)
     );
   }
 
@@ -701,17 +754,19 @@ export class ClassProtocols {
     const properties = this.checker.getPropertiesOfType(type);
     if (symbol && protocols.has(symbol)) return true;
     if (
-      !symbol ||
-      !symbol.declarations.some(
-        (declaration) =>
-          ts.isInterfaceDeclaration(declaration) && !declaration.getSourceFile().isDeclarationFile,
-      )
+      !this.pickOfProgramClass(type) &&
+      (!symbol ||
+        !symbol.declarations.some(
+          (declaration) =>
+            ts.isInterfaceDeclaration(declaration) &&
+            !ts.getSourceFileOfNode(declaration).isDeclarationFile,
+        ))
     )
       return false;
     for (const property of properties) {
       const memberType = this.checker.getTypeOfSymbol(property);
       if (this.checker.getCallSignatures(memberType).length === 0) continue;
-      for (const declaration of this.methods.get(property.name) ?? []) {
+      for (const declaration of this.methods.get(ts.symbolName(property)) ?? []) {
         const classSymbol = declaration.name
           ? this.checker.getSymbolAtLocation(declaration.name)
           : undefined;

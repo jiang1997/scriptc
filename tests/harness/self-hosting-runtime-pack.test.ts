@@ -32,6 +32,7 @@ const base: NativeLinkFeatures = {
   searchParams: false,
   qs: false,
   dynBuiltinClass: false,
+  dynBuiltinStream: false,
   parseArgs: false,
   stream: false,
   net: false,
@@ -45,6 +46,7 @@ const base: NativeLinkFeatures = {
   tls: false,
   tlsCa: false,
   cipher: false,
+  ecdh: false,
   webcrypto: false,
   perfLoop: false,
 };

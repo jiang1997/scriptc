@@ -231,11 +231,11 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
   let receiverIr = neverTaintedJsType(lowerer, expr.expression, lowerer.typeOf(expr.expression))
     ? null
     : lowerer.mapTypeOf(lowerer.typeOf(expr.expression));
-  if (isJsSourceFile(expr.getSourceFile())) {
+  if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
     const receiver = tryLowerExpression(lowerer, expr.expression);
     if (receiver?.type.kind === "dyn") {
       const key = lowerer.lowerExprExpecting(expr.argumentExpression, DYN);
-      const optional = hasOptionalChainGuard(expr.expression);
+      const optional = hasOptionalChainGuard(expr.expression, lowerer);
       return lowerer.maybeNarrow(
         {
           kind: "dynKeyGet",
@@ -316,7 +316,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
       locOf(expr.argumentExpression),
       expr.argumentExpression,
     );
-    if (isJsSourceFile(expr.getSourceFile()) && recv.type.kind === "bytes") {
+    if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && recv.type.kind === "bytes") {
       return {
         kind: "dynKeyGet",
         value: lowerer.coerceInto(expr.expression, recv, DYN),
@@ -378,7 +378,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
           lowerer.lowerExpr(expr.argumentExpression),
           expr.argumentExpression,
         );
-        const optional = hasOptionalChainGuard(expr.expression);
+        const optional = hasOptionalChainGuard(expr.expression, lowerer);
         return lowerer.maybeNarrow(
           {
             kind: "dynKeyGet",
@@ -488,7 +488,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
           ? lowerer.coerceToExpected(rawKey, DYN)
           : lowerRecordPropertyKey(lowerer, rawKey, expr.argumentExpression);
       if (key.type.kind === "string" || key.type.kind === "dyn") {
-        const opt = hasOptionalChainGuard(expr.expression);
+        const opt = hasOptionalChainGuard(expr.expression, lowerer);
         return lowerer.maybeNarrow(
           {
             kind: "dynKeyGet",
@@ -565,7 +565,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
       if (
         receiver?.type.kind === "dyn" ||
         (receiver &&
-          isJsSourceFile(expr.getSourceFile()) &&
+          isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
           (receiver.type.kind === "union" || receiver.type.kind === "bytes") &&
           lowerer.dynConvertible(receiver.type))
       ) {
@@ -769,7 +769,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
   if (
     arr.type.kind === "array" &&
     (index.type.kind === "dyn" ||
-      (isJsSourceFile(expr.getSourceFile()) &&
+      (isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
         index.type.kind !== "f64" &&
         lowerer.dynConvertible(index.type)))
   ) {
@@ -822,7 +822,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
     arr.type.kind === "array" &&
     arr.kind === "arrIntrinsic" &&
     arr.method === "slice" &&
-    npmStaticPackageOfPath(expr.getSourceFile().fileName) !== null
+    npmStaticPackageOfPath(ts.getSourceFileOfNode(expr).fileName) !== null
   ) {
     const safe = lowerSafeIndexRead(lowerer, arr, index, locOf(expr));
     if (safe) return safe;
@@ -1306,7 +1306,16 @@ export function lowerRecordKeyRead(
   ) {
     declared = shape.fields[0]!.type;
   }
-  if (!declared && isJsSourceFile(expr.getSourceFile()) && recordKeyResultOk(lowerer, shape, DYN))
+  // Fields of different types answer a checked-dynamic value where nothing
+  // typed the read: in JavaScript, and where the checker types it 'any'
+  // (an object literal of a package's JavaScript indexed by a runtime key,
+  // such as a numeric enum's reverse mapping).
+  if (
+    !declared &&
+    (isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
+      (lowerer.typeOf(expr).flags & ts.TypeFlags.Any) !== 0) &&
+    recordKeyResultOk(lowerer, shape, DYN)
+  )
     declared = DYN;
   if (!declared) {
     lowerer.unsupported(
@@ -1425,7 +1434,7 @@ export function lowerElementCompoundParts(
   if (isKeyedFieldAccess(lowerer, target))
     return { expr: lowerFieldCompoundValue(lowerer, target, op, expr.right, loc), stmts: null };
   const checked = lowerer.lowerExpr(target.expression);
-  if (checked?.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile())) {
+  if (checked?.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
     const stmts: IrStmt[] = [];
     const save = (value: IrExpr, name: string): IrExpr => {
       const local = lowerer.declareHiddenLocal(name, value.type);
@@ -1516,7 +1525,7 @@ export function lowerElementCompoundParts(
   const rhs = lowerer.lowerExpr(expr.right);
   const numericRhs =
     rhs.type.kind === "dyn" &&
-    isJsSourceFile(expr.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
     receiver.type.kind === "bytes"
       ? { kind: "libCall" as const, fn: "dyn.toNumberCoerce" as const, args: [rhs], type: F64, loc }
       : lowerOptionalNumber(lowerer, rhs, loc);
@@ -1566,7 +1575,7 @@ export function lowerElementCompoundParts(
       type: F64,
       loc,
     };
-  } else if (valueType.kind === "dyn" && isJsSourceFile(expr.getSourceFile())) {
+  } else if (valueType.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
     const left = lowerer.coerceToExpected(oldRef(), DYN),
       right = lowerer.coerceToExpected(rhs, DYN);
     computed = dynCompoundValue(op, left, right, loc);
@@ -1700,7 +1709,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
         loc: locOf(expr),
       };
     if (
-      isJsSourceFile(expr.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       receiver.type.kind === "object" &&
       lowerer.dynConvertible(receiver.type)
     ) {
@@ -1724,7 +1733,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
       loc: locOf(expr),
     };
   }
-  if (checkedReceiver?.type.kind === "object" && isJsSourceFile(expr.getSourceFile())) {
+  if (checkedReceiver?.type.kind === "object" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
     const info = lowerer.classes.get(checkedReceiver.type.className);
     const key =
       recordKeyLiteralText(target.argumentExpression) ??
@@ -1739,7 +1748,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
     }
   }
   let receiverIr = lowerer.mapTypeOf(lowerer.typeOf(target.expression));
-  if (isJsSourceFile(expr.getSourceFile()) && checkedReceiver) {
+  if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && checkedReceiver) {
     const represented =
       checkedReceiver.type.kind === "union"
         ? lowerer.stripUndefinedArm(checkedReceiver.type)

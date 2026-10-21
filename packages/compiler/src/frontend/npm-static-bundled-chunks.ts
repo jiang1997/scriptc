@@ -24,6 +24,7 @@
 import * as ts from "./ts7/syntax.js";
 import { helperTokens } from "./helper-tokens.js";
 import { canonicalBuiltinModule } from "./builtin-modules.js";
+import { getTextOfNode, tokenStartOfNode } from "./ts7/node-functions.js";
 import { bundledShimForwarder, packageShimForBundledFile } from "./package-shims.js";
 import {
   builtinAliasOf,
@@ -372,16 +373,16 @@ function helperForm(
     const ret = stmts[0];
     if (stmts.length !== 1 || ret === undefined || !ts.isReturnStatement(ret) || !ret.expression)
       return null;
-    const actual = helperTokens(ret.expression.getText(sf));
+    const actual = helperTokens(getTextOfNode(ret.expression));
     if (actual === null) return null;
     // The own-key reader: esbuild's alias or the 0.11 spelling.
-    const keysRef = /\[\s*([A-Za-z_$][\w$]*(?:\.keys)?)\s*\(/.exec(ret.expression.getText(sf));
+    const keysRef = /\[\s*([A-Za-z_$][\w$]*(?:\.keys)?)\s*\(/.exec(getTextOfNode(ret.expression));
     const keys = keysRef?.[1];
     if (keys === undefined || (keys !== "Object.keys" && !ownNames(keys))) return null;
     return actual === template(KEYED_RETURN, cb, mod, keys) ? "keyed" : null;
   }
   if (ts.isArrowFunction(body) && body.parameters.nodes.length === 0 && !ts.isBlock(body.body)) {
-    const actual = helperTokens(body.body.getText(sf));
+    const actual = helperTokens(getTextOfNode(body.body));
     return actual !== null && actual === template(ARROW_BODY, cb, mod, "") ? "arrow" : null;
   }
   return null;
@@ -547,7 +548,7 @@ export function splitBundledChunks(
     const init = t.node.initializer;
     return (
       init !== undefined &&
-      helperTokens(init.getText(sf)) === helperTokens("Object.getOwnPropertyNames")
+      helperTokens(getTextOfNode(init)) === helperTokens("Object.getOwnPropertyNames")
     );
   };
   if (helperNames.length === 0) {
@@ -658,8 +659,8 @@ export function splitBundledChunks(
     const forwarded =
       forwarderSpec(chunk) ?? (shimOfChunk(chunk) !== null ? shimSpec(chunk) : null);
     callEdits.push({
-      start: call.getStart(sf),
-      end: call.getEnd(),
+      start: tokenStartOfNode(call),
+      end: call.end,
       text: aliased ?? `require(${JSON.stringify(forwarded ?? chunk.spec)})`,
     });
   }
@@ -687,7 +688,7 @@ export function splitBundledChunks(
   for (const chunk of chunks.values()) {
     if (!unaliased.has(chunk.name) && builtinAliasOfChunk(chunk) !== null) {
       // A chunk of a package that IS a builtin on Node 24 is that builtin.
-      bundleEdits.push({ start: chunk.stmt.getStart(sf), end: chunk.stmt.getEnd(), text: "" });
+      bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
       continue;
     }
     const shim = shimOfChunk(chunk);
@@ -699,12 +700,12 @@ export function splitBundledChunks(
         path: shimDeclPath(chunk),
         source: bundledShimForwarder(shimDeclPath(chunk), shim),
       });
-      bundleEdits.push({ start: chunk.stmt.getStart(sf), end: chunk.stmt.getEnd(), text: "" });
+      bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
       continue;
     }
     if (forwarderSpec(chunk) !== null) {
       // A chunk that only re-exports a builtin module is that module.
-      bundleEdits.push({ start: chunk.stmt.getStart(sf), end: chunk.stmt.getEnd(), text: "" });
+      bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
       continue;
     }
     const result = chunkSource(
@@ -720,7 +721,7 @@ export function splitBundledChunks(
     );
     if (typeof result !== "string") return result;
     out.push({ path: chunk.path, source: result });
-    bundleEdits.push({ start: chunk.stmt.getStart(sf), end: chunk.stmt.getEnd(), text: "" });
+    bundleEdits.push({ start: tokenStartOfNode(chunk.stmt), end: chunk.stmt.end, text: "" });
   }
   return { text: applyEdits(source, 0, source.length, bundleEdits), chunks: out };
 }
@@ -820,7 +821,11 @@ export function aliasReplacement(call: ts.CallExpression, alias: BuiltinAlias): 
   const text = aliasUseReplacement(call, alias);
   if (text === null) return null;
   const root = /^[A-Za-z_$][\w$]*/.exec(text)?.[0];
-  if (root !== undefined && root !== "require" && countDeclarations(call.getSourceFile(), root) > 0)
+  if (
+    root !== undefined &&
+    root !== "require" &&
+    countDeclarations(ts.getSourceFileOfNode(call), root) > 0
+  )
     return null;
   return text;
 }
@@ -1018,8 +1023,8 @@ function chunkSource(
         const p = r.parent;
         edits.push(
           ts.isShorthandPropertyAssignment(p)
-            ? { start: r.getStart(sf), end: r.getEnd(), text: `${name}: ${global}` }
-            : { start: r.getStart(sf), end: r.getEnd(), text: global },
+            ? { start: tokenStartOfNode(r), end: r.end, text: `${name}: ${global}` }
+            : { start: tokenStartOfNode(r), end: r.end, text: global },
         );
       }
       continue;
@@ -1063,15 +1068,17 @@ function chunkSource(
   }
   // Declaration order of the bundle: a helper reads only earlier ones.
   const ordered = [...copied].sort(
-    (a, b) => top.get(a)!.node.getStart(sf) - top.get(b)!.node.getStart(sf),
+    (a, b) => tokenStartOfNode(top.get(a)!.node) - tokenStartOfNode(top.get(b)!.node),
   );
   for (const name of ordered) {
     const node = top.get(name)!.node;
-    header.push(ts.isFunctionDeclaration(node) ? node.getText(sf) : `var ${node.getText(sf)};`);
+    header.push(
+      ts.isFunctionDeclaration(node) ? getTextOfNode(node) : `var ${getTextOfNode(node)};`,
+    );
   }
 
   const bodyStrict = strictPrologue(body.statements.nodes);
-  const text = applyEdits(sf.text, body.getStart(sf) + 1, body.getEnd() - 1, edits);
+  const text = applyEdits(sf.text, tokenStartOfNode(body) + 1, body.end - 1, edits);
   const prologue = bundleStrict || bodyStrict ? '"use strict";\n' : "";
   return prologue + (header.length > 0 ? header.join("\n") + "\n" : "") + text + "\n";
 }

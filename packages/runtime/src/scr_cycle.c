@@ -165,8 +165,9 @@ void scr_weak_dispose(void *object) {
 #include <stdlib.h>
 #include <string.h>
 
-/* Every heap object's first member is `size_t rc`. */
-#define SCR_RC(obj) (*(size_t *)(obj))
+/* Every heap object's first member is `size_t rc`; the collector works on
+ * its count (SCR_RC_COUNT). */
+#define SCR_RC(obj) SCR_RC_COUNT(obj)
 
 static void scr_cyc_oom(void) {
   scr_trap("scriptc: out of memory\n");
@@ -1171,7 +1172,7 @@ void scr_cyc_on_release(void *obj) {
 #define SCR_CYC_WALK_GEN(h) scr_cyc_gen(h)
 #endif
 #define SCR_CYC_SKIP(child)                     \
-  ((child) == NULL || SCR_RC(child) == SIZE_MAX \
+  ((child) == NULL || SCR_RC(child) == SCR_RC_IMMORTAL \
    || SCR_CYC_WALK_GEN(scr_cyc_hdr(child)) > scr_gen_limit)
 
 /* The walks are depth-first and recursive up to SCR_CYC_WALK_DEPTH, where
@@ -1190,8 +1191,10 @@ void scr_cyc_on_release(void *obj) {
     size_t end = arr->len < arr->cap ? arr->len : arr->cap;               \
     size_t filled = arr->filled < end ? arr->filled : end;                \
     for (size_t i = 0; i < filled; i++) visit((void *)(uintptr_t)arr->data[i], ctx); \
+    const uint8_t *states = scr_arr_states_end(arr);                      \
     for (size_t i = filled; i < end; i++)                                 \
-      if (arr->present[i] == SCR_ARR_VALUE) visit((void *)(uintptr_t)arr->data[i], ctx); \
+      if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE)                   \
+        visit((void *)(uintptr_t)arr->data[i], ctx);                      \
   }
 
 /* Visit every child of `obj` with VISIT, through ARRAY_WALK for a dense
@@ -1213,7 +1216,7 @@ SCR_CYC_ARRAY_WALK(scr_scan_array, scr_scan_visit)
 
 static inline __attribute__((always_inline)) void scr_mark_gray(void *obj, uintptr_t depth);
 static void scr_mg_visit(void *child, void *ctx) {
-  if (child == NULL || SCR_RC(child) == SIZE_MAX) return;
+  if (child == NULL || SCR_RC(child) == SCR_RC_IMMORTAL) return;
   ScrCycHdr *h = scr_cyc_hdr(child);
   if (SCR_CYC_WALK_GEN(h) > scr_gen_limit) {
     scr_cyc_push_work(&scr_xgen_edges, scr_gray_holder);
@@ -1372,7 +1375,7 @@ static SCR_TL size_t scr_xg_freed = 0;
 static void scr_xg_release(void *obj);
 static void scr_xg_child_visit(void *child, void *ctx) {
   (void)ctx;
-  if (child == NULL || SCR_RC(child) == SIZE_MAX) return;
+  if (child == NULL || SCR_RC(child) == SCR_RC_IMMORTAL) return;
   scr_xg_release(child);
 }
 
@@ -1597,7 +1600,7 @@ static void scr_yin_leave(ScrCycHdr *h, void *obj) {
 
 static void scr_yin_count_visit(void *child, void *ctx) {
   (void)ctx;
-  if (child == NULL || SCR_RC(child) == SIZE_MAX) return;
+  if (child == NULL || SCR_RC(child) == SCR_RC_IMMORTAL) return;
   ScrCycHdr *h = scr_cyc_hdr(child);
   if (scr_cyc_gen(h) == SCR_CYC_YOUNG) scr_yin_counts[scr_cyc_buf_index(h)]++;
 }
@@ -1605,7 +1608,7 @@ static void scr_yin_count_visit(void *child, void *ctx) {
 /* Marked young objects are GRAY (young objects are otherwise BLACK). */
 static void scr_yin_mark_visit(void *child, void *ctx) {
   (void)ctx;
-  if (child == NULL || SCR_RC(child) == SIZE_MAX) return;
+  if (child == NULL || SCR_RC(child) == SCR_RC_IMMORTAL) return;
   ScrCycHdr *h = scr_cyc_hdr(child);
   if (scr_cyc_gen(h) != SCR_CYC_YOUNG || scr_cyc_color(h) == SCR_CYC_GRAY) return;
   scr_cyc_set_color(h, SCR_CYC_GRAY);
@@ -1617,7 +1620,7 @@ static void scr_yin_mark_visit(void *child, void *ctx) {
  * the count until every teardown has run. */
 static void scr_yin_dead_visit(void *child, void *ctx) {
   (void)ctx;
-  if (child == NULL || SCR_RC(child) == SIZE_MAX) return;
+  if (child == NULL || SCR_RC(child) == SCR_RC_IMMORTAL) return;
   ScrCycHdr *h = scr_cyc_hdr(child);
   if (scr_cyc_gen(h) == SCR_CYC_YOUNG && scr_cyc_color(h) != SCR_CYC_GRAY) return;
   scr_yin_push(&scr_yin_xrel, child);

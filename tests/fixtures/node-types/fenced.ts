@@ -97,6 +97,12 @@ void callbackified;
  * getAuthTag(), and setAuthTag(); the stream.Transform members are fenced. */
 const cipherStream = createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
 cipherStream.on("data", () => {});
+/* ECDH on a curve Node knows but the runtime does not implement, and
+ * computeSecret(view, encoding), which answers a Buffer where @types/node
+ * declares a string. */
+import { createECDH } from "node:crypto";
+createECDH("sect163k1");
+createECDH("prime256v1").computeSecret(Buffer.alloc(65), "hex");
 /* WebCrypto beyond the HMAC slice: @types/node declares the whole
  * SubtleCrypto surface, and the methods outside importKey, sign, verify
  * and digest fence by name. */

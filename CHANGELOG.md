@@ -6,6 +6,73 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.4.0
+
+### Breaking changes
+
+- **tsc-ts is the default TypeScript 7 checker** on Linux and macOS. scriptc installs it with the compiler (`tsc-ts` 0.0.5 and its platform package for the host). Programs get the same diagnostics and generated code as with tsgo, and compiling takes less checker memory. `SCRIPTC_CHECKER=tsgo` selects tsgo, which stays the default on Windows. A build cache entry made with one checker isn't reused with the other.
+- **`--npm-static=auto`, the default, compiles more packages:** packages typed by their DefinitelyTyped twin (`@types/<name>`), and untyped dependencies that another package's JavaScript imports. A program whose dependencies were refused before can now compile them, and a twin whose declarations disagree with the package's JavaScript fails the build at the use. Use `--npm-static <pkg,…>` to name the packages to compile.
+- **Program type errors are reported as type errors** instead of as refusals of the npm package that contains them.
+
+### Highlights
+
+- **WebAssembly:** builds translate every WebAssembly module whose bytes they can see into native code, and `WebAssembly.compile`, `instantiate`, `validate`, `new WebAssembly.Module` and `new WebAssembly.Instance` run them. There is no interpreter. `WebAssembly.Memory`, `Table` and `Global`, `Module.imports`, `Module.exports` and `Module.customSections`, and function references from tables are supported, and modules can be sent to workers. `scriptc coverage` lists the modules a program loads, with `--wasm <file.wasm>` for modules loaded from paths the sources don't spell out.
+- **Async functions that suspend only at their `await`s run as stackless coroutines** instead of on fibers with their own stack, so a suspended call keeps only the values live across its awaits.
+- **Discriminated unions of records are the record pointer itself,** with no box around each value.
+- **The dynamic tier computes with NaN-boxed values:** numbers, booleans, `undefined` and `null` between operators no longer allocate. `scriptc coverage --explain-dynamic` lists the functions that run in the dynamic tier and why, and `--tier=static-only` keeps a program fully static.
+- **npm packages:** esbuild's bundled CommonJS chunks, CommonJS cycles and lazily initialized ES modules compile statically, as do classic CommonJS packages (late and JSON `require`s, require cycles), class hierarchies across a package's modules, and the packages unblocked by type-only imports, `@types` packages, `punycode` and `constants`. chalk 5 and the jose root entry compile.
+
+### Features
+
+- **`@scriptc/experimental` adds `ThreadSlots`,** one value per key and thread on shared objects, read without a lock.
+- **`node:test` adds `mock.timers`, `getTestContext`, `t.assert.snapshot` and `t.assert.fileSnapshot`,** the `TestContext` values `filePath`, `attempt`, `passed`, `workerId` and `tags`, module-level `before` and `after` hooks, the `SuiteContext` and hook contexts, and unnamed `test` and `describe` calls. A timed-out test cancels its running subtests.
+- **`node:worker_threads` adds `BroadcastChannel`,** `setEnvironmentData`/`getEnvironmentData`, `receiveMessageOnPort`, `markAsUntransferable`, `markAsUncloneable`, `threadName`, `resourceLimits.stackSizeMb`, the `stdout`/`stderr`/`stdin` options and streams, and `worker[Symbol.asyncDispose]`.
+- **`node:net` adds `SocketAddress` and `BlockList`,** and `net.connect` resolves host names.
+- **`node:http` pools keep-alive sockets in `Agent`s,** uses `globalAgent` for default requests, reads `http.request` options at run time, and speaks HTTP over Unix domain sockets. `fetch` tunnels through `HTTP_PROXY`/`HTTPS_PROXY` with `CONNECT`.
+- **`DisposableStack`, `Float16Array`, `Error.isError`, `Promise.try` and the regular expression `v` flag** are supported.
+- **Iterator helpers** run on generators, `Map` and `Set` iterators, string and typed array iterators, `Iterator.from` and untyped iterators.
+- **`Object.groupBy` and `Map.groupBy`** group Sets, Maps and generators.
+- **`v8`, `stream/web`, `dns/promises`, `EvalError` and `graceful-fs`** are available, and `Temporal` is reported as absent, as in Node 24.
+- **`util.promisify`** works over the crypto callback functions, dns lookups, `child_process.exec`'s callback forms and callback-style functions.
+- **`events.once`** takes an `AbortSignal` and works over streams.
+- **`AsyncLocalStorage` stores** carry into timer, immediate, `process.nextTick` and microtask callbacks.
+- **JavaScript classes compile like TypeScript classes** when their layout or JSDoc types allow it.
+- **Classes that extend `EventEmitter` or a stream class can be used as values,** and so can `EventEmitter`, the stream classes and the error classes themselves. Constructor functions can inherit from them.
+- **Class instances can be frozen and their fields redefined.**
+- **Method overrides may differ from the method they override** in parameter and result types, as long as each value converts.
+- **Library profiles add the `cstring` class.**
+- **An experimental young-object nursery** for compiled classes and records is available at compile time with `SCRIPTC_YOUNG_NURSERY=1`.
+
+### Performance
+
+- **Dense arrays have head room,** so `shift`, `splice(0, n)` and `unshift` runs cost amortized O(1), and `pop` of a packed array is inline.
+- **Index loops over arrays and typed arrays are versioned on one bounds guard,** with stable lengths proven and typed-array memory tagged for alias analysis.
+- **Retain and release pairs are removed** through private-array precision and last-use moves, borrowed string slices go into stack buffers, and records, tuples and spread updates stay in frame storage.
+- **SHA-384 and SHA-512 use AVX2, AVX-512VL or the arm64 SHA-512 instructions,** and MD5's block function is unrolled.
+- **String character tests, optional-string `switch`es, `String.fromCharCode` and long-string `length` are faster,** and `Buffer.write` widens ASCII to UTF-16 sixteen bytes per step.
+- **The cycle collector walks dead cycles once,** frees large dead cycle sets in address order and no longer creates self-capture cycles on the release fast path.
+- **Workers return their memory** while the event loop waits and when they finish, and default-region memory is committed as it is used.
+- **Lifetime regions carry across `await`,** and freed region chunks are reused.
+- **Large closure environments compile in linear time,** and two frontend scans no longer repeat.
+- **Programs keep stack frames only when they can read `stack`.** Before, a computed-key read on a dynamic value kept frames in every function; tsc-ts's own check is back to 0.3.6's speed.
+- **The child-process runtime unit links only into programs that spawn.**
+
+### Fixes
+
+- **Node 24 parity:** `util.format`, `util.types` and `util.inspect`, `URLSearchParams`, `querystring` (null-prototype results), `string_decoder`, `os`, `events` and `timers/promises` match Node 24. Class instances, iterators, iterator helper objects and holes in arrays print as Node prints them, and `%d`/`%i` format dynamic arguments as Node does.
+- **Silent wrong output is fixed** for object identity, `Object.prototype` values, `Date.parse` (V8's date grammar), stored builtins, constructor returns, `arr && arr[0]`, ES5 class names, builtin function values, uninitialized `let` writes, module-export `this` and `1 ** Infinity`.
+- **Strings compare in UTF-16 code-unit order.**
+- **Dates format with Node's local time zone names,** convert to local time once for their local getters, and follow `TZ` changes. `Date.prototype.toJSON` gives `null` for invalid dates.
+- **Errors:** thrown Maps, Sets, typed arrays, functions and arrays keep their identity. Errors list their own name where they were created, errors held as `any` have their own `stack` accessor and convert with `Error.prototype.toString`, and errors that cross into dynamic code carry Node's error properties.
+- **`matchAll` rows and `exec` results have `index`, `input` and `groups`,** and named groups keep their null prototype through optional chains.
+- **Unhandled rejections are reported after each timer and immediate callback,** and async generator completions settle on Node's microtask turns.
+- **Missing `Record` and index-signature keys read as `undefined`,** and generic functions that read a missing element return `undefined`.
+- **Sockets:** `'data'` listeners get strings after `setEncoding`, socket and stream chunks are Buffers, and an idle pooled http socket that receives data is destroyed.
+- **Diagnostic code frames window long source lines.**
+- **npm crashes, internal errors and false TDZ errors** found while compiling popular packages are fixed.
+
+<!-- release:end -->
+
 ## 0.3.6
 
 ### Features
@@ -37,8 +104,6 @@ All notable changes to scriptc will be documented in this file.
 - **fs paths with a null byte are refused as Node does.**
 - **`Object.setPrototypeOf` returns primitive receivers,** and `createHmac` without a key throws Node's error.
 - **Boxed records that hold an async function link the dynamic promise unit.**
-
-<!-- release:end -->
 
 ## 0.3.5
 

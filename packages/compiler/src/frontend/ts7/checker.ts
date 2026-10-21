@@ -35,7 +35,7 @@ import { CheckerCache } from "./checker-cache.js";
  *    repeats an IPC request. All paths are verified against the raw checker
  *    and against 5.9.3 by the adapter's suites. */
 
-import type { Node, SourceFile } from "./ast-types.js";
+import type { Identifier, Node, SourceFile } from "./ast-types.js";
 import type {
   IndexInfo,
   InterfaceType,
@@ -46,9 +46,10 @@ import type {
   TypeReference,
 } from "./semantic-types.js";
 import type { SemanticChecker as Checker } from "./semantic-checker.js";
-import type { SemanticProject as Project } from "./semantic-model.js";
+import { symbolNameOf, type SemanticProject as Project } from "./semantic-model.js";
 import { isTypeNode, walkPreorder } from "./ast.js";
-import { SignatureKind, SyntaxKind, TypeFlags } from "./enums.js";
+import { SignatureKind, SyntaxKind, TypeFlags, type SymbolFlags } from "./enums.js";
+import { getSourceFileOfNode } from "./node-functions.js";
 
 /** Array-overload chunk size: large enough that per-request overhead
  * vanishes, small enough to keep any single JSON-RPC payload modest. */
@@ -259,6 +260,14 @@ export class CheckerFacade {
     return sigs;
   }
 
+  /** The call or construct signatures of `type`, as getCallSignatures and getConstructSignatures
+   * answer them. */
+  getSignaturesOfType(type: Type, kind: SignatureKind): readonly Signature[] {
+    return kind === SignatureKind.Call
+      ? this.getCallSignatures(type)
+      : this.getConstructSignatures(type);
+  }
+
   /** 5.9.3's type.getProperty(name). */
   getPropertyOfType(type: Type, name: string): Ts7Symbol | undefined {
     this.ensureActive();
@@ -370,7 +379,7 @@ export class CheckerFacade {
 
   private markManaged(roots: readonly Node[]): void {
     for (const root of roots) {
-      const sf = root.getSourceFile();
+      const sf = getSourceFileOfNode(root);
       this.cache.managedTypes.add(sf);
       this.cache.managedSymbols.add(sf);
     }
@@ -447,7 +456,7 @@ export class CheckerFacade {
 
   private autoPrefetch(node: Node, kind: "types" | "symbols"): void {
     if (this.options.autoPrefetch === false) return;
-    const sf = node.getSourceFile();
+    const sf = getSourceFileOfNode(node);
     // A referenced declaration rarely needs the rest of its library's
     // metadata. Keep those queries direct; explicit whole-file prefetch
     // remains available to consumers that do need the complete surface.
@@ -786,6 +795,38 @@ export class CheckerFacade {
     return this.raw.getTypeOfSymbolAtLocation(symbol, location);
   }
 
+  resolveName(
+    name: string,
+    meaning: SymbolFlags,
+    location?: Node,
+    excludeGlobals?: boolean,
+  ): Ts7Symbol | undefined {
+    this.ensureActive();
+    return this.raw.resolveName(name, meaning, location, excludeGlobals);
+  }
+
+  /** The value `node` names where it is: resolveName of its text with SymbolFlags.Value and
+   * SymbolFlags.ExportValue. */
+  getResolvedSymbol(node: Identifier): Ts7Symbol | undefined {
+    this.ensureActive();
+    return this.raw.getResolvedSymbol(node);
+  }
+
+  getAnyType(): Type {
+    this.ensureActive();
+    return this.anyType();
+  }
+
+  getNeverType(): Type {
+    this.ensureActive();
+    return this.intrinsic("never", () => this.raw.getNeverType());
+  }
+
+  getBigIntType(): Type {
+    this.ensureActive();
+    return this.intrinsic("bigint", () => this.raw.getBigIntType());
+  }
+
   getUnknownType(): Type {
     this.ensureActive();
     if (this.cache.unknownType === null) this.cache.unknownType = this.raw.getUnknownType();
@@ -851,7 +892,7 @@ export class CheckerFacade {
    * programs see the es2025 lib's Promise (the ambient world forces it). */
   private promiseArgumentOf(type: Type): Type | null {
     if (!type.isTypeReference()) return null;
-    const name = type.getTarget()?.getSymbol()?.name;
+    const name = symbolNameOf(type.getTarget()?.getSymbol());
     if (name !== "Promise" && name !== "PromiseLike") return null;
     const args = this.getTypeArguments(type);
     return args[0] ?? null;

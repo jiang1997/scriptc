@@ -290,6 +290,9 @@ function generalChildStdioType(
   const className = name === "stdin" ? "%Writable" : "%Readable";
   const mapped = lowerer.mapTypeOf(lowerer.typeOf(expr));
   if (!mapped) return null;
+  // Checked-dynamic stream slots: the declared stream type maps to dyn
+  // (dyn-streams.ts); the read still produces the bridged stream.
+  if (lowerer.dynNodeStreams && mapped.kind === "dyn") return { kind: "object", className };
   const arms =
     mapped.kind === "union" ? (lowerer.unions.get(mapped.unionId)?.arms ?? []) : [mapped];
   return arms.some((arm) => arm.kind === "object" && arm.className === className)

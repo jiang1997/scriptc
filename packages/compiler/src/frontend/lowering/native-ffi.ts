@@ -393,7 +393,7 @@ export function lowerFfiCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr 
           (decl) =>
             ts.isFunctionDeclaration(decl) &&
             decl.body === undefined &&
-            libraryCallbackOwnsFile(lowerer, decl.getSourceFile()),
+            libraryCallbackOwnsFile(lowerer, ts.getSourceFileOfNode(decl)),
         );
       if (callbackShaped) {
         lowerer.pushDiag(
@@ -429,13 +429,13 @@ export function lowerFfiCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr 
       if (lowerer.libraryCallbacks) {
         const declarations = symbol.declarations;
         const programDeclarations = declarations.filter((decl) =>
-          libraryCallbackOwnsFile(lowerer, decl.getSourceFile()),
+          libraryCallbackOwnsFile(lowerer, ts.getSourceFileOfNode(decl)),
         );
         const programAmbient =
           programDeclarations.length > 0 &&
           programDeclarations.every(
             (decl) =>
-              decl.getSourceFile().isDeclarationFile ||
+              ts.getSourceFileOfNode(decl).isDeclarationFile ||
               (ts.getCombinedModifierFlags(decl as ts.Declaration) & ts.ModifierFlags.Ambient) !==
                 0,
           );

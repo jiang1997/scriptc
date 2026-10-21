@@ -27,9 +27,10 @@ const ASSERTION_ERROR_PROPERTIES: ReadonlySet<string> = new Set([
 export function isExecExceptionType(lowerer: Lowerer, t: ts.Type): boolean {
   const sym = t.getSymbol();
   return (
-    sym?.name === "ExecException" &&
+    sym !== undefined &&
+    ts.symbolName(sym) === "ExecException" &&
     sym.declarations.some(
-      (d) => ts.isInterfaceDeclaration(d) && lowerer.isStdlibFile(d.getSourceFile()),
+      (d) => ts.isInterfaceDeclaration(d) && lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
     )
   );
 }

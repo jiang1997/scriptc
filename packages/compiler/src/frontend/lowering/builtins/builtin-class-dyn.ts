@@ -111,8 +111,18 @@ export function builtinClassDynValueOf(lowerer: Lowerer, node: ts.Expression): I
   };
 }
 
+/** EventEmitter and the legacy Stream are dyn.builtinClass; the stream
+ * classes, which carry native stream state for constructor functions, are
+ * dyn.builtinStreamClass, so only programs that use them link the stream
+ * half. */
 export function builtinClassValue(kind: number, loc: SrcLoc): IrExpr {
-  return { kind: "libCall", fn: "dyn.builtinClass", args: [numLit(kind, loc)], type: DYN, loc };
+  return {
+    kind: "libCall",
+    fn: kind <= 1 ? "dyn.builtinClass" : "dyn.builtinStreamClass",
+    args: [numLit(kind, loc)],
+    type: DYN,
+    loc,
+  };
 }
 
 /** `Base.call(this, …)` / `Base.apply(this, args)` on one of those class
@@ -130,7 +140,7 @@ export function lowerBuiltinClassCall(lowerer: Lowerer, call: ts.CallExpression)
     kind: "dynInvoke",
     recv: receiver,
     method,
-    calleeName: callee.getText(),
+    calleeName: ts.getTextOfNode(callee),
     args: call.arguments.nodes.map((arg) => lowerer.lowerExprExpecting(arg, DYN)),
     type: DYN,
     loc,

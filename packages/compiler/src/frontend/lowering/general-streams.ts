@@ -88,9 +88,11 @@ export function stdioIntoGeneralStream(
 ): IrExpr | null {
   if (!lowerer.generalNodeStreams || expr.type.kind !== "procStream") return null;
   const writable: IrType = { kind: "object", className: "%Writable" };
+  // Checked-dynamic stream slots (dyn-streams.ts) hold the Writable boxed.
   const accepts =
     (expected.kind === "object" && expected.className === "%Writable") ||
-    (expected.kind === "union" && lowerer.armTag(expected.unionId, writable) >= 0);
+    (expected.kind === "union" && lowerer.armTag(expected.unionId, writable) >= 0) ||
+    (expected.kind === "dyn" && lowerer.dynNodeStreams);
   if (!accepts) return null;
   return {
     kind: "libCall",
@@ -111,4 +113,24 @@ export function requestGeneralStreamSurface(lowerer: Lowerer, receiver: ts.Expre
   const type = lowerer.checker.getNonNullableType(lowerer.typeOf(receiver));
   if (isGeneralNodeStreamInterface(type, lowerer.typeCtx))
     lowerer.requiresGeneralNodeStreams = true;
+}
+
+/** Under the general representation, an untyped value reaching a runtime
+ * stream class slot (the checked unwrap) or an untyped pipe/pipeline
+ * stage: the program lowers again with checked-dynamic stream slots
+ * (dyn-streams.ts), where NodeJS.ReadableStream / NodeJS.WritableStream
+ * hold JavaScript stream objects too. */
+export function noteUntypedStreamFlow(lowerer: Lowerer, expected: IrType | null): void {
+  if (lowerer.dynNodeStreams) return;
+  if (!lowerer.generalNodeStreams) {
+    // An untyped pipe or pipeline stage needs both: the next pass lowers
+    // with the general representation and checked-dynamic slots at once.
+    if (expected === null) {
+      lowerer.requiresGeneralNodeStreams = true;
+      lowerer.requiresDynNodeStreams = true;
+    }
+    return;
+  }
+  if (expected === null || containsPart(lowerer, expected, (p) => isGeneralStream(lowerer, p)))
+    lowerer.requiresDynNodeStreams = true;
 }

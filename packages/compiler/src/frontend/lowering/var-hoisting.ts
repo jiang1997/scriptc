@@ -97,7 +97,7 @@ function hoistingScopeOf(node: ts.Node): Scope {
     )
       return p;
   }
-  return node.getSourceFile();
+  return ts.getSourceFileOfNode(node);
 }
 
 function statementsOf(scope: Scope): readonly ts.Statement[] {
@@ -221,7 +221,7 @@ class ScopeAnalysis {
    * the statement at index `settle`. `read`: `ref` reads the binding
    * itself, so tsc vouches for one in the scope's own code. */
   settles(scope: Scope, settle: number, ref: ts.Identifier, read = true): boolean {
-    if (ref.getSourceFile() !== this.sf) return true;
+    if (ts.getSourceFileOfNode(ref) !== this.sf) return true;
     const statements = statementsOf(scope);
     let deferred: ts.Node | null = null;
     let top: ts.Node | null = null;

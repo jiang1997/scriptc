@@ -51,6 +51,7 @@ const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   ["dns.", "the node:dns surface"],
   ["tls.", "the node:tls surface"],
   ["crypto.cipherNew", "crypto.createCipheriv and createDecipheriv"],
+  ["crypto.ecdh", "crypto.createECDH and ECDH.convertKey"],
   ["webcrypto.", "WebCrypto (crypto.subtle)"],
   ["fs.watch", "fs.watch"],
   ["watcher.", "fs.watch"],

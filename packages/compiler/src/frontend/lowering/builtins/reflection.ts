@@ -36,6 +36,33 @@ export function lowerReflectCall(
   }
   if (call.questionDotToken) return null;
   const reflectMember = lowerer.stdlibGlobalMember(access, "Reflect");
+  // Reflect.getOwnPropertyDescriptor and Reflect.defineProperty over
+  // checked objects (execa's Promise mixin): the Object operations, with
+  // defineProperty answering true. A non-object target throws the Object
+  // operation's TypeError.
+  if (
+    (reflectMember === "getOwnPropertyDescriptor" && call.arguments.nodes.length === 2) ||
+    (reflectMember === "defineProperty" && call.arguments.nodes.length === 3)
+  ) {
+    if (call.arguments.nodes.some(ts.isSpreadElement)) return null;
+    const loc = locOf(call);
+    const args = call.arguments.nodes.map((arg) => lowerer.lowerExprExpecting(arg, DYN));
+    if (reflectMember === "getOwnPropertyDescriptor")
+      return { kind: "libCall", fn: "dyn.getOwnPropertyDescriptor", args, type: DYN, loc };
+    return {
+      kind: "seqExpr",
+      stmts: [
+        {
+          kind: "exprStmt",
+          expr: { kind: "libCall", fn: "dyn.defineProperty", args, type: DYN, loc },
+          loc,
+        },
+      ],
+      result: { kind: "boolLit", value: true, type: BOOL, loc },
+      type: BOOL,
+      loc,
+    };
+  }
   if (reflectMember === "get" || reflectMember === "set") {
     const required = reflectMember === "get" ? 2 : 3;
     if (

@@ -1,6 +1,6 @@
 /* Runtime performance A/B harness for compiled programs.
  *
- * Builds every workload in benchmarks/runtime/workloads.json with one or two
+ * Builds every workload in benchmarks/runtime/workloads/ with one or two
  * scriptc checkouts, verifies that each executable's output is identical to
  * Node's (stdout, stderr, exit status), then times interleaved launches and reports
  * per-workload medians with bootstrap confidence intervals for the
@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { readWorkloads, workloadCategory } from "../benchmarks/runtime/workloads.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const suiteRoot = join(repoRoot, "benchmarks/runtime");
@@ -62,7 +63,7 @@ evenly over those layouts, so verdicts cover code-placement luck instead of one
 placement.
 Use it for small codegen changes (e.g. --layouts=4 --runs=16).
 
-Workload names are listed in benchmarks/runtime/workloads.json; for example
+Workload names are the file names in benchmarks/runtime/workloads/*.json; for example
 --workloads=cli-config,http-api runs only the startup and server workloads.
 
 --baseline-optimization/--candidate-optimization pick each contender's
@@ -88,13 +89,13 @@ assert.ok(
   "--layouts needs macOS or Linux",
 );
 
-const manifest = JSON.parse(readFileSync(join(suiteRoot, "workloads.json"), "utf8"));
+const allWorkloads = readWorkloads(suiteRoot);
 const selected = values.workloads ? new Set(values.workloads.split(",")) : null;
-const workloads = manifest.workloads.filter((w) => selected === null || selected.has(w.name));
+const workloads = allWorkloads.filter((w) => selected === null || selected.has(w.name));
 if (selected) {
   for (const name of selected)
     assert.ok(
-      manifest.workloads.some((w) => w.name === name),
+      allWorkloads.some((w) => w.name === name),
       `unknown workload ${name}`,
     );
 }
@@ -488,8 +489,6 @@ const report = {
 /* Workload kinds: "process" (default) times whole launches; `launches` > 1
  * makes each sample the median of that many sequential launches (startup-bound
  * CLIs). "server" times the measured phase of a load-client session. */
-const categoryOf = (w) =>
-  w.kind === "server" ? "server" : (w.launches ?? 1) > 1 ? "startup" : "cpu";
 for (const w of workloads) {
   assert.ok((w.kind ?? "process") === "process" || w.kind === "server", `${w.name}: unknown kind`);
   if (w.kind === "server") assert.ok(w.client?.script, `${w.name}: server workloads need a client`);
@@ -569,7 +568,7 @@ try {
     const entry = { name: w.name, args, results: {} };
     if (w.kind === "server") entry.kind = "server";
     if ((w.launches ?? 1) > 1) entry.launches = w.launches;
-    entry.category = categoryOf(w);
+    entry.category = workloadCategory(w);
     const oracleFailure = server ? serverFailure(oracle) : oracle.timedOut ? "timed out" : "";
     if (oracle.status !== 0 || oracleFailure) {
       entry.error = `node oracle failed (status ${oracle.status}${oracleFailure ? `, ${oracleFailure}` : ""}): ${oracle.stderr.slice(0, 2000)}`;

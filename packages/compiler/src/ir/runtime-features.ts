@@ -9,97 +9,118 @@ import {
 } from "./ir.js";
 import { everyModuleNode } from "./traverse.js";
 
+/** The fixed-width Buffer read/write method names (both "UInt" and "Uint"
+ * spellings) a checked-dynamic method call routes to scr_bytes_dyn.c. */
+export const DYN_BUFFER_NUM_METHODS: ReadonlySet<string> = new Set(
+  ["read", "write"].flatMap((rw) => [
+    ...["UInt", "Uint"].flatMap((u) =>
+      ["8", "16LE", "16BE", "32LE", "32BE"].map((w) => `${rw}${u}${w}`),
+    ),
+    ...[
+      "Int8",
+      "Int16LE",
+      "Int16BE",
+      "Int32LE",
+      "Int32BE",
+      "FloatLE",
+      "FloatBE",
+      "DoubleLE",
+      "DoubleBE",
+    ].map((n) => `${rw}${n}`),
+  ]),
+);
+
 const DYN_ASYNC_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // DEP0040 rides the dyn-async unit's warning machinery.
-  "punycode.warn",
-  "fs.callbackValue",
-  "fs.callbackCall",
-  "fs.callbackGlob",
   "async.awaitDyn",
-  "timers.immediatePromise",
   "crypto.native",
   "dyn.promiseAll",
   "dyn.promiseAllSettled",
   "dyn.promiseAny",
   "dyn.promiseResolve",
-  "process.onUncaughtException",
-  "process.offUncaughtException",
-  "process.onUnhandledRejection",
-  "process.offUnhandledRejection",
-  "process.onRejectionHandled",
-  "process.offRejectionHandled",
-  "process.onWarning",
-  "process.offWarning",
+  "fs.callbackCall",
+  "fs.callbackGlob",
+  "fs.callbackValue",
+  "process.deprecationFlag",
   "process.emitWarning",
   "process.emitWarningText",
-  "process.deprecationFlag",
+  "process.offRejectionHandled",
+  "process.offUncaughtException",
+  "process.offUnhandledRejection",
+  "process.offWarning",
+  "process.onRejectionHandled",
+  "process.onUncaughtException",
+  "process.onUnhandledRejection",
+  "process.onWarning",
   "process.setDeprecationFlag",
   "process.setEmitWarning",
+  "punycode.warn",
+  "timers.immediatePromise",
   // The performance timeline (scr_perf.c, linked with this unit for its
   // MaxPerformanceEntryBufferExceededWarning).
-  "perf.mark",
-  "perf.measure",
-  "perf.entries",
   "perf.clearMarks",
   "perf.clearMeasures",
-  "perf.entryName",
-  "perf.entryType",
-  "perf.entryStart",
-  "perf.entryDuration",
+  "perf.entries",
   "perf.entryDetail",
+  "perf.entryDuration",
   "perf.entryKeep",
+  "perf.entryName",
   "perf.entryRef",
+  "perf.entryStart",
+  "perf.entryType",
+  "perf.mark",
+  "perf.measure",
   // Blob and File (scr_blob.c, linked with this unit, which boxes their
   // reads as dyn promises).
-  "blob.new",
+  "als.disable",
+  "als.enterWith",
+  "als.exitRun",
+  "als.get",
+  "als.new",
+  "als.run",
+  "blob.arrayBuffer",
+  "blob.bytes",
   "blob.fileNew",
+  "blob.is",
+  "blob.new",
   "blob.slice",
   "blob.text",
-  "blob.bytes",
-  "blob.arrayBuffer",
-  "blob.is",
-  "util.styleText",
-  "util.inherits",
-  "util.deprecate",
+  "dc.chanBindStore",
+  "dc.chanRunStores",
+  "dc.chanUnbindStore",
   "util.callbackify",
   "util.debuglog",
-  "als.new",
-  "als.get",
-  "als.run",
-  "als.exitRun",
-  "als.enterWith",
-  "als.disable",
-  "dc.chanBindStore",
-  "dc.chanUnbindStore",
-  "dc.chanRunStores",
+  "util.deprecate",
+  "util.inherits",
+  "util.styleText",
 ]);
 
 /** The libCalls that enter AsyncLocalStorage stores (RuntimeFeatures
  * asyncContext). */
 const ASYNC_CONTEXT_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "als.run",
-  "als.exitRun",
   "als.enterWith",
+  "als.exitRun",
+  "als.run",
   "dc.chanBindStore",
   "dc.chanRunStores",
   // getTestContext() reads the test runner's entry in the same snapshot.
-  "test.hasContext",
   "test.context",
+  "test.hasContext",
 ]);
 
 const LEGACY_URL_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "url.legacyParse",
-  "url.legacyFormat",
-  "url.legacyResolve",
   "url.domainToASCII",
   "url.domainToUnicode",
+  "url.legacyFormat",
+  "url.legacyParse",
+  "url.legacyResolve",
 ]);
 
 const UTIL_CALLABLE_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "util.inherits",
-  "util.deprecate",
   "util.callbackify",
   "util.debuglog",
+  "util.deprecate",
+  "util.inherits",
 ]);
 
 /** Entry points that link the regex unit: the regex and glob matchers (fs.glob's walk compiles its patterns with the glob matcher), and readline's terminal unit (scr_readline_tty.c), which measures with the regex unit's stripVTControlCharacters. */
@@ -130,6 +151,7 @@ const LEGACY_TEXT_DECODER_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
 
 /** Signal-taking readline, stream and timers/promises entry points, which register abort listeners. */
 const ABORT_SIGNAL_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "events.onceSignal",
   "http.clientSignal",
   "http.requestDyn",
   "http.requestDynCb",
@@ -166,10 +188,14 @@ const STREAM_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.addAbortSignalFn",
   "stream.destroy",
   "stream.destroyErr",
+  "stream.dynNative",
+  "stream.dynNativePipe",
   "stream.errored",
+  "stream.pipeDyn",
   "stream.prop",
   "stream.stdioWritable",
   "stream.unboxDyn",
+  "stream.unpipeDyn",
   "stream.workerStdio",
 ]);
 
@@ -215,6 +241,10 @@ const DYN_INVOKE_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.globalConstructor",
   "dyn.objCreateWithProperties",
   "dyn.objectTag",
+  "stream.dynNative",
+  "stream.dynNativePipe",
+  "stream.pipeDyn",
+  "stream.unpipeDyn",
 ]);
 
 /** Member names whose constant-key dynamic reads answer the inherited Object.prototype member through the dyn-invoke unit. Mirrors expr-dynamic.ts INHERITED_OBJECT_MEMBERS (the IR layer does not import the backend). */
@@ -248,7 +278,9 @@ const CHILD_PROCESS_LIB_PREFIXES: readonly string[] = ["child.", "cp.", "spawnRe
  * emitter unit, so each of them links all five. */
 const BUILTIN_CLASS_LIB_FNS: readonly IrLibFn[] = [
   "dyn.builtinClass",
+  // the stream classes, through scr_dyn_builtin_stream.c
   "dyn.builtinInstanceOf",
+  "dyn.builtinStreamClass",
   "dyn.functionInstanceOf",
 ];
 
@@ -376,64 +408,64 @@ function boxesPromise(t: IrType, tables: TypeTables, seen: Set<string>): boolean
 /** The libCall fns served by the OPTIONAL events unit (scr_events.c):
  * process signal/exit listeners and the piped-stdin surface. */
 const PROCESS_EVENT_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "process.stdio",
-  "process.onSignal",
+  "process.offExit",
   "process.offSignal",
   "process.onExit",
-  "process.offExit",
+  "process.onSignal",
+  "process.stdio",
+  "stdin.nextChunk",
   "stdin.onData",
   "stdin.onEnd",
   "stdin.onError",
-  "stdin.nextChunk",
   // node:readline rides the stdin unit (scr_readline.c links beside
   // scr_events.c under the same gate).
+  "rl.checkCompleter",
+  "rl.checkOptions",
+  "rl.close",
   "rl.create",
   "rl.createSignal",
-  "rl.question",
-  "rl.questionAsync",
-  "rl.questionAsyncSignal",
-  "rl.questionDyn",
-  "rl.questionAsyncDyn",
-  "rl.questionAsyncSignalDyn",
-  "rl.close",
-  "rl.pause",
-  "rl.resume",
-  "rl.prompt",
-  "rl.promptWith",
-  "rl.setPrompt",
-  "rl.setPromptDyn",
-  "rl.getPrompt",
-  "rl.write",
-  "rl.writeKey",
-  "rl.on",
-  "rl.iterOpen",
-  "rl.iterNext",
-  "rl.iterReturn",
-  "rl.checkOptions",
-  "rl.checkCompleter",
-  "rl.setOptions",
-  "rl.setHistory",
-  "rl.history",
-  "rl.numProp",
-  "rl.terminal",
-  "rl.line",
-  "rl.isTerminal",
-  "rl.isPromises",
   "rl.cursor",
-  "rl.seq",
-  "rl.moves",
   "rl.cursorPos",
+  "rl.getPrompt",
+  "rl.history",
+  "rl.isPromises",
+  "rl.isTerminal",
+  "rl.iterNext",
+  "rl.iterOpen",
+  "rl.iterReturn",
   "rl.keypressStdin",
   "rl.keypressStream",
-  "stdin.onKeypress",
-  "rl.uiOpen",
-  "rl.uiOpenStream",
-  "rl.uiCursorTo",
-  "rl.uiMoveCursor",
+  "rl.line",
+  "rl.moves",
+  "rl.numProp",
+  "rl.on",
+  "rl.pause",
+  "rl.prompt",
+  "rl.promptWith",
+  "rl.question",
+  "rl.questionAsync",
+  "rl.questionAsyncDyn",
+  "rl.questionAsyncSignal",
+  "rl.questionAsyncSignalDyn",
+  "rl.questionDyn",
+  "rl.resume",
+  "rl.seq",
+  "rl.setHistory",
+  "rl.setOptions",
+  "rl.setPrompt",
+  "rl.setPromptDyn",
+  "rl.terminal",
   "rl.uiClearLine",
   "rl.uiClearScreenDown",
-  "rl.uiRollback",
   "rl.uiCommit",
+  "rl.uiCursorTo",
+  "rl.uiMoveCursor",
+  "rl.uiOpen",
+  "rl.uiOpenStream",
+  "rl.uiRollback",
+  "rl.write",
+  "rl.writeKey",
+  "stdin.onKeypress",
 ]);
 
 /** The legacy http2.* libCalls implemented by scr_http.c/scr_tls.c (the
@@ -474,7 +506,9 @@ const NET_PREFIXES: readonly string[] = ["net.", "http.", "tls.", "https.", "htt
 
 /** One rule per runtime feature, sorted by name. A new feature is an
  * entry here and its line in noRuntimeFeatures; RuntimeFeatures, the scan
- * and its early exit derive from this table. */
+ * and its early exit derive from this table. The lists above keep one
+ * entry per line, sorted within each commented group, so changes that add
+ * different entries touch different lines. */
 const RUNTIME_FEATURE_RULES = {
   assert: rule({ prefixes: ["assert."] }),
   /** The program enters AsyncLocalStorage stores (store.run, enterWith,
@@ -514,14 +548,15 @@ const RUNTIME_FEATURE_RULES = {
       mod.functions.some(
         (fn) => fn.async === true && fn.generator === undefined && fn.returnType.kind === "dyn",
       ),
-    // The legacy url functions and crypto.createCipheriv emit their
-    // deprecation warnings through the dyn-async unit; scr_wasm.c boxes its
-    // handles and promises through it.
+    // The legacy url functions, crypto.createCipheriv and
+    // ecdh.setPublicKey emit their deprecation warnings through the
+    // dyn-async unit; scr_wasm.c boxes its handles and promises through it.
     fns: [
       ...DYN_ASYNC_LIB_FNS,
       ...READABLE_DYN_ASYNC_LIB_FNS,
       ...LEGACY_URL_LIB_FNS,
       "crypto.cipherNew",
+      "crypto.ecdhNew",
     ],
     prefixes: [...READABLE_DYN_ASYNC_PREFIXES, "wasm."],
     expr: (node, tables) =>
@@ -539,6 +574,10 @@ const RUNTIME_FEATURE_RULES = {
   dynBuiltinClass: rule({
     fns: [...BUILTIN_CLASS_LIB_FNS],
   }),
+  /** The stream classes as untyped constructor values with their stream
+   * half (scr_dyn_builtin_stream.c): native stream state for constructor
+   * functions, over the stream unit. */
+  dynBuiltinStream: rule({ fns: ["dyn.builtinStreamClass"] }),
   dynInvoke: rule({
     initial: (mod) => mod.workers === true,
     fns: [...DYN_INVOKE_LIB_FNS, ...UTIL_CALLABLE_LIB_FNS, ...BUILTIN_CLASS_LIB_FNS],
@@ -553,8 +592,24 @@ const RUNTIME_FEATURE_RULES = {
   /** The program has dynamic-tier jsval operations (js.* builtins, the
    * jsval pass): links the scr_js_* units (two-tier design I3). */
   dynTier: rule({ prefixes: ["js."] }),
+  /** Checked-dynamic stream slots test values and pipe into JavaScript
+   * stream objects (scr_stream_dyn.c). */
+  streamDyn: rule({
+    fns: ["stream.dynNative", "stream.dynNativePipe", "stream.pipeDyn", "stream.unpipeDyn"],
+  }),
+  /** Fixed-width Buffer read/write methods called on checked-dynamic
+   * values (scr_bytes_dyn.c). */
+  dynBufferNum: rule({
+    expr: (node, _tables) => node.kind === "dynInvoke" && DYN_BUFFER_NUM_METHODS.has(node.method),
+  }),
+  /** Builtin functions read as values (scr_builtin_values.c). */
+  builtinValues: rule({ fns: ["buffer.byteLenValue", "buffer.allocValue", "fs.realpathValue"] }),
   /** The stream unit emits through the emitter unit, also when the
    * program constructs no stream (a pipeline of functions). */
+  /** scr_ecdh.c over the mbedTLS archive; DEP0031 reports through the
+   * process-warning unit, and unknown encodings and formats render through
+   * the inspect unit. */
+  ecdh: rule({ fns: ["crypto.ecdhNew", "crypto.ecdhConvertKey"] }),
   emitter: rule({
     initial: (mod) =>
       mod.workers === true || (mod.classes ?? []).some((c) => c.name === RUNTIME_EMITTER_CLASS),
@@ -571,6 +626,8 @@ const RUNTIME_FEATURE_RULES = {
     fns: ["events.addAbortListener", ...ABORT_SIGNAL_LIB_FNS],
     prefixes: ["event."],
   }),
+  /** events.once(emitter, name, { signal }) (scr_events_once_signal.c). */
+  eventsOnceSignal: rule({ fns: ["events.onceSignal"] }),
   fetch: rule({ prefixes: ["fetch."] }),
   fileHandle: rule({ types: ["fileHandle"] }),
   fsWatch: rule({ prefixes: ["fs.watch", "watcher."], types: ["fsWatcher"] }),
@@ -596,6 +653,8 @@ const RUNTIME_FEATURE_RULES = {
       "global.native",
       "util.styleText",
       "crypto.cipherNew",
+      "crypto.ecdhNew",
+      "crypto.ecdhConvertKey",
       ...BUILTIN_CLASS_LIB_FNS,
       ...UTIL_CALLABLE_LIB_FNS,
     ],
@@ -663,7 +722,7 @@ const RUNTIME_FEATURE_RULES = {
   }),
   stream: rule({
     initial: (mod) => (mod.classes ?? []).some((c) => RUNTIME_STREAM_CLASSES.has(c.name)),
-    fns: [...STREAM_LIB_FNS],
+    fns: [...STREAM_LIB_FNS, "dyn.builtinStreamClass"],
     prefixes: STREAM_LIB_PREFIXES,
   }),
   /** A Dirent row converted to dyn carries Node's Symbol(type) key
@@ -708,20 +767,23 @@ function noRuntimeFeatures(): RuntimeFeatures {
     dnsPromises: false,
     dynAsync: false,
     dynBuiltinClass: false,
+    dynBuiltinStream: false,
     dynInvoke: false,
     dynTier: false,
+    ecdh: false,
     emitter: false,
     eventTarget: false,
+    eventsOnceSignal: false,
     fetch: false,
     fileHandle: false,
     fsWatch: false,
-    netLookup: false,
-    http: false,
     http2: false,
+    http: false,
     inspect: false,
     legacyTextDecoder: false,
     mockTimers: false,
     net: false,
+    netLookup: false,
     nodeTest: false,
     parseArgs: false,
     perfLoop: false,
@@ -731,6 +793,9 @@ function noRuntimeFeatures(): RuntimeFeatures {
     searchParams: false,
     stdioExtended: false,
     stream: false,
+    streamDyn: false,
+    dynBufferNum: false,
+    builtinValues: false,
     symbol: false,
     tls: false,
     tlsCa: false,
@@ -871,6 +936,14 @@ export function moduleUsesEmitter(mod: IrModule): boolean {
  * programs pay zero bytes and keep their exact link line. */
 export function moduleUsesStream(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "stream").stream;
+}
+
+/** True when the program links scr_dyn_builtin_stream.c (stream classes
+ * as untyped constructor values): its runtime streams box through that
+ * unit's view and checked casts to the stream classes accept constructor-
+ * function streams. Programs without it keep their exact code. */
+export function moduleUsesDynBuiltinStream(mod: IrModule): boolean {
+  return scanRuntimeFeatures(mod, "dynBuiltinStream").dynBuiltinStream;
 }
 
 export const NPM_COMPRESS_MIN = 1024;

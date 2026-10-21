@@ -107,8 +107,8 @@ function nodeAt(sf: ts.SourceFile, start: number, end: number): ts.Node {
   let node: ts.Node = sf;
   for (;;) {
     let next: ts.Node | undefined;
-    node.forEachChild((child) => {
-      if (child.getStart(sf) <= start && end <= child.getEnd()) {
+    ts.forEachChild(node, (child) => {
+      if (ts.tokenStartOfNode(child) <= start && end <= child.end) {
         next = child;
         return true;
       }
@@ -263,23 +263,23 @@ function functionName(node: ts.Node): string {
     if (ts.isBinaryExpression(parent) && parent.right === node) {
       const left = parent.left;
       if (ts.isIdentifier(left)) return left.text;
-      if (ts.isPropertyAccessExpression(left)) return left.getText();
+      if (ts.isPropertyAccessExpression(left)) return ts.getTextOfNode(left);
     }
   }
-  const sf = node.getSourceFile();
-  const pos = ts.getLineAndCharacterOfPosition(sf, node.getStart(sf));
+  const sf = ts.getSourceFileOfNode(node);
+  const pos = ts.getLineAndCharacterOfPosition(sf, ts.tokenStartOfNode(node));
   return `<anonymous ${pos.line + 1}:${pos.character + 1}>`;
 }
 
 function locOfNode(node: ts.Node): SrcLoc {
-  const sf = node.getSourceFile();
-  return { file: sf.fileName, start: node.getStart(sf), end: node.getEnd() };
+  const sf = ts.getSourceFileOfNode(node);
+  return { file: sf.fileName, start: ts.tokenStartOfNode(node), end: node.end };
 }
 
 function enclosingFunction(node: ts.Node): ts.Node {
   let current: ts.Node | undefined = node.parent;
   while (current !== undefined && !isFunctionLikeOrFile(current)) current = current.parent;
-  return current ?? node.getSourceFile();
+  return current ?? ts.getSourceFileOfNode(node);
 }
 
 function functionUnit(node: ts.Node, instance: string | null): DemotionUnit {
@@ -423,7 +423,10 @@ class UnitResolver {
       return this.declarationUnit(binding);
     }
     if (ts.isVariableDeclaration(decl) || ts.isParameter(decl) || ts.isBindingElement(decl)) {
-      const name = nameText(decl.name) ?? decl.name?.getText() ?? "<binding>";
+      const name =
+        nameText(decl.name) ??
+        (decl.name === undefined ? undefined : ts.getTextOfNode(decl.name)) ??
+        "<binding>";
       const scope = enclosingFunction(decl);
       const unit: DemotionUnit = { kind: "binding", name, loc: locOfNode(decl) };
       if (ts.isParameter(decl) && ts.isFunctionLikeDeclaration(decl.parent))
@@ -437,7 +440,7 @@ class UnitResolver {
   /** The unit an operand expression denotes. */
   valueUnit(expr: ts.Node): { unit: DemotionUnit; reflection: boolean } | null {
     const { root, viaPrototype } = rootOf(expr);
-    const sf = root.getSourceFile();
+    const sf = ts.getSourceFileOfNode(root);
     if (root.kind === ts.SyntaxKind.ThisKeyword) {
       const owner = enclosingFunction(root);
       if (ts.isSourceFile(owner))
@@ -475,7 +478,7 @@ class UnitResolver {
     if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0)
       symbol = this.checker.getAliasedSymbol(symbol);
     const decls = symbol === undefined ? [] : symbol.declarations;
-    const decl = decls.find((d) => !d.getSourceFile().isDeclarationFile);
+    const decl = decls.find((d) => !ts.getSourceFileOfNode(d).isDeclarationFile);
     if (decl === undefined) {
       // CommonJS `exports`/`module` as values: the module object.
       if (isModuleObjectName(root))

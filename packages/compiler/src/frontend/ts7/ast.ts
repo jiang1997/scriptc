@@ -53,6 +53,7 @@ import { ModifierFlags, SyntaxKind } from "./enums.js";
 // The frontend's node types, guards and token spellings share the concrete
 // AstNode layout. Parser and transform factories remain outside this client.
 export * from "./ast-types.js";
+export * from "./node-functions.js";
 export * from "./ast-guards.generated.js";
 export { tokenToString } from "./ast-tokens.generated.js";
 

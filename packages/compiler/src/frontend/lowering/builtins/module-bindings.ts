@@ -135,7 +135,7 @@ function builtinModuleBindingOf(
   if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
     const target = lowerer.checker.getAliasedSymbol(symbol);
     const tdecl = target.declarations[0];
-    if (tdecl !== undefined && tdecl.getSourceFile().isDeclarationFile) {
+    if (tdecl !== undefined && ts.getSourceFileOfNode(tdecl).isDeclarationFile) {
       for (
         let p: ts.Node | undefined = tdecl.parent;
         p !== undefined && !ts.isSourceFile(p);
@@ -143,7 +143,7 @@ function builtinModuleBindingOf(
       ) {
         if (ts.isModuleDeclaration(p) && ts.isStringLiteral(p.name)) {
           const module = canonicalBuiltinModule(p.name.text);
-          if (module !== null) return { module, member: target.name };
+          if (module !== null) return { module, member: ts.symbolName(target) };
           break;
         }
       }
@@ -297,14 +297,14 @@ export function createRequireCalleeFileOf(
 ): ts.SourceFile | null {
   const e = stripTypeCasts(callee);
   if (ts.isCallExpression(e)) {
-    return createRequireBaseCallOf(lowerer, e) !== null ? e.getSourceFile() : null;
+    return createRequireBaseCallOf(lowerer, e) !== null ? ts.getSourceFileOfNode(e) : null;
   }
   if (!ts.isIdentifier(e)) return null;
   const symbol = lowerer.checker.getSymbolAtLocation(e);
   const decl = symbol ? symbol.declarations[0] : undefined;
   if (!decl || !ts.isVariableDeclaration(decl) || decl.initializer === undefined) return null;
   return createRequireBindingDecl(lowerer, decl.name, decl.initializer)
-    ? decl.getSourceFile()
+    ? ts.getSourceFileOfNode(decl)
     : null;
 }
 

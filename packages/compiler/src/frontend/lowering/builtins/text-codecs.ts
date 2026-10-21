@@ -360,13 +360,15 @@ export function storedTextCodecClassOf(
   expr: ts.Expression,
 ): TextCodecCtor["cls"] | null {
   const sym = lowerer.typeOf(expr).getSymbol();
-  if (!sym || (sym.name !== "TextEncoder" && sym.name !== "TextDecoder")) return null;
+  if (!sym) return null;
+  const name = ts.symbolName(sym);
+  if (name !== "TextEncoder" && name !== "TextDecoder") return null;
   return sym.declarations.some(
     (d) =>
       (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
-      lowerer.isStdlibFile(d.getSourceFile()),
+      lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
   )
-    ? sym.name
+    ? name
     : null;
 }
 
@@ -517,8 +519,9 @@ function directTextCodecCtorOf(lowerer: Lowerer, expr: ts.Expression): TextCodec
   if (callee.text !== "TextDecoder" && callee.text !== "TextEncoder") return null;
   const sym = lowerer.resolveValueSymbol(callee);
   if (!sym || !lowerer.isStdlibSymbol(sym)) return null;
-  if (sym.name !== "TextDecoder" && sym.name !== "TextEncoder") return null;
-  return { cls: sym.name, ctor };
+  const name = ts.symbolName(sym);
+  if (name !== "TextDecoder" && name !== "TextEncoder") return null;
+  return { cls: name, ctor };
 }
 
 /** Inline codec calls avoid allocating a receiver; stored receivers use

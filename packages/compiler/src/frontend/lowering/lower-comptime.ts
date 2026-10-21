@@ -86,7 +86,7 @@ export function lowerComptime(lowerer: Lowerer, expr: ts.CallExpression): IrExpr
   try {
     if (lowerer.frontendServices === undefined)
       throw new Error("compile-time evaluation requires frontend services");
-    result = lowerer.frontendServices.evaluateComptime(cb.getText(), COMPTIME_TIMEOUT_MS);
+    result = lowerer.frontendServices.evaluateComptime(ts.getTextOfNode(cb), COMPTIME_TIMEOUT_MS);
   } catch (e) {
     const detail = comptimeFailureDetail(e);
     lowerer.pushDiag(comptimeFailedDiag(detail, locOf(cb)));
@@ -226,7 +226,7 @@ export function rejectComptimeCaptures(
   lowerer: Lowerer,
   cb: ts.ArrowFunction | ts.FunctionExpression,
 ): void {
-  const sf = cb.getSourceFile();
+  const sf = ts.getSourceFileOfNode(cb);
   const inTypePosition = (node: ts.Node): boolean => {
     for (let p: ts.Node | undefined = node.parent; p && p !== cb; p = p.parent) {
       if (ts.isTypeNode(p)) return true;
@@ -249,7 +249,7 @@ export function rejectComptimeCaptures(
         const decls = symbol ? symbol.declarations : undefined;
         if (symbol && decls && decls.length > 0) {
           const ownLocal = decls.every(
-            (d) => d.getSourceFile() === sf && d.pos >= cb.pos && d.end <= cb.end,
+            (d) => ts.getSourceFileOfNode(d) === sf && d.pos >= cb.pos && d.end <= cb.end,
           );
           if (!ownLocal) {
             if (node.text === "comptime" && lowerer.isStdlibSymbol(symbol)) {

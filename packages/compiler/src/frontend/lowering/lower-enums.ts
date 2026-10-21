@@ -36,14 +36,14 @@ import { nodeThrowExpr } from "../../ir/build.js";
  * the only name forms tsc allows on enum members). */
 function memberNameText(member: ts.EnumMember): string {
   const n = member.name;
-  return ts.isIdentifier(n) || ts.isStringLiteralLike(n) ? n.text : n.getText();
+  return ts.isIdentifier(n) || ts.isStringLiteralLike(n) ? n.text : ts.getTextOfNode(n);
 }
 
 /** Ambient: a `declare`d declaration, or one living in a .d.ts. */
 function isAmbientEnumDecl(decl: ts.EnumDeclaration): boolean {
   return (
     (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Ambient) !== 0 ||
-    decl.getSourceFile().isDeclarationFile
+    ts.getSourceFileOfNode(decl).isDeclarationFile
   );
 }
 
@@ -126,7 +126,7 @@ function lowerEnumMemberRead(
     // runtime values, so SC2020-family member fences own those. A user's
     // `declare enum` follows the
     // `declare const __VERSION__` stance: ReferenceError at the access.
-    const sf = enumDecl.getSourceFile();
+    const sf = ts.getSourceFileOfNode(enumDecl);
     if (lowerer.isStdlibFile(sf)) return null;
     const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
     if (!declared || declared.kind === "void") return null;
@@ -165,10 +165,10 @@ function lowerEnumReverseRead(
   key: ts.Expression,
 ): IrExpr | null {
   const loc = locOf(expr);
-  const enumName = recvSym.name;
+  const enumName = ts.symbolName(recvSym);
   // Ambient: no object exists — the member-read stance.
   if (decls.every((d) => isAmbientEnumDecl(d))) {
-    if (decls.some((d) => lowerer.isStdlibFile(d.getSourceFile()))) {
+    if (decls.some((d) => lowerer.isStdlibFile(ts.getSourceFileOfNode(d)))) {
       return null;
     }
     return {

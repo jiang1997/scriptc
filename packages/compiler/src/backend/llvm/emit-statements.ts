@@ -36,7 +36,7 @@ import { emitDiscardedSplice } from "./expr-containers.js";
 import { InternalCompilerError } from "../../errors.js";
 import { emitDenseArrayGet, emitDenseArrayPop, emitDenseArraySet } from "./dense-array-access.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
-import { f64Lit, llvmCommentText, sizeToDouble } from "./common.js";
+import { f64Lit, llvmCommentText, loadArrCount, sizeToDouble } from "./common.js";
 import { RESULT_DST_ID, RESULT_ENTRY_PREFIX } from "./record-results.js";
 import {
   matchIntegerArrayForLoop,
@@ -440,9 +440,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         done = B.newLabel("arr.len.done");
       B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${arr.name}, i32 0, i32 1`);
       emitter.markMemoryPointer(lenPtr, "array:header");
-      B.line(
-        `${len} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}${emitter.arrayLengthRange}`,
-      );
+      loadArrCount(emitter, len, lenPtr, emitter.fieldAliasAttachment(lenPtr));
       B.line(
         `${lenNumber} = ${sizeToDouble(emitter.sizeType)} ${emitter.sizeType} ${len} to double`,
       );
@@ -1092,12 +1090,26 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
           B.line(
             `${lenPtr} = getelementptr inbounds %${integerArrayLoop ? "ScrArr" : "ScrBytes"}, ptr ${receiver.name}, i64 0, i32 1`,
           );
-          emitter.markMemoryPointer(lenPtr, integerArrayLoop ? "array:header" : "bytes:header");
-          B.line(
-            `${len} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}`,
-          );
           B.line(`${index} = load ${emitter.sizeType}, ptr ${integerSlot}`);
-          B.line(`${inBounds} = icmp ult ${emitter.sizeType} ${index}, ${len}`);
+          if (integerArrayLoop) {
+            // The counter starts at most 2^32 - 1 and steps only while it is
+            // below the length, so it fits the i32 length field: compare in
+            // 32 bits, which lets the compare read the field directly.
+            emitter.markMemoryPointer(lenPtr, "array:header");
+            B.line(`${len} = load i32, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}`);
+            let narrow = index;
+            if (emitter.sizeType === "i64") {
+              narrow = B.tmp();
+              B.line(`${narrow} = trunc i64 ${index} to i32`);
+            }
+            B.line(`${inBounds} = icmp ult i32 ${narrow}, ${len}`);
+          } else {
+            emitter.markMemoryPointer(lenPtr, "bytes:header");
+            B.line(
+              `${len} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}`,
+            );
+            B.line(`${inBounds} = icmp ult ${emitter.sizeType} ${index}, ${len}`);
+          }
           B.condBr(inBounds, lb, exit);
         } else if (countedLoop && integerSlot && countedLimit) {
           const index = B.tmp();
@@ -1203,9 +1215,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         // The inline form of scr_arr_len, like the `length` intrinsic.
         B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${arr!.name}, i32 0, i32 1`);
         emitter.markMemoryPointer(lenPtr, "array:header");
-        B.line(
-          `${rawLen} = load ${emitter.sizeType}, ptr ${lenPtr}${emitter.fieldAliasAttachment(lenPtr)}${emitter.arrayLengthRange}`,
-        );
+        loadArrCount(emitter, rawLen, lenPtr, emitter.fieldAliasAttachment(lenPtr));
         B.line(
           `${len} = ${sizeToDouble(emitter.sizeType)} ${emitter.sizeType} ${rawLen} to double`,
         );

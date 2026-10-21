@@ -16,7 +16,7 @@ export function inferredJsDiagnosticSuppressed(
   const checker = program.getTypeChecker();
   let suppressed = false;
   ts.walkPreorder(file, (node) => {
-    if (node.getEnd() < diagnostic.pos || node.getStart(file) > diagnostic.end) return "skip";
+    if (node.end < diagnostic.pos || ts.tokenStartOfNode(node) > diagnostic.end) return "skip";
     if (
       diagnostic.code === 2565 &&
       isJsSourceFileName(file.fileName) &&
@@ -30,7 +30,7 @@ export function inferredJsDiagnosticSuppressed(
             ts.isPropertyDeclaration(decl) &&
             !decl.type &&
             !decl.initializer &&
-            !/@type\b/.test(file.text.slice(decl.pos, decl.getStart(file))),
+            !/@type\b/.test(file.text.slice(decl.pos, ts.tokenStartOfNode(decl))),
         )
       ) {
         // Bare JS fields exist with value undefined before the first write;
@@ -44,14 +44,14 @@ export function inferredJsDiagnosticSuppressed(
       const declaration = signature && signature.declaration;
       if (
         declaration &&
-        isJsSourceFileName(declaration.getSourceFile().fileName) &&
+        isJsSourceFileName(ts.getSourceFileOfNode(declaration).fileName) &&
         (ts.isFunctionDeclaration(declaration) ||
           ts.isFunctionExpression(declaration) ||
           ts.isMethodDeclaration(declaration)) &&
         node.arguments.nodes.length > declaration.parameters.nodes.length &&
-        node.arguments.nodes[declaration.parameters.nodes.length]?.getStart(file) ===
+        ts.tokenStartOfNode(node.arguments.nodes[declaration.parameters.nodes.length]!) ===
           diagnostic.pos &&
-        node.arguments.nodes[node.arguments.nodes.length - 1]?.getEnd() === diagnostic.end &&
+        node.arguments.nodes[node.arguments.nodes.length - 1]!.end === diagnostic.end &&
         bodyReadsArguments(declaration)
       ) {
         suppressed = true;
@@ -68,7 +68,7 @@ export function inferredJsDiagnosticSuppressed(
       const iterable = checker.getTypeAtLocation(node.expression);
       const iterator = checker
         .getPropertiesOfType(iterable)
-        .find((property) => property.name.startsWith("__@iterator@"));
+        .find((property) => ts.symbolName(property).startsWith("__@iterator@"));
       if (!iterator) return undefined;
       const signatures = checker.getCallSignatures(
         checker.getTypeOfSymbolAtLocation(iterator, node.expression),
@@ -88,7 +88,7 @@ export function inferredJsDiagnosticSuppressed(
         declaration &&
         ts.isMethodDeclaration(declaration) &&
         declaration.type === undefined &&
-        isJsSourceFileName(declaration.getSourceFile().fileName) &&
+        isJsSourceFileName(ts.getSourceFileOfNode(declaration).fileName) &&
         declaration.body?.statements?.nodes.length === 1 &&
         ts.isThrowStatement(declaration.body.statements.nodes[0]!)
       ) {

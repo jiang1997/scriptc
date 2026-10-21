@@ -191,7 +191,8 @@ export class NarrowingStability {
     const checker = this.lowerer.checker;
     const signature = checker.getResolvedSignature(call);
     const declaration = signature ? signature.declaration : undefined;
-    if (!declaration || !this.lowerer.isStdlibFile(declaration.getSourceFile())) return true;
+    if (!declaration || !this.lowerer.isStdlibFile(ts.getSourceFileOfNode(declaration)))
+      return true;
     const callee = skipOuter(call.expression);
     if (
       ts.isPropertyAccessExpression(callee) &&
@@ -287,11 +288,11 @@ export class NarrowingStability {
     const last = chain.links[chain.links.length - 1];
     const refKey = last ? `.${last.name}` : (chain.root as ts.Identifier).text;
     const candidates = facts.refs.get(refKey) ?? [];
-    const useStart = node.getStart();
+    const useStart = ts.tokenStartOfNode(node);
     let start = -1;
     for (const candidate of candidates) {
       if (candidate === node) continue;
-      const candidateStart = candidate.getStart();
+      const candidateStart = ts.tokenStartOfNode(candidate);
       if (candidateStart >= useStart) break;
       if (referenceKey(candidate) !== chain.key) continue;
       start = candidateStart;
@@ -313,7 +314,7 @@ export class NarrowingStability {
     // between.
     let end = useStart;
     for (const loop of facts.loops) {
-      const loopStart = loop.getStart();
+      const loopStart = ts.tokenStartOfNode(loop);
       if (loopStart >= start && loopStart <= useStart && loop.end >= node.end)
         end = Math.max(end, loop.end);
     }
@@ -376,7 +377,9 @@ export class NarrowingStability {
       if (decl !== undefined && ts.isVariableDeclaration(decl)) {
         if (decl.initializer !== undefined && this.mayBeStale(decl.initializer)) result = true;
         else {
-          for (const write of this.writesIn(decl.getSourceFile()).get(symbol.name) ?? []) {
+          for (const write of this.writesIn(ts.getSourceFileOfNode(decl)).get(
+            ts.symbolName(symbol),
+          ) ?? []) {
             const assignment = write.parent;
             if (
               ts.isBinaryExpression(assignment) &&
@@ -430,7 +433,7 @@ export class NarrowingStability {
           ts.isParameter(decl));
       if (decl && mutableBinding) {
         const home = flowBoundary(decl);
-        const writes = this.writesIn(decl.getSourceFile()).get(symbol.name) ?? [];
+        const writes = this.writesIn(ts.getSourceFileOfNode(decl)).get(ts.symbolName(symbol)) ?? [];
         for (const write of writes) {
           if (flowBoundary(write) === home) continue;
           if (this.lowerer.resolveValueSymbol(write) === symbol) {
@@ -497,7 +500,7 @@ export class NarrowingStability {
           if (name === "toString" || name === "valueOf" || name === "toJSON")
             facts.conversion = true;
           if (ts.isComputedPropertyName(node.name)) {
-            const text = node.name.expression.getText();
+            const text = ts.getTextOfNode(node.name.expression);
             if (text.includes("toPrimitive")) facts.conversion = true;
             if (text.includes("iterator") || text.includes("asyncIterator")) facts.iteration = true;
           }
@@ -711,7 +714,7 @@ export class NarrowingStability {
     const symbol = type.getSymbol();
     return (
       symbol !== undefined &&
-      BUILTIN_COLLECTIONS.has(symbol.name) &&
+      BUILTIN_COLLECTIONS.has(ts.symbolName(symbol)) &&
       this.lowerer.isStdlibSymbol(symbol)
     );
   }
@@ -1062,7 +1065,7 @@ function memberUse(
 function flowBoundary(node: ts.Node): ts.Node {
   let n: ts.Node | undefined = node.parent;
   while (n && !isFlowBoundary(n)) n = n.parent;
-  return n ?? node.getSourceFile();
+  return n ?? ts.getSourceFileOfNode(node);
 }
 
 function isFlowBoundary(node: ts.Node): boolean {

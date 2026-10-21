@@ -21,6 +21,7 @@
  * export). Merged declarations, computed or referencing members, and any
  * other write to the variable keep the original text. */
 import * as ts from "./ts7/syntax.js";
+import { tokenStartOfNode } from "./ts7/node-functions.js";
 import { applyEdits, unparen, type Edit } from "./npm-static-bundled-chunks.js";
 
 /** True when the text may hold an enum IIFE (a cheap probe). */
@@ -42,17 +43,17 @@ export function rewriteEnumIifes(sf: ts.SourceFile): string | null {
     // enum) keeps exporting the binding.
     const declaration = stmts[i - 1] as ts.VariableStatement;
     const modifiers = sf.text.slice(
-      declaration.getStart(sf),
-      declaration.declarationList.getStart(sf),
+      tokenStartOfNode(declaration),
+      tokenStartOfNode(declaration.declarationList),
     );
     edits.push({
-      start: declaration.getStart(sf),
-      end: declaration.getEnd(),
+      start: tokenStartOfNode(declaration),
+      end: declaration.end,
       text: `${modifiers}var ${decl} = ${objectLiteral(iife.members)};`,
     });
     edits.push({
-      start: stmts[i]!.getStart(sf),
-      end: stmts[i]!.getEnd(),
+      start: tokenStartOfNode(stmts[i]!),
+      end: stmts[i]!.end,
       text: iife.exportName === null ? "" : `exports.${iife.exportName} = ${decl};`,
     });
   }
@@ -232,8 +233,8 @@ function objectLiteral(members: Members): string {
 
 /** True when the module writes `name` anywhere outside the enum call. */
 function writtenElsewhere(sf: ts.SourceFile, name: string, iife: ts.Statement): boolean {
-  const start = iife.getStart(sf);
-  const end = iife.getEnd();
+  const start = tokenStartOfNode(iife);
+  const end = iife.end;
   let written = false;
   ts.walkPreorder(sf, (n) => {
     if (written) return "stop";

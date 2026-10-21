@@ -17,7 +17,7 @@ import {
   vAdapters,
 } from "./shapes.js";
 import type { LlvmEmitterContext, LlValue } from "./expr-context.js";
-import { F64_INF, f64Lit, sizeToDouble } from "./common.js";
+import { F64_INF, f64Lit, loadArrCount, sizeToDouble } from "./common.js";
 import { MUTATING_COLLECTION_METHODS } from "../publication.js";
 import { borrowsStringInputs, emitStringInputs } from "./string-lifetimes.js";
 import {
@@ -564,9 +564,7 @@ export function emitArrIntrinsic(
         t = B.tmp();
       B.line(`${p} = getelementptr inbounds %ScrArr, ptr ${r.name}, i32 0, i32 1`);
       host.markMemoryPointer(p, "array:header");
-      B.line(
-        `${len} = load ${host.sizeType}, ptr ${p}${host.fieldAliasAttachment(p)}${host.arrayLengthRange}`,
-      );
+      loadArrCount(host, len, p, host.fieldAliasAttachment(p));
       B.line(`${t} = ${sizeToDouble(host.sizeType)} ${host.sizeType} ${len} to double`);
       return { name: t, type: e.type };
     }

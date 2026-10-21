@@ -1,7 +1,10 @@
 - **Streams and readline:** Stream chunks are Buffers or strings.
   `NodeJS.ReadableStream` and `NodeJS.WritableStream`, and `stream.Readable` and `stream.Writable` under `@types/node`, accept every stream: when a program passes file, zlib, or `node:stream` streams through them, child-process pipes and `process.stdout` and `process.stderr` join those streams as `Readable` and `Writable` instances.
   `readable.pipe(process.stdout)` and `readable.pipe(process.stderr)` compile and, as in Node, do not end the process stream.
-  A `pipeline` stage that arrives as an untyped value must be a native stream at run time; other values throw a not-supported error.
+  When an untyped value reaches `NodeJS.ReadableStream` or `NodeJS.WritableStream`, those two interfaces hold any value, so JavaScript stream objects (constructor-function streams, plain objects with `on` and `pipe`) pass through TypeScript functions typed with them and come back to JavaScript as the same objects.
+  Member calls on such a value use the native stream when it is one and call the object's own members otherwise; `readable.pipe()` into a JavaScript destination follows Node's pipe protocol.
+  A `pipeline` stage and a `for await` source that arrive as untyped values must be native streams at run time; other values throw a not-supported error.
+  Native streams expose no `emit` to JavaScript, so a JavaScript stream whose own `pipe()` emits on its destination (the legacy `Stream` pipe) cannot pipe into one.
   `Readable.from` accepts arrays, Sets, Map and Set iterators, generators, async generators, and class iterables and async iterables whose values are strings or Buffers, and in JavaScript any iterable or async iterable of them; a stream that mixes strings and Buffers is unsupported.
   In JavaScript, a sync iterator value with a `then` method that is not a promise, and an object whose `[Symbol.asyncIterator]` or `[Symbol.iterator]` method is a generator method, are unsupported.
   Object-mode streams of other values (including `Readable.from` over a `Map`, whose values are entry arrays) are unsupported.

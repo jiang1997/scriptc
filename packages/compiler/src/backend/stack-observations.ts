@@ -3,7 +3,7 @@
  * it answers true. */
 import { exprFunctionReference, moduleFunctionReferences } from "../ir/function-references.js";
 import { MAY_THROW_LIB_FNS } from "../ir/builtin-effects.js";
-import type { IrExpr, IrFunction, IrModule, IrStmt } from "../ir/ir.js";
+import type { IrExpr, IrFunction, IrModule, IrStmt, IrType } from "../ir/ir.js";
 import { MAY_THROW_ARR_METHODS } from "../ir/ir.js";
 import { everyExprChild, everyStmtChild, everyStmtList } from "../ir/traverse.js";
 import { unreachableStatements } from "./may-throw.js";
@@ -13,16 +13,135 @@ import { writesPublished } from "./publication.js";
 /** Lib calls that read a captured stack trace. */
 const STACK_READS: ReadonlySet<string> = new Set(["error.stack"]);
 
+/** Key types whose property names are never `stack`: a number, bigint or
+ * boolean key names its decimal or `true`/`false` property. */
+const NON_STACK_KEY_TYPES: ReadonlySet<IrType["kind"]> = new Set(["f64", "bigint", "bool"]);
+
+/** Whether a computed key can be the string "stack", the question a read
+ * on a checked-dynamic value asks before it counts as a stack read.
+ * - A string literal answers by its value; a key of a number, bigint or
+ *   boolean type, or one converted from such a value, cannot be "stack".
+ * - An immutable local answers with its one initializer, and a parameter of
+ *   a function the program only calls by name answers with the arguments
+ *   its call sites pass.
+ * - Any other key can be "stack" when the program spells the literal
+ *   "stack" somewhere, since the literal can reach the key through fields,
+ *   containers or calls; a key the program assembles from other strings or
+ *   from data it reads keeps the static answer. */
+class StackKeys {
+  private readonly spelled: boolean;
+  private readonly calls = new Map<string, { caller: IrFunction; args: IrExpr[] }[]>();
+  private readonly named: Set<string>;
+  private readonly inits = new Map<IrFunction, Map<string, IrExpr | null>>();
+  /** Settled answers by function and local: true where a search reached a
+   * key that can be "stack", false where a search that found none passed. */
+  private readonly answers = new Map<string, boolean>();
+
+  constructor(mod: IrModule) {
+    this.spelled = spellsStack(mod);
+    this.named = new Set(moduleFunctionReferences(mod));
+    // Class methods, accessors and constructors are called through dispatch.
+    const classNames = new Set((mod.classes ?? []).map((cls) => cls.name));
+    for (const fn of mod.functions) {
+      if (isClassMember(fn.name, classNames)) this.named.add(fn.name);
+      everyStmtList(fn.body, {
+        stmt: () => true,
+        expr: (expr) => {
+          if (expr.kind === "call") {
+            const sites = this.calls.get(expr.callee) ?? [];
+            sites.push({ caller: fn, args: expr.args });
+            this.calls.set(expr.callee, sites);
+          }
+          const referenced = exprFunctionReference(expr);
+          if (referenced !== undefined) this.named.add(referenced);
+          return true;
+        },
+      });
+    }
+  }
+
+  mayBeStack(fn: IrFunction, key: IrExpr): boolean {
+    const visited = new Set<string>();
+    const answer = this.keyMayBeStack(fn, key, visited);
+    // A search that found no way to "stack" explored everything it visited
+    // to the end, so none of it can be "stack" either.
+    if (!answer) for (const visit of visited) this.answers.set(visit, false);
+    return answer;
+  }
+
+  private keyMayBeStack(fn: IrFunction, key: IrExpr, visited: Set<string>): boolean {
+    if (key.kind === "strLit") return key.value === "stack";
+    if (!this.spelled) return false;
+    if (NON_STACK_KEY_TYPES.has(key.type.kind)) return false;
+    if (key.kind === "toString" && NON_STACK_KEY_TYPES.has(key.operand.type.kind)) return false;
+    if (key.kind === "dynFrom" && NON_STACK_KEY_TYPES.has(key.value.type.kind)) return false;
+    if (key.kind !== "varRef") return true;
+    const visit = `${fn.name}\0${key.localId}`;
+    const known = this.answers.get(visit);
+    if (known !== undefined) return known;
+    // Each local is searched once per question: a cycle, or a second path
+    // to a local already searched, adds no value of its own.
+    if (visited.has(visit)) return false;
+    visited.add(visit);
+    const answer = this.localMayBeStack(fn, key.localId, visited);
+    if (answer) this.answers.set(visit, true);
+    return answer;
+  }
+
+  private localMayBeStack(fn: IrFunction, localId: string, visited: Set<string>): boolean {
+    const local = fn.locals.find((candidate) => candidate.id === localId);
+    if (local === undefined || local.mutable) return true;
+    const index = fn.params.findIndex((param) => param.localId === localId);
+    if (index !== -1) {
+      const sites = this.calls.get(fn.name);
+      if (this.named.has(fn.name) || sites === undefined) return true;
+      return sites.some(
+        (site) =>
+          site.args.length !== fn.params.length ||
+          this.keyMayBeStack(site.caller, site.args[index]!, visited),
+      );
+    }
+    const init = this.initializerOf(fn, localId);
+    return init === null || this.keyMayBeStack(fn, init, visited);
+  }
+
+  /** The one initializer of an immutable local, or null when it has none
+   * or more than one declaration. */
+  private initializerOf(fn: IrFunction, localId: string): IrExpr | null {
+    let inits = this.inits.get(fn);
+    if (inits === undefined) {
+      inits = new Map();
+      everyStmtList(fn.body, {
+        stmt: (stmt) => {
+          if (stmt.kind === "varDecl")
+            inits!.set(stmt.localId, inits!.has(stmt.localId) ? null : (stmt.init ?? null));
+          return true;
+        },
+        expr: () => true,
+      });
+      this.inits.set(fn, inits);
+    }
+    return inits.get(localId) ?? null;
+  }
+}
+
+/** Whether `name` follows the `%<class>.<member>` convention of class
+ * methods, accessors and constructors for one of `classNames`. */
+function isClassMember(name: string, classNames: ReadonlySet<string>): boolean {
+  if (!name.startsWith("%")) return false;
+  for (let dot = name.indexOf("."); dot !== -1; dot = name.indexOf(".", dot + 1)) {
+    if (classNames.has(name.slice(1, dot))) return true;
+  }
+  return false;
+}
+
 /** A typed `error.stack` read, or a read on a checked-dynamic value that
- * can reach an error's own `stack` accessor: the constant key `stack`, or
- * a computed key when `computedKeys` (the program spells "stack", so a
- * computed key can name it). A key the program assembles from other
- * strings or from data it reads keeps the static answer. */
-function readsStack(expr: IrExpr, computedKeys: boolean): boolean {
+ * can reach an error's own `stack` accessor: one whose key can be "stack"
+ * (StackKeys). */
+function readsStack(fn: IrFunction, expr: IrExpr, keys: StackKeys): boolean {
   if (expr.kind === "libCall") return STACK_READS.has(expr.fn);
   if (expr.kind !== "dynKeyGet") return false;
-  if (expr.key.kind === "strLit") return expr.key.value === "stack";
-  return computedKeys;
+  return keys.mayBeStack(fn, expr.key);
 }
 
 /** Whether the module contains the string literal "stack". */
@@ -36,10 +155,10 @@ function spellsStack(mod: IrModule): boolean {
   );
 }
 
-function containsStackRead(fn: IrFunction, computedKeys: boolean): boolean {
+function containsStackRead(fn: IrFunction, keys: StackKeys): boolean {
   return !everyStmtList(fn.body, {
     stmt: () => true,
-    expr: (expr) => !readsStack(expr, computedKeys),
+    expr: (expr) => !readsStack(fn, expr, keys),
   });
 }
 
@@ -65,22 +184,14 @@ function visitLiveExprs(body: IrStmt[], visit: (expr: IrExpr) => void): void {
  * and those reads must not cost every call of the program a frame.
  * Programs without any stack read answer false without the walk. */
 export function observesStacks(mod: IrModule): boolean {
-  const computedKeys = spellsStack(mod);
-  if (!mod.functions.some((fn) => containsStackRead(fn, computedKeys))) return false;
+  const keys = new StackKeys(mod);
+  if (!mod.functions.some((fn) => containsStackRead(fn, keys))) return false;
   const byName = new Map(mod.functions.map((fn) => [fn.name, fn]));
   const classNames = new Set((mod.classes ?? []).map((cls) => cls.name));
   const pending: string[] = [...moduleFunctionReferences(mod)];
   // Class methods, accessors and constructors are reachable through
   // dispatch the IR does not name per site: all of them are roots.
-  for (const fn of mod.functions) {
-    if (!fn.name.startsWith("%")) continue;
-    for (let dot = fn.name.indexOf("."); dot !== -1; dot = fn.name.indexOf(".", dot + 1)) {
-      if (classNames.has(fn.name.slice(1, dot))) {
-        pending.push(fn.name);
-        break;
-      }
-    }
-  }
+  for (const fn of mod.functions) if (isClassMember(fn.name, classNames)) pending.push(fn.name);
   const reached = new Set<string>();
   let observed = false;
   while (pending.length > 0 && !observed) {
@@ -90,7 +201,7 @@ export function observesStacks(mod: IrModule): boolean {
     const fn = byName.get(name);
     if (fn === undefined) continue;
     visitLiveExprs(fn.body, (expr) => {
-      if (readsStack(expr, computedKeys)) observed = true;
+      if (readsStack(fn, expr, keys)) observed = true;
       if (expr.kind === "call" && !reached.has(expr.callee)) pending.push(expr.callee);
       const referenced = exprFunctionReference(expr);
       if (referenced !== undefined && !reached.has(referenced)) pending.push(referenced);

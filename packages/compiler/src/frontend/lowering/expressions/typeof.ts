@@ -71,7 +71,7 @@ export function lowerTypeofExpr(lowerer: Lowerer, expr: ts.TypeOfExpression, loc
       (operand.text === "__dirname" || operand.text === "__filename") &&
       lowerer.isStdlibGlobal(operand, operand.text)
     ) {
-      const sf = operand.getSourceFile();
+      const sf = ts.getSourceFileOfNode(operand);
       if (isNodeEsmFile(sf, lowerer.program) && !/\.tsx?$/.test(sf.fileName))
         return { kind: "strLit", value: "undefined", type: STRING, loc };
     }
@@ -219,7 +219,7 @@ export function lowerTypeofExpr(lowerer: Lowerer, expr: ts.TypeOfExpression, loc
     // its own lowering as an identity token (a string), so the operand's
     // representation cannot answer. Node's answer follows the export's
     // kind, and the binding read has no effects.
-    const imported = isJsSourceFile(tested.getSourceFile())
+    const imported = isJsSourceFile(ts.getSourceFileOfNode(tested))
       ? lowerer.builtinImportOf(tested)
       : null;
     if (imported && builtinModuleConstOf(lowerer, imported.module, imported.member) === undefined) {

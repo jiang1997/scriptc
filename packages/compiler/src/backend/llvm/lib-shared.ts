@@ -374,6 +374,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "fsp.globStrings": "scr_fsp_glob_strings",
   "fsp.globError": "scr_fsp_glob_error",
   "fs.realpathSync": "scr_fs_realpath",
+  "fs.realpathValue": "scr_fs_realpath_value",
   "fs.realpathNativeSync": "scr_fs_realpath_promise",
   "fs.unlinkSync": "scr_fs_unlink",
   "fs.chmodSync": "scr_fs_chmod",
@@ -437,6 +438,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "buffer.concatDyn": "scr_buffer_concat_dyn",
   "buffer.concatLenDyn": "scr_buffer_concat_len_dyn",
   "buffer.alloc": "scr_buffer_alloc",
+  "buffer.allocValue": "scr_buffer_alloc_value",
   "buffer.allocUnsafe": "scr_buffer_alloc_unsafe",
   "buffer.allocUnsafeSlow": "scr_buffer_alloc_unsafe_slow",
   "buffer.poolFromStr": "scr_buffer_from_str",
@@ -444,9 +446,11 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "buffer.poolFromBytes": "scr_buffer_from_bytes",
   "buffer.poolFromArray": "scr_buffer_from_arr",
   "buffer.poolFromDyn": "scr_buffer_from_dyn_pooled",
+  "buffer.poolFromDynRef": "scr_buffer_from_dyn_ref_pooled",
   "buffer.poolSize": "scr_buffer_pool_size",
   "buffer.setPoolSize": "scr_buffer_set_pool_size",
   "buffer.byteLenDyn": "scr_buffer_byte_length_dyn",
+  "buffer.byteLenValue": "scr_buffer_byte_length_value",
   "buffer.byteLenStr": "scr_bytes_byte_length_str",
   "buffer.isEncoding": "scr_bytes_is_encoding",
   // The checked-dynamic compare/equals validators (scr_bytes_io.c):
@@ -472,6 +476,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "fs.existsChk": "scr_fs_exists_async",
   "fs.mkdtempSyncChk": "scr_fs_mkdtemp_sync_chk",
   "net.connectAttempt": "scr_net_connect_attempt",
+  "net.connectLookupDyn": "scr_net_connect_lookup_dyn",
   "fs.lchmodSyncChk": "scr_fs_lchmod_sync_chk",
   "fsp.lchmodChk": "scr_fsp_lchmod_chk",
   "fs.readFileSyncBuf": "scr_fs_read_file_bytes",
@@ -568,6 +573,8 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "crypto.hashStream": "scr_crypto_hash_stream",
   "crypto.hashStreamPiped": "scr_crypto_hash_stream_piped",
   "crypto.cipherNew": "scr_crypto_cipher_new",
+  "crypto.ecdhNew": "scr_crypto_ecdh_new",
+  "crypto.ecdhConvertKey": "scr_crypto_ecdh_convert_key",
   "crypto.hmacNewStr": "scr_crypto_hmac_new_str",
   "crypto.hmacNewBytes": "scr_crypto_hmac_new_bytes",
   "crypto.hashUpdateStr": "scr_crypto_hash_update_str",
@@ -626,6 +633,9 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "insp.regex": "scr_insp_regex",
   "insp.date": "scr_insp_date",
   "insp.error": "scr_insp_error",
+  "insp.errorHasCause": "scr_insp_error_has_cause",
+  "insp.errorBagHasProperties": "scr_insp_error_bag_has_properties",
+  "insp.errorCause": "scr_insp_error_cause",
   "insp.begin": "scr_insp_begin",
   "insp.layout": "scr_insp_layout",
   "insp.entry": "scr_insp_entry",
@@ -742,6 +752,8 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "procStream.write": "scr_proc_stream_write",
   "stream.stdioWritable": "scr_stream_stdio_writable",
   "stream.unboxDyn": "scr_stream_unbox_dyn",
+  "stream.pipeDyn": "scr_stream_pipe_dyn",
+  "stream.unpipeDyn": "scr_stream_unpipe_dyn",
   "process.kill": "scr_process_kill_named",
   "process.killNum": "scr_process_kill",
   // fs.promises (scr_bytes_io.c / scr_lib.c): the promise forms settle
@@ -1459,6 +1471,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "dyn.classBasePrototype": "scr_dyn_class_base_prototype",
   "dyn.classInherit": "scr_dyn_class_inherit",
   "dyn.builtinClass": "scr_dyn_builtin_class",
+  "dyn.builtinStreamClass": "scr_dyn_builtin_stream_class",
   "dyn.builtinInstanceOf": "scr_dyn_builtin_instanceof",
   "dyn.functionInstanceOf": "scr_dyn_function_instanceof",
   "dyn.classSuper": "scr_dyn_class_super",
@@ -1537,8 +1550,12 @@ export function mockTimerSym(
 
 export const USES_TIMERS_LIB_FNS = new Set<string>([
   "process.emitWarning",
+  // Constructor-function streams defer their events on the stream ticks.
+  "dyn.builtinStreamClass",
   // Decipheriv.setAuthTag reports DEP0182 on the next tick.
   "crypto.cipherNew",
+  // ecdh.setPublicKey reports DEP0031 on the next tick.
+  "crypto.ecdhNew",
   // WebCrypto results settle through the deferred crypto queue.
   "webcrypto.sign",
   "webcrypto.verify",
@@ -1683,6 +1700,7 @@ export const USES_TIMERS_LIB_FNS = new Set<string>([
   "net.connect",
   "net.connectCb",
   "net.connectLookup",
+  "net.connectLookupDyn",
   "net.connectAttempt",
   "fs.existsChk",
   "fs.callbackValue",

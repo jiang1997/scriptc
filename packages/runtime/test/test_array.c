@@ -1283,7 +1283,7 @@ static void test_exact_construction(void) {
 static bool filled_ok(const ScrArr *a) {
   if (a->filled > a->len || a->filled > a->cap) return false;
   for (size_t i = 0; i < a->filled; i++)
-    if (a->present[i] != SCR_ARR_VALUE) return false;
+    if (*scr_arr_state_ptr(a, i) != SCR_ARR_VALUE) return false;
   return true;
 }
 
@@ -1358,7 +1358,7 @@ static void test_filled_prefix(void) {
   scr_arr_release(scr_arr_sort_primitive(b, false));
   check(filled_ok(b), "sorting moves holes past the bound");
   for (size_t i = 0; i < b->len; i++) {
-    if (i < b->cap && b->present[i] != SCR_ARR_VALUE) break;
+    if (i < b->cap && *scr_arr_state_ptr(b, i) != SCR_ARR_VALUE) break;
     check(i < b->filled, "sorted values form the bound");
   }
   while (scr_arr_len(b) > 0) {
@@ -1378,11 +1378,11 @@ static void test_filled_prefix(void) {
 }
 
 /* Boolean arrays store one byte per dense element, followed by the states in
- * the same allocation. Growth moves the states past the larger value area,
+ * the same allocation. Growth moves the states to the end of the larger area,
  * densifying absorbs sparse entries into bytes, and every moving and copying
  * operation keeps values, holes and present undefined in place. */
 static bool bool_layout_ok(const ScrArr *a) {
-  return a->cap == 0 || a->present == (const uint8_t *)a->data + a->cap;
+  return a->cap == 0 || scr_arr_states_end(a) == (const uint8_t *)a->data + 2 * (size_t)a->cap;
 }
 
 static bool bool_states(const ScrArr *a, const char *want) {
@@ -1495,7 +1495,8 @@ static void test_inline_slots(void) {
   check(!inline_slots(plain), "plain constructions keep separate storage");
   scr_arr_release(plain);
   ScrArr *a = scr_arr_new_small(SCR_ELEM_F64);
-  check(inline_slots(a) && a->cap >= 4 && a->len == 0 && a->present == (uint8_t *)(a->data + a->cap),
+  check(inline_slots(a) && a->cap >= 4 && a->len == 0 &&
+            scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
         "small construction places slots and states in the array block");
   size_t inline_cap = a->cap;
   for (size_t i = 0; i < inline_cap; i++) scr_arr_push_f64(a, (double)i);
@@ -1503,12 +1504,13 @@ static void test_inline_slots(void) {
   scr_arr_push_f64(a, 100);
   check(!inline_slots(a) && a->cap > inline_cap && scr_arr_get_f64(a, 0) == 0 &&
             scr_arr_get_f64(a, (double)inline_cap - 1) == (double)inline_cap - 1 &&
-            scr_arr_get_f64(a, (double)inline_cap) == 100 && a->present == (uint8_t *)(a->data + a->cap),
+            scr_arr_get_f64(a, (double)inline_cap) == 100 &&
+            scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
         "growth moves inline slots to their own allocation");
   scr_arr_release(a);
 
   ScrArr *flags = scr_arr_new_small(SCR_ELEM_BOOL);
-  check(inline_slots(flags) && flags->present == (uint8_t *)flags->data + flags->cap,
+  check(inline_slots(flags) && scr_arr_states_end(flags) == (uint8_t *)flags->data + 2 * (size_t)flags->cap,
         "boolean inline slots are one byte each");
   scr_arr_push_bool(flags, true);
   scr_arr_set_bool(flags, 3, true);
@@ -1887,6 +1889,10 @@ static void test_dense_slots(void) {
 /* shift and splice(0, n) advance dense storage into head room instead of
  * moving the tail; unshift reuses that room, growth gives it back, and a
  * drained array starts over at the front of its allocation. */
+/* SCR_ARR_HEAD_ROOM (scr_array.c): the array has vacated slots in front of
+ * `data`, and the slot just before `data` holds their count. */
+static bool head_room(const ScrArr *a) { return (a->spare & 2u) != 0; }
+
 static void test_head_room(void) {
 #ifdef SCR_RC_AUDIT
   long strings0 = scr_str_live_count();
@@ -1899,7 +1905,8 @@ static void test_head_room(void) {
   check_f64(scr_arr_shift_f64(q), 0, "shift answers the first element");
   check(q->data == block + 1 && q->cap == cap - 1 && q->len == 63,
         "shift advances the storage instead of moving the tail");
-  check(q->present == (uint8_t *)(block + cap) + 1, "states keep following the whole value area");
+  check(scr_arr_states_end(q) == (uint8_t *)(block + cap) + cap - 1 && head_room(q) && q->data[-1] == 1,
+        "the remaining states stay at the end of the allocation");
   check(q->filled == 63, "shift keeps the hole-free prefix");
   for (int i = 1; i < 40; i++) scr_arr_shift_f64(q);
   check(q->data == block + 40 && q->len == 24 && scr_arr_get_f64(q, 0) == 40 &&
@@ -1974,7 +1981,7 @@ static void test_head_room(void) {
   bool ordered = rev->len == 1000;
   for (int i = 0; i < 1000 && ordered; i++) ordered = scr_arr_get_f64(rev, i) == 999 - i;
   check(ordered, "unshift run keeps reverse order");
-  size_t room = (size_t)(rev->present - (uint8_t *)(rev->data + rev->cap));
+  size_t room = head_room(rev) ? (size_t)rev->data[-1] : 0;
   check(room >= 4 && rev->cap >= rev->len, "an unshift run reserves head room");
   uint64_t *rblock = rev->data;
   scr_arr_unshift_f64(rev, -1);
@@ -1986,7 +1993,7 @@ static void test_head_room(void) {
   check(rev->data == rblock - 4 && scr_arr_get_f64(rev, 3) == -1, "unshift many order");
   /* Storage swaps (typed views) first drop the head room. */
   scr_arr_outline(rev);
-  check(rev->present == (uint8_t *)(rev->data + rev->cap) && scr_arr_get_f64(rev, 0) == 7 &&
+  check(!head_room(rev) && scr_arr_get_f64(rev, 0) == 7 &&
             scr_arr_get_f64(rev, 1003) == 0,
         "outline moves the elements to the front of their allocation");
   scr_arr_release(rev);
@@ -1996,7 +2003,7 @@ static void test_head_room(void) {
   for (int i = 0; i < 40; i++) scr_arr_push_f64(once, i);
   size_t once_cap = once->cap;
   scr_arr_unshift_f64(once, -1);
-  check(once->cap == once_cap && once->present == (uint8_t *)(once->data + once->cap),
+  check(once->cap == once_cap && !head_room(once),
         "a one-off unshift keeps the allocation");
   scr_arr_release(once);
 

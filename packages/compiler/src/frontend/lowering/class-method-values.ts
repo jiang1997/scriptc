@@ -92,7 +92,8 @@ export function lowerClassMethodValue(
       loc,
     };
   };
-  const checked = isJsSourceFile(expr.getSourceFile()) && lowerer.dynConvertible(value.type);
+  const checked =
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) && lowerer.dynConvertible(value.type);
   if (checked) value = lowerer.coerceToExpected(value, DYN);
   // Select the declaration when extracting the value. Calling the value
   // later must not redispatch the method name on a different receiver.
@@ -374,7 +375,7 @@ function reflectedMethodValue(
   if (!member || (!ts.isMethodDeclaration(member) && !ts.isAccessor(member)) || !member.body)
     return null;
   let needsNativeReceiver =
-    !isJsSourceFile(declaration.getSourceFile()) ||
+    !isJsSourceFile(ts.getSourceFileOfNode(declaration)) ||
     info.localClass !== undefined ||
     lowerer.errorHierarchyClassOf(info.def.name);
   ts.walkPreorder(member, (node) => {

@@ -133,7 +133,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
       );
     }
     if (projection?.kind === "builtin-function") {
-      if (!isJsSourceFile(expr.getSourceFile())) {
+      if (!isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         const callable = lowerer.lowerBuiltinCallableValue(
           { module: projection.module, member: projection.member },
           loc,
@@ -149,7 +149,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
     // `EventEmitter`, `Readable` or `TypeError` (or a const alias of
     // one) as a value in a TypeScript file: the runtime class's class
     // object. JavaScript files keep the identity token.
-    if (!isJsSourceFile(expr.getSourceFile())) {
+    if (!isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const runtimeClass = runtimeClassValueOf(lowerer, expr);
       if (runtimeClass) return lowerer.classValueRef(runtimeClass, expr);
     }
@@ -187,7 +187,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
         const clause = decl.parent.parent.parent;
         if (
           (ts.isCaseClause(clause) || ts.isDefaultClause(clause)) &&
-          !(expr.getStart() >= clause.getStart() && expr.end <= clause.end)
+          !(ts.tokenStartOfNode(expr) >= ts.tokenStartOfNode(clause) && expr.end <= clause.end)
         ) {
           lowerer.unsupported(
             "SC1090",
@@ -385,7 +385,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
     (expr.text === "__dirname" || expr.text === "__filename") &&
     lowerer.isStdlibGlobal(expr, expr.text)
   ) {
-    const sf = expr.getSourceFile();
+    const sf = ts.getSourceFileOfNode(expr);
     if (isNodeEsmFile(sf, lowerer.program) && !/\.tsx?$/.test(sf.fileName)) {
       return {
         kind: "libCall",
@@ -552,7 +552,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
       // JavaScript sources: an otherwise unsupported builtin VALUE is
       // the same identity-token story as stdlib globals above (the
       // harness adds worker_threads.Worker to its identity Set).
-      if (isJsSourceFile(expr.getSourceFile())) {
+      if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         // EventEmitter and the stream classes are the runtime's untyped
         // constructors, so constructor functions can inherit from them.
         const classKind = builtinMemberClassKind(bi.module, bi.member);
@@ -652,7 +652,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
   // type-mapper.ts pins the one concrete signature `(value: string) =>
   // primitive`; direct calls `String(x)` never reach here — the call
   // lowering intercepts them with the wider static coercions).
-  const jsPrimitiveCtorSelector = isJsSourceFile(expr.getSourceFile());
+  const jsPrimitiveCtorSelector = isJsSourceFile(ts.getSourceFileOfNode(expr));
   const primitiveName = stdlibGlobalNameOf(lowerer, expr);
   if (
     primitiveName === "String" ||
@@ -664,7 +664,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
   }
   if (lowerer.isStdlibGlobal(expr, "ArrayBuffer"))
     return { kind: "libCall", fn: "arrayBuffer.constructor", args: [], type: DYN, loc };
-  if (isJsSourceFile(expr.getSourceFile()) && lowerer.isStdlibGlobal(expr, "Array"))
+  if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && lowerer.isStdlibGlobal(expr, "Array"))
     return { kind: "libCall", fn: "dyn.arrayConstructor", args: [], type: DYN, loc };
   if (
     Object.values(BYTES_ELEMENT_NAME).includes(expr.text) &&
@@ -763,10 +763,10 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
         expr,
         canonical,
         loc,
-        isJsSourceFile(expr.getSourceFile()),
+        isJsSourceFile(ts.getSourceFileOfNode(expr)),
       );
       if (builtinValue !== null) return builtinValue;
-      if (isJsSourceFile(expr.getSourceFile())) {
+      if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         return { kind: "strLit", value: `[builtin ${canonical}]`, type: STRING, loc };
       }
       // The families with a WHY: each hint states what makes the
@@ -986,7 +986,7 @@ function cjsExportAccessorRead(lowerer: Lowerer, ident: ts.Identifier): IrExpr |
   if (
     binding !== undefined &&
     (ts.isImportSpecifier(binding) || ts.isExportSpecifier(binding)) &&
-    !isCjsJsFile(binding.getSourceFile(), lowerer.program)
+    !isCjsJsFile(ts.getSourceFileOfNode(binding), lowerer.program)
   ) {
     const snapshot = cjsAccessorSnapshotOf(lowerer, getter);
     if (snapshot !== null)

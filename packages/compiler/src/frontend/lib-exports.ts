@@ -35,7 +35,7 @@ export function entryFunctionExports(entry: ts.SourceFile): Map<string, EntryExp
     if (out.has(name) && stmt.body === undefined) continue; // overload signature
     out.set(name, {
       name,
-      loc: { file: entry.fileName, start: stmt.getStart(), end: stmt.end },
+      loc: { file: entry.fileName, start: ts.tokenStartOfNode(stmt), end: stmt.end },
       generic: (stmt.typeParameters?.nodes.length ?? 0) > 0,
       async: mods?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
       generator: stmt.asteriskToken !== undefined,

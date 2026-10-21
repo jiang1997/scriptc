@@ -1,5 +1,6 @@
 import * as ts from "./ts7/syntax.js";
 import { helperTokens } from "./helper-tokens.js";
+import { getTextOfNode, tokenStartOfNode } from "./ts7/node-functions.js";
 
 // Bun's cached node-mode interop helper. Match the complete token stream,
 // including its dependencies: helper names alone are not a semantic contract.
@@ -117,14 +118,14 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
   }
   for (const [name, shape] of helperShapes) {
     const actual = declarations.get(name);
-    if (!actual || helperTokens(actual.stmt.getText(sf)) !== shape) return null;
+    if (!actual || helperTokens(getTextOfNode(actual.stmt)) !== shape) return null;
   }
   // These initializers must execute before any factory or namespace. The
   // original bundle would throw if a var helper were still undefined.
   let helperEnd = 0;
   for (const name of helperShapes.keys()) {
     const stmt = declarations.get(name)!.stmt;
-    if (stmt.getStart(sf) < helperEnd) return null;
+    if (tokenStartOfNode(stmt) < helperEnd) return null;
     helperEnd = stmt.end;
   }
   const edits: Edit[] = [];
@@ -140,7 +141,7 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
     const call = decl.initializer;
     if (!ts.isIdentifier(call.expression) || call.expression.text !== "__commonJS") continue;
     if (
-      stmt.getStart(sf) < helperEnd ||
+      tokenStartOfNode(stmt) < helperEnd ||
       (ts.canHaveModifiers(stmt) &&
         ts.getModifiers(stmt)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword))
     )
@@ -193,7 +194,7 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
     if (unsafe) return null;
     // The comma expression prevents inferred naming of an anonymous export.
     edits.push(
-      { start: call.getStart(sf), end: value.getStart(sf), text: "(0," },
+      { start: tokenStartOfNode(call), end: tokenStartOfNode(value), text: "(0," },
       { start: value.end, end: call.end, text: ")" },
     );
     factories.set(name, stmt);
@@ -212,7 +213,7 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
     const call = decl.initializer;
     if (!ts.isIdentifier(call.expression) || call.expression.text !== "__toESM") continue;
     if (
-      stmt.getStart(sf) < helperEnd ||
+      tokenStartOfNode(stmt) < helperEnd ||
       (ts.canHaveModifiers(stmt) &&
         ts.getModifiers(stmt)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword))
     )
@@ -230,9 +231,9 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
     )
       return null;
     const factory = factories.get(requireCall.expression.text);
-    if (!factory || factory.end > stmt.getStart(sf)) return null;
+    if (!factory || factory.end > tokenStartOfNode(stmt)) return null;
     edits.push({
-      start: call.getStart(sf),
+      start: tokenStartOfNode(call),
       end: call.end,
       text: `{default:${requireCall.expression.text}}`,
     });
@@ -286,7 +287,7 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
   // Remove only helpers that became dead. Other bundle features may share
   // __defProp, so a recognized declaration alone does not justify erasure.
   const dead = (n: ts.Node): boolean =>
-    edits.some((e) => n.getStart(sf) >= e.start && n.end <= e.end);
+    edits.some((e) => tokenStartOfNode(n) >= e.start && n.end <= e.end);
   const removed = new Set<string>();
   for (let changed = true; changed;) {
     changed = false;
@@ -304,7 +305,7 @@ export function rewriteBundledFunctionImports(source: string, sf: ts.SourceFile)
           live = true;
       });
       if (!live) {
-        edits.push({ start: stmt.getStart(sf), end: stmt.end, text: "" });
+        edits.push({ start: tokenStartOfNode(stmt), end: stmt.end, text: "" });
         removed.add(name);
         changed = true;
       }

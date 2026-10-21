@@ -140,7 +140,6 @@ Never hand-edit these files:
 
 - `packages/compiler/surface-manifest.json`
 - `internal/compatibility/generated/node-v24-internal.json`
-- `internal/compatibility/generated/node-v24-backlog.json`
 - `docs/src/generated/node-v24-compatibility.json`
 
 Change compiler decision sources or the implementation-owned compatibility manifests, then regenerate. Use `pnpm manifest` when compiler decision tables change and `pnpm node-compat` whenever the Node pin, compatibility manifests, compiler surface manifest, changes.
@@ -158,7 +157,7 @@ For each API family:
 5. Add differential evidence that executes under Node and as a compiled binary. Cover stdout, stderr, exit status, success behavior, and important error shapes. A load-only export check does not prove behavior.
 6. Update the implementation-owned source or manifest. Positive `supported` and `partial` mappings must name existing test evidence.
 7. Run `pnpm manifest` if compiler surface tables changed, then run `pnpm node-compat`. Never patch generated JSON or headers.
-8. Inspect the internal ledger, public artifact, and backlog diff. Confirm the intended API family changed and unrelated rows did not.
+8. Inspect the internal ledger and public artifact diff, and compare `pnpm node-compat:backlog` output before and after. Confirm the intended API family changed and unrelated rows did not.
 9. Run focused tests, `pnpm node-compat:check`, and the full validation gate required for the change. If docs output changed, also run the docs gate.
 
 Compatibility commands:

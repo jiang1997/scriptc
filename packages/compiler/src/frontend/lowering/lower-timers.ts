@@ -420,7 +420,7 @@ function lowerTimerCall(
       lowerer.noLowering(`clearTimeout with ${expr.arguments.nodes.length} arguments`, expr);
     }
     let handle = lowerer.lowerExpr(expr.arguments.nodes[0]!);
-    if (handle.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile())) {
+    if (handle.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const stored = lowerer.declareHiddenLocal("%timer.clear", DYN);
       const ref = varRef(stored.id, DYN, loc);
       handle = {

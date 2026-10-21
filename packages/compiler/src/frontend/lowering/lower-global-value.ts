@@ -14,7 +14,7 @@ export function lowerGlobalValue(lowerer: Lowerer, expr: ts.Expression): IrExpr 
   // lib slice) but absent in Node 24: reads answer undefined.
   const names = lowerer.checker
     .getPropertiesOfType(lowerer.typeOf(expr))
-    .map((property) => property.name)
+    .map((property) => ts.symbolName(property))
     .filter((name) => name !== TEMPORAL_GLOBAL);
   return {
     kind: "libCall",

@@ -15,6 +15,7 @@
  * of the carried names read the builtin module's members, value uses read
  * the class itself, and a mixture keeps the package's own JavaScript. */
 import * as ts from "./ts7/syntax.js";
+import { tokenStartOfNode } from "./ts7/node-functions.js";
 import {
   aliasReplacement,
   applyEdits,
@@ -59,7 +60,7 @@ export function rewriteBuiltinAliasRequires(
     const alias = aliasFor(spec);
     if (alias === null) return undefined;
     const text = aliasReplacement(n, alias);
-    if (text !== null) edits.push({ start: n.getStart(sf), end: n.getEnd(), text });
+    if (text !== null) edits.push({ start: tokenStartOfNode(n), end: n.end, text });
     return undefined;
   });
   if (edits.length === 0) return null;

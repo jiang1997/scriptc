@@ -143,7 +143,7 @@ export function completeArgs(
           loc: value.loc,
         };
       }
-      value = checkedIterableSpread(lowerer, value, arg.expression.getText(), loc);
+      value = checkedIterableSpread(lowerer, value, ts.getTextOfNode(arg.expression), loc);
       if (spreads === 1 && index === argNodes.length - 1) {
         stmts.push({
           kind: "exprStmt",
@@ -153,7 +153,7 @@ export function completeArgs(
             args: [
               ref(),
               value,
-              { kind: "strLit", value: arg.expression.getText(), type: STRING, loc },
+              { kind: "strLit", value: ts.getTextOfNode(arg.expression), type: STRING, loc },
             ],
             type: VOID,
             loc,
@@ -605,7 +605,7 @@ export function lowerSpreadArgsCall(
   // TypeScript reaches this lane only for checked-dynamic variadic callees
   // (`(...args: unknown[]) => R`), whose ABI is the JS one.
   if (
-    !isJsSourceFile(expr.getSourceFile()) &&
+    !isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
     !(callee.type.kind === "func" && callee.type.rest === true && callee.type.restAbi === undefined)
   )
     return null;
@@ -613,7 +613,7 @@ export function lowerSpreadArgsCall(
   if (callee.type.kind !== "dyn" && callee.type.kind !== "func") return null;
   const calleeName =
     ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)
-      ? expr.expression.getText()
+      ? ts.getTextOfNode(expr.expression)
       : ts.isIdentifier(expr.expression)
         ? expr.expression.text
         : "value";
@@ -640,8 +640,8 @@ export function lowerSpreadArgsCall(
       if (p.spreadOf !== null) {
         // The spelling rides along for V8's nullish spread-call
         // TypeError ("v is not iterable (cannot read property ...)").
-        spreads.push({ arg: args.length, what: p.spreadOf.getText() });
-        args.push(checkedIterableSpread(lowerer, p.v, p.spreadOf.getText(), loc));
+        spreads.push({ arg: args.length, what: ts.getTextOfNode(p.spreadOf) });
+        args.push(checkedIterableSpread(lowerer, p.v, ts.getTextOfNode(p.spreadOf), loc));
       } else {
         args.push(lowerer.coerceInto(p.node!, p.v, DYN));
       }

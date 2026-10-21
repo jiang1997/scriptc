@@ -389,11 +389,15 @@ ScrBytes *scr_buffer_from_str_checked(const ScrStr *s, const ScrStr *enc);
 ScrBytes *scr_buffer_from_bytes(const ScrBytes *src); /* a copy of any typed array's values */
 ScrBytes *scr_buffer_from_arr(const ScrArr *arr);     /* number[] */
 ScrBytes *scr_buffer_from_dyn_pooled(const ScrDyn *value, const ScrStr *encoding);
+ScrBytes *scr_buffer_from_dyn_ref_pooled(const ScrDyn *value, const ScrStr *encoding);
 ScrBytes *scr_buffer_concat(const ScrArr *list);
 ScrBytes *scr_buffer_concat_len(const ScrArr *list, double total);
 /* The untyped-list forms: Node's ERR_INVALID_ARG_TYPE checks on the list
  * and each element, then the typed concat. NULL with the exception pending. */
 ScrBytes *scr_buffer_concat_dyn(const struct ScrDyn *list);
+ScrBytes *scr_buffer_alloc_value(const struct ScrDyn *size, const struct ScrDyn *fill,
+                                 const struct ScrDyn *encoding);
+struct ScrDyn *scr_fs_realpath_value(const struct ScrDyn *path, const struct ScrDyn *options, bool native);
 ScrBytes *scr_buffer_concat_len_dyn(const struct ScrDyn *list, double total);
 /* Drops the pool's slab reference and restores Buffer.poolSize (process
  * exit audits and library session resets). */
@@ -408,6 +412,7 @@ ScrBytes *scr_bytes_from_str_checked(const ScrStr *s, const ScrStr *enc);
  * Borrow; never throw. */
 double scr_bytes_byte_length_str(ScrStr *s, const ScrStr *enc);
 double scr_buffer_byte_length_dyn(ScrDyn *value, ScrStr *enc);
+double scr_buffer_byte_length_value(ScrDyn *value, ScrDyn *encoding);
 bool scr_bytes_is_encoding(const ScrStr *s);
 
 /* equals / compare / indexOf-lastIndexOf / fill / copy / swap / write on

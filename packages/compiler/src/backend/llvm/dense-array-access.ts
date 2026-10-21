@@ -17,7 +17,15 @@
  * whose writes extend the bound when they continue it. */
 
 import { isRefCounted, type IrExpr, type IrType } from "../../ir/ir.js";
-import { f64Lit, SCR_ARR_FIELD, sizeToDouble } from "./common.js";
+import {
+  f64Lit,
+  loadArrCount,
+  SCR_ARR_FIELD,
+  scrArrStatePtr,
+  scrArrStates,
+  sizeToDouble,
+  storeArrCount,
+} from "./common.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 
@@ -36,7 +44,8 @@ interface DenseGuard {
   len: string;
   /** The hole-free prefix bound loaded by the guard (i32). */
   filled: string;
-  /** Dense value and state storage base pointers. */
+  /** The dense value storage base pointer, and the end of the states
+   * (scrArrStates). */
   data: string;
   states: string;
 }
@@ -48,7 +57,9 @@ interface DenseGuard {
  * below the hole-free prefix bound branches to `filledLabel` first; both
  * that block and the returned (state-checked) dense block may use the
  * guard's values. A `proven` index is known to lie below the bound (a dense
- * array loop's fast copy, dense-array-loops.ts) and always takes it. */
+ * array loop's fast copy, dense-array-loops.ts) and always takes it. With
+ * `prefixOnly`, every other index branches to `slow` and no block is left
+ * open: only `offset` and `data` are meaningful. */
 function emitDenseGuard(
   host: LlvmEmitterContext,
   array: string,
@@ -57,7 +68,9 @@ function emitDenseGuard(
   slow: string,
   requireBelowLen: boolean,
   filledLabel: string,
+  width: number,
   proven = false,
+  prefixOnly = false,
 ): DenseGuard {
   const B = host.B;
   const size = host.sizeType;
@@ -89,7 +102,6 @@ function emitDenseGuard(
     cap = B.tmp(),
     dataPtr = B.tmp(),
     data = B.tmp(),
-    statesPtr = B.tmp(),
     states = B.tmp();
   B.line(
     `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
@@ -97,26 +109,23 @@ function emitDenseGuard(
   host.markMemoryPointer(dataPtr, "array:header");
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
   const loadChecked = (): void => {
-    B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 1`);
+    B.line(
+      `${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.len}`,
+    );
     host.markMemoryPointer(lenPtr, "array:header");
+    loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
     B.line(
-      `${len} = load ${size}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}${host.arrayLengthRange}`,
+      `${capPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.cap}`,
     );
-    B.line(`${capPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 2`);
     host.markMemoryPointer(capPtr, "array:header");
-    B.line(`${cap} = load ${size}, ptr ${capPtr}${host.fieldAliasAttachment(capPtr)}`);
-    B.line(
-      `${statesPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.present}`,
-    );
-    host.markMemoryPointer(statesPtr, "array:header");
-    B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);
+    loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
   };
   // Reads load the storage bases before branching: the header of a live
   // array is always readable, and unconditional loads let LLVM hoist them
   // out of loops whose only calls are read-only fallbacks. Writes load the
   // fields that only the state-checked path needs inside it, which keeps
   // them off a hot loop of prefix stores (that path stores to the header).
-  const eagerHeader = requireBelowLen;
+  const eagerHeader = requireBelowLen && !prefixOnly;
   if (eagerHeader) loadChecked();
   const filledPtr = B.tmp(),
     filled = B.tmp(),
@@ -148,6 +157,10 @@ function emitDenseGuard(
     B.line(`${t} = and i1 ${integral}, ${inFilled}`);
     inFilled = t;
   }
+  if (prefixOnly) {
+    B.condBr(inFilled, filledLabel, slow);
+    return { offset, len, filled, data, states };
+  }
   const check = B.newLabel("arr.check");
   B.condBr(inFilled, filledLabel, check);
   B.startBlock(check);
@@ -171,6 +184,10 @@ function emitDenseGuard(
   const dense = B.newLabel("arr.dense");
   B.condBr(ok, dense, slow);
   B.startBlock(dense);
+  // Only the state-checked block needs the states: the address is pure
+  // arithmetic on loaded fields, so computing it here keeps it off the
+  // prefix path.
+  scrArrStates(host, states, data, cap, width);
   return { offset, len, filled, data, states };
 }
 
@@ -186,11 +203,8 @@ function statePointer(
   host: LlvmEmitterContext,
   guard: Pick<DenseGuard, "offset" | "states">,
 ): string {
-  const B = host.B;
-  const statePtr = B.tmp();
-  B.line(
-    `${statePtr} = getelementptr inbounds i8, ptr ${guard.states}, ${host.sizeType} ${guard.offset}`,
-  );
+  const statePtr = host.B.tmp();
+  scrArrStatePtr(host, statePtr, guard.states, guard.offset);
   host.markMemoryPointer(statePtr, "array:present");
   return statePtr;
 }
@@ -199,6 +213,11 @@ function statePointer(
  * other element kind an 8-byte slot. */
 function slotType(acc: ArrayAccess): "i8" | "i64" {
   return acc === "bool" ? "i8" : "i64";
+}
+
+/** Bytes per dense slot (scr_arr_slot_width). */
+export function slotWidth(acc: ArrayAccess): number {
+  return acc === "bool" ? 1 : 8;
 }
 
 function valuePointer(
@@ -245,7 +264,7 @@ export function emitDenseSlotUnlink(
   const unlink = B.newLabel("arr.unlink"),
     swap = B.newLabel("arr.unlink.swap"),
     done = B.newLabel("arr.unlink.done");
-  const guard = emitDenseGuard(host, array, index, indexExpr, done, true, unlink);
+  const guard = emitDenseGuard(host, array, index, indexExpr, done, true, unlink, 8);
   // The state-checked dense block: leave holes and the tail to the store.
   B.br(done);
   B.startBlock(unlink);
@@ -290,11 +309,29 @@ export function emitDenseArrayGet(
   const slow = B.newLabel("arr.get.slow"),
     join = B.newLabel("arr.get.join"),
     valueLabel = B.newLabel("arr.get.value");
-  const guard = emitDenseGuard(host, array, index, indexExpr, slow, true, valueLabel, proven);
-  const state = loadState(host, guard);
-  const present = B.tmp();
-  B.line(`${present} = icmp eq i8 ${state}, ${SCR_ARR_VALUE}`);
-  B.condBr(present, valueLabel, slow);
+  // The state of slot i is at data + cap * (width + 1) - 1 - i: an inline
+  // state check indexed by a loop's induction variable makes LLVM keep
+  // -1 - i as a second induction variable, so above the prefix the runtime
+  // getter reads the slot.
+  const induction = indexExpr?.kind === "varRef" && host.integerLoopBindings.has(indexExpr.localId);
+  const guard = emitDenseGuard(
+    host,
+    array,
+    index,
+    indexExpr,
+    slow,
+    true,
+    valueLabel,
+    slotWidth(acc),
+    proven,
+    induction,
+  );
+  if (!induction) {
+    const state = loadState(host, guard);
+    const present = B.tmp();
+    B.line(`${present} = icmp eq i8 ${state}, ${SCR_ARR_VALUE}`);
+    B.condBr(present, valueLabel, slow);
+  }
   B.startBlock(valueLabel);
   const ptr = valuePointer(host, guard, acc);
   let fast: string;
@@ -360,6 +397,7 @@ export function emitDenseArrayState(
   index: LlValue,
   indexExpr: IrExpr | undefined,
   kind: "state" | "has",
+  width: number,
 ): string {
   const B = host.B;
   const fn = kind === "state" ? "scr_arr_state" : "scr_arr_has";
@@ -368,7 +406,7 @@ export function emitDenseArrayState(
   const slow = B.newLabel("arr.state.slow"),
     join = B.newLabel("arr.state.join"),
     filledLabel = B.newLabel("arr.state.filled");
-  const guard = emitDenseGuard(host, array, index, indexExpr, slow, true, filledLabel);
+  const guard = emitDenseGuard(host, array, index, indexExpr, slow, true, filledLabel, width);
   const state = loadState(host, guard);
   const fast = B.tmp();
   if (kind === "state") B.line(`${fast} = uitofp i8 ${state} to double`);
@@ -421,7 +459,17 @@ export function emitDenseArraySet(
   const slow = B.newLabel("arr.set.slow"),
     join = B.newLabel("arr.set.join"),
     filledLabel = B.newLabel("arr.set.filled");
-  const guard = emitDenseGuard(host, array, index, indexExpr, slow, false, filledLabel, proven);
+  const guard = emitDenseGuard(
+    host,
+    array,
+    index,
+    indexExpr,
+    slow,
+    false,
+    filledLabel,
+    slotWidth(acc),
+    proven,
+  );
   const { offset, len } = guard;
   const storeValue = (valuePtr: string): void => {
     if (acc === "f64") {
@@ -482,9 +530,11 @@ export function emitDenseArraySet(
   const nextLen = B.tmp(),
     lenPtr = B.tmp();
   B.line(`${nextLen} = add ${host.sizeType} ${offset}, 1`);
-  B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 1`);
+  B.line(
+    `${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.len}`,
+  );
   host.markMemoryPointer(lenPtr, "array:header");
-  B.line(`store ${host.sizeType} ${nextLen}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}`);
+  storeArrCount(host, nextLen, lenPtr, host.fieldAliasAttachment(lenPtr));
   B.br(storedLabel);
   B.startBlock(storedLabel);
   if (acc === "ref" && oldState && old) {
@@ -542,7 +592,7 @@ export function emitDenseArrayPop(
   const lenPtr = header(SCR_ARR_FIELD.len),
     len = B.tmp(),
     none = B.tmp();
-  B.line(`${len} = load ${size}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}`);
+  loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
   B.line(`${none} = icmp eq ${size} ${len}, 0`);
   const check = B.newLabel("arr.pop.check"),
     dense = B.newLabel("arr.pop.dense");
@@ -557,12 +607,15 @@ export function emitDenseArrayPop(
   B.startBlock(dense);
   const last = B.tmp();
   B.line(`${last} = sub nuw ${size} ${len}, 1`);
+  // A packed array's last index is below its capacity (filled <= cap).
   const dataPtr = header(SCR_ARR_FIELD.data),
     data = B.tmp(),
-    statesPtr = header(SCR_ARR_FIELD.present),
+    capPtr = header(SCR_ARR_FIELD.cap),
+    cap = B.tmp(),
     states = B.tmp();
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
-  B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);
+  loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
+  scrArrStates(host, states, data, cap, slotWidth(acc));
   const valuePtr = valuePointer(host, { offset: last, data }, acc);
   const statePtr = statePointer(host, { offset: last, states });
   const slotTy = slotType(acc);
@@ -581,7 +634,7 @@ export function emitDenseArrayPop(
     B.line(`${last32} = trunc i64 ${last} to i32`);
   }
   B.line(`store i32 ${last32}, ptr ${filledPtr}${host.fieldAliasAttachment(filledPtr)}`);
-  B.line(`store ${size} ${last}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}`);
+  B.line(`store i32 ${last32}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}`);
   return raw;
 }
 
@@ -608,13 +661,13 @@ export function emitDenseArrayPush(
     host.markMemoryPointer(ptr, "array:header");
     return ptr;
   };
-  const lenPtr = header(1),
+  const lenPtr = header(SCR_ARR_FIELD.len),
     len = B.tmp(),
     cap = B.tmp(),
     room = B.tmp();
-  B.line(`${len} = load ${size}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}`);
-  const capPtr = header(2);
-  B.line(`${cap} = load ${size}, ptr ${capPtr}${host.fieldAliasAttachment(capPtr)}`);
+  loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
+  const capPtr = header(SCR_ARR_FIELD.cap);
+  loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
   B.line(`${room} = icmp ult ${size} ${len}, ${cap}`);
   const fast = B.newLabel("arr.push.dense"),
     slow = B.newLabel("arr.push.slow"),
@@ -623,11 +676,18 @@ export function emitDenseArrayPush(
   B.startBlock(fast);
   const dataPtr = header(SCR_ARR_FIELD.data),
     data = B.tmp(),
-    statesPtr = header(SCR_ARR_FIELD.present),
-    states = B.tmp();
+    spare = B.tmp(),
+    near = B.tmp(),
+    statePtr = B.tmp();
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
-  B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);
-  const statePtr = statePointer(host, { offset: len, states });
+  // The state of slot `len` is data + width * cap + (cap - len) - 1. With
+  // `cap - len` formed first, the store addresses it from one register sum.
+  B.line(`${spare} = sub nuw ${size} ${cap}, ${len}`);
+  B.line(`${near} = getelementptr inbounds i8, ptr ${data}, ${size} ${spare}`);
+  B.line(
+    `${statePtr} = getelementptr inbounds [${slotWidth(acc)} x i8], ptr ${near}, ${size} ${cap}, ${size} -1`,
+  );
+  host.markMemoryPointer(statePtr, "array:present");
   const valuePtr = valuePointer(host, { offset: len, data }, acc);
   if (acc === "f64") {
     B.line(`store double ${value}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
@@ -642,7 +702,7 @@ export function emitDenseArrayPush(
   const next = B.tmp(),
     fastValue = B.tmp();
   B.line(`${next} = add nuw ${size} ${len}, 1`);
-  B.line(`store ${size} ${next}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}`);
+  storeArrCount(host, next, lenPtr, host.fieldAliasAttachment(lenPtr));
   // An append to a hole-free array keeps it hole-free.
   const filledPtr = header(SCR_ARR_FIELD.filled),
     filled = B.tmp(),

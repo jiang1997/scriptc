@@ -518,8 +518,25 @@ static ScrClosure *scr_ee_once_closure(void *adapter, ScrClosure *boxer, ScrEeOn
   return c;
 }
 
+static ScrBox *scr_ee_once_promise_box(ScrPromise *p) {
+  ScrBox *box = scr_box_new_obj(&scr_promise_retain_v, &scr_promise_release_v, &scr_promise_trace_v);
+  scr_box_set_ref(box, scr_promise_retain(p));
+  return box;
+}
+
+static void scr_ee_once_adopt_job(ScrClosure *job) {
+  ScrPromise *outer = scr_box_get_ref(job->caps[0]);
+  ScrPromise *inner = scr_box_get_ref(job->caps[1]);
+  scr_promise_race_join(outer, inner, &scr_promise_adapt_copy);
+  scr_promise_release(inner);
+  scr_promise_release(outer);
+}
+
 /* boxer and err_boxer are borrowed; the result is +1. err_boxer is NULL
- * when the awaited event is 'error' itself. */
+ * when the awaited event is 'error' itself. Node's once is an async
+ * function returning the executor's promise, so the result adopts that
+ * promise through a thenable job queued here, whose reaction settles the
+ * result one turn after the executor's promise settles. */
 ScrPromise *scr_events_once(ScrEmitter *em, ScrStr *name, ScrClosure *boxer, void *adapter,
                             ScrEeInvoke inv, ScrClosure *err_boxer, void *err_adapter,
                             ScrEeInvoke err_inv) {
@@ -558,9 +575,13 @@ ScrPromise *scr_events_once(ScrEmitter *em, ScrStr *name, ScrClosure *boxer, voi
     scr_caught_release(thrown);
     scr_promise_reject_pending(st->promise);
   }
-  ScrPromise *p = scr_promise_retain(st->promise);
+  ScrPromise *outer = scr_promise_new();
+  ScrClosure *job = scr_closure_new((void *)&scr_ee_once_adopt_job, 2);
+  job->caps[0] = scr_ee_once_promise_box(outer);
+  job->caps[1] = scr_ee_once_promise_box(st->promise);
+  scr_queue_microtask(job);
   scr_ee_once_release(st);
-  return p;
+  return outer;
 }
 
 /* The adapter's tail: `cb` is the firing listener closure, `args` the
@@ -1130,3 +1151,9 @@ double scr_emitter_get_default_max(void) { return scr_emitter_default_max; }
 static SCR_TL double scr_emitter_esm_default_max = 10;
 double scr_emitter_esm_default_max_get(void) { return scr_emitter_esm_default_max; }
 void scr_emitter_esm_sync(void) { scr_emitter_esm_default_max = scr_emitter_default_max; }
+
+/* events.once with a signal (scr_events_once_signal.c) undoes an add whose
+ * 'newListener' announcement threw. */
+void scr_emitter_unadd_quiet(ScrEmitter *em, ScrStr *name, ScrClosure *cb) {
+  scr_ee_unadd(em, name, cb);
+}

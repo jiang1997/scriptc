@@ -35,6 +35,25 @@ export class AstNodeList<T extends AstNode = AstNode> {
   get end(): number {
     return this.wire.end(this.index) >>> 0;
   }
+
+  /** Whether a comma follows the last node before the list's end. */
+  hasTrailingComma(): boolean {
+    const last = this.nodes[this.nodes.length - 1];
+    if (last === undefined) return false;
+    const text = last.getSourceFile().text;
+    const next = astSkipTrivia(text, last.end, false, false);
+    return next < this.end && text.charCodeAt(next) === 44;
+  }
+}
+
+/** A declaration's modifiers, with the flags of all of them: tsc-ts's
+ * ModifierList. */
+export class AstModifierList<T extends AstNode = AstNode> extends AstNodeList<T> {
+  get modifierFlags(): number {
+    let result = 0;
+    for (const modifier of this.nodes) result |= astModifierFlag(modifier.kind);
+    return result;
+  }
 }
 
 /** One immutable AST response owns one object per node and one array per
@@ -85,6 +104,12 @@ export class AstFile {
   }
 
   list(index: number): AstNodeList {
+    return new AstNodeList(this.wire, index, this.listNodes(index));
+  }
+  modifierList(index: number): AstModifierList {
+    return new AstModifierList(this.wire, index, this.listNodes(index));
+  }
+  private listNodes(index: number): AstNode[] {
     let nodes = this.lists[index];
     if (nodes === undefined) {
       nodes = [];
@@ -92,7 +117,7 @@ export class AstFile {
       this.lists[index] = nodes;
       this.materialized?.();
     }
-    return new AstNodeList(this.wire, index, nodes);
+    return nodes;
   }
 
   namedChild(node: AstNode, name: string): number {
@@ -422,6 +447,11 @@ export class AstNode {
     return result;
   }
 
+  get modifiers(): AstModifierList | undefined {
+    const index = this.file.namedChild(this, "modifiers");
+    return index === 0 ? undefined : this.file.modifierList(index);
+  }
+
   get body(): AstNode | undefined {
     const body = this.childNode("body");
     // TS7 can serialize a reparsed @type callable before a method's
@@ -598,9 +628,6 @@ export class AstNode {
   }
   get members(): AstNodeList | undefined {
     return this.childList("members");
-  }
-  get modifiers(): AstNodeList | undefined {
-    return this.childList("modifiers");
   }
   get moduleReference(): AstNode | undefined {
     return this.childNode("moduleReference");

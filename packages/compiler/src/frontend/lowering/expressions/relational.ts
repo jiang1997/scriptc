@@ -470,7 +470,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
       );
     }
     const constructor = tryLowerExpression(lowerer, expr.right);
-    if (constructor?.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile())) {
+    if (constructor?.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
       return checkedClassInstanceOf(lowerer, value, constructor, loc);
     }
@@ -478,7 +478,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
     // function's prototype against the value's prototype chain.
     if (
       constructor?.type.kind === "func" &&
-      isJsSourceFile(expr.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       lowerer.dynConvertible(constructor.type)
     ) {
       const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
@@ -1080,7 +1080,11 @@ function lowerPrivateIn(
   // when the value is a class instance at or below the declarer. A typed
   // reference carries the class it was boxed under: the declarer or a
   // descendant answers true; an ancestor answers per instance.
-  if (recv.type.kind === "dyn" && recv.kind === "varRef" && isJsSourceFile(expr.getSourceFile())) {
+  if (
+    recv.type.kind === "dyn" &&
+    recv.kind === "varRef" &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr))
+  ) {
     // A function-local class has one brand per evaluation.
     if (info.localClass) {
       const owner = localPrivateBrandClass(lowerer, priv);
@@ -1376,12 +1380,30 @@ export function lowerInExpression(
   if (key === "code" && isExecExceptionType(lowerer, lowerer.typeOf(expr.right))) {
     refuseExecExceptionCode(lowerer, expr);
   }
+  // A literal key that names no declared member of an index-signature
+  // record (`"id" in match.groups`): the same keyed presence probe a
+  // runtime key takes — declared fields by name, then the overflow keys.
+  {
+    const recvT = lowerer.mapTypeOf(lowerer.typeOf(expr.right));
+    const shape = recvT?.kind === "record" ? lowerer.shapes.get(recvT.shapeId) : undefined;
+    if (
+      shape?.indexValue &&
+      !shape.tuple &&
+      !OBJECT_PROTOTYPE_KEYS.has(key) &&
+      !shape.fields.some(
+        (f) => f.name === key || f.name === `%get:${key}` || f.name === `%set:${key}`,
+      )
+    ) {
+      const probed = lowerRuntimeKeyIn(lowerer, expr, loc);
+      if (probed) return probed;
+    }
+  }
   let recv = lowerer.lowerExpr(expr.right);
   const classInfo =
     recv.type.kind === "classval" ? lowerer.classes.get(recv.type.className) : undefined;
   if (
     (classInfo && (classInfo.callableBase || hasRuntimeStatics(classInfo))) ||
-    (isJsSourceFile(expr.getSourceFile()) &&
+    (isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       recv.type.kind === "func" &&
       lowerer.dynConvertible(recv.type))
   ) {

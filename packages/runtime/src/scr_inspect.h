@@ -35,6 +35,9 @@ ScrStr *scr_insp_error(ScrError *e, double recurse, double depth);
  * one, or one built from its fields), so Node's own properties follow the
  * bracket form. */
 ScrStr *scr_insp_error_node(ScrError *e, double recurse, double depth);
+bool scr_insp_error_bag_has_properties(ScrDyn *bag);
+bool scr_insp_error_has_cause(ScrError *e);
+ScrStr *scr_insp_error_cause(ScrError *e, double recurse, double depth);
 /* The checked-dynamic tree: shape lives in the value, so the whole
  * traversal is here. dyn-boxed bytes render in the checked-dynamic tree's documented
  * Uint8Array identity. */

@@ -14,7 +14,21 @@ import {
   SemanticSignature,
   SemanticSymbol,
   SemanticType,
+  symbolName,
 } from "../../src/frontend/ts7/semantic-model.js";
+import { ts7Diagnostic, type Ts7Diagnostic } from "../../src/frontend/ts7/diagnostic.js";
+import type { Ts7DiagnosticData } from "../../src/frontend/ts7/session-schema.generated.js";
+
+// The SDK's symbols have `name`; scriptc's give it with symbolName, which reads `escapedName`, as the
+// SDK's symbols also have it.
+function nameOf(symbol: SdkSymbol): string {
+  return symbolName(symbol as unknown as SemanticSymbol);
+}
+
+// scriptc's diagnostics have every member set; the SDK's leave absent ones out.
+function diagnostics(list: readonly unknown[]): Ts7Diagnostic[] {
+  return list.map((item) => ts7Diagnostic(item as Ts7DiagnosticData));
+}
 
 // scriptc's symbols keep their declarations' node handles in
 // `declarationHandles`, and the SDK's in `declarations`.
@@ -51,12 +65,12 @@ function programFacts(snapshot: Snapshot, config: string, path: string) {
     options: project.program.getCompilerOptions(),
     text: file.text,
     type: checker.typeToString(type),
-    symbol: symbol.name,
+    symbol: nameOf(symbol),
     declaration: declarationHandlesOf(symbol)[0]!.resolve()!.getText(file),
-    syntactic: project.program.getSyntacticDiagnostics(path),
-    semantic: project.program.getSemanticDiagnostics(path),
-    globals: project.program.getGlobalDiagnostics(),
-    config: project.program.getConfigFileParsingDiagnostics(),
+    syntactic: diagnostics(project.program.getSyntacticDiagnostics(path)),
+    semantic: diagnostics(project.program.getSemanticDiagnostics(path)),
+    globals: diagnostics(project.program.getGlobalDiagnostics()),
+    config: diagnostics(project.program.getConfigFileParsingDiagnostics()),
     defaultLibrary: project.program.isSourceFileDefaultLibrary(file),
     externalLibrary: project.program.isSourceFileFromExternalLibrary(file),
   };
@@ -233,7 +247,7 @@ test("native semantic registries preserve project scope and snapshot lifetimes",
               .declarationList.declarations,
           )[0],
         texts: [a.checker.typeToString(typeA), b.checker.typeToString(typeB)],
-        parameters: signatureA.getParameters().map((symbol) => symbol.name),
+        parameters: signatureA.getParameters().map(nameOf),
       },
       symbolA,
       typeA,
@@ -258,7 +272,7 @@ test("native semantic registries preserve project scope and snapshot lifetimes",
     first.dispose();
     expect(() => actual.typeA.getSymbol()).toThrow("disposed");
     expect(() => declarationHandlesOf(actual.symbolA)[0]!.resolve()).toThrow("disposed");
-    expect(next.signatureA.getParameters()[0]!.name).toBe("value");
+    expect(nameOf(next.signatureA.getParameters()[0]!)).toBe("value");
     expect(second.getProject(firstConfig)!.checker.typeToString(next.typeA)).toBe("42");
     second.dispose();
     expect(() => next.signatureA.getParameters()).toThrow("disposed");

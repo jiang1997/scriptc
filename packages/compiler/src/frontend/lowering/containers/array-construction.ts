@@ -1,5 +1,6 @@
 import { generatorDrain } from "../iterator-adapters.js";
 import { identityPreservingWidening } from "../coercions/identity.js";
+import { liftedFreshSpread } from "../coercions/fresh-spread.js";
 import { InternalCompilerError } from "../../../errors.js";
 import {
   dynUndefinedExpr,
@@ -141,6 +142,16 @@ export function lowerArraySpreadItems(
       }
       if (source.type.kind === "record" && lowerer.shapes.get(source.type.shapeId)?.tuple) {
         source = lowerer.widthCoerce(source, arrType) ?? source;
+      }
+      if (
+        !typeEquals(source.type, arrType) &&
+        !(
+          source.type.kind === "array" &&
+          identityPreservingWidening(lowerer, source.type.elem, elem)
+        )
+      ) {
+        // Fresh elements (an array literal) convert into the element layout.
+        source = liftedFreshSpread(lowerer, node.expression, source, arrType, loc) ?? source;
       }
       if (!typeEquals(source.type, arrType)) {
         if (
@@ -296,7 +307,7 @@ export function lowerArrayConstructor(
   // reference. Known element forms retain native arrays, including their
   // existing sparse storage and indexed property contracts.
   if (
-    isJsSourceFile(expr.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
     (result?.kind !== "array" || result.elem.kind === "dyn")
   ) {
     return {
@@ -321,7 +332,7 @@ export function lowerArrayConstructor(
       : null;
     if (elem !== null && isSupportedArrayElem(elem)) result = arrayOf(elem);
   }
-  if (isJsSourceFile(expr.getSourceFile()) && (result === null || result.kind === "dyn"))
+  if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && (result === null || result.kind === "dyn"))
     result = arrayOf(DYN);
   if (result?.kind !== "array" || !isSupportedArrayElem(result.elem)) {
     lowerer.badType(expr, lowerer.typeOf(expr));
@@ -823,7 +834,7 @@ export function lowerArrayFromCall(
   const loc = locOf(call);
   const args = call.arguments.nodes;
   if (
-    isJsSourceFile(call.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(call)) &&
     args.length >= 1 &&
     args.length <= 3 &&
     !args.some(ts.isSpreadElement)

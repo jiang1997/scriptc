@@ -126,8 +126,12 @@ function useSiteType(lowerer: Lowerer, expr: ts.Expression): IrType {
   // elsewhere — the throw always fires first.
   const type = lowerer.typeOf(expr);
   const symbol = type.getSymbol();
-  if (symbol?.name === "Function" && lowerer.isStdlibSymbol(symbol)) {
-    return isJsSourceFile(expr.getSourceFile()) ? DYN : F64;
+  if (
+    symbol !== undefined &&
+    ts.symbolName(symbol) === "Function" &&
+    lowerer.isStdlibSymbol(symbol)
+  ) {
+    return isJsSourceFile(ts.getSourceFileOfNode(expr)) ? DYN : F64;
   }
   const mapped = lowerer.mapTypeOf(type);
   if (

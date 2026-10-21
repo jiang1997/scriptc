@@ -31,6 +31,7 @@ const features: NativeLinkFeatures = {
   searchParams: false,
   qs: false,
   dynBuiltinClass: false,
+  dynBuiltinStream: false,
   parseArgs: false,
   stream: false,
   net: false,
@@ -44,6 +45,7 @@ const features: NativeLinkFeatures = {
   tls: false,
   tlsCa: false,
   cipher: false,
+  ecdh: false,
   webcrypto: false,
   perfLoop: false,
 };
@@ -101,7 +103,7 @@ for (const backend of ["llvm"] as const) {
           object_format: target.objectFormat,
           minimum_os: target.minimumOs,
         },
-        runtime_abi: { version: 22, marker: "scr_runtime_abi_v22" },
+        runtime_abi: { version: 23, marker: "scr_runtime_abi_v23" },
         compiler: { command: "fixture", identity: "fixture", target: target.llvmTriple },
         macros: { executable: [], excluded: [], sanitizer: "external-toolchain-required" },
         flavors: {

@@ -285,7 +285,7 @@ function lowerPerfArguments(lowerer: Lowerer, call: ts.CallExpression, loc: SrcL
       });
       continue;
     }
-    const spelling = arg.expression.getText();
+    const spelling = ts.getTextOfNode(arg.expression);
     const items = checkedIterableSpread(lowerer, lowerer.lowerExpr(arg.expression), spelling, loc);
     stmts.push({
       kind: "exprStmt",
@@ -527,7 +527,11 @@ export function fencePerfEntryKeyWalk(
  * receiver's checker type. Its value is the runtime histogram handle. */
 function isIntervalHistogram(lowerer: Lowerer, node: ts.Expression): boolean {
   const symbol = lowerer.typeOf(node).getSymbol();
-  return symbol?.name === "IntervalHistogram" && lowerer.isStdlibSymbol(symbol);
+  return (
+    symbol !== undefined &&
+    ts.symbolName(symbol) === "IntervalHistogram" &&
+    lowerer.isStdlibSymbol(symbol)
+  );
 }
 
 /** IntervalHistogram's numeric members, as perf.eldStat selectors. */

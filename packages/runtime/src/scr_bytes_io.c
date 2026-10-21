@@ -1350,6 +1350,24 @@ ScrBytes *scr_buffer_from_dyn_pooled(const ScrDyn *value, const ScrStr *encoding
   return scr_buffer_pool_adopt(out);
 }
 
+/* scr_buffer_from_dyn_pooled for values that can be a typed array crossing
+ * an untyped slot by reference (a number[] passed to an untyped parameter,
+ * as yazl's Buffer.from(something, encoding) receives it): the array copies
+ * like the array it is. Used by the runtime-encoding Buffer.from forms. */
+ScrBytes *scr_buffer_from_dyn_ref_pooled(const ScrDyn *value, const ScrStr *encoding) {
+  if (value->kind == SCR_DYN_TYPED_REF && scr_dyn_typed_ref_array_ops(value) != NULL) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(value);
+    if (scr_exc_pending()) {
+      scr_dyn_release(materialized);
+      return NULL;
+    }
+    ScrBytes *out = scr_buffer_from_dyn_pooled(materialized, encoding);
+    scr_dyn_release(materialized);
+    return out;
+  }
+  return scr_buffer_from_dyn_pooled(value, encoding);
+}
+
 /* ── the checked-dynamic Buffer compare/equals validators ──────────────
  * Node's argument ladders for buf.equals / buf.compare / Buffer.compare
  * over dyn-boxed arguments (the invalid-input probes: string needles,

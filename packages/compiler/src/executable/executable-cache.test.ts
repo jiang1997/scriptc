@@ -46,6 +46,7 @@ const native: EarlyExecutableNativeFeatures = {
   searchParams: false,
   qs: false,
   dynBuiltinClass: false,
+  dynBuiltinStream: false,
   parseArgs: false,
   stream: false,
   net: false,
@@ -59,6 +60,7 @@ const native: EarlyExecutableNativeFeatures = {
   tls: false,
   tlsCa: false,
   cipher: false,
+  ecdh: false,
   webcrypto: false,
   perfLoop: false,
 };

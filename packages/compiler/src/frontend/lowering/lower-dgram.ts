@@ -195,7 +195,7 @@ export function lowerDgramDnsModuleCall(
         sawType = true;
       } else if (name === "reuseAddr") {
         reuseAddr = lowerer.lowerExprExpecting(prop.initializer, BOOL);
-      } else if (name === "signal" && isJsSourceFile(expr.getSourceFile())) {
+      } else if (name === "signal" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
         // A provably-non-AbortSignal signal (the invalid-input probes:
         // strings, numbers, plain records) throws Node's
         // validateAbortSignal ladder; plausible signal values keep the
@@ -441,8 +441,31 @@ function lowerDnsModuleCall(
     const hostname = dyn(args[0]!);
     const options = args.length === 3 ? dyn(args[1]!) : dynUndefinedExpr(loc);
     const last = args[args.length - 1]!;
-    const typed = typedResult(last);
-    const cb = lowerDnsCallback(lowerer, last, "lookup callbacks");
+    // Options known only at run time (a checked-dynamic value, or one cast
+    // to an overload's option type) decide between Node's two callback
+    // shapes there: the address is a string, or an address list with
+    // `all: true`. An inline callback then binds its parameters as
+    // checked-dynamic values, whatever the overload the checker picked
+    // says, and its body tests what actually arrived.
+    let runtimeOptions = false;
+    if (args.length === 3) {
+      let inner: ts.Expression = args[1]!;
+      while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner))
+        inner = inner.expression;
+      runtimeOptions = lowerer.mapTypeOf(lowerer.typeOf(inner))?.kind === "dyn";
+    }
+    let callbackNode: ts.Expression = last;
+    while (ts.isParenthesizedExpression(callbackNode)) callbackNode = callbackNode.expression;
+    const dynCallback =
+      runtimeOptions && (ts.isArrowFunction(callbackNode) || ts.isFunctionExpression(callbackNode));
+    const typed = dynCallback ? boolLit(false, loc) : typedResult(last);
+    if (dynCallback) lowerer.dynParamLambdas.add(callbackNode);
+    let cb: IrExpr;
+    try {
+      cb = lowerDnsCallback(lowerer, last, "lookup callbacks");
+    } finally {
+      if (dynCallback) lowerer.dynParamLambdas.delete(callbackNode);
+    }
     return {
       kind: "libCall",
       fn: "dns.lookupDyn",
@@ -578,7 +601,7 @@ export function lowerDgramMethodCall(
       return { kind: "libCall", fn, args: [receiver, data, port, host], type: VOID, loc };
     }
     if (
-      isJsSourceFile(call.getSourceFile()) &&
+      isJsSourceFile(ts.getSourceFileOfNode(call)) &&
       args.length <= 5 &&
       !args.some(ts.isSpreadElement)
     ) {

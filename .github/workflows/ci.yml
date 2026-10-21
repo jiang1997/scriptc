@@ -4,21 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly full macOS sweep, including on days without a push to main.
+  # Nightly full macOS sweep. Pushes to main run no macOS jobs, and pull requests run them only when they change
+  # darwin code (scripts/ci-lanes.mjs).
   schedule:
     - cron: "17 7 * * *"
-  # A manual run; macos_full runs the complete suite on macOS as the nightly sweep does (for example on a
-  # release candidate commit).
+  # A manual run, for example on a release candidate commit. It runs every lane; macos_suite selects the complete
+  # suite on macOS, as the nightly sweep runs it, or the darwin suite that pull requests run.
   workflow_dispatch:
     inputs:
-      macos_full:
-        description: Run the complete test suite on macOS
-        type: boolean
-        default: false
+      macos_suite:
+        description: The test suite to run on macOS
+        type: choice
+        options: [full, darwin]
+        default: full
 
 concurrency:
   # A new push to a pull request cancels its previous run. Every push to main runs to completion in a group of
-  # its own commit, so each merged commit gets a full result (releases require a green run on their commit). The
+  # its own commit, so each merged commit gets a result (releases require a green run on their commit). The
   # nightly sweep and manual runs neither cancel nor are cancelled by main pushes.
   group: ci-${{ github.event_name == 'schedule' && 'schedule' || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -59,7 +61,8 @@ jobs:
           NODE
 
   # Which expensive lanes a pull request needs (scripts/ci-lanes.mjs, run from the base commit against the pull
-  # request's diff, so a pull request cannot change its own selection). Pushes and the nightly sweep run every lane.
+  # request's diff, so a pull request cannot change its own selection). Pushes to main run every lane except macos,
+  # whose jobs the nightly sweep runs on main. The nightly sweep and manual runs run every lane.
   lanes:
     needs: validation_scope
     if: ${{ needs.validation_scope.outputs.full == 'true' }}
@@ -86,7 +89,9 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           every() { printf 'linux=true\nmacos=true\neffects=true\nbootstrap=true\n' | tee -a "$GITHUB_OUTPUT"; }
-          if [ "$EVENT" != pull_request ]; then
+          if [ "$EVENT" = push ]; then
+            printf 'linux=true\nmacos=false\neffects=true\nbootstrap=true\n' | tee -a "$GITHUB_OUTPUT"
+          elif [ "$EVENT" != pull_request ]; then
             every
           elif git show "$BASE:scripts/ci-lanes.mjs" > "$RUNNER_TEMP/ci-lanes.mjs" 2> /dev/null; then
             node "$RUNNER_TEMP/ci-lanes.mjs" --base "$BASE" --head "$HEAD" --github-output
@@ -219,25 +224,25 @@ jobs:
   tests_macos:
     needs: [validation_scope, lanes, native_macos]
     if: ${{ needs.validation_scope.outputs.full == 'true' && needs.lanes.outputs.macos == 'true' }}
-    name: test (macOS, ${{ matrix.flavor }}, ${{ (github.event_name != 'schedule' && !inputs.macos_full) && 'darwin ' || '' }}${{ matrix.shard }}/${{ (github.event_name != 'schedule' && !inputs.macos_full) && '3' || '10' }})
+    name: test (macOS, ${{ matrix.flavor }}, ${{ (github.event_name != 'schedule' && inputs.macos_suite != 'full') && 'darwin ' || '' }}${{ matrix.shard }}/${{ (github.event_name != 'schedule' && inputs.macos_suite != 'full') && '3' || '10' }})
     # arm64 macOS: same clang/libc the differential + number-formatting
-    # oracles were verified against. Pull requests and pushes to main run the
-    # darwin suite (scripts/ci-test-plan.mjs) in three slices; the nightly
-    # schedule and manual runs with macos_full run the complete suite in ten.
-    # The complete suite on every push needed more macOS runners than the
-    # repository has.
+    # oracles were verified against. Pull requests that change darwin code and
+    # manual runs with macos_suite set to darwin run the darwin suite
+    # (scripts/ci-test-plan.mjs) in three slices; the nightly schedule and
+    # other manual runs run the complete suite in ten. The complete suite on
+    # every push needed more macOS runners than the repository has.
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         flavor: [plain, san]
-        shard: ${{ fromJSON((github.event_name != 'schedule' && !inputs.macos_full) && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}
+        shard: ${{ fromJSON((github.event_name != 'schedule' && inputs.macos_suite != 'full') && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}
     env:
       # See the Linux tests job for the worker cap and case partitioning.
       SCRIPTC_TEST_WORKERS: "4"
       SCRIPTC_SAN: ${{ matrix.flavor == 'san' && '1' || '' }}
-      SCRIPTC_TEST_SHARD: ${{ matrix.shard }}/${{ (github.event_name != 'schedule' && !inputs.macos_full) && '3' || '10' }}
-      SCRIPTC_CI_SUITE: ${{ (github.event_name != 'schedule' && !inputs.macos_full) && 'darwin' || 'full' }}
+      SCRIPTC_TEST_SHARD: ${{ matrix.shard }}/${{ (github.event_name != 'schedule' && inputs.macos_suite != 'full') && '3' || '10' }}
+      SCRIPTC_CI_SUITE: ${{ (github.event_name != 'schedule' && inputs.macos_suite != 'full') && 'darwin' || 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -254,7 +259,7 @@ jobs:
           path: ${{ runner.temp }}
       - run: tar -xzf "$RUNNER_TEMP/native-darwin-arm64.tar.gz"
       - run: pnpm build
-      - name: Tests (${{ (github.event_name != 'schedule' && !inputs.macos_full) && 'darwin suite' || 'corpus and integration suites' }})
+      - name: Tests (${{ (github.event_name != 'schedule' && inputs.macos_suite != 'full') && 'darwin suite' || 'corpus and integration suites' }})
         run: node scripts/ci-test.mjs
 
   native_linux:
@@ -868,14 +873,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runtime: runtime-ios-arm64
-            runner: macos-15
-          - runtime: runtime-ios-simulator-arm64
-            runner: macos-15
-          - runtime: runtime-android-arm64
-            runner: ubuntu-24.04
-    runs-on: ${{ matrix.runner }}
+        runtime: [runtime-android-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mobile-runtime-pack
+        with:
+          runtime: ${{ matrix.runtime }}
+
+  # The iOS runtime packs build on macOS runners, so they run in the macos lane.
+  mobile_runtime_packs_ios:
+    needs: [validation_scope, lanes]
+    if: ${{ needs.validation_scope.outputs.full == 'true' && needs.lanes.outputs.macos == 'true' }}
+    name: test (${{ matrix.runtime }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [runtime-ios-arm64, runtime-ios-simulator-arm64]
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -908,6 +924,7 @@ jobs:
         windows_cli,
         llvm_artifacts_windows_x64,
         mobile_runtime_packs,
+        mobile_runtime_packs_ios,
       ]
     # Run even after failed or cancelled lanes: skipped required jobs allow merging.
     if: ${{ always() }}
@@ -939,6 +956,7 @@ jobs:
               lane windows_cli "${{ needs.windows_cli.result }}" "${{ needs.lanes.outputs.linux }}"
               lane llvm_artifacts_windows_x64 "${{ needs.llvm_artifacts_windows_x64.result }}" "${{ needs.lanes.outputs.linux }}"
               lane mobile_runtime_packs "${{ needs.mobile_runtime_packs.result }}" "${{ needs.lanes.outputs.linux }}"
+              lane mobile_runtime_packs_ios "${{ needs.mobile_runtime_packs_ios.result }}" "${{ needs.lanes.outputs.macos }}"
               ;;
             false)
               echo "::notice::Full CI is deferred until this PR becomes the lowest unmerged layer. Merge the stack from the bottom up."

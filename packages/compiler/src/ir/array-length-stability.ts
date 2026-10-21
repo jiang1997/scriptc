@@ -17,6 +17,11 @@ const READING_ARRAY_METHODS = new Set<string>([
 /** String methods that read an immutable string and run no user code. */
 const READING_STRING_METHODS = new Set<string>(["length", "charCodeAt", "codePointAt"]);
 
+/** Map and Set methods that read the receiver and run no user code: keys
+ * hash and compare by value or identity, and no array is touched. */
+const READING_MAP_METHODS = new Set<string>(["get", "has", "size"]);
+const READING_SET_METHODS = new Set<string>(["has", "size"]);
+
 /** Expressions that compute from their operands and run no user code. Their
  * children are checked separately. */
 const PLAIN_EXPRESSIONS = new Set<string>([
@@ -162,8 +167,9 @@ export interface ArrayLengthLoop {
 /** Whether running `nodes` (a loop's condition, body and update) can never
  * change the length of the array held by local `loop.receiver`. The proof is
  * syntactic and conservative: every expression and statement must be one
- * that runs no user code (no calls, callbacks, closures, iterators,
- * suspension or exception regions); the binding is never written and only
+ * that runs no user code (no calls other than checked union extractions, no
+ * callbacks, closures, iterators, suspension or exception regions; Map and
+ * Set reads are accepted); the binding is never written and only
  * ever read as the receiver of an element access or a reading array method,
  * so the array cannot escape to code that resizes it; and nothing in the
  * nodes resizes any array that may be the same one. Element writes are
@@ -215,6 +221,14 @@ export function preservesArrayLength(
           e.args.every(expr)
         );
       }
+      case "call":
+        // A checked union extraction (`x!`, coercions/unions.ts): the
+        // asserted arm's payload or a TypeError, and no user code.
+        return e.callee.startsWith("%union.narrow.") && e.args.every(expr);
+      case "mapIntrinsic":
+        return READING_MAP_METHODS.has(e.method) && expr(e.receiver) && e.args.every(expr);
+      case "setIntrinsic":
+        return READING_SET_METHODS.has(e.method) && expr(e.receiver) && e.args.every(expr);
       case "libCall":
         return (
           isBorrowSafeMath(e.fn) &&

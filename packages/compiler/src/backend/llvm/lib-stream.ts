@@ -36,6 +36,29 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     host.emitPendingCheck();
     return out;
   }
+  if (e.fn === "stream.dynNative" || e.fn === "stream.dynNativePipe") {
+    // Checked-dynamic stream slots: the boxed native stream (+1) or NULL.
+    if (e.type.kind !== "union")
+      throw new InternalCompilerError(`llvm emitter bug: ${e.fn} result is not a union`);
+    const def = host.unionsById.get(e.type.unionId);
+    const streamTag = def ? def.arms.findIndex((a) => a.kind === "object") : -1;
+    const nullTag = def ? def.arms.findIndex((a) => a.kind === "nullT") : -1;
+    if (streamTag < 0 || nullTag < 0)
+      throw new InternalCompilerError(`llvm emitter bug: ${e.fn} union lacks its arms`);
+    const value = host.emitExpr(e.args[0]!);
+    const side = host.emitExpr(e.args[1]!);
+    // A pipe or unpipe destination in programs with constructor-function
+    // streams can be one of those streams too (scr_dyn_builtin_stream.c),
+    // as stream.unboxDyn does there.
+    const fn =
+      e.fn === "stream.dynNativePipe" && host.usesDynBuiltinStream
+        ? "scr_dyn_builtin_stream_dyn_native"
+        : "scr_stream_dyn_native";
+    host.declare(`declare ptr @${fn}(ptr, double)`);
+    const raw = B.tmp();
+    B.line(`${raw} = call ptr @${fn}(ptr ${value.name}, double ${side.name}) ; +1 or NULL`);
+    return host.wrapNullable(raw, raw, def!.arms[streamTag]!, streamTag, e.type, nullTag);
+  }
   if (e.fn === "stream.onData") {
     // The callback MOVES into the stream's listener registry; the
     // adapter is per callback shape — runtime-provided for the

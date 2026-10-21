@@ -378,9 +378,9 @@ function usesArguments(fn: ts.FunctionExpression): boolean {
     if (found) return;
     if (ts.isIdentifier(node) && node.text === "arguments") found = true;
     else if (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node))
-      node.forEachChild(visit);
+      ts.forEachChild(node, visit);
   };
-  fn.body?.forEachChild(visit);
+  if (fn.body !== undefined) ts.forEachChild(fn.body, visit);
   return found;
 }
 

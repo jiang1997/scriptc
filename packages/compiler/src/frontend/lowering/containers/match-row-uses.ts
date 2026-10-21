@@ -242,7 +242,7 @@ function constBindingReadsByElements(
 }
 
 function usesOf(lowerer: Lowerer, name: ts.Identifier, symbol: ts.Symbol): ts.Identifier[] {
-  return identifiersNamed(lowerer, name.getSourceFile(), name.text).filter(
+  return identifiersNamed(lowerer, ts.getSourceFileOfNode(name), name.text).filter(
     (use) => use !== name && lowerer.resolveValueSymbol(use) === symbol,
   );
 }

@@ -39,8 +39,8 @@ export function isClassCallback(lowerer: Lowerer, info: ClassInfo, name: string)
     !found.sig.abstract &&
     (lowerer.prototypeMethodAccesses.has(name) ||
       (info.decl !== null &&
-        isJsSourceFile(info.decl.getSourceFile()) &&
-        !lowerer.checkedJsFile(info.decl.getSourceFile()) &&
+        isJsSourceFile(ts.getSourceFileOfNode(info.decl)) &&
+        !lowerer.checkedJsFile(ts.getSourceFileOfNode(info.decl)) &&
         found.sig.params.length === 0 &&
         found.sig.ret.kind === "void"))
   );
@@ -171,7 +171,7 @@ export function classCallbackCall(
   const spreads: { arg: number; what: string }[] = [];
   const args = argumentNodes.map((argument, index) => {
     if (!ts.isSpreadElement(argument)) return lowerer.lowerExprExpecting(argument, DYN);
-    const spelling = argument.expression.getText();
+    const spelling = ts.getTextOfNode(argument.expression);
     spreads.push({ arg: index, what: spelling });
     return checkedIterableSpread(lowerer, lowerer.lowerExpr(argument.expression), spelling, loc);
   });

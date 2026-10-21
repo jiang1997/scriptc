@@ -85,12 +85,11 @@ test("slots.get reads the slot word, the page and the entry inline", () => {
   ];
   expect(validateModule(module(calls))).toEqual([]);
   const llvm = emitLlvmModule(module(calls), { pointerBits: 64 });
-  // The slot word sits after the header words of every hierarchy member.
+  // The slot word sits after the rc word of every hierarchy member, which
+  // keeps its class id in the rc word instead of a vtable word.
+  expect(llvm).toMatch(new RegExp(`%${mangleClassStruct("Node")} = type \\{ i64, i32, ptr \\}`));
   expect(llvm).toMatch(
-    new RegExp(`%${mangleClassStruct("Node")} = type \\{ i64, ptr, i32, ptr \\}`),
-  );
-  expect(llvm).toMatch(
-    new RegExp(`%${mangleClassStruct("Leaf")} = type \\{ i64, ptr, i32, ptr, (i32|double) \\}`),
+    new RegExp(`%${mangleClassStruct("Leaf")} = type \\{ i64, i32, ptr, (i32|double) \\}`),
   );
   expect(llvm).toMatch(new RegExp(`%${mangleClassStruct("Plain")} = type \\{ i64, ptr \\}`));
   // One block per family name.
@@ -102,7 +101,7 @@ test("slots.get reads the slot word, the page and the entry inline", () => {
   );
   const main = body(llvm, "sc_f_main");
   expect(main).toMatch(
-    /getelementptr inbounds %\S+, ptr %\S+, i64 0, i32 2\n {2}(%\S+) = load atomic i32, ptr %\S+ monotonic, align 4\n {2}%\S+ = lshr i32 \1, 10/,
+    /getelementptr inbounds %\S+, ptr %\S+, i64 0, i32 1\n {2}(%\S+) = load atomic i32, ptr %\S+ monotonic, align 4\n {2}%\S+ = lshr i32 \1, 10/,
   );
   expect(main).not.toMatch(/call ptr @scr_slots_get/);
   expect(main).toMatch(

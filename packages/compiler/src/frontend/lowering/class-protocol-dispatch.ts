@@ -87,7 +87,7 @@ function codeOwner(node: ts.Node): ts.Node {
     !ts.isPropertyDeclaration(current)
   )
     current = current.parent;
-  return current ?? node.getSourceFile();
+  return current ?? ts.getSourceFileOfNode(node);
 }
 
 /** A local variable or parameter that only its own function's code
@@ -102,21 +102,21 @@ function ownedBinding(lowerer: Lowerer, id: ts.Identifier): boolean {
   const decl = symbol.valueDeclaration;
   let owned =
     decl !== undefined &&
-    decl.getSourceFile() === id.getSourceFile() &&
+    ts.getSourceFileOfNode(decl) === ts.getSourceFileOfNode(id) &&
     ((ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name)) ||
       (ts.isParameter(decl) && ts.isIdentifier(decl.name)));
   if (owned && decl) {
     const owner = codeOwner(decl);
     const names = (node: ts.Node): boolean =>
       ts.isIdentifier(node) &&
-      node.text === symbol.name &&
+      node.text === ts.symbolName(symbol) &&
       lowerer.resolveValueSymbol(node) === symbol;
     const written = (target: ts.Node): boolean => {
       let found = false;
       const walk = (node: ts.Node): void => {
         if (found) return;
         if (names(node)) found = true;
-        else node.forEachChild(walk);
+        else ts.forEachChild(node, walk);
       };
       walk(target);
       return found;
@@ -144,9 +144,9 @@ function ownedBinding(lowerer: Lowerer, id: ts.Identifier): boolean {
       )
         target = node.initializer;
       if (target && codeOwner(node) !== owner && written(target)) owned = false;
-      node.forEachChild(visit);
+      ts.forEachChild(node, visit);
     };
-    owner.forEachChild(visit);
+    ts.forEachChild(owner, visit);
   }
   lowerer.protocolOwnedBindings.set(symbol, owned);
   return owned;
@@ -302,7 +302,7 @@ export function lowerProtocolMethodCall(
       kind: "dynCall",
       callee: probed ? varRef("p.callee", DYN, loc) : read(),
       receiver: varRef("p.0", DYN, loc),
-      calleeName: access.getText(),
+      calleeName: ts.getTextOfNode(access),
       calleeNameValue: varRef("p.calleeName", STRING, loc),
       args: params.map((type, i) => lowerer.coerceToExpected(varRef(`p.${i + 1}`, type, loc), DYN)),
       type: DYN,
@@ -378,7 +378,7 @@ export function lowerProtocolMethodCall(
         receiver,
         ...(callee ? [varRef(callee.id, DYN, loc)] : []),
         ...args,
-        { kind: "strLit", value: access.getText(), type: STRING, loc },
+        { kind: "strLit", value: ts.getTextOfNode(access), type: STRING, loc },
       ],
       type: result,
       loc,
@@ -487,7 +487,7 @@ export function lowerProtocolPropertyRead(
   lowerer: Lowerer,
   access: ts.PropertyAccessExpression,
 ): IrExpr | null {
-  if (isJsSourceFile(access.getSourceFile())) return null;
+  if (isJsSourceFile(ts.getSourceFileOfNode(access))) return null;
   const receiverType = lowerer.typeOf(access.expression);
   if (!lowerer.classImplementedProtocol(receiverType)) return null;
   const name = access.name.text;

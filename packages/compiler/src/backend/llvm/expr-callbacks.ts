@@ -864,23 +864,27 @@ export function emitterFixedAdapter(
  * (the event's tuple to any[]): the runtime-built listener closure holds
  * the boxer in caps[0], so the adapter calls it with the event's typed
  * arguments, as emitterFixedAdapter calls a listener, and hands the array
- * to scr_events_once_fire. */
+ * to scr_events_once_fire (or `fire`, the signal form's entry). */
 export function emitterOnceAdapter(
   host: LlvmEmitterContext,
   boxerT: IrType & { kind: "func" },
+  fire = "scr_events_once_fire",
 ): { fn: string; shim: string } {
   const cursor = boxerT.params.length > 4;
   const shim = cursor ? "scr_ee_inv_args" : `scr_ee_inv_fixed${boxerT.params.length}`;
   if (cursor) host.declare("declare ptr @scr_ee_arg_next(ptr)");
   host.declare(`declare void @${shim}(ptr, ptr)`);
-  const key = `eeOnce:${typeKey(boxerT)}`;
+  const key =
+    fire === "scr_events_once_fire"
+      ? `eeOnce:${typeKey(boxerT)}`
+      : `eeOnce:${fire}:${typeKey(boxerT)}`;
   let sym = host.resolveThunks.get(key);
   if (sym) return { fn: sym, shim };
   sym = `sc_ee_once_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
   host.declare(`declare ptr @scr_box_get_ref(ptr)`);
   host.declare(`declare void @scr_closure_release(ptr)`);
-  host.declare(`declare void @scr_events_once_fire(ptr, ptr)`);
+  host.declare(`declare void @${fire}(ptr, ptr)`);
   const params = cursor ? "ptr %args" : boxerT.params.map((_, i) => `ptr %a${i}`).join(", ");
   const d: string[] = [
     `define internal void @${sym}(ptr %cb${params ? ", " + params : ""}) ${FN_ATTRS} { ; events.once adapter ${typeKey(boxerT)}`,
@@ -911,7 +915,7 @@ export function emitterOnceAdapter(
     `  %fn = load ptr, ptr %fnp`,
     `  %arr = call ptr %fn(${passed.join(", ")}) ; the boxed arguments, +1`,
     `  call void @scr_closure_release(ptr %boxer)`,
-    `  call void @scr_events_once_fire(ptr %cb, ptr %arr) ; moves %arr`,
+    `  call void @${fire}(ptr %cb, ptr %arr) ; moves %arr`,
     `  ret void`,
     `}`,
     ``,

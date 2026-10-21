@@ -17,7 +17,7 @@ export function runtimeConstructorReceiver(
   let e = expr;
   while (ts.isParenthesizedExpression(e)) e = e.expression;
   if (!ts.isPropertyAccessExpression(e) || e.questionDotToken) return null;
-  if (e.name.text !== "constructor" || isJsSourceFile(e.getSourceFile())) return null;
+  if (e.name.text !== "constructor" || isJsSourceFile(ts.getSourceFileOfNode(e))) return null;
   const mapped = lowerer.mapTypeOf(lowerer.typeOf(e.expression));
   if (mapped?.kind !== "object") return null;
   const info = lowerer.classes.get(mapped.className);

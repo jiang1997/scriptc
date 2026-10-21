@@ -92,13 +92,17 @@ export function isRequireMainFilename(lowerer: Lowerer, expr: ts.Expression): bo
   const main = expr.expression;
   if (!ts.isPropertyAccessExpression(main) || main.name.text !== "main") return false;
   if (!lowerer.isStdlibGlobal(main.expression, "require")) return false;
-  return !isNodeEsmFile(expr.getSourceFile(), lowerer.program);
+  return !isNodeEsmFile(ts.getSourceFileOfNode(expr), lowerer.program);
 }
 
 export function isOptionalChainTail(lowerer: Lowerer, expr: ts.Expression): boolean {
   const tail = chainTailDot(lowerer, expr);
   if (!tail) return false;
-  const recvT = lowerer.mapTypeOf(lowerer.typeOf(tail.expression));
+  const recvTs = lowerer.typeOf(tail.expression);
+  // An `any` receiver short-circuits the whole tail too: `a?.b.c` reads
+  // `.c` normally once `a` is present.
+  if (recvTs.flags & ts.TypeFlags.Any) return true;
+  const recvT = lowerer.mapTypeOf(recvTs);
   if (recvT?.kind === "dyn") return true;
   if (recvT?.kind === "union") {
     const def = lowerer.unions.get(recvT.unionId);
@@ -119,7 +123,7 @@ export function isOptionalChainTail(lowerer: Lowerer, expr: ts.Expression): bool
  * throwing. Walks the receiver spine only; the argument of the access
  * itself is not part of the guard. Parentheses end the chain
  * (`(a?.b).c` reads `.c` from undefined); `!` does not. */
-export function hasOptionalChainGuard(expr: ts.Expression): boolean {
+export function hasOptionalChainGuard(expr: ts.Expression, lowerer?: Lowerer): boolean {
   let cur: ts.Expression = expr;
   for (;;) {
     if (ts.isNonNullExpression(cur)) {
@@ -131,7 +135,11 @@ export function hasOptionalChainGuard(expr: ts.Expression): boolean {
       ts.isElementAccessExpression(cur) ||
       ts.isCallExpression(cur)
     ) {
-      if (cur.questionDotToken) return true;
+      // Inside an optional chain's guarded body (dynamic reads pass the
+      // lowerer), the enclosing optChain already short-circuits on the
+      // consumed token, so the steps above it read normally: `a?.b.c`
+      // throws when `a.b` is undefined.
+      if (cur.questionDotToken) return lowerer === undefined || !lowerer.chainHandled.has(cur);
       cur = cur.expression;
       continue;
     }
@@ -257,14 +265,14 @@ export function lowerOptionalChain(
       const spreads: { arg: number; what: string }[] = [];
       const args = expr.arguments.nodes.map((arg, index) => {
         if (!ts.isSpreadElement(arg)) return lowerer.lowerExprExpecting(arg, DYN);
-        spreads.push({ arg: index, what: arg.expression.getText() });
+        spreads.push({ arg: index, what: ts.getTextOfNode(arg.expression) });
         return lowerer.lowerExprExpecting(arg.expression, DYN);
       });
       const body: IrExpr = {
         kind: "dynCall",
         callee,
         ...(thisValue ? { receiver: thisValue } : {}),
-        calleeName: recvNode.getText(),
+        calleeName: ts.getTextOfNode(recvNode),
         args,
         ...(spreads.length ? { spreads } : {}),
         type: DYN,

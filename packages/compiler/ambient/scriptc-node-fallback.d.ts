@@ -2933,6 +2933,34 @@ declare module "crypto" {
     iv: BinaryLike | null,
     options?: { authTagLength?: number },
   ): Decipheriv;
+  export type ECDHKeyFormat = "compressed" | "uncompressed" | "hybrid";
+  export class ECDH {
+    private constructor();
+    static convertKey(
+      key: BinaryLike,
+      curve: string,
+      inputEncoding?: BinaryToTextEncoding,
+      outputEncoding?: "latin1" | "hex" | "base64" | "base64url",
+      format?: ECDHKeyFormat,
+    ): Buffer | string;
+    generateKeys(): Buffer;
+    generateKeys(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
+    computeSecret(otherPublicKey: ArrayBufferView): Buffer;
+    computeSecret(otherPublicKey: string, inputEncoding: BinaryToTextEncoding): Buffer;
+    computeSecret(otherPublicKey: ArrayBufferView, outputEncoding: BinaryToTextEncoding): string;
+    computeSecret(
+      otherPublicKey: string,
+      inputEncoding: BinaryToTextEncoding,
+      outputEncoding: BinaryToTextEncoding,
+    ): string;
+    getPrivateKey(): Buffer;
+    getPrivateKey(encoding: BinaryToTextEncoding): string;
+    getPublicKey(encoding?: null, format?: ECDHKeyFormat): Buffer;
+    getPublicKey(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
+    setPrivateKey(privateKey: ArrayBufferView): void;
+    setPrivateKey(privateKey: string, encoding: BinaryToTextEncoding): void;
+  }
+  export function createECDH(curveName: string): ECDH;
   export interface ScryptOptions {
     N?: number;
     r?: number;
@@ -4940,15 +4968,17 @@ declare module "net" {
     host?: string,
     connectListener?: () => void,
   ): Socket;
-  /* The caller-resolver dial (@types/node's net.LookupFunction, narrowed
-   * to the lowered shape): the runtime invokes it as Node does and dials
-   * the answered addresses in order under autoSelectFamily: true. */
+  /* The caller-resolver dial (@types/node's net.LookupFunction): the
+   * runtime invokes it as Node's autoSelectFamily dial does (options
+   * { hints, all: true }, so the callback answers an address list) and
+   * dials the answered addresses in order. */
   export type LookupFunction = (
     hostname: string,
-    options: unknown,
+    options: import("node:dns").LookupOptions,
     callback: (
       err: NodeJS.ErrnoException | null,
-      addresses: { address: string; family: number }[],
+      address: string | import("node:dns").LookupAddress[],
+      family?: number,
     ) => void,
   ) => void;
   export function connect(
@@ -6569,7 +6599,7 @@ declare module "events" {
     export { internal as EventEmitter };
     // The event's arguments, as checked-dynamic values.
     export function once(
-      emitter: EventEmitter,
+      emitter: EventEmitter | NodeJS.ReadableStream | NodeJS.WritableStream,
       eventName: string,
       options?: { signal?: AbortSignal },
     ): Promise<unknown[]>;

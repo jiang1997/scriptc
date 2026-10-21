@@ -1,5 +1,6 @@
 import { lowerBuiltinByteInput, errorFirstBytesCallback, errorFirstCallback } from "./arguments.js";
 import { isKeyObjectValue } from "./key-object.js";
+import { lowerCreateEcdh } from "./ecdh.js";
 import { boolLit, dynUndefinedExpr, nodeThrowExpr, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, own } from "../lowerer.js";
@@ -240,7 +241,9 @@ function cryptoKdfInput(lowerer: Lowerer, node: ts.Expression): IrExpr {
   const symbol = lowerer.typeOf(node).getSymbol();
   if (
     type?.kind === "bytes" ||
-    (symbol?.name === "ArrayBuffer" && lowerer.isStdlibSymbol(symbol))
+    (symbol !== undefined &&
+      ts.symbolName(symbol) === "ArrayBuffer" &&
+      lowerer.isStdlibSymbol(symbol))
   ) {
     const value = lowerer.coerceInto(node, lowerer.lowerExpr(node), DYN);
     return { kind: "libCall", fn: "bytes.bufferSource", args: [value], type: BYTES_U8, loc };
@@ -406,6 +409,7 @@ export function lowerCryptoModuleCall(
       loc,
     };
   }
+  if (bi.member === "createECDH") return lowerCreateEcdh(lowerer, expr);
   if (bi.member === "createHmac") {
     if (args.length < 1 || args.length > 3 || args.some(ts.isSpreadElement)) {
       lowerer.noLowering(
@@ -878,8 +882,8 @@ export function isCipherType(lowerer: Lowerer, type: ts.Type): boolean {
   const symbol = type.getAliasSymbol() ?? type.getSymbol();
   return (
     !!symbol &&
-    CIPHER_TYPE_NAMES.has(symbol.name) &&
-    symbol.declarations.some((d) => lowerer.isStdlibFile(d.getSourceFile()))
+    CIPHER_TYPE_NAMES.has(ts.symbolName(symbol)) &&
+    symbol.declarations.some((d) => lowerer.isStdlibFile(ts.getSourceFileOfNode(d)))
   );
 }
 
@@ -894,11 +898,11 @@ const CIPHER_METHODS = new Set([
 
 /** V8's spelling of a callee in "is not a function" messages: call
  * arguments render as "(...)". */
-function v8CalleeText(node: ts.Expression): string {
+export function v8CalleeText(node: ts.Expression): string {
   if (ts.isPropertyAccessExpression(node))
     return `${v8CalleeText(node.expression)}.${node.name.text}`;
   if (ts.isCallExpression(node)) return `${v8CalleeText(node.expression)}(...)`;
-  return node.getText();
+  return ts.getTextOfNode(node);
 }
 
 /** Calls on native Cipheriv/Decipheriv handles dispatch through the
@@ -959,7 +963,7 @@ export function lowerCryptoHashMethodCall(
     return {
       kind: "seqExpr",
       stmts: evaluated,
-      result: nodeThrowExpr(1, "", `${access.getText()} is not a function`, DYN, loc),
+      result: nodeThrowExpr(1, "", `${ts.getTextOfNode(access)} is not a function`, DYN, loc),
       type: DYN,
       loc,
     };

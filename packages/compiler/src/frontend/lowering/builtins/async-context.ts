@@ -35,7 +35,7 @@ export function lowerDiagnosticsSubscriber(lowerer: Lowerer, node: ts.Expression
   if (ts.isIdentifier(node) && node.text === "setImmediate") {
     const sym = lowerer.checker.getSymbolAtLocation(node);
     const decls = sym ? sym.declarations : [];
-    if (decls.length > 0 && decls.every((d) => lowerer.isStdlibFile(d.getSourceFile()))) {
+    if (decls.length > 0 && decls.every((d) => lowerer.isStdlibFile(ts.getSourceFileOfNode(d)))) {
       return {
         kind: "libCall",
         fn: "timers.setImmediateFnValue",

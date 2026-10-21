@@ -30,7 +30,7 @@ export function perEvaluationPrivateNames(info: ClassInfo): boolean {
   const declaration = info.localClass ? info.decl : null;
   return (
     !!declaration &&
-    isJsSourceFile(declaration.getSourceFile()) &&
+    isJsSourceFile(ts.getSourceFileOfNode(declaration)) &&
     declaration.members.nodes.some(
       (member) => member.name !== undefined && ts.isPrivateIdentifier(member.name),
     )

@@ -9,7 +9,12 @@ import { varRef } from "../../../ir/build.js";
 function isStdlibDisposableStack(lowerer: Lowerer, node: ts.Expression): boolean {
   const type = lowerer.checker.getBaseTypeOfLiteralType(lowerer.typeOf(node));
   for (const symbol of [type.getSymbol(), type.getAliasSymbol()]) {
-    if (symbol?.name === "DisposableStack" && lowerer.isStdlibSymbol(symbol)) return true;
+    if (
+      symbol !== undefined &&
+      ts.symbolName(symbol) === "DisposableStack" &&
+      lowerer.isStdlibSymbol(symbol)
+    )
+      return true;
   }
   return false;
 }

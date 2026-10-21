@@ -71,7 +71,7 @@ export function typedArgumentsCandidate(node: ts.Node): node is ts.FunctionExpre
   return (
     ts.isFunctionExpression(node) &&
     node.asteriskToken === undefined &&
-    !isJsSourceFile(node.getSourceFile()) &&
+    !isJsSourceFile(ts.getSourceFileOfNode(node)) &&
     node.parameters.nodes.every(isThisParameter) &&
     bodyReadsArguments(node)
   );
@@ -243,7 +243,7 @@ export function onlyForwarded(
           lowerer.checker.getNonNullableType(lowerer.typeOf(p.parent.expression)),
         );
         const decl = sigs.length === 1 ? sigs[0]!.declaration : undefined;
-        if (decl && !decl.getSourceFile().isDeclarationFile) return undefined;
+        if (decl && !ts.getSourceFileOfNode(decl).isDeclarationFile) return undefined;
       }
       if (
         ts.isVariableDeclaration(p) &&
@@ -317,7 +317,7 @@ export function forwardedTupleType(lowerer: Lowerer, node: ts.Expression): IrTyp
     ts.isParameter(decl) &&
     decl.dotDotDotToken !== undefined &&
     ts.isIdentifier(decl.name) &&
-    !isJsSourceFile(decl.getSourceFile()) &&
+    !isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
     // Checker-only probe first: an ordinary array rest never maps here.
     restTupleElementTypes(lowerer.typeOf(operand), lowerer.typeCtx) !== null
   ) {

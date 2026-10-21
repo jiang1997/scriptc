@@ -731,27 +731,34 @@ export function emitErrorsEventsLibCall(host: LlvmEmitterContext, e: LibCallExpr
     host.emitAlwaysPendingUnwind();
     return out;
   }
-  if (e.fn === "events.once") {
-    // (recv, name, boxer, errorBoxer, listenForError): scr_events_once
-    // registers one-shot typed listeners behind adapters that box the
-    // event's tuple (and the 'error' tuple) into the fulfilled array. The
-    // runtime retains the boxers; the frame's temporaries release as usual.
-    // May-throw ('newListener' meta listeners run inside).
+  if (e.fn === "events.once" || e.fn === "events.onceSignal") {
+    // (recv, name, boxer, errorBoxer, listenForError[, signal]):
+    // scr_events_once registers one-shot typed listeners behind adapters
+    // that box the event's tuple (and the 'error' tuple) into the fulfilled
+    // array. The runtime retains the boxers; the frame's temporaries
+    // release as usual. May-throw ('newListener' meta listeners run
+    // inside). The signal form's adapters end in its own fire entry.
     const boxerT = e.args[2]!.type;
     const errorT = e.args[3]!.type;
     if (boxerT.kind !== "func" || errorT.kind !== "func")
-      throw new InternalCompilerError("llvm emitter bug: events.once boxer not a func");
+      throw new InternalCompilerError(`llvm emitter bug: ${e.fn} boxer not a func`);
+    const signal = e.fn === "events.onceSignal";
     const args = e.args.map((a) => host.emitExpr(a));
-    const event = host.emitterOnceAdapter(boxerT);
-    const error = host.emitterOnceAdapter(errorT);
-    host.declare(`declare ptr @scr_events_once(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)`);
+    const fire = signal ? "scr_events_once_signal_fire" : undefined;
+    const event = host.emitterOnceAdapter(boxerT, fire);
+    const error = host.emitterOnceAdapter(errorT, fire);
+    const entry = signal ? "scr_events_once_signal" : "scr_events_once";
+    host.declare(
+      `declare ptr @${entry}(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr${signal ? ", ptr" : ""})`,
+    );
     const errorBoxer = B.tmp();
     B.line(`${errorBoxer} = select i1 ${args[4]!.name}, ptr ${args[3]!.name}, ptr null`);
     const t = B.tmp();
     B.line(
-      `${t} = call ptr @scr_events_once(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ` +
+      `${t} = call ptr @${entry}(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ` +
         `ptr ${args[2]!.name}, ptr @${event.fn}, ptr @${event.shim}, ` +
-        `ptr ${errorBoxer}, ptr @${error.fn}, ptr @${error.shim})`,
+        `ptr ${errorBoxer}, ptr @${error.fn}, ptr @${error.shim}` +
+        `${signal ? `, ptr ${args[5]!.name}` : ""})`,
     );
     const out = host.own({ name: t, type: e.type });
     host.emitPendingCheck();

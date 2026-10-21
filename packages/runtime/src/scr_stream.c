@@ -2254,6 +2254,8 @@ void scr_stream_set_flush(ScrStream *s, ScrClosure *cb /*moves*/, ScrStreamPlain
 
 void scr_stream_set_flush_on_prefinish(ScrStream *s) { s->st->flush_on_prefinish = true; }
 
+void scr_stream_set_destroyed(ScrStream *s, bool destroyed) { s->st->destroyed = destroyed; }
+
 void scr_stream_set_native(ScrStream *s, void *state /*moves*/, void (*release)(void *)) {
   ScrStreamState *st = s->st;
   if (st->native) st->native_release(st->native);
@@ -4738,12 +4740,14 @@ ScrStream *scr_stream_rl_from_dyn(const ScrDyn *value, bool output) {
   if (value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
       !memcmp(value->v.typed_ref.type_key, "object:", 7)) {
     ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-    const ScrVt *vt = stream->vt;
-    bool duplex = vt == &scr_duplex_vt || vt == &scr_transform_vt || vt == &scr_passthrough_vt ||
-                  scr_vt_within(vt, &scr_duplex_vt);
-    bool ok = duplex || (output ? vt == &scr_writable_vt || scr_vt_within(vt, &scr_writable_vt)
-                                : vt == &scr_readable_vt || scr_vt_within(vt, &scr_readable_vt));
-    if (ok) return stream;
+    const ScrVt *vt = scr_stream_vt_of(stream);
+    if (vt) {
+      bool duplex = vt == &scr_duplex_vt || vt == &scr_transform_vt || vt == &scr_passthrough_vt ||
+                    scr_vt_within(vt, &scr_duplex_vt);
+      bool ok = duplex || (output ? vt == &scr_writable_vt || scr_vt_within(vt, &scr_writable_vt)
+                                  : vt == &scr_readable_vt || scr_vt_within(vt, &scr_readable_vt));
+      if (ok) return stream;
+    }
     value->v.typed_ref.release(stream);
   }
   static const char in_m[] = "createInterface with an input that is not a readable stream has no lowering";
@@ -6409,9 +6413,9 @@ static ScrStream *scr_stream_view_receiver(const ScrDyn *value) {
   if (value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
       !memcmp(value->v.typed_ref.type_key, "object:", 7)) {
     ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-    const ScrVt *vt = stream->vt;
-    if ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
-        (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post)) return stream;
+    const ScrVt *vt = scr_stream_vt_of(stream);
+    if (vt && ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
+               (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post))) return stream;
     value->v.typed_ref.release(stream);
   }
   scr_dyn_arg_type_fail("destination", "an instance of Stream", value);
@@ -6714,9 +6718,9 @@ ScrStream *scr_stream_unbox_dyn(const ScrDyn *value, const ScrStr *message) {
   if (value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
       !memcmp(value->v.typed_ref.type_key, "object:", 7)) {
     ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-    const ScrVt *vt = stream->vt;
-    if ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
-        (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post)) return stream;
+    const ScrVt *vt = scr_stream_vt_of(stream);
+    if (vt && ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
+               (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post))) return stream;
     value->v.typed_ref.release(stream);
   }
   scr_throw_error_msg_code(SCR_ERR_ERROR, message->data, message->len, "SC2020");

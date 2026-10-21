@@ -472,7 +472,7 @@ static ScrArrState scr_itable_element(ScrITableElements *w, size_t i, uint64_t *
   }
   if (i < a->cap) {
     *slot = a->data[i];
-    return (ScrArrState)a->present[i];
+    return (ScrArrState)*scr_arr_state_ptr(a, i);
   }
   if (a->ext) {
     while (w->sparse < a->ext->sparse_len && a->ext->sparse[w->sparse].index < i) w->sparse++;
