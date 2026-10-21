@@ -7503,7 +7503,9 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
       }
       const ScrDyn *e = d->v.arr.items[i];
       if (e->kind == SCR_DYN_UNDEF || e->kind == SCR_DYN_NULL) continue; /* JS join: empty */
-      ScrStr *piece = scr_dyn_string_coerce(e);
+      /* ToString with the object protocol: an element's own or inherited
+       * toString/valueOf runs, as in Array.prototype.join. */
+      ScrStr *piece = scr_dyn_string_coerce_js(e);
       if (!piece || scr_exc_pending()) {
         scr_str_release(piece);
         scr_str_release(out);
