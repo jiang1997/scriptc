@@ -29,7 +29,7 @@ import { LlvmUnsupportedError } from "./unsupported.js";
 import type { LlvmEmitterContext, ExprOf, LlValue } from "./expr-context.js";
 import { emitUnionWiden } from "./expr-records.js";
 import { emitJsIcMethod, jsIcMethods } from "./js-ic.js";
-import { DYN_BUFFER_METHODS } from "../../ir/runtime-features.js";
+import { DYN_BUFFER_NUM_METHODS } from "../../ir/runtime-features.js";
 
 export function emitDynamicExpr(
   host: LlvmEmitterContext,
@@ -234,9 +234,11 @@ export function emitDynamicExpr(
         });
         argsPtr = arr;
       }
-      // Buffer.prototype method names take their scr_bytes_dyn.c entry, which
+      // Fixed-width Buffer method names take scr_bytes_dyn.c's entry, which
       // runs them on Buffer receivers and dispatches any other receiver.
-      const invoke = DYN_BUFFER_METHODS.get(e.method) ?? "scr_dyn_invoke_prepared";
+      const invoke = DYN_BUFFER_NUM_METHODS.has(e.method)
+        ? "scr_dyn_invoke_buffer_num"
+        : "scr_dyn_invoke_prepared";
       host.declare(`declare ptr @${invoke}(ptr, ptr, ptr, ptr, ${host.sizeType}, ptr)`);
       let name = host.cstr(e.calleeName);
       if (e.calleeNameValue !== undefined) {

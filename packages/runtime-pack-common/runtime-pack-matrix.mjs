@@ -61,8 +61,8 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_inspect.c", "inspect"],
   ["scr_console_native.c", "inspect"],
   ["scr_dyn_invoke.c", any("dynInvoke", "nativeFetch")],
-  // Buffer.prototype methods called on checked-dynamic values.
-  ["scr_bytes_dyn.c", all("dynBuffer", "dynInvoke")],
+  // Fixed-width Buffer methods called on checked-dynamic values.
+  ["scr_bytes_dyn.c", all("dynBufferNum", "dynInvoke")],
   // Builtin functions read as values in JavaScript dependencies.
   ["scr_builtin_values.c", "builtinValues"],
   ["scr_dc.c", "dc"],

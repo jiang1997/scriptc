@@ -581,7 +581,7 @@ async function compileExecutableNative(
     ...(features.handleProps ? { handleProps: true } : {}),
     ...(features.dynForAwait ? { dynForAwait: true } : {}),
     ...(features.eventsOnceSignal ? { eventsOnceSignal: true } : {}),
-    ...(features.dynBuffer ? { dynBuffer: true } : {}),
+    ...(features.dynBufferNum ? { dynBufferNum: true } : {}),
     ...(features.builtinValues ? { builtinValues: true } : {}),
     events: features.events,
     emitter: features.emitter,

@@ -1489,10 +1489,8 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
 static void scr_bytes_to_str_bounds(const ScrBytes *b, double start, double end,
                                     size_t *s0_out, size_t *e0_out) {
   size_t len = b->len;
-  /* Clamped before the conversion: NaN and values at or below 0 are 0,
-   * values at or past the length (Infinity included) are the length. */
-  size_t s0 = !(start > 0) ? 0 : start >= (double)len ? len : (size_t)start;
-  size_t e0 = !(end > 0) ? 0 : end >= (double)len ? len : (size_t)end;
+  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
+  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
   if (e0 < s0) e0 = s0;
   *s0_out = s0;
   *e0_out = e0;
@@ -2521,7 +2519,7 @@ static bool scr_enc_eq_ci(const ScrStr *raw, const char *name) {
   return true;
 }
 
-ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
+static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
   static const struct { const char *from; const char *to; } map[] = {
     {"utf8", "utf8"}, {"utf-8", "utf8"}, {"hex", "hex"},
     {"base64", "base64"}, {"base64url", "base64url"},
@@ -3206,61 +3204,15 @@ double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nar
   return sn < tn ? -1 : 1;
 }
 
-/* node_buffer.cc's IndexOfBuffer/IndexOfString for the UCS2 encoding over
- * an encoded needle: buffer.js clamps the byteOffset to the int32 range,
- * IndexOfOffset picks the start, the search runs over whole 2-byte units of
- * the haystack (an odd trailing byte of either side is ignored), and a match
- * is reported at its byte position. */
-static double scr_bytes_index_of_ucs2(const ScrBytes *haystack, const ScrBytes *needle, double at, bool fwd) {
-  int64_t length = (int64_t)haystack->len, needle_length = (int64_t)needle->len;
-  /* NaN (an omitted or non-numeric byteOffset) searches everything. */
-  if (at > 2147483647.0) at = 2147483647.0;
-  else if (at < -2147483648.0) at = -2147483648.0;
-  int64_t offset_i64 = at != at ? (fwd ? 0 : length) : (int64_t)trunc(at);
-  int64_t opt_offset;
-  if (offset_i64 < 0) {
-    if (offset_i64 + length >= 0) opt_offset = length + offset_i64;
-    else opt_offset = fwd || needle_length == 0 ? 0 : -1;
-  } else if (offset_i64 + needle_length <= length) {
-    opt_offset = offset_i64;
-  } else if (needle_length == 0) {
-    opt_offset = length;
-  } else {
-    opt_offset = fwd ? -1 : length - 1;
-  }
-  size_t search_end = haystack->len & ~(size_t)1;
-  if (needle_length == 0) return (double)(opt_offset < (int64_t)search_end ? opt_offset : (int64_t)search_end);
-  if (length == 0 || opt_offset <= -1) return -1;
-  size_t offset = (size_t)opt_offset;
-  if (offset >= search_end) {
-    if (fwd || search_end == 0) return -1;
-    offset = search_end - 1;
-  }
-  if ((fwd && needle->len + offset > search_end) || needle->len > search_end) return -1;
-  if (search_end < 2 || needle->len < 2) return -1;
-  size_t units = search_end / 2, needle_units = needle->len / 2, start = offset / 2;
-  if (units < needle_units) return -1;
-  size_t last = units - needle_units;
-  if (fwd) {
-    for (size_t p = start; p <= last; p++)
-      if (!memcmp(haystack->data + 2 * p, needle->data, 2 * needle_units)) return (double)(2 * p);
-    return -1;
-  }
-  for (size_t p = start < last ? start : last;; p--) {
-    if (!memcmp(haystack->data + 2 * p, needle->data, 2 * needle_units)) return (double)(2 * p);
-    if (p == 0) return -1;
-  }
-}
-
 /* The shared search core: needle bytes, a coerced byteOffset (trunc; NaN
  * means 'search everything' — 0 forward, the end backward; negatives
  * count from the end, and a still-negative backward search answers -1),
- * and the alignment: 2 searches utf16le units (scr_bytes_index_of_ucs2). */
+ * and the utf16le alignment stride. */
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd) {
   SCR_BYTES_SNAPSHOT(b);
   SCR_BYTES_SNAPSHOT(needle);
-  if (align == 2) return scr_bytes_index_of_ucs2(b, needle, off, fwd);
   size_t len = b->len, nlen = needle->len;
+  size_t step = align == 2 ? 2 : 1;
   double o = (off != off) ? (fwd ? 0 : (double)len) : trunc(off);
   if (o < 0) {
     o += (double)len;
@@ -3273,15 +3225,17 @@ double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off,
   if (nlen > len) return -1;
   if (fwd) {
     size_t start = o > (double)len ? len : (size_t)o;
-    for (size_t i = start; i + nlen <= len; i++) {
+    if (step == 2) start += start % 2;
+    for (size_t i = start; i + nlen <= len; i += step) {
       if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
     }
     return -1;
   }
   size_t start = o > (double)(len - nlen) ? len - nlen : (size_t)o;
-  for (size_t i = start;; i--) {
+  if (step == 2) start -= start % 2;
+  for (size_t i = start;; i -= step) {
     if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
-    if (i == 0) break;
+    if (i < step) break;
   }
   return -1;
 }

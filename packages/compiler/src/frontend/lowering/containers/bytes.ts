@@ -1537,8 +1537,6 @@ function lowerBufferInstanceMethod(
       if (encName === "utf16le") align = 2;
     } else if (vT?.kind === "bytes" && vT.elem === "u8") {
       needle = lowerer.lowerExpr(args[0]!);
-      // A Buffer needle under utf16le also searches whole 2-byte units.
-      if (encName === "utf16le") align = 2;
     } else {
       lowerer.noLowering(
         `.${name} of '${lowerer.checker.typeToString(lowerer.typeOf(args[0]!))}' values`,

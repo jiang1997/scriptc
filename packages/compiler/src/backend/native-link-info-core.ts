@@ -55,9 +55,9 @@ export interface NativeLinkFeatures {
   /** events.once with options: scr_events_once_signal.c. Absent (not
    * false) for programs without it. */
   eventsOnceSignal?: boolean;
-  /** Buffer.prototype methods called on checked-dynamic values link
+  /** Fixed-width Buffer methods called on checked-dynamic values link
    * scr_bytes_dyn.c; absent (false) for programs without them. */
-  dynBuffer?: boolean;
+  dynBufferNum?: boolean;
   /** Builtin functions read as values (Buffer.byteLength, Buffer.alloc,
    * fs.realpathSync) link scr_builtin_values.c; absent (false) otherwise. */
   builtinValues?: boolean;

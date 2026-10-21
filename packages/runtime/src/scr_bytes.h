@@ -150,10 +150,6 @@ ScrStr *scr_strdec_write(const ScrStr *enc, double pending, const ScrBytes *chun
 double scr_strdec_next(const ScrStr *enc, double pending, const ScrBytes *chunk);
 ScrStr *scr_strdec_end(const ScrStr *enc, double pending);
 ScrStr *scr_strdec_encoding(const ScrDyn *enc); /* +1, or NULL with ERR_UNKNOWN_ENCODING pending */
-/* A Buffer encoding name known only at run time, Node's getEncodingOps: the
- * canonical name of an encoding in any ASCII case (+1), or NULL with
- * ERR_UNKNOWN_ENCODING ("Unknown encoding: <raw>") pending. Borrows raw. */
-ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw);
 
 /* `new Uint8Array(n)` / Buffer.alloc(n): zero-filled. n goes through
  * ToIndex like JS (NaN → 0, truncate toward zero; negative or > 2^53-1
