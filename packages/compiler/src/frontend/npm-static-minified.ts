@@ -8,11 +8,16 @@
  *   - the target looks minified (the eligibility heuristic's own test) and
  *     a sibling with the same name minus `.min` exists;
  *   - the bundle's source map lists every source with its content, and the
- *     per-file module graph reached from the sibling (relative edges and the
- *     installed dependencies Node would load, through their source maps)
- *     compiles exactly the same sources with byte-identical content — so a
- *     dependency inlined into the bundle at build time must match the
- *     installed version the per-file build would import;
+ *     per-file module graph reached from the sibling compiles exactly the
+ *     same sources with byte-identical content;
+ *   - only the package's own files answer through their source maps. A
+ *     file of another package (an installed dependency) answers with its
+ *     installed JavaScript, so a dependency the bundle inlined must appear in
+ *     the bundle's sources as that exact JavaScript. A dependency's source
+ *     map describes code the dependency controls and cannot show that its
+ *     installed JavaScript is the copy the bundle inlined. A dependency the
+ *     bundle itself imports is the same installed module for both builds,
+ *     so the per-file build's edge into it is not compared;
  *   - the bundle and the sibling export the same names.
  * Anything else keeps the minified target, and the reason is recorded for
  * the eligibility refusal. */
@@ -116,6 +121,18 @@ function verify(minFile: string): string | null {
   if (!trackedExists(sibling)) return `it has no unminified sibling ${sibling}`;
   const bundled = sourcesOf(minFile, minSource);
   if (bundled === null) return "its bundle has no source map with source contents";
+  const own = packageOfKey(sourceKey(minFile));
+  // Modules the bundle loads at run time instead of inlining them.
+  const shared = new Set<string>();
+  for (const edge of h.moduleEdges(minFile, minSource)) {
+    const spec = edge.specifier;
+    if (spec.startsWith("node:") || canonicalBuiltinModule(spec) !== null) continue;
+    if (spec.startsWith("./") || spec.startsWith("../")) continue;
+    for (const kind of edgeKinds(edge)) {
+      const target = h.resolveBare(minFile, spec, kind);
+      if (target !== null) shared.add(resolve(target));
+    }
+  }
 
   // The per-file graph Node would load from the sibling.
   const compiled = new Map<string, string>();
@@ -128,7 +145,8 @@ function verify(minFile: string): string | null {
     seen.add(file);
     const source = trackedReadFile(file);
     if (source === null) return `${file} cannot be read`;
-    const mapped = file.endsWith(".json") ? null : sourcesOf(file, source);
+    const ownFile = packageOfKey(sourceKey(file)) === own;
+    const mapped = file.endsWith(".json") || !ownFile ? null : sourcesOf(file, source);
     const contributed = new Map<string, string>();
     if (mapped === null) contributed.set(sourceKey(file), source);
     else for (const [key, content] of mapped) contributed.set(key, content);
@@ -143,15 +161,13 @@ function verify(minFile: string): string | null {
     for (const edge of h.moduleEdges(file, source)) {
       const spec = edge.specifier;
       if (spec.startsWith("node:") || canonicalBuiltinModule(spec) !== null) continue;
-      const kinds: ("import" | "require")[] = [];
-      if (edge.imported) kinds.push("import");
-      if (edge.required) kinds.push("require");
-      for (const kind of kinds) {
+      for (const kind of edgeKinds(edge)) {
         const target =
           spec.startsWith("./") || spec.startsWith("../")
             ? relativeTarget(file, spec, kind)
             : h.resolveBare(file, spec, kind);
         if (target === null) return `'${spec}' does not resolve from ${file}`;
+        if (ownFile && shared.has(resolve(target))) continue;
         queue.push(target);
       }
     }
@@ -159,6 +175,10 @@ function verify(minFile: string): string | null {
 
   for (const [key, content] of bundled) {
     const per = compiled.get(key);
+    const pkg = packageOfKey(key);
+    if (per === undefined && pkg !== own) {
+      return `the bundle inlines ${key} from ${pkg}, and only ${pkg}'s installed JavaScript, not its source map, can show that the per-file build loads the same code`;
+    }
     if (per === undefined) {
       return `the bundle inlines ${key}, which its per-file build does not load`;
     }
@@ -229,6 +249,20 @@ function sourcesOf(file: string, source: string): Map<string, string> | null {
     out.set(sourceKey(resolve(dirname(mapFile), root, entry)), content);
   }
   return out;
+}
+
+/** The runtime loads an edge performs: import, require, or both. */
+function edgeKinds(edge: ModuleEdge): ("import" | "require")[] {
+  const kinds: ("import" | "require")[] = [];
+  if (edge.imported) kinds.push("import");
+  if (edge.required) kinds.push("require");
+  return kinds;
+}
+
+/** The package name a source key starts with (`@scope/name` or `name`). */
+function packageOfKey(key: string): string {
+  const parts = key.split("/");
+  return parts[0]!.startsWith("@") && parts.length > 1 ? `${parts[0]}/${parts[1]}` : parts[0]!;
 }
 
 /** `pkg/rest` below the innermost node_modules, else the path relative to

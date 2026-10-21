@@ -21,11 +21,8 @@ import {
   trackedReadFile,
   trackedRealpath,
 } from "./input-tracker.js";
-<<<<<<< a761388bf (Merge main)
 import { looksUnminified, minifiedEntryRefusal, unminifiedTarget } from "./npm-static-minified.js";
-=======
 import { npmBuiltinAliasOf } from "./builtin-modules.js";
->>>>>>> 200fe8d22 (Read http.request options at run time, speak HTTP over Unix sockets, and fill the boot path's net and fetch gaps (#1515))
 
 let activePackages: ReadonlySet<string> = new Set();
 let declarationOverloads: ReadonlyMap<string, NpmStaticDeclarationOverloads> = new Map();

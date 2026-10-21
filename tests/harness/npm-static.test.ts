@@ -1732,9 +1732,10 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   }, 120_000);
 
   // A minified entry compiles from its per-file build once the source maps
-  // prove the two are one program: the bundle's sources (its own modules
-  // and the minified-dep it inlined at build time) are exactly the ones the
-  // per-file graph loads, byte for byte, and both export the same names.
+  // prove the two are one program: the bundle's sources are exactly the
+  // package's own modules the per-file graph loads, with the same content,
+  // and both export the same names. Both builds import the installed
+  // minified-dep, so it is shared rather than compared.
   test("a verified minified entry compiles from its per-file build and byte-matches Node", async () => {
     const entry = join(pilotRoot, "minified-pair-cli.ts");
     const { coverage } = analyze(entry, { npmStatic: "auto" });
@@ -1757,7 +1758,7 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
 
   // The bundle inlined an older minified-dep than the one installed: the
   // per-file build would run different code than Node runs, so the
-  // minified entry keeps its refusal and names the mismatch.
+  // minified entry keeps its refusal.
   test("a minified entry whose bundle inlines another dependency version stays refused", () => {
     const entry = join(pilotRoot, "minified-drift-cli.ts");
     const { coverage } = analyze(entry, { npmStatic: "auto" });
@@ -1766,8 +1767,27 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         package: "minified-drift",
         status: "refused",
         detail:
-          "its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines a minified-dep/src/index.ts that differs from the installed one its per-file build loads",
+          "its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines minified-dep/src/index.ts from minified-dep, and only minified-dep's installed JavaScript, not its source map, can show that the per-file build loads the same code",
         hint: "to compile it anyway, name it with --npm-static=minified-drift (or --npm-static=minified-drift... to include its dependencies)",
+      },
+    ]);
+  }, 120_000);
+
+  // The bundle inlined minified-dep's TypeScript sources, which the
+  // installed minified-dep's source map also lists. That map belongs to
+  // the dependency and does not show that its installed JavaScript is the
+  // code the bundle inlined, so the entry keeps its refusal even when the
+  // contents agree.
+  test("a minified entry whose bundle inlines another package's sources stays refused", () => {
+    const entry = join(pilotRoot, "minified-inline-cli.ts");
+    const { coverage } = analyze(entry, { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "minified-inline",
+        status: "refused",
+        detail:
+          "its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines minified-dep/src/index.ts from minified-dep, and only minified-dep's installed JavaScript, not its source map, can show that the per-file build loads the same code",
+        hint: "to compile it anyway, name it with --npm-static=minified-inline (or --npm-static=minified-inline... to include its dependencies)",
       },
     ]);
   }, 120_000);
@@ -1783,9 +1803,9 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(files.some((f) => f.endsWith("/lru-cache/dist/esm/node/index.js"))).toBe(true);
   }, 120_000);
 
-  // glob 13.0.6's bundle inlined the minimatch, path-scurry and lru-cache
-  // releases current at its build; the installed ones are newer, so the
-  // per-file build is a different program and the entry stays refused.
+  // glob 13.0.6's bundle inlined the sources of minimatch, path-scurry and
+  // lru-cache releases; another package's sources cannot be verified
+  // through its source map, so the entry stays refused.
   test("glob 13 with newer installed dependencies keeps the minified-entry refusal", () => {
     const { coverage } = analyze(join(pilotRoot, "glob13-cli.ts"), { npmStatic: "auto" });
     expect(coverage.npmStatic).toEqual([
@@ -1793,7 +1813,7 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         package: "glob",
         status: "refused",
         detail: expect.stringMatching(
-          /^its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines a .* that differs from the installed one its per-file build loads$/,
+          /^its shipped JS looks minified, and its per-file build cannot replace it: the bundle inlines \S+ from \S+, and only \S+ installed JavaScript, not its source map, can show that the per-file build loads the same code$/,
         ),
         hint: "to compile it anyway, name it with --npm-static=glob (or --npm-static=glob... to include its dependencies)",
       },
