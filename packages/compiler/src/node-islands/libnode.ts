@@ -6,8 +6,8 @@
  * SCRIPTC_LIBNODE overrides the recorded directory at run time.
  *
  * Where the build finds the pack: `--libnode=<pack directory>`, else
- * SCRIPTC_LIBNODE in the build's environment (until NI-13 publishes
- * @scriptc/libnode-<platform> packages that an installation carries).
+ * SCRIPTC_LIBNODE in the build's environment, else the installed
+ * @scriptc/libnode-<platform> pack (libnode-pack.ts).
  * `--libnode=beside` takes that pack and copies it next to the executable
  * as `<output>.libnode/`, recorded as `$ORIGIN/<output>.libnode`, so the
  * executable and its Node travel together; a recorded `$ORIGIN/` path is
@@ -15,6 +15,7 @@
 import { createHash } from "node:crypto";
 import { copyFileSync, linkSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { findInstalledLibnodePack, hostLibnodeTarget, libnodePackPackage } from "./libnode-pack.js";
 
 /** The oldest Node.js release Node islands support: synchronous
  * module.registerHooks, which shared modules need, is a release candidate
@@ -92,12 +93,18 @@ export function libnodeRecord(
   option: string | undefined,
   outPath: string,
   env: NodeJS.ProcessEnv = process.env,
+  projectDir: string = process.cwd(),
 ): LibnodeRecord | string {
   const fromEnv = env["SCRIPTC_LIBNODE"];
   const beside = option === "beside";
-  const source = option !== undefined && !beside ? option : fromEnv;
-  if (source === undefined || source === "")
-    return "this program calls into Node.js (@scriptc/node), but no libnode pack is installed: set SCRIPTC_LIBNODE or pass --libnode=<pack directory>";
+  const explicit = option !== undefined && !beside ? option : fromEnv;
+  // Without an explicit pack, the installed @scriptc/libnode-<platform>.
+  const source =
+    explicit !== undefined && explicit !== ""
+      ? explicit
+      : findInstalledLibnodePack({ targetName: hostLibnodeTarget(), projectDir });
+  if (source === undefined || source === null || source === "")
+    return `this program calls into Node.js (@scriptc/node), but no libnode pack is installed: install ${libnodePackPackage(hostLibnodeTarget()) ?? "a libnode pack"}, set SCRIPTC_LIBNODE or pass --libnode=<pack directory>`;
   if (source.startsWith(ORIGIN)) {
     // A pack the deployment places next to the executable: nothing to read.
     return { libnode: source, nodeVersion: "" };
@@ -115,7 +122,10 @@ export function libnodeRecord(
  * undefined when neither --libnode nor SCRIPTC_LIBNODE is set. It holds the
  * option, the pack directory and a digest of the pack's manifest.json, so
  * that a pack upgraded in place (another Node version, bridge ABI or file
- * list) gives cached executables a new key instead of their old record. */
+ * list) gives cached executables a new key instead of their old record.
+ * An installed @scriptc/libnode-<platform> pack needs no part: it versions
+ * in lockstep with the compiler, whose version every key already holds, so
+ * the bootstrap's routed cache keeps serving builds where one is installed. */
 export function libnodeCacheKey(
   option: string | undefined,
   env: NodeJS.ProcessEnv = process.env,

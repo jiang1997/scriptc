@@ -763,7 +763,7 @@ async function prepareExecutableInput(
     if (!moduleRuntimeFeatures(mod).nodeIsland) {
       delete mod.nodeIsland;
     } else if (outputKind === "exe") {
-      const recorded = libnodeRecord(opts.libnode, opts.outPath);
+      const recorded = libnodeRecord(opts.libnode, opts.outPath, process.env, dirname(entryPath));
       if (typeof recorded === "string")
         return { ok: false, diagnostics: [nodeIslandNodeDiag(recorded, entryPath)], sourceTexts };
       mod.nodeIsland = recorded;
