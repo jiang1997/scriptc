@@ -1553,6 +1553,16 @@ export const BUILTIN_MODULE_FNS: Record<
     createSecretKey: { fn: "crypto.createSecretKey", params: [DYN, DYN], result: DYN },
     generateKeySync: { fn: "crypto.generateKeySync", params: [DYN, DYN], result: DYN },
     generateKey: { fn: "crypto.generateKeyCb", params: [], result: VOID },
+    // Asymmetric keys and signatures (lowerPkiCall): checked-dynamic
+    // arguments, results converted to the call site's type.
+    createPrivateKey: { fn: "crypto.createPrivateKey", params: [DYN], result: DYN },
+    createPublicKey: { fn: "crypto.createPublicKey", params: [DYN], result: DYN },
+    createSign: { fn: "crypto.createSign", params: [DYN], result: DYN },
+    createVerify: { fn: "crypto.createVerify", params: [DYN], result: DYN },
+    generateKeyPairSync: { fn: "crypto.generateKeyPairSync", params: [], result: DYN },
+    generateKeyPair: { fn: "crypto.generateKeyPairCb", params: [], result: VOID },
+    sign: { fn: "crypto.signOneshot", params: [], result: DYN },
+    verify: { fn: "crypto.verifyOneshot", params: [], result: DYN },
     pbkdf2Sync: {
       fn: "crypto.pbkdf2",
       params: [BYTES_U8, BYTES_U8, F64, F64, STRING],
@@ -2211,8 +2221,8 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     kind: "stdlib",
     name: "globalThis.crypto.subtle",
     fns: [
-      "webcrypto.importKey",
       "webcrypto.generateKey",
+      "webcrypto.importKey",
       "webcrypto.exportKey",
       "webcrypto.encrypt",
       "webcrypto.decrypt",
@@ -2222,7 +2232,7 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
       "webcrypto.verify",
       "webcrypto.digest",
     ],
-    note: "importKey, generateKey and exportKey (raw and jwk) for HMAC and AES keys, importKey for PBKDF2 and HKDF keys, AES-GCM, AES-CBC and AES-CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign and verify, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused",
+    note: "importKey, generateKey and exportKey (raw and jwk) for HMAC and AES keys, importKey for PBKDF2 and HKDF keys, AES-GCM, AES-CBC and AES-CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign and verify, generateKey, importKey, exportKey, sign and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused",
   },
   {
     id: "stdlib.webcrypto.CryptoKey",
@@ -3068,14 +3078,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
   crypto: {
     ...Object.fromEntries(
       [
-        "generateKeyPair",
-        "generateKeyPairSync",
-        "createPrivateKey",
-        "createPublicKey",
-        "createSign",
-        "createVerify",
-        "sign",
-        "verify",
         "createDiffieHellman",
         "createDiffieHellmanGroup",
         "getDiffieHellman",
@@ -3086,9 +3088,9 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
         "privateDecrypt",
       ].map((m) => [
         m,
-        "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and " +
-          "public and private KeyObjects — neither exists in the static runtime, so no faithful lowering " +
-          "can be small; the lowered crypto surface is hashing, randomness, secret KeyObjects, and the introspection statics",
+        "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is " +
+          "RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, " +
+          "createSign, createVerify, and createECDH",
       ]),
     ),
     ...Object.fromEntries(

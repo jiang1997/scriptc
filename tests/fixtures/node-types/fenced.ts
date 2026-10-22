@@ -69,11 +69,11 @@ http2.createSecureServer({
 http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", streamResetBurst: 1 + 0 });
 http2.connect("https://localhost");
 /* The crypto surface beyond the lowered slice (randomness, the hash
- * chain, the introspection statics): asymmetric-key operations name the
- * missing public-key stack, symmetric ciphers the missing cipher stack,
- * prime checks theirs, and setFips the FIPS truth (getFips() lowers to 0). */
-import { checkPrimeSync, createCipheriv, generateKeyPair, setFips } from "node:crypto";
-generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
+ * chain, the introspection statics): Diffie-Hellman names the lowered
+ * asymmetric surface, symmetric ciphers the missing cipher stack, prime
+ * checks theirs, and setFips the FIPS truth (getFips() lowers to 0). */
+import { checkPrimeSync, createCipheriv, createDiffieHellman, setFips } from "node:crypto";
+createDiffieHellman(512);
 createCipheriv("aes-128-ccm", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
 checkPrimeSync(7n);
 setFips(false);
@@ -93,10 +93,6 @@ void inspectReadableStream;
 import { callbackify } from "node:util";
 const callbackified = callbackify(async (n: number) => n);
 void callbackified;
-/* Cipheriv values support update(), final(), setAAD(), setAutoPadding(),
- * getAuthTag(), and setAuthTag(); the stream.Transform members are fenced. */
-const cipherStream = createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
-cipherStream.on("data", () => {});
 /* ECDH on a curve Node knows but the runtime does not implement, and
  * computeSecret(view, encoding), which answers a Buffer where @types/node
  * declares a string. */

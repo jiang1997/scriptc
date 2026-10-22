@@ -27,6 +27,13 @@ export const ADOPTED_OPTIONS = [
   // SC1012 "not supported yet" beats a raw TS1259 at the same site.
   "esModuleInterop",
   "allowSyntheticDefaultImports",
+  // JSX: the checker types JSX as the project's tsc does, and the JSX
+  // lowering (jsx-source.ts) emits the calls that setting selects.
+  "jsx",
+  "jsxFactory",
+  "jsxFragmentFactory",
+  "jsxImportSource",
+  "reactNamespace",
 ] as const;
 
 export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([

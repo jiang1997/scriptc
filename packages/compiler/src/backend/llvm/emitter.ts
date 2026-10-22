@@ -1896,14 +1896,14 @@ export class LlEmitter {
 
   /** Whether a fiberless body running on its caller's stack needs the
    * frame scr_async_inline_enter/exit keep: it isolates the Error.stack
-   * frame chain, which only stack-observing programs push, and the
-   * AsyncLocalStorage context, which only programs that enter stores
-   * change (RuntimeFeatures asyncContext), as a fresh fiber would. Other
-   * programs run the body with a plain call. The frame also counts the
-   * bodies running on a fiber's stack for the runtime's trap on a fiberless
-   * body that suspends. */
+   * frame chain, which only stack-observing programs push, as a fresh fiber
+   * would. Other programs run the body with a plain call. The body runs in
+   * its caller's AsyncLocalStorage context either way, as Node runs an async
+   * body up to its first await. The frame also counts the bodies running on
+   * a fiber's stack for the runtime's trap on a fiberless body that
+   * suspends. */
   get fiberlessFrames(): boolean {
-    return this.stackTraces || this.schedulesInContext;
+    return this.stackTraces;
   }
 
   /** The spawn wrapper of a fiberless async function: runs the body on the

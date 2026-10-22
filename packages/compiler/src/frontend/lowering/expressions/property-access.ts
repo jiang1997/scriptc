@@ -4090,10 +4090,26 @@ function lowerStreamObjectProperty(
   return lowerStreamProperty(lowerer, expr, info);
 }
 
+/** The error constructors among GLOBAL_CONSTRUCTOR_VALUES. Their statics
+ * (`Error.stackTraceLimit`, `Error.captureStackTrace`) keep their own
+ * lowerings, so fenceBuiltinConstructorStaticRead leaves them alone. */
+const ERROR_CONSTRUCTOR_VALUES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+]);
+
 /** The builtin constructors JavaScript sources read as real function
  * values rather than identity tokens: the runtime interns one function per
  * constructor, and dynamic values answer `.constructor` with the same one,
- * so `o.constructor === Object` is an exact identity test. */
+ * so `o.constructor === Object` and `err.constructor === TypeError` are
+ * exact identity tests, and `err.constructor.name` is the constructor's
+ * name. */
 const GLOBAL_CONSTRUCTOR_VALUES: ReadonlySet<string> = new Set([
   "Object",
   "Function",
@@ -4104,6 +4120,7 @@ const GLOBAL_CONSTRUCTOR_VALUES: ReadonlySet<string> = new Set([
   "Promise",
   "WeakMap",
   "WeakSet",
+  ...ERROR_CONSTRUCTOR_VALUES,
 ]);
 
 /** The builtin global functions JavaScript sources read as interned
@@ -4154,8 +4171,18 @@ export function builtinGlobalValue(canonical: string, loc: SrcLoc, js = false): 
 const BUILTIN_VALUE_MEMBERS: ReadonlySet<string> = new Set(["name", "length", "constructor"]);
 
 /** The Object statics whose answers for an interned builtin function value
- * match Node's (identity, and the empty enumerable own-key lists). */
-const BUILTIN_VALUE_REFLECTION: ReadonlySet<string> = new Set(["is", "keys", "values", "entries"]);
+ * match Node's (identity, the empty enumerable own-key lists, and
+ * extensibility: freezing, sealing and preventExtensions are fenced, so the
+ * values stay extensible). */
+const BUILTIN_VALUE_REFLECTION: ReadonlySet<string> = new Set([
+  "is",
+  "keys",
+  "values",
+  "entries",
+  "isExtensible",
+  "isFrozen",
+  "isSealed",
+]);
 
 /** The value `builtinGlobalValue` gives the stdlib global `expr` read at its
  * use site: null when the use reads the global's members (they keep their
@@ -4246,6 +4273,7 @@ function fenceBuiltinConstructorStaticRead(
     symbol !== undefined &&
     ts.symbolName(symbol).endsWith("Constructor") &&
     GLOBAL_CONSTRUCTOR_VALUES.has(ts.symbolName(symbol).slice(0, -"Constructor".length)) &&
+    !ERROR_CONSTRUCTOR_VALUES.has(ts.symbolName(symbol).slice(0, -"Constructor".length)) &&
     lowerer.isStdlibSymbol(symbol)
   )
     lowerer.stdlibMemberFence(access);

@@ -2939,6 +2939,26 @@ function lowerNetSocketMethodCall(
         loc,
       };
     }
+    if (event === "secure") {
+      // The handshake's completion on a TLS socket (after secureConnect on
+      // a client); plain sockets never fire it.
+      const { cb } = lowerCallbackArg(
+        lowerer,
+        args[1]!,
+        "secure listeners",
+        0,
+        () => false,
+        "use ()",
+        [],
+      );
+      return {
+        kind: "libCall",
+        fn: "tls.sockOnSecure",
+        args: [receiver, cb, once],
+        type: VOID,
+        loc,
+      };
+    }
     if (event === "session") {
       // The received-ticket event: fires once per TLS client socket with
       // the serialized session (a Buffer); plain sockets never fire it.
@@ -2962,7 +2982,7 @@ function lowerNetSocketMethodCall(
     lowerer.noLowering(
       `socket.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
       args[0]!,
-      '"data", "end", "close", "error", "connect", "lookup", "ready", "timeout", "readable", "secureConnect", and "session" are the supported socket events (as literals)',
+      '"data", "end", "close", "error", "connect", "lookup", "ready", "timeout", "readable", "secureConnect", "secure", and "session" are the supported socket events (as literals)',
     );
   }
   lowerer.noLowering(
@@ -4676,6 +4696,125 @@ export function lowerHttpServerNew(lowerer: Lowerer, expr: ts.NewExpression): Ir
   return lowerHttpCreateServerForms(lowerer, expr, "new http.Server", locOf(expr));
 }
 
+/** `new tls.TLSSocket(socket, options)` in server mode: a new TLS socket
+ * takes over the socket's connection and runs the server handshake
+ * (scr_tls_wrap_socket). The options record reads at runtime, the
+ * tls.connect precedent. A literal's secureContext member is a
+ * SecureContext handle, which the checked-dynamic record cannot hold, so
+ * it passes as its own argument; members after it must be free of side
+ * effects, because it is read after them. Node never starts the handshake
+ * of a client-mode TLSSocket, so a literal without isServer: true fences
+ * here. */
+export function lowerTlsSocketNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr | null {
+  const callee = expr.expression;
+  const isTlsSocket =
+    (ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === "TLSSocket" &&
+      lowerer.builtinMemberOf(callee)?.module === "tls") ||
+    (ts.isIdentifier(callee) &&
+      lowerer.builtinImportOf(callee)?.module === "tls" &&
+      lowerer.builtinImportOf(callee)?.member === "TLSSocket");
+  if (!isTlsSocket) return null;
+  const loc = locOf(expr);
+  const HINT =
+    "the supported forms are new tls.TLSSocket(socket, { isServer: true, cert, key }) and new tls.TLSSocket(socket, { isServer: true, secureContext })";
+  const args = expr.arguments?.nodes ?? [];
+  if (args.length !== 2 || args.some(ts.isSpreadElement)) {
+    lowerer.noLowering(`new tls.TLSSocket with ${args.length} argument(s)`, expr, HINT);
+  }
+  const socket = lowerer.lowerExpr(args[0]!);
+  if (socket.type.kind !== "netSocket") {
+    lowerer.noLowering(
+      `new tls.TLSSocket over a '${lowerer.fmt(socket.type)}' value`,
+      args[0]!,
+      "the wrapped value must be a net.Socket (a server connection or an http CONNECT socket)",
+    );
+  }
+  let optsNode: ts.Expression = args[1]!;
+  while (ts.isParenthesizedExpression(optsNode)) optsNode = optsNode.expression;
+  if (!ts.isObjectLiteralExpression(optsNode)) {
+    const o = lowerer.lowerExpr(optsNode);
+    const opts: IrExpr =
+      o.type.kind === "dyn"
+        ? o
+        : canConvertToDyn(
+              o.type,
+              (id) => lowerer.shapes.get(id),
+              (id) => lowerer.unions.get(id),
+            )
+          ? { kind: "dynFrom", value: o, type: DYN, loc }
+          : lowerer.noLowering(
+              `new tls.TLSSocket with a '${lowerer.fmt(o.type)}' options record`,
+              optsNode,
+              `${HINT} — a secureContext member lowers in an options object literal`,
+            );
+    return { kind: "libCall", fn: "tls.wrapSocket", args: [socket, opts], type: NETSOCKET_T, loc };
+  }
+  const props = optsNode.properties.nodes;
+  const nameOf = (p: ts.ObjectLiteralElementLike): string | null =>
+    (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+    (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))
+      ? p.name.text
+      : null;
+  const isServer = props.find((p) => nameOf(p) === "isServer");
+  if (
+    isServer === undefined ||
+    (ts.isPropertyAssignment(isServer) && isServer.initializer.kind === ts.SyntaxKind.FalseKeyword)
+  ) {
+    lowerer.noLowering(
+      "new tls.TLSSocket in client mode",
+      optsNode,
+      "Node starts no handshake for a client-mode TLSSocket — pass isServer: true for the server side; tls.connect makes client sockets",
+    );
+  }
+  const ctxIndex = props.findIndex((p) => nameOf(p) === "secureContext");
+  if (ctxIndex < 0) {
+    const opts = lowerDynObjectLiteral(lowerer, optsNode);
+    return { kind: "libCall", fn: "tls.wrapSocket", args: [socket, opts], type: NETSOCKET_T, loc };
+  }
+  const ctxProp = props[ctxIndex]!;
+  const ctxNode = ts.isShorthandPropertyAssignment(ctxProp)
+    ? ctxProp.name
+    : (ctxProp as ts.PropertyAssignment).initializer;
+  for (const p of props.slice(ctxIndex + 1)) {
+    const pure =
+      ts.isShorthandPropertyAssignment(p) ||
+      (ts.isPropertyAssignment(p) && sideEffectFreeOptionValue(p.initializer));
+    if (!pure) {
+      lowerer.noLowering(
+        "a new tls.TLSSocket options literal with side effects after secureContext",
+        p,
+        "secureContext is read after the other members — move it to the end of the object",
+      );
+    }
+  }
+  let ctx: IrExpr | null = null;
+  const opts = lowerDynObjectLiteral(lowerer, optsNode, (node, value) => {
+    if (node !== ctxNode) return lowerer.coerceToExpected(value, DYN);
+    if (value.type.kind !== "secureCtx") {
+      lowerer.noLowering(
+        `a '${lowerer.fmt(value.type)}' secureContext`,
+        node,
+        "pass a tls.createSecureContext({ cert, key }) result",
+      );
+    }
+    ctx = value;
+    return {
+      kind: "dynFrom",
+      value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
+      type: DYN,
+      loc,
+    };
+  });
+  return {
+    kind: "libCall",
+    fn: "tls.wrapSocketCtx",
+    args: [socket, opts, ctx!],
+    type: NETSOCKET_T,
+    loc,
+  };
+}
+
 /** Module-function calls on http import bindings: createServer([options][,
  * handler]) and the call-form Server (Node's constructor works without
  * `new` — test/parallel's http.Server(fn) spelling). The handler takes
@@ -4985,14 +5124,14 @@ function lowerTlsServerOptionsOrDyn(
  * connect(options[, cb]) and connect(port[, host][, options][, cb]) with
  * a RUNTIME options record (the checked-dynamic JS lane's shape — a dyn
  * value, or a record that converts): the runtime walk implements
- * port/host/rejectUnauthorized/ca/servername/ALPNProtocols/minVersion/maxVersion/timeout and throws the catchable
+ * port/host/socket/rejectUnauthorized/ca/servername/ALPNProtocols/minVersion/maxVersion/timeout and throws the catchable
  * fence for other documented members (the divergence-66 stance). The
  * callback (and 'secureConnect'/'connect' listeners) fires
  * post-handshake — Node's secureConnect timing. */
 function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcLoc): IrExpr {
   const args = expr.arguments.nodes;
   const FORMS_HINT =
-    "the supported forms are connect(options[, cb]) and connect(port[, host][, options][, cb]) — options implement port/host/rejectUnauthorized/ca/servername/ALPNProtocols/minVersion/maxVersion/timeout";
+    "the supported forms are connect(options[, cb]) and connect(port[, host][, options][, cb]) — options implement port/host/socket/rejectUnauthorized/ca/servername/ALPNProtocols/minVersion/maxVersion/timeout";
   if (args.length < 1 || args.length > 4 || args.some(ts.isSpreadElement)) {
     lowerer.noLowering(`tls.connect with ${args.length} arguments`, expr, FORMS_HINT);
   }
@@ -5043,7 +5182,22 @@ function lowerTlsConnectCall(lowerer: Lowerer, expr: ts.CallExpression, loc: Src
   // The options value rides whole to the runtime walk: dyn passes
   // directly; a typed record that converts boxes into the checked-dynamic tree.
   let opts: IrExpr;
-  if (optsNode !== null) {
+  let literal: ts.Expression | null = optsNode;
+  while (literal !== null && ts.isParenthesizedExpression(literal)) literal = literal.expression;
+  if (
+    literal !== null &&
+    ts.isObjectLiteralExpression(literal) &&
+    literal.properties.nodes.some(
+      (p) =>
+        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+        ts.isIdentifier(p.name) &&
+        p.name.text === "socket",
+    )
+  ) {
+    // A socket member is a handle the record form cannot box: the literal
+    // builds the checked-dynamic object member by member.
+    opts = lowerDynObjectLiteral(lowerer, literal);
+  } else if (optsNode !== null) {
     const o = lowerer.lowerExpr(optsNode);
     if (o.type.kind === "dyn") {
       opts = o;

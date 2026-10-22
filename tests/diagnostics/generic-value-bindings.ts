@@ -60,3 +60,15 @@ function throughParam(a: Amb): void {
   console.log(a.m(4));
 }
 throughParam(amb);
+
+// A `var` binding inside a function, declared in a branch and called from
+// a closure: when the branch does not run, Node finds the binding undefined.
+// The compiled instances have no per-call flag for that, so the call fences.
+function branchVar(flag: boolean): number {
+  if (flag) {
+    var picked = <T>(x: T): T => x;
+  }
+  const invoke = (): number => picked(1);
+  return invoke();
+}
+console.log(branchVar(true));

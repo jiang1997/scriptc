@@ -351,8 +351,22 @@ typedef struct ScrNetTransportOps {
   bool (*pending)(void *tctx);
   void (*shutdown_write)(void *tctx);
   void (*free)(void *tctx);
+  /* nullable: runs after the established socket's 'connect' listeners
+   * (the TLS 'secure' event, which Node emits after secureConnect) */
+  void (*after_established)(void *tctx);
+  /* nullable: runs when the closed socket settles, after its own
+   * listeners drop; the transport drops the listeners it holds */
+  void (*settle)(void *tctx);
 } ScrNetTransportOps;
 void scr_net_sock_set_transport(ScrNetSocket *s, const ScrNetTransportOps *ops, void *tctx);
+/* new tls.TLSSocket(socket) and tls.connect({ socket }): a fresh socket
+ * takes over an open connection (fd, buffered bytes, peer identity); the
+ * old socket stays open without I/O, forwards end() and destroy(), and
+ * fires 'close' just before the new one. +1, or NULL when the socket has
+ * no open, idle connection to give. Set the transport on the result, then
+ * call scr_net_sock_adopt_start. */
+ScrNetSocket *scr_net_sock_adopt(ScrNetSocket *raw);
+void scr_net_sock_adopt_start(ScrNetSocket *t);
 /* Routes a client socket through an HTTP CONNECT proxy. Call it right
  * after the dial (scr_net_connect to the proxy) and before any transport
  * is set: once TCP is up, `request` (the CONNECT head, copied) is sent
@@ -366,6 +380,9 @@ void scr_net_sock_set_tunnel(ScrNetSocket *s, const char *request, size_t len);
 int scr_net_tunnel_status(const char *head, size_t len);
 void scr_net_tunnel_failure(int status, char *msg, size_t cap);
 int scr_net_sock_fd(ScrNetSocket *s);
+/* The host a client socket was told to dial (Node's socket._host). +1;
+ * NULL on server sockets. */
+ScrStr *scr_net_sock_dial_name(ScrNetSocket *s);
 /* Drain up to n bytes of the socket's receive buffer (peeked/unshifted
  * bytes — the demux path); consumers call it before the fd. */
 size_t scr_net_sock_take_buffered(ScrNetSocket *s, char *buf, size_t n);
@@ -385,6 +402,16 @@ void scr_net_sock_replay(ScrNetSocket *s, const char *data, size_t len);
  * 'error' + teardown to the sweep; NULL tears down without an 'error'
  * event, Node's default for an unhandled server-side handshake failure. */
 void scr_net_sock_transport_error(ScrNetSocket *s, const char *msg);
+/* The same with the error's code given (static storage), for messages
+ * whose text does not name it. */
+void scr_net_sock_transport_error_code(ScrNetSocket *s, const char *msg, const char *code);
+/* The peer closed before the handshake finished on a wrapped socket:
+ * 'end', then 'close' without an error. */
+void scr_net_sock_transport_eof(ScrNetSocket *s);
+/* Registers a listener that fires when the transport establishes, once
+ * TCP is up (a socket that took over an open connection is up from the
+ * start). */
+void scr_net_sock_on_established(ScrNetSocket *s, ScrClosure *cb /*moves*/, bool once);
 /* Defer the server's 'connection' listeners to handshake completion —
  * tls.createServer's handler is the 'secureConnection' event, fired with
  * the socket only once the TLS layer stands (Node's timing). */

@@ -222,7 +222,8 @@ test("bodies that suspend only at their own awaits compile to stackless coroutin
 });
 
 const framedSources = {
-  // Entering a store makes the frame isolate the AsyncLocalStorage context.
+  // Entering a store needs no frame: the body runs in its caller's context,
+  // as Node runs an async body's synchronous prefix.
   context: `
 import { AsyncLocalStorage } from "node:async_hooks";
 const store = new AsyncLocalStorage<string>();
@@ -238,7 +239,7 @@ async function leaf(x: number): Promise<number> {
 }`,
 };
 
-test("fiberless bodies keep their frame where it isolates a context or a stack", async () => {
+test("fiberless bodies keep their frame only where it isolates a stack", async () => {
   for (const [name, prefix] of Object.entries(framedSources)) {
     const llvm = await emit(`${prefix}
 async function slow(x: number): Promise<number> {
@@ -262,9 +263,12 @@ async function main(): Promise<void> {
 void main();
 `);
     for (const symbol of ["sc_ai_leaf", "sc_aw_leaf", "sc_as_leaf"]) {
-      expect(definition(llvm, symbol), `${name} ${symbol}`).toContain(
-        "call void @scr_async_inline_enter(ptr %frame)",
-      );
+      const body = definition(llvm, symbol);
+      if (name === "stack")
+        expect(body, `${name} ${symbol}`).toContain(
+          "call void @scr_async_inline_enter(ptr %frame)",
+        );
+      else expect(body, `${name} ${symbol}`).not.toContain("@scr_async_inline_enter");
     }
   }
 });

@@ -97,6 +97,15 @@ describe("async_free detection over the IR", () => {
     ).toContain("child_process");
   });
 
+  test("asymmetric keys and signatures refuse", async () => {
+    expect(
+      await surfaceOf(
+        "pki",
+        `import * as crypto from "node:crypto";\nconst { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });\nconsole.log(crypto.sign("sha256", Buffer.from("x"), privateKey).length > 0);\n`,
+      ),
+    ).toContain("asymmetric KeyObjects");
+  });
+
   test("process signal listeners refuse", async () => {
     expect(
       await surfaceOf(

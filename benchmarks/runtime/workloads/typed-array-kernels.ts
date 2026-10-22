@@ -21,6 +21,14 @@ function brighten(src: Uint8ClampedArray, gain: number, out: Uint8ClampedArray):
   for (let i = 0; i < out.length; i++) out[i] = src[i]! * gain + 8;
 }
 
+// Callback methods over a whole typed array.
+function callbacks(samples: Float32Array, limit: number, data: Uint8Array): number {
+  const energy = samples.reduce((sum, v) => sum + v * v, 0);
+  const loud = samples.some((v) => v > limit) ? 1 : 0;
+  const halved = data.map((v) => v >> 1);
+  return energy / samples.length + loud + halved[halved.length >> 1]!;
+}
+
 function gray(rgba: Uint8Array, out: Uint8Array): void {
   for (let i = 0; i < out.length; i++) {
     const j = i * 4;
@@ -73,6 +81,7 @@ let byteSum = 0;
 let intSum = 0;
 let brightSum = 0;
 let lumaSum = 0;
+let callbackSum = 0;
 for (let r = 0; r < rounds; r++) {
   // Change one input element per round so no round repeats the last.
   const at = (r * 7919) & (n - 1);
@@ -88,6 +97,7 @@ for (let r = 0; r < rounds; r++) {
   addWrap(ia, ib, io);
   brighten(pixels, 0.75 + (r & 7) / 8, bright);
   gray(rgba, luma);
+  if ((r & 3) === 0) callbackSum += callbacks(fo, 140 + (r & 12), masked);
   const probe = (r * 104729) & (n - 1);
   f64Sum += d[probe]!;
   f32Sum += fo[probe]!;
@@ -102,3 +112,4 @@ console.log(`uint8 ${byteSum}`);
 console.log(`int32 ${intSum}`);
 console.log(`clamped ${brightSum}`);
 console.log(`gray ${lumaSum}`);
+console.log(`callbacks ${callbackSum.toFixed(3)}`);

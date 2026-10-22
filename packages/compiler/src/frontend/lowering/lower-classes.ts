@@ -158,7 +158,7 @@ import {
   classSymbolKeyOfSymbol,
   symbolFieldDisplayName,
 } from "./symbol-fields.js";
-import { lowerHttpAgentNew, lowerHttpServerNew } from "./lower-server.js";
+import { lowerHttpAgentNew, lowerHttpServerNew, lowerTlsSocketNew } from "./lower-server.js";
 import {
   ambientNsRootOf,
   ambientUndefReadType,
@@ -9835,6 +9835,12 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
   {
     const httpServer = lowerHttpServerNew(lowerer, expr);
     if (httpServer) return httpServer;
+  }
+  // `new tls.TLSSocket(socket, options)` — the server-mode wrap of an open
+  // socket (lower-server).
+  {
+    const tlsSocket = lowerTlsSocketNew(lowerer, expr);
+    if (tlsSocket) return tlsSocket;
   }
   // `new http.Agent(opts?)` / `new https.Agent(opts?)` — the Agent
   // handle (lower-server): getName/destroy/counters through the dyn

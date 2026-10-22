@@ -2918,22 +2918,6 @@ static bool scr_http_conn_parse_head(ScrHttpConn *conn, size_t head_len, bool *o
   conn->trailer_bytes = 0;
   conn->trailer_fields = 0;
 
-  if (!http10 && conn->srv->require_host_header) {
-    bool has_host = false;
-    for (size_t i = 0; i < req->nheaders; i++) {
-      const ScrStr *name = req->hnames[i];
-      if (name->len == 4 && memcmp(name->data, "host", 4) == 0) {
-        has_host = true;
-        break;
-      }
-    }
-    if (!has_host) {
-      scr_http_req_release(req);
-      scr_http_conn_missing_host(conn);
-      return true;
-    }
-  }
-
   /* framing: chunked wins over Content-Length (RFC 9112) */
   bool chunked = false;
   long long content_length = 0;
@@ -2958,12 +2942,33 @@ static bool scr_http_conn_parse_head(ScrHttpConn *conn, size_t head_len, bool *o
     }
   }
 
+  /* HTTP/1.1 requires Host (requireHostHeader). CONNECT requests, and
+   * upgrade requests an 'upgrade' listener takes, leave the parser before
+   * Node's check. */
+  bool is_connect = req->method->len == 7 && memcmp(req->method->data, "CONNECT", 7) == 0;
+  bool takes_upgrade = has_upgrade_hdr && conn_upgrade_token && conn->srv->upgrade_ls.n > 0;
+  if (!http10 && conn->srv->require_host_header && !is_connect && !takes_upgrade) {
+    bool has_host = false;
+    for (size_t i = 0; i < req->nheaders; i++) {
+      const ScrStr *name = req->hnames[i];
+      if (name->len == 4 && memcmp(name->data, "host", 4) == 0) {
+        has_host = true;
+        break;
+      }
+    }
+    if (!has_host) {
+      scr_http_req_release(req);
+      scr_http_conn_missing_host(conn);
+      return true;
+    }
+  }
+
   /* A CONNECT request: 'connect' fires INSTEAD of 'request' — the
    * upgrade machinery's exact shape ((req, socket, head); the parser
    * steps aside; no listener destroys the socket, Node's default). The
    * h2 compat server's HTTP/1.1 arm lands here too; its HTTP/2 arm is
    * dispatched separately with the compatibility response handle. */
-  if (req->method->len == 7 && memcmp(req->method->data, "CONNECT", 7) == 0) {
+  if (is_connect) {
     memmove(conn->buf, conn->buf + head_len, conn->len - head_len);
     conn->len -= head_len;
     if (!scr_net_ls_has_live(&conn->srv->connect_ls)) {

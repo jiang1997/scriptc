@@ -147,6 +147,15 @@ export const WEBCRYPTO_DYN_TYPES: ReadonlySet<string> = new Set([
   "KeyAlgorithm",
   "HmacImportParams",
   "HmacKeyAlgorithm",
+  "CryptoKeyPair",
+  "EcKeyAlgorithm",
+  "RsaHashedKeyAlgorithm",
+  "EcKeyGenParams",
+  "EcKeyImportParams",
+  "EcdsaParams",
+  "RsaHashedKeyGenParams",
+  "RsaHashedImportParams",
+  "RsaPssParams",
   "HmacKeyGenParams",
   "AesKeyGenParams",
   "AesKeyAlgorithm",
@@ -157,6 +166,28 @@ export const WEBCRYPTO_DYN_TYPES: ReadonlySet<string> = new Set([
   "Pbkdf2Params",
   "HkdfParams",
   "AesDerivedKeyParams",
+]);
+
+/** node:crypto's key and signature option interfaces: the key functions,
+ * KeyObject.export and sign/verify take them as checked-dynamic arguments
+ * (scr_lib.c, scr_pki.c). */
+export const CRYPTO_KEY_OPTION_DYN_TYPES: ReadonlySet<string> = new Set([
+  "AsymmetricKeyExportOptions",
+  "ECKeyPairKeyObjectOptions",
+  "ECKeyPairOptions",
+  "ED25519KeyPairOptions",
+  "JsonWebKeyInput",
+  "JwkKeyExportOptions",
+  "KeyExportOptions",
+  "PrivateKeyInput",
+  "PublicKeyInput",
+  "RSAKeyPairKeyObjectOptions",
+  "RSAKeyPairOptions",
+  "SignKeyObjectInput",
+  "SignPrivateKeyInput",
+  "SigningOptions",
+  "VerifyKeyObjectInput",
+  "VerifyPublicKeyInput",
 ]);
 
 export const FETCH_AMBIENT_TYPES = [
@@ -2987,9 +3018,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   ) {
     return DYN;
   }
-  // node:crypto's KeyObject: secret keys are native handles (scr_lib.c)
-  // whose getters and methods dispatch through the handle. The JsonWebKey
-  // that export() returns is a plain checked-dynamic object.
+  // node:crypto's KeyObject: secret keys (scr_lib.c) and private and
+  // public keys (scr_pki.c) are native handles whose getters and methods
+  // dispatch through the handle. The JsonWebKey that export() returns is a
+  // plain checked-dynamic object.
   if (
     ((psym !== undefined && ts.symbolName(psym) === "KeyObject") ||
       (psym !== undefined && ts.symbolName(psym) === "JsonWebKey")) &&
@@ -2997,6 +3029,35 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       (d) =>
         (ts.isClassDeclaration(d) || ts.isInterfaceDeclaration(d)) &&
         ctx.isStdlibFile(ts.getSourceFileOfNode(d)),
+    )
+  ) {
+    return DYN;
+  }
+  // node:crypto's key and signature options are plain checked-dynamic
+  // objects, so a value asserted to one (`opts as
+  // crypto.AsymmetricKeyExportOptions<"pem">`) reaches the call unchanged.
+  if (
+    psym !== undefined &&
+    CRYPTO_KEY_OPTION_DYN_TYPES.has(ts.symbolName(psym)) &&
+    psym.declarations.some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        ctx.isStdlibFile(ts.getSourceFileOfNode(d)) &&
+        isDeclaredInAmbientModule(d, "crypto"),
+    )
+  ) {
+    return DYN;
+  }
+  // node:crypto's Sign and Verify (createSign/createVerify): native
+  // handles over the digest state (scr_pki.c).
+  if (
+    psym !== undefined &&
+    (ts.symbolName(psym) === "Sign" || ts.symbolName(psym) === "Verify") &&
+    psym.declarations.some(
+      (d) =>
+        ts.isClassDeclaration(d) &&
+        ctx.isStdlibFile(ts.getSourceFileOfNode(d)) &&
+        isDeclaredInAmbientModule(d, "crypto"),
     )
   ) {
     return DYN;
@@ -4266,6 +4327,41 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         ),
       };
     }
+  }
+  // crypto.generateKeyPairSync's results: KeyPairKeyObjectResult and
+  // KeyPairSyncResult<T1, T2> as { publicKey, privateKey } records over the
+  // mapped property types (KeyObjects, PEM strings or DER Buffers), in
+  // Node's key order.
+  if (
+    psym !== undefined &&
+    (ts.symbolName(psym) === "KeyPairKeyObjectResult" ||
+      ts.symbolName(psym) === "KeyPairSyncResult") &&
+    psym.declarations.some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        ctx.isStdlibFile(ts.getSourceFileOfNode(d)) &&
+        isDeclaredInAmbientModule(d, "crypto"),
+    )
+  ) {
+    const field = (name: string): IrType | null => {
+      const prop = ctx.checker.getPropertyOfType(type, name);
+      return prop ? mapType(ctx.checker.getTypeOfSymbol(prop), ctx) : null;
+    };
+    const publicKey = field("publicKey");
+    const privateKey = field("privateKey");
+    if (!publicKey || !privateKey) return null;
+    return {
+      kind: "record",
+      shapeId: ctx.shapes.intern(
+        [
+          { name: "privateKey", type: privateKey },
+          { name: "publicKey", type: publicKey },
+        ],
+        false,
+        undefined,
+        ["publicKey", "privateKey"],
+      ),
+    };
   }
   // crypto.X509Certificate — the Dirent-style data record: THREE visible
   // fields (fingerprint and the validFrom/validTo validity window, all

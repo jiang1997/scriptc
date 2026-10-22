@@ -272,6 +272,7 @@ ScrStream *scr_stream_set_push_encoding(ScrStream *s, ScrStr *enc);
 bool scr_stream_push_null(ScrStream *s);
 void scr_stream_unshift(ScrStream *s, ScrBytes *chunk);
 void scr_stream_unshift_str(ScrStream *s, ScrStr *str);
+void scr_stream_unshift_dyn(ScrStream *s, const ScrDyn *d);
 ScrBytes *scr_stream_read(ScrStream *s, double size);
 ScrStream *scr_stream_on_dyn(ScrStream *s, ScrStr *name, ScrDyn *cb, bool once, bool prepend);
 ScrDyn *scr_stream_read_dyn(ScrStream *s, ScrDyn *size); /* +1 or NULL; size < 0 = all/first; throws once encoded (the static type is Buffer|null) */
@@ -291,6 +292,8 @@ typedef struct ScrPromise ScrPromise; /* full declaration below (C11 repeat) */
  * each chunk before asking again). */
 bool scr_stream_push_dyn(ScrStream *s, const ScrDyn *d);       /* borrows d; tag dispatch */
 bool scr_stream_write_dyn(ScrStream *s, const ScrDyn *d, ScrClosure *cb); /* cb moves */
+/* write(chunk, encoding, cb): enc borrowed, NULL or undefined when absent */
+bool scr_stream_write_enc(ScrStream *s, const ScrDyn *chunk, ScrDyn *enc, ScrClosure *cb);
 ScrPromise *scr_stream_next_chunk(ScrStream *s);
 ScrPromise *scr_stream_next_chunk_dyn(ScrStream *s);
 /* node:stream/promises — the promise forms over the finished/pipeline
@@ -475,6 +478,28 @@ void scr_stream_final_done(ScrStream *s, ScrError *err);
 void scr_stream_destroy_done(ScrStream *s, ScrError *err);
 void scr_stream_transform_done(ScrStream *s, ScrError *err, ScrBytes *data, ScrStr *data_str);
 void scr_stream_flush_done(ScrStream *s, ScrError *err, ScrBytes *data, ScrStr *data_str);
+/* The same completions with a checked-dynamic data value (borrowed; NULL,
+ * null and undefined push nothing): an object-mode Transform's data, or an
+ * untyped callback's. err moves. */
+/* objectMode: scr_stream_set_object_mode applies the option's sides right
+ * after construction; scr_stream_writes_values answers whether the write
+ * and transform steps receive dyn values instead of Buffers. */
+void scr_stream_set_object_mode(ScrStream *s, bool readable, bool writable);
+ScrStream *scr_stream_object_mode(ScrStream *s, bool readable, bool writable);
+bool scr_stream_writes_values(ScrStream *s);
+/* A compiled write or transform callback's chunk by its declared type: a
+ * Buffer (+1, or NULL with a TypeError for another object-mode value), a
+ * dyn value (+1), and the encoding argument (+1). */
+ScrBytes *scr_stream_chunk_bytes(ScrStream *s, ScrBytes *chunk);
+struct ScrDyn *scr_stream_chunk_value(ScrStream *s, ScrBytes *chunk);
+ScrStr *scr_stream_chunk_encoding(ScrStream *s);
+ScrDyn *scr_stream_chunk_encoding_value(ScrStream *s);
+/* emit('data', value) with a checked-dynamic chunk (borrowed). */
+bool scr_stream_emit_value(ScrStream *s, ScrStr *name, struct ScrDyn *v);
+/* Whether a dyn for-await step (readable.nextChunkDyn) answered the end. */
+bool scr_stream_chunk_done(const struct ScrDyn *v);
+void scr_stream_transform_done_value(ScrStream *s, ScrError *err, struct ScrDyn *v);
+void scr_stream_flush_done_value(ScrStream *s, ScrError *err, struct ScrDyn *v);
 
 /* Runtime-backed streams (the fs streams in scr_fs_stream.c).
  * - construct: Node's _construct. The hook runs on a tick after

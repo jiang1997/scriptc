@@ -1,9 +1,7 @@
 import type {
   SemanticIndexInfoData as IndexInfoResponse,
-  SemanticSignatureData as SignatureResponse,
   SemanticSymbolData as SymbolResponse,
   SemanticTypePredicateData as TypePredicateResponse,
-  SemanticTypeData as TypeResponse,
 } from "./semantic-schema.generated.js";
 import { AstFile, AstNode } from "./ast-node.js";
 import {
@@ -14,6 +12,7 @@ import {
   SemanticType,
   type SemanticDocument,
   type SemanticQuery,
+  present,
 } from "./semantic-model.js";
 import { SemanticSymbolFlags } from "./semantic-schema.generated.js";
 import type { TypePredicateKind } from "./enums.generated.js";
@@ -97,6 +96,13 @@ export interface SemanticCompletion {
   symbol: SemanticSymbol | undefined;
 }
 
+/** Whether lowering asks the checker for contextual types and resolved
+ * signatures in batches (`getContextualTypes`, `getResolvedSignatures`).
+ * Off until scriptc depends on a tsc-ts release that answers them: the
+ * batch prefetches (checker.ts) then do nothing and lowering asks node by
+ * node. */
+export const NODE_BATCH_QUERIES = false;
+
 /** The pinned checker's request surface over native objects. Every query
  * converges on the same snapshot/project registries, including batch and
  * lazy-object queries. No SDK object is constructed or consulted here. */
@@ -106,32 +112,25 @@ export class SemanticChecker {
   constructor(readonly project: SemanticProject) {}
 
   private type(method: string, query: SemanticQuery): SemanticType | undefined {
-    const data = this.project.request<TypeResponse | null>(method, query);
-    return data === null ? undefined : this.project.type(data);
+    return this.project.requestType(method, query);
   }
   private symbol(method: string, query: SemanticQuery): SemanticSymbol | undefined {
-    const data = this.project.request<SymbolResponse | null>(method, query);
-    return data === null ? undefined : this.project.symbol(data);
+    return this.project.requestSymbol(method, query);
   }
   private signature(method: string, query: SemanticQuery): SemanticSignature | undefined {
-    const data = this.project.request<SignatureResponse | null>(method, query);
-    return data === null ? undefined : this.project.signature(data);
+    return this.project.requestSignature(method, query);
   }
   private types(method: string, query: SemanticQuery): SemanticType[] {
-    const data = this.project.request<TypeResponse[] | null>(method, query);
-    return (data ?? []).map((item) => this.project.type(item));
+    return present(this.project.requestTypes(method, query), method);
   }
   private symbols(method: string, query: SemanticQuery): SemanticSymbol[] {
-    const data = this.project.request<SymbolResponse[] | null>(method, query);
-    return (data ?? []).map((item) => this.project.symbol(item));
+    return present(this.project.requestSymbols(method, query), method);
   }
   private optionalTypes(method: string, query: SemanticQuery): (SemanticType | undefined)[] {
-    const data = this.project.request<(TypeResponse | null)[]>(method, query);
-    return data.map((item) => (item === null ? undefined : this.project.type(item)));
+    return this.project.requestTypes(method, query);
   }
   private optionalSymbols(method: string, query: SemanticQuery): (SemanticSymbol | undefined)[] {
-    const data = this.project.request<(SymbolResponse | null)[]>(method, query);
-    return data.map((item) => (item === null ? undefined : this.project.symbol(item)));
+    return this.project.requestSymbols(method, query);
   }
 
   getTypeAtLocation(node: AstNode): SemanticType | undefined;
@@ -209,6 +208,10 @@ export class SemanticChecker {
   getContextualType(node: AstNode): SemanticType | undefined {
     return this.type("getContextualType", { location: node.id });
   }
+  /** getContextualType for each node. */
+  getContextualTypes(nodes: readonly AstNode[]): (SemanticType | undefined)[] {
+    return this.optionalTypes("getContextualTypes", { locations: nodes.map((node) => node.id) });
+  }
   getTypeFromTypeNode(node: AstNode): SemanticType | undefined {
     return this.type("getTypeFromTypeNode", { location: node.id });
   }
@@ -220,6 +223,12 @@ export class SemanticChecker {
   }
   getResolvedSignature(node: AstNode): SemanticSignature | undefined {
     return this.signature("getResolvedSignature", { location: node.id });
+  }
+  /** getResolvedSignature for each node. */
+  getResolvedSignatures(nodes: readonly AstNode[]): (SemanticSignature | undefined)[] {
+    return this.project.requestSignatures("getResolvedSignatures", {
+      locations: nodes.map((node) => node.id),
+    });
   }
   getSignatureFromDeclaration(node: AstNode): SemanticSignature | undefined {
     return this.signature("getSignatureFromDeclaration", { location: node.id });
@@ -375,11 +384,10 @@ export class SemanticChecker {
     );
   }
   getSignaturesOfType(type: SemanticType, kind: number): SemanticSignature[] {
-    const data = this.project.request<SignatureResponse[]>("getSignaturesOfType", {
-      type: type.id,
-      kind,
-    });
-    return data.map((item) => this.project.signature(item));
+    return present(
+      this.project.requestSignatures("getSignaturesOfType", { type: type.id, kind }),
+      "getSignaturesOfType",
+    );
   }
   getTypePredicateOfSignature(signature: SemanticSignature): SemanticTypePredicate | undefined {
     const data = this.project.request<TypePredicateResponse | null>("getTypePredicateOfSignature", {

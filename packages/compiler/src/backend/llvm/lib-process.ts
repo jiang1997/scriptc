@@ -924,32 +924,41 @@ export function emitErrorsEventsLibCall(host: LlvmEmitterContext, e: LibCallExpr
   }
   if (e.fn === "emitter.emitData") {
     // A user emit('data', chunk) on a stream-rooted receiver: fill the
-    // matching payload slot of the two-slot 'data' ABI, NULL the other.
+    // matching payload slot of the three-slot 'data' ABI (bytes, string,
+    // object-mode value), NULL the others; a checked-dynamic chunk fills
+    // them by tag (scr_stream_emit_value).
     const args = e.args.map((a) => host.emitExpr(a));
     const chunkT = e.args[2]!.type;
-    const both =
-      chunkT.kind === "string"
-        ? [`ptr null`, `ptr ${args[2]!.name}`]
-        : [`ptr ${args[2]!.name}`, `ptr null`];
-    host.declare(`declare zeroext i1 @scr_emitter_emit(ptr, ptr, ...)`);
     const t = B.tmp();
-    B.line(
-      `${t} = call zeroext i1 (ptr, ptr, ...) @scr_emitter_emit(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ${both.join(", ")})`,
-    );
+    if (chunkT.kind === "dyn") {
+      host.declare(`declare zeroext i1 @scr_stream_emit_value(ptr, ptr, ptr)`);
+      B.line(
+        `${t} = call zeroext i1 @scr_stream_emit_value(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${args[2]!.name})`,
+      );
+    } else {
+      const slots =
+        chunkT.kind === "string"
+          ? [`ptr null`, `ptr ${args[2]!.name}`, `ptr null`]
+          : [`ptr ${args[2]!.name}`, `ptr null`, `ptr null`];
+      host.declare(`declare zeroext i1 @scr_emitter_emit(ptr, ptr, ...)`);
+      B.line(
+        `${t} = call zeroext i1 (ptr, ptr, ...) @scr_emitter_emit(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ${slots.join(", ")})`,
+      );
+    }
     host.emitPendingCheck();
     return e.type.kind === "void" ? { name: "", type: e.type } : { name: t, type: e.type };
   }
   if (e.fn === "emitter.onData" || e.fn === "emitter.onDataDyn") {
     // The stream-'data' registration: same runtime entries as
-    // emitter.on/onDyn, but the DATA adapter (the two-slot payload ABI
-    // — scr_stream_emit_data) behind the arity-2 fixed shim.
+    // emitter.on/onDyn, but the DATA adapter (the three-slot payload ABI
+    // — scr_stream_emit_data) behind the arity-3 fixed shim.
     const isDyn = e.fn === "emitter.onDataDyn";
     const cbT = e.args[isDyn ? 3 : 2]!.type;
     if (cbT.kind !== "func")
       throw new InternalCompilerError(`llvm emitter bug: ${e.fn} listener not a func`);
     const args = e.args.map((a) => host.emitExpr(a));
     const adapterFn = host.streamDataAdapter(cbT);
-    host.declare(`declare void @scr_ee_inv_fixed2(ptr, ptr)`);
+    host.declare(`declare void @scr_ee_inv_fixed3(ptr, ptr)`);
     const t = B.tmp();
     if (isDyn) {
       host.toHeap(args[3]!);
@@ -959,7 +968,7 @@ export function emitErrorsEventsLibCall(host: LlvmEmitterContext, e: LibCallExpr
       );
       B.line(
         `${t} = call ptr @scr_emitter_on_dyn(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ` +
-          `ptr ${args[2]!.name}, ptr ${wrapped}, ptr @scr_ee_inv_fixed2, i1 ${args[4]!.name}, i1 ${args[5]!.name})`,
+          `ptr ${args[2]!.name}, ptr ${wrapped}, ptr @scr_ee_inv_fixed3, i1 ${args[4]!.name}, i1 ${args[5]!.name})`,
       );
     } else {
       host.declare(`declare ptr @scr_closure_retain_v(ptr)`);
@@ -972,7 +981,7 @@ export function emitErrorsEventsLibCall(host: LlvmEmitterContext, e: LibCallExpr
       );
       B.line(
         `${t} = call ptr @scr_emitter_on_via(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ` +
-          `ptr ${args[2]!.name}, ptr ${wrapped}, ptr @scr_ee_inv_fixed2, i1 ${args[3]!.name}, i1 ${args[4]!.name})`,
+          `ptr ${args[2]!.name}, ptr ${wrapped}, ptr @scr_ee_inv_fixed3, i1 ${args[3]!.name}, i1 ${args[4]!.name})`,
       );
     }
     const out = host.own({ name: t, type: e.type });

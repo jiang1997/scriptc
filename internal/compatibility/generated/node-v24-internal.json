@@ -19316,6 +19316,10 @@
           "tests/corpus/7055-cipher-streams.ts",
           "tests/corpus/7056-cipher-stream-errors.ts",
           "tests/corpus/7057-cipher-streams.mjs",
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
           "tests/corpus/7122-webcrypto-node-crypto.ts",
           "tests/corpus/7123-webcrypto-node-crypto.cjs",
           "tests/corpus/node24-crypto-kdf-errors.ts",
@@ -19324,6 +19328,7 @@
           "tests/corpus/node24-crypto-sha2.ts",
           "tests/fixtures/node-types/cipher.ts",
           "tests/fixtures/node-types/ecdh.ts",
+          "tests/fixtures/node-types/keys.ts",
           "tests/harness/npm-static.test.ts"
         ]
       },
@@ -19972,8 +19977,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createPrivateKey"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.createPrivateKey",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20018,8 +20030,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createPublicKey"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.createPublicKey",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20068,8 +20087,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createSign"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.createSign",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20091,8 +20117,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createVerify"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.createVerify",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20210,8 +20243,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.generateKeyPair"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.generateKeyPair",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20233,8 +20273,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.generateKeyPairSync"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.generateKeyPairSync",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -21107,8 +21154,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.sign"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.sign",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -21157,8 +21211,15 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.verify"
+        "status": "partial",
+        "evidence": "compiler-dedicated:crypto.verify",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23062,8 +23123,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:asymmetricKeyDetails",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "ancestor"
     },
@@ -23085,8 +23153,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:asymmetricKeyType",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "ancestor"
     },
@@ -23223,8 +23298,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:Sign",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23246,8 +23328,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:sign.sign",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23269,8 +23358,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:sign.update",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23292,8 +23388,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:Verify",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23315,8 +23418,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:verify.update",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -23338,8 +23448,15 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:verify.verify",
+        "tests": [
+          "tests/corpus/7080-crypto-ed25519.mjs",
+          "tests/corpus/7082-crypto-key-objects.ts",
+          "tests/corpus/7083-crypto-sign-verify.ts",
+          "tests/corpus/7084-crypto-key-pairs.cjs",
+          "tests/fixtures/node-types/keys.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -95421,7 +95538,10 @@
           "tests/corpus/2557-tls-ca-store.ts",
           "tests/corpus/2596-net-arg-ladders.cjs",
           "tests/corpus/6721-tls-alpn-protocols.ts",
-          "tests/corpus/6722-tls-min-max-version.ts"
+          "tests/corpus/6722-tls-min-max-version.ts",
+          "tests/corpus/7087-tls-socket-wrap.ts",
+          "tests/corpus/7088-tls-socket-connect-tunnel.ts",
+          "tests/fixtures/node-types/tls-socket-wrap.ts"
         ]
       },
       "anchorSource": "chapter"
@@ -96123,8 +96243,13 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:tls"
+        "status": "partial",
+        "evidence": "compiler-feature:tls.tls.TLSSocket",
+        "tests": [
+          "tests/corpus/7087-tls-socket-wrap.ts",
+          "tests/corpus/7088-tls-socket-connect-tunnel.ts",
+          "tests/fixtures/node-types/tls-socket-wrap.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -96911,8 +97036,13 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:tls"
+        "status": "partial",
+        "evidence": "compiler-feature:tls.'secure'",
+        "tests": [
+          "tests/corpus/7087-tls-socket-wrap.ts",
+          "tests/corpus/7088-tls-socket-connect-tunnel.ts",
+          "tests/fixtures/node-types/tls-socket-wrap.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -106669,6 +106799,9 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs",
           "tests/corpus/7120-webcrypto-random-uuid.ts",
           "tests/corpus/7121-webcrypto-crypto-object.mjs",
           "tests/corpus/7124-webcrypto-secret-keys.ts",
@@ -110561,7 +110694,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110599,7 +110735,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110637,7 +110776,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110675,7 +110817,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110759,7 +110904,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110797,7 +110945,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110858,7 +111009,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110896,7 +111050,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110934,7 +111091,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -110995,7 +111155,10 @@
           "tests/corpus/6293-webcrypto-digest.ts",
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
-          "tests/fixtures/node-types/webcrypto-hmac.ts"
+          "tests/fixtures/node-types/webcrypto-hmac.ts",
+          "tests/corpus/7081-webcrypto-ed25519.mjs",
+          "tests/corpus/7085-webcrypto-ecdsa-rsa.ts",
+          "tests/corpus/7086-webcrypto-ecdsa-rsa-errors.mjs"
         ]
       },
       "anchorSource": "exact"

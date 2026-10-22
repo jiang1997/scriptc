@@ -121,6 +121,13 @@ export function emitTlsLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValu
     case "tls.sockOnSecureConnect":
       host.toHeap(args[1]!);
       return finishRuntimeCall(host, e, "scr_tls_sock_on_secure_connect", a);
+    case "tls.sockOnSecure":
+      host.toHeap(args[1]!);
+      return finishRuntimeCall(host, e, "scr_tls_sock_on_secure", a);
+    case "tls.wrapSocket":
+      return finishRuntimeCall(host, e, "scr_tls_wrap_socket", [a[0]!, a[1]!, ptr()]);
+    case "tls.wrapSocketCtx":
+      return finishRuntimeCall(host, e, "scr_tls_wrap_socket", a);
     case "tls.sockOnSession": {
       const cb = args[1]!,
         type = callbackType(cb);

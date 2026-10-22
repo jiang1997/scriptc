@@ -140,6 +140,15 @@ import {
 } from "./type-only-imports.js";
 import { moduleSourceCandidates } from "./module-source-candidates.js";
 import { inferredJsDiagnosticSuppressed } from "./inferred-js-diagnostics.js";
+import {
+  containsJsx,
+  firstJsx,
+  jsxEmitName,
+  jsxEmitPlan,
+  jsxPragmas,
+  lowerJsx,
+  type LoweredJsx,
+} from "./jsx-source.js";
 
 const BASE_OPTIONS: ts.Ts7CompilerOptions = {
   strict: true,
@@ -377,6 +386,18 @@ export interface LoadResult {
    * checkPreflight. */
   startupCrash?: StartupCrash | null;
   configDiags: ScrDiagnostic[];
+  /** The files whose JSX the program lowers (jsx-source.ts), by file name.
+   * The program holds their rewritten text; positions in diagnostics refer
+   * to it. */
+  jsxSources?: ReadonlyMap<string, LoweredJsx>;
+  /** With JSX sources: the program over the original text, whose TypeScript
+   * errors are the program's, and its project world when it has errors. */
+  tscWorld?: {
+    program: ts.Program;
+    /** The program's pre-emit diagnostics, computed once. */
+    diagnostics: readonly ts.Diagnostic[];
+    projectWorld: ts.Program | null;
+  };
   /** How scriptc's type world differs from the project's own tsc setup —
    * used only to label the TypeScript errors those differences cause. */
   typeWorld?: TypeWorldDifferences;
@@ -778,6 +799,47 @@ function moduleSpecifierKind7(specifier: ts.StringLiteralLike): "import" | "requ
     : "import";
 }
 
+/** The program's files with JSX, lowered with the project's jsx settings
+ * and each file's pragmas, or the refusal of a setting that emits no calls.
+ * TypeScript files (.ts, .mts, .cts) cannot hold JSX; without a jsx setting
+ * the checker already rejects any JSX (TS17004). */
+function lowerProgramJsx7(
+  program: ts.Program,
+  options: ts.Ts7CompilerOptions,
+): { sources: Map<string, LoweredJsx>; refusal: ScrDiagnostic | null } {
+  const sources = new Map<string, LoweredJsx>();
+  const mode = jsxEmitName(options.jsx as string | number | undefined);
+  if (mode === undefined) return { sources, refusal: null };
+  for (const sf of program.getImplementationSourceFiles()) {
+    if (sf.isDeclarationFile || /\.[mc]?ts$/.test(sf.fileName) || !containsJsx(sf)) continue;
+    const at = firstJsx(sf)!;
+    const loc = { file: sf.fileName, start: ts.tokenStartOfNode(at), end: at.end };
+    if (mode === "preserve" || mode === "react-native") {
+      return {
+        sources,
+        refusal: {
+          code: "SC1090",
+          message: `JSX with "jsx": "${mode}" is not supported: that setting keeps JSX in the output instead of lowering it to calls`,
+          loc,
+          hint: 'set "jsx" to "react", "react-jsx" or "react-jsxdev" in the project tsconfig',
+        },
+      };
+    }
+    const plan = jsxEmitPlan(
+      {
+        jsx: mode,
+        jsxFactory: options.jsxFactory as string | undefined,
+        jsxFragmentFactory: options.jsxFragmentFactory as string | undefined,
+        jsxImportSource: options.jsxImportSource as string | undefined,
+        reactNamespace: options.reactNamespace as string | undefined,
+      },
+      jsxPragmas(sf.text),
+    );
+    sources.set(sf.fileName, lowerJsx(sf, plan));
+  }
+  return { sources, refusal: null };
+}
+
 function loadProgram7(
   host: ts.Ts7Host,
   entryPath: string,
@@ -859,6 +921,26 @@ function loadProgram7(
       };
       program = host.createProgram([...programRoots, overridesDtsPath()], options);
     }
+    // JSX: the program above checks the files as written; the program the
+    // lowering compiles holds them with their JSX lowered.
+    const jsx = lowerProgramJsx7(program, options);
+    let tscWorld: LoadResult["tscWorld"];
+    if (jsx.refusal !== null) {
+      config.diags.push(jsx.refusal);
+    } else if (jsx.sources.size > 0) {
+      const original = program;
+      // The project world must read the original text too, so it is built
+      // before the rewritten files are served, and only when it is needed.
+      const diagnostics = ts.getPreEmitDiagnostics(original);
+      const errors = diagnostics.some((d) => d.category === ts.DiagnosticCategory.Error);
+      tscWorld = {
+        program: original,
+        diagnostics,
+        projectWorld: errors ? host.createProgram(programRoots, options) : null,
+      };
+      for (const [file, lowered] of jsx.sources) host.addVirtualFile(file, lowered.text);
+      program = host.createProgram([...programRoots, overridesDtsPath()], options);
+    }
     const entry = program.getSourceFile(entryPath);
     if (!entry) throw new Error(`could not load ${entryPath}`);
     const externalTypeSpecifiersByFile = externalTypeFileClosure7(program, externalTypes);
@@ -876,10 +958,14 @@ function loadProgram7(
       },
       externalTypes,
       externalTypeSpecifiersByFile,
+      ...(tscWorld === undefined ? {} : { jsxSources: jsx.sources }),
+      ...(tscWorld === undefined ? {} : { tscWorld }),
       projectWorld: () => (projectWorld ??= host.createProgram(programRoots, options)),
       disposeAll: () => {
         try {
           projectWorld?.dispose();
+          tscWorld?.projectWorld?.dispose();
+          tscWorld?.program.dispose();
         } finally {
           program.dispose();
         }
@@ -4665,8 +4751,8 @@ function preflight7(load: LoadResult): {
     const sf = p.getSourceFile(d.fileName);
     return sf !== undefined && isCheckedJsSourceFile(sf, projectCheckJs);
   };
-  const errorsOf = (p: ts.Program): ts.Diagnostic[] => {
-    const all = ts.getPreEmitDiagnostics(p);
+  const errorsOf = (p: ts.Program): ts.Diagnostic[] => keptErrors(p, ts.getPreEmitDiagnostics(p));
+  const keptErrors = (p: ts.Program, all: readonly ts.Diagnostic[]): ts.Diagnostic[] => {
     // First pass: every comment-side 2300's (file, name) — the partners
     // the second pass forgives.
     const commentDup = new Set<string>();
@@ -4706,9 +4792,39 @@ function preflight7(load: LoadResult): {
   // instead (the SC1100 checked-cast family). Dirty there → the project-
   // world errors are the ones reported: they are reproducible with the
   // project's own tsc, which is what "fix type errors first" asks for.
-  const tscErrors = errorsOf(program);
+  // With JSX sources, the program over the original text answers the tsc
+  // gate; its positions move into the rewritten text the program holds.
+  // Errors only the rewritten text has come from the calls the JSX lowers
+  // to (a factory whose signature does not accept them).
+  const tscWorld = load.tscWorld;
+  const tscErrors =
+    tscWorld === undefined ? errorsOf(program) : keptErrors(tscWorld.program, tscWorld.diagnostics);
   if (tscErrors.length > 0) {
-    for (const d of errorsOf(load.projectWorld())) diags.push(toPassthrough(d));
+    const world =
+      tscWorld === undefined ? load.projectWorld() : (tscWorld.projectWorld ?? tscWorld.program);
+    for (const d of errorsOf(world)) {
+      const diag = toPassthrough(d);
+      const lowered = tscWorld === undefined ? undefined : load.jsxSources?.get(diag.loc.file);
+      if (lowered !== undefined) {
+        diag.loc = {
+          ...diag.loc,
+          start: lowered.rewrittenPosition(diag.loc.start, false),
+          end: lowered.rewrittenPosition(diag.loc.end, true),
+        };
+      }
+      diags.push(diag);
+    }
+  } else if (load.jsxSources !== undefined) {
+    for (const file of load.jsxSources.keys()) {
+      const sf = program.getSourceFile(file);
+      if (sf === undefined) continue;
+      const own = [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)];
+      for (const d of keptErrors(program, own)) {
+        const diag = toPassthrough(d);
+        diag.message = `${diag.message} (in the call this JSX lowers to)`;
+        diags.push(diag);
+      }
+    }
   }
 
   // Preflight and lowering share this CheckerFacade. Claim executable

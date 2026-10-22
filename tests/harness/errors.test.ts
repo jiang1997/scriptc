@@ -855,6 +855,101 @@ try {
   });
 });
 
+// new tls.TLSSocket reads a runtime options record: the client mode, whose
+// handshake Node never starts, and members without a lowering throw the
+// fence, as do sockets it cannot take over (a second wrap, and
+// tls.connect({ socket }) over a socket that is still dialing).
+describe("tls.TLSSocket runtime fences", () => {
+  test("client mode, unlowered members and sockets that cannot be taken over throw", async () => {
+    const r = await compileAndRun(
+      "tls-socket-fences",
+      `import { readFileSync } from "node:fs";
+import * as net from "node:net";
+import * as tls from "node:tls";
+const certs = "tests/fixtures/server/certs";
+const cert = readFileSync(\`\${certs}/localhost.pem\`);
+const key = readFileSync(\`\${certs}/localhost-key.pem\`);
+function report(label: string, run: () => void): void {
+  try {
+    run();
+    console.log(label, "no error");
+  } catch (error) {
+    console.log(label, (error as Error).message);
+  }
+}
+const client: Record<string, unknown> = { cert, key };
+const session: Record<string, unknown> = { isServer: true, cert, key, session: Buffer.alloc(1) };
+const server: Record<string, unknown> = { isServer: true, cert, key };
+const listener = net.createServer((raw) => {
+  report("client mode", () => new tls.TLSSocket(raw, client));
+  report("session", () => new tls.TLSSocket(raw, session));
+  const wrapped = new tls.TLSSocket(raw, server);
+  report("twice", () => new tls.TLSSocket(raw, server));
+  wrapped.destroy();
+  listener.close();
+});
+listener.listen(0, () => {
+  const c = net.connect((listener.address() as net.AddressInfo).port, "localhost");
+  report("dialing", () => tls.connect({ socket: c }));
+  c.on("error", () => {});
+});
+`,
+    );
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(
+      "dialing tls.connect over a socket that is not connected, or is already wrapped, is not supported yet\n" +
+        "client mode new tls.TLSSocket option 'isServer' has no static lowering — Node starts no handshake for a client-mode TLSSocket; tls.connect({ socket }) runs the client handshake over an open socket\n" +
+        "session new tls.TLSSocket option 'session' has no static lowering — isServer, cert, key, secureContext, ALPNProtocols, minVersion and maxVersion are the implemented members\n" +
+        "twice new tls.TLSSocket over a socket that is not connected, or is already wrapped, is not supported yet\n",
+    );
+  });
+});
+
+// With a secureContext, the TLSSocket's own options still apply: a truthy
+// requestCert, which asks for client certificates this runtime does not
+// verify, and SNICallback throw the fence instead of being dropped.
+describe("tls.TLSSocket socket options beside a secureContext", () => {
+  test("requestCert and SNICallback throw the fence", async () => {
+    const r = await compileAndRun(
+      "tls-socket-context-fences",
+      `import { readFileSync } from "node:fs";
+import * as net from "node:net";
+import * as tls from "node:tls";
+const certs = "tests/fixtures/server/certs";
+const cert = readFileSync(\`\${certs}/localhost.pem\`);
+const key = readFileSync(\`\${certs}/localhost-key.pem\`);
+const context = tls.createSecureContext({ cert, key });
+function report(label: string, run: () => void): void {
+  try {
+    run();
+    console.log(label, "no error");
+  } catch (error) {
+    console.log(label, (error as Error).message);
+  }
+}
+const listener = net.createServer((raw) => {
+  report("requestCert", () => new tls.TLSSocket(raw, { isServer: true, secureContext: context, requestCert: true, rejectUnauthorized: true }));
+  report("SNICallback", () => new tls.TLSSocket(raw, { isServer: true, secureContext: context, SNICallback: (name: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => cb(null, context) }));
+  report("requestCert false", () => new tls.TLSSocket(raw, { isServer: true, secureContext: context, requestCert: false, rejectUnauthorized: true }).destroy());
+  listener.close();
+});
+listener.listen(0, () => {
+  const c = net.connect((listener.address() as net.AddressInfo).port, "localhost");
+  c.on("error", () => {});
+  c.on("close", () => console.log("client closed"));
+});
+`,
+    );
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(
+      "requestCert new tls.TLSSocket option 'requestCert' has no static lowering — client-certificate handshakes are not modeled (SEMANTICS.md divergence 55) — requestCert stays at Node's false default\n" +
+        "SNICallback new tls.TLSSocket option 'SNICallback' has no static lowering — isServer, cert, key, secureContext, ALPNProtocols, minVersion and maxVersion are the implemented members\n" +
+        "requestCert false no error\n" +
+        "client closed\n",
+    );
+  });
+});
+
 // A curve Node lists in crypto.getCurves() but the runtime does not
 // implement throws a coded SC2020 error naming the curve when the name is
 // computed; literal names are refused at compile time (node-types-fenced).
@@ -1634,14 +1729,15 @@ console.log(typeof promisePrototype, typeof promisePrototype.then, promiseProtot
   });
 });
 
-// WebCrypto's native slice is crypto.subtle's secret-key methods.
-// Algorithms Node recognizes outside that slice reject with a coded SC2020
+// WebCrypto's native slice is crypto.subtle's secret-key methods and its
+// ECDSA, Ed25519 and RSA algorithms. Algorithms Node recognizes outside
+// that slice reject with a coded SC2020
 // Error instead of a Node-shaped success, and a JavaScript call of a
 // method outside it meets its named fence when it runs.
 // Node's own rejections (unknown names, bad usages) are corpus-pinned
 // (6292, 6294); these refusals have no Node twin, so they live here.
 describe("WebCrypto refusals (JS lane)", () => {
-  test("recognized algorithms outside the secret-key slice reject with SC2020", async () => {
+  test("recognized algorithms outside the lowered ones reject with SC2020", async () => {
     const r = await compileAndRun(
       "webcrypto-unsupported-algorithms",
       `const bytes = new TextEncoder().encode("secret");
@@ -1653,16 +1749,13 @@ async function attempt(label, run) {
     console.log(label, e.name, e.code, e.message);
   }
 }
-await attempt("rsa", () =>
-  crypto.subtle.importKey("raw", bytes, { name: "RSA-PSS", hash: "SHA-256" }, false, ["verify"]),
-);
 const key = await crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-await attempt("ecdsa", () => crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, bytes));
+await attempt("ed448", () => crypto.subtle.sign({ name: "Ed448" }, key, bytes));
+await attempt("ecdsa with an hmac key", () => crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, bytes));
 await attempt("sha3", () => crypto.subtle.digest("SHA3-256", bytes));
 await attempt("sha3 hmac", () =>
   crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA3-256" }, false, ["sign"]),
 );
-await attempt("ed25519 key", () => crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign"]));
 const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 128 }, false, ["encrypt"]);
 await attempt("aes-ocb", () => crypto.subtle.encrypt({ name: "AES-OCB", iv: new Uint8Array(12) }, aes, bytes));
 await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key, 256));
@@ -1672,11 +1765,10 @@ await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key,
     expect(r.exitCode).toBe(0);
     expect(r.stderr).toBe("");
     expect(r.stdout).toBe(
-      "rsa Error SC2020 crypto.subtle.importKey with the RSA-PSS algorithm is not supported yet\n" +
-        "ecdsa Error SC2020 crypto.subtle.sign with the ECDSA algorithm is not supported yet\n" +
+      "ed448 Error SC2020 crypto.subtle.sign with the Ed448 algorithm is not supported yet\n" +
+        "ecdsa with an hmac key InvalidAccessError 15 Key algorithm mismatch\n" +
         "sha3 Error SC2020 crypto.subtle.digest with the SHA3-256 algorithm is not supported yet\n" +
         "sha3 hmac Error SC2020 crypto.subtle.importKey with the SHA3-256 algorithm is not supported yet\n" +
-        "ed25519 key Error SC2020 crypto.subtle.generateKey with the Ed25519 algorithm is not supported yet\n" +
         "aes-ocb Error SC2020 crypto.subtle.encrypt with the AES-OCB algorithm is not supported yet\n" +
         "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n",
     );
@@ -1695,6 +1787,57 @@ await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
       /^Uncaught Error: 'crypto\.subtle\.wrapKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+    );
+  });
+});
+
+// The Ed25519 arithmetic (scr_ed25519.c) links only into programs whose
+// string literals name Ed25519. Without it, an Ed25519 public key still
+// imports and exports, while private-key parsing, signing and verification
+// reject with a coded SC2020 Error where Node answers; there is no Node
+// twin, so this lives here. The corpus (7080, 7081) pins the linked path.
+describe("Ed25519 without the Ed25519 unit (JS lane)", () => {
+  test("a program that never names Ed25519 refuses its arithmetic with SC2020", async () => {
+    const r = await compileAndRun(
+      "ed25519-unit-not-linked",
+      `import * as c from "node:crypto";
+const spki = Buffer.from("302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex");
+const pkcs8 = Buffer.from("302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex");
+const pub = c.createPublicKey({ key: spki, format: "der", type: "spki" });
+console.log(pub.asymmetricKeyType, pub.export({ format: "jwk" }).x);
+async function attempt(label, run) {
+  try {
+    await run();
+    console.log(label, "resolved");
+  } catch (e) {
+    console.log(label, e.name, e.code, e.message);
+  }
+}
+await attempt("pkcs8", () => c.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" }));
+await attempt("verify", () => c.verify(null, Buffer.from("x"), pub, Buffer.alloc(64)));
+// ECDSA links the WebCrypto key unit; the Ed25519 name is built at run time.
+const ecdsa = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+console.log(ecdsa.privateKey.type);
+const name = ["Ed", "25519"].join("");
+await attempt("generateKey", () => crypto.subtle.generateKey(name, false, ["sign", "verify"]));
+await attempt("importKey", () => crypto.subtle.importKey("pkcs8", pkcs8, name, false, ["sign"]));
+const raw = await crypto.subtle.importKey("raw", spki.subarray(12), name, false, ["verify"]);
+await attempt("subtle verify", () => crypto.subtle.verify(name, raw, new Uint8Array(64), new Uint8Array(1)));
+`,
+      "mjs",
+    );
+    const refusal =
+      "Error SC2020 Ed25519 keys are supported when a string literal in the program names 'ed25519'";
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(
+      "ed25519 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\n" +
+        `pkcs8 ${refusal}\n` +
+        `verify ${refusal}\n` +
+        "private\n" +
+        `generateKey ${refusal}\n` +
+        `importKey ${refusal}\n` +
+        `subtle verify ${refusal}\n`,
     );
   });
 });

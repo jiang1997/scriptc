@@ -65,6 +65,8 @@ const native: EarlyExecutableNativeFeatures = {
   tlsCa: false,
   cipher: false,
   ecdh: false,
+  pki: false,
+  ed25519: false,
   webcrypto: false,
   perfLoop: false,
 };
@@ -133,8 +135,15 @@ test("early executable cache restores the emitted TU, IR, and native feature gat
   const hit = await readEarlyExecutableCache(f.root, f.options);
   expect(hit?.native).toEqual(native);
   expect(hit?.executableRestored).toBe(false);
-  expect(await readFile(f.llvmPath, "utf8")).toBe("; generated llvm\n");
-  expect(await readFile(f.irPath, "utf8")).toContain("irVersion");
+  // The build compiles private copies beside the shared names and installs
+  // them there when it is done.
+  expect(hit?.llvmPath).toBe(f.llvmPath);
+  expect(hit?.irPath).toBe(f.irPath);
+  expect(hit?.llvmSourcePath).toMatch(/[/\\]\.scriptc-llvm-[^/\\]*\.ll$/);
+  expect(hit?.irSourcePath).toMatch(/[/\\]\.scriptc-ir-/);
+  expect(await readFile(hit!.llvmSourcePath!, "utf8")).toBe("; generated llvm\n");
+  expect(await readFile(hit!.irSourcePath!, "utf8")).toContain("irVersion");
+  await expect(stat(f.llvmPath)).rejects.toThrow();
   expect(await readFile(alternateC, "utf8")).toBe("/* user-owned native source */\n");
 });
 

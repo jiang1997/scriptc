@@ -1,4 +1,5 @@
-import type { IntegerCountedForLoop } from "../../ir/integer-loops.js";
+import type { IntegerCountedForLoop, IntegerPairedForLoop } from "../../ir/integer-loops.js";
+import type { IrExpr } from "../../ir/ir.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 import { f64Lit } from "./common.js";
 
@@ -59,37 +60,51 @@ export function emitCountedLoopSafety(
       `${safe} = fcmp ${loop.step > 0 ? "ole" : "oge"} double ${bound.name}, ${f64Lit(loop.guardLimit)}`,
     );
   }
-  if (loop.startGuarded) {
-    // An exact integer of at most 2^53 - 1 in magnitude, and not -0
-    // (the bit patterns of the value and its round trip agree).
-    // NaN and infinities fail the ordered range tests.
-    const start = host.emitExpr(loop.start);
-    const low = B.tmp(),
-      high = B.tmp(),
-      raw = B.tmp(),
-      wide = B.tmp(),
-      back = B.tmp(),
-      bits = B.tmp(),
-      backBits = B.tmp(),
-      exact = B.tmp(),
-      inRange = B.tmp(),
-      ok = B.tmp();
-    B.line(`${low} = fcmp oge double ${start.name}, ${f64Lit(-Number.MAX_SAFE_INTEGER)}`);
-    B.line(`${high} = fcmp ole double ${start.name}, ${f64Lit(Number.MAX_SAFE_INTEGER)}`);
-    B.line(`${inRange} = and i1 ${low}, ${high}`);
-    B.line(`${raw} = fptosi double ${start.name} to i64`);
-    B.line(`${wide} = freeze i64 ${raw}`);
-    B.line(`${back} = sitofp i64 ${wide} to double`);
-    B.line(`${bits} = bitcast double ${start.name} to i64`);
-    B.line(`${backBits} = bitcast double ${back} to i64`);
-    B.line(`${exact} = icmp eq i64 ${bits}, ${backBits}`);
-    B.line(`${ok} = and i1 ${inRange}, ${exact}`);
-    if (safe === "true") safe = ok;
-    else {
-      const both = B.tmp();
-      B.line(`${both} = and i1 ${safe}, ${ok}`);
-      safe = both;
-    }
-  }
+  if (loop.startGuarded) safe = andSafe(host, safe, emitExactStart(host, loop.start));
   return safe;
+}
+
+/** The run-time test of a guarded paired loop: each unproven start is an
+ * exact safe integer. */
+export function emitPairedLoopSafety(host: LlvmEmitterContext, loop: IntegerPairedForLoop): string {
+  let safe = "true";
+  for (const counter of [loop.low, loop.high])
+    if (counter.startGuarded) safe = andSafe(host, safe, emitExactStart(host, counter.start));
+  return safe;
+}
+
+function andSafe(host: LlvmEmitterContext, safe: string, ok: string): string {
+  if (safe === "true") return ok;
+  const both = host.B.tmp();
+  host.B.line(`${both} = and i1 ${safe}, ${ok}`);
+  return both;
+}
+
+/** An exact integer of at most 2^53 - 1 in magnitude, and not -0 (the bit
+ * patterns of the value and its round trip agree). NaN and infinities fail
+ * the ordered range tests. */
+function emitExactStart(host: LlvmEmitterContext, expr: IrExpr): string {
+  const B = host.B;
+  const start = host.emitExpr(expr);
+  const low = B.tmp(),
+    high = B.tmp(),
+    raw = B.tmp(),
+    wide = B.tmp(),
+    back = B.tmp(),
+    bits = B.tmp(),
+    backBits = B.tmp(),
+    exact = B.tmp(),
+    inRange = B.tmp(),
+    ok = B.tmp();
+  B.line(`${low} = fcmp oge double ${start.name}, ${f64Lit(-Number.MAX_SAFE_INTEGER)}`);
+  B.line(`${high} = fcmp ole double ${start.name}, ${f64Lit(Number.MAX_SAFE_INTEGER)}`);
+  B.line(`${inRange} = and i1 ${low}, ${high}`);
+  B.line(`${raw} = fptosi double ${start.name} to i64`);
+  B.line(`${wide} = freeze i64 ${raw}`);
+  B.line(`${back} = sitofp i64 ${wide} to double`);
+  B.line(`${bits} = bitcast double ${start.name} to i64`);
+  B.line(`${backBits} = bitcast double ${back} to i64`);
+  B.line(`${exact} = icmp eq i64 ${bits}, ${backBits}`);
+  B.line(`${ok} = and i1 ${inRange}, ${exact}`);
+  return ok;
 }

@@ -158,6 +158,11 @@ typedef enum {
   X(DIR, 44) /* fs.Dir (scr_lib.c) */ \
   X(DISPOSABLE_STACK, 49) /* DisposableStack (scr_symbol.c) */ \
   X(ECDH, 64) /* node:crypto ECDH (scr_ecdh.c) */ \
+  X(PRIVATE_KEY, 65) /* node:crypto PrivateKeyObject (scr_pki.c) */ \
+  X(PUBLIC_KEY, 66) /* node:crypto PublicKeyObject (scr_pki.c) */ \
+  X(SIGN, 67) /* node:crypto Sign (scr_pki.c) */ \
+  X(VERIFY, 68) /* node:crypto Verify (scr_pki.c) */ \
+  X(ASYMMETRIC_CRYPTO_KEY, 69) /* WebCrypto ECDSA and RSA CryptoKey (scr_webcrypto_pki.c) */ \
   X(EVENT, 14) /* ScrEvent — new Event() and AbortSignal's abort events */ \
   X(EVENT_TARGET, 39) /* ScrEventTarget — new EventTarget() */ \
   X(FETCH_HEADERS, 13) /* native static-fetch response Headers */ \
@@ -759,6 +764,9 @@ ScrDyn *scr_dyn_array_constructor(void);
 /* The interned builtin constructor `name` (Object, Date, RegExp, Map, Set,
  * Promise, WeakMap, WeakSet) as a dynamic function value: +1. */
 ScrDyn *scr_dyn_global_constructor(const ScrStr *name);
+/* The interned function value of an error constructor ("TypeError"), or
+ * NULL for other names. */
+ScrDyn *scr_dyn_error_constructor(const char *name);
 /* A builtin global function (setTimeout, setImmediate, process.nextTick, ...)
  * as an interned dynamic function value: +1. */
 ScrDyn *scr_dyn_builtin_function(const ScrStr *name);

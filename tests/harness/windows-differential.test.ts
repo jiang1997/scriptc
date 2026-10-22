@@ -47,11 +47,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import ts5 from "typescript";
 import { compile } from "@scriptc/compiler";
+import { tscJsxOracleEntry, wantsTscJsx } from "./jsx-oracle.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.env["SCRIPTC_WIN"] === "1";
@@ -343,11 +344,13 @@ async function scpToLane(paths: string[]): Promise<void> {
  * type-strips .ts natively (same pinned version as the macOS lanes). */
 async function runWindowsNode(file: string): Promise<RunResult> {
   const name = laneName(file);
-  const entry = wantsTscDecorators(file)
-    ? decOracleName(file)
-    : name === basename(file)
-      ? name
-      : `${name}\\${basename(file)}`;
+  const entry = wantsTscJsx(directiveHead(file))
+    ? `${basename(dirname(tscJsxOracleEntry(file, cacheDir)))}\\main.js`
+    : wantsTscDecorators(file)
+      ? decOracleName(file)
+      : name === basename(file)
+        ? name
+        : `${name}\\${basename(file)}`;
   const transform = wantsTransformTypes(file)
     ? "--experimental-transform-types --disable-warning=ExperimentalWarning "
     : "";
@@ -366,7 +369,7 @@ async function runWindowsNode(file: string): Promise<RunResult> {
 function programInputs(file: string): string[] {
   if (!/\/main\.(ts|js|mjs|cjs)$/.test(file)) return [file];
   return [
-    ...ENTRY_EXTS.flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
+    ...[...ENTRY_EXTS, "tsx", "jsx"].flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
     ...globSync(join(file, "../**/tsconfig.json")),
     ...globSync(join(file, "../**/package.json")),
   ].sort();
@@ -403,7 +406,11 @@ async function shipProgram(file: string): Promise<void> {
   const programRoot = /\/main\.(ts|js|mjs|cjs)$/.test(file) ? join(file, "..") : file;
   // Decorator programs additionally ship the tsc downlevel the oracle
   // executes (the compiler still eats the real source above).
-  const oracleExtra = wantsTscDecorators(file) ? [decOraclePath(file)] : [];
+  const oracleExtra = wantsTscJsx(directiveHead(file))
+    ? [dirname(tscJsxOracleEntry(file, cacheDir))]
+    : wantsTscDecorators(file)
+      ? [decOraclePath(file)]
+      : [];
   await scpToLane([binary, programRoot, ...oracleExtra]);
 }
 

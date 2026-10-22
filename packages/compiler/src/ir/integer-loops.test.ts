@@ -1,6 +1,10 @@
 import { expect, test } from "vitest";
 import { BOOL, F64, STRING, arrayOf, type IrExpr, type IrLocal, type IrStmt } from "./ir.js";
-import { matchIntegerArrayForLoop, matchIntegerCountedForLoop } from "./integer-loops.js";
+import {
+  matchIntegerArrayForLoop,
+  matchIntegerCountedForLoop,
+  matchIntegerPairedForLoop,
+} from "./integer-loops.js";
 
 const loc = { file: "integer-array-loop.ts", start: 0, end: 0 };
 const number = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
@@ -354,4 +358,71 @@ test("a descending loop from an array's last index takes an integer counter for 
     guarded: false,
     range: { min: 0, max: 4294967294 },
   });
+});
+
+test("paired counters closing in on each other run as integers", () => {
+  const vars = new Map(locals);
+  for (const id of ["lo", "hi", "head"]) vars.set(id, { id, name: id, type: F64, mutable: true });
+  const step = (id: string, op: "+" | "-", value = 1): IrStmt => ({
+    kind: "assign",
+    localId: id,
+    value: { kind: "bin", op, left: ref(id), right: number(value), type: F64, loc },
+    loc,
+  });
+  const element = (index: IrExpr): IrExpr => ({
+    kind: "arrayGet",
+    arr: { kind: "varRef", localId: "a", type: arrayOf(F64), loc },
+    index,
+    type: F64,
+    loc,
+  });
+  const paired = (
+    lowStart: IrExpr,
+    highStart: IrExpr,
+    update = [step("lo", "+"), step("hi", "-")],
+  ) =>
+    ({
+      kind: "for",
+      loc,
+      init: {
+        kind: "block",
+        body: [
+          { kind: "varDecl", localId: "lo", init: lowStart, loc },
+          { kind: "varDecl", localId: "hi", init: highStart, loc },
+        ],
+        loc,
+      },
+      cond: { kind: "bin", op: "<", left: ref("lo"), right: ref("hi"), type: BOOL, loc },
+      update: { kind: "block", body: update, loc },
+      body: [{ kind: "exprStmt", expr: element(ref("hi")), loc }],
+    }) as IrStmt & { kind: "for" };
+  expect(matchIntegerPairedForLoop(paired(number(0), number(9)), vars)).toMatchObject({
+    low: { localId: "lo", step: 1, startGuarded: false },
+    high: { localId: "hi", step: -1, startGuarded: false },
+    guarded: false,
+    range: { min: 0, max: 9 },
+  });
+  // A start without a known range is tested at run time.
+  expect(matchIntegerPairedForLoop(paired(number(0), ref("head")), vars)).toMatchObject({
+    high: { startGuarded: true },
+    guarded: true,
+  });
+  // Counters moving the same way, written by the body, captured, started
+  // from each other, or never used as an index are refused.
+  expect(
+    matchIntegerPairedForLoop(
+      paired(number(0), number(9), [step("lo", "+"), step("hi", "+")]),
+      vars,
+    ),
+  ).toBeNull();
+  const writing = paired(number(0), number(9));
+  writing.body.push(step("hi", "-", 2));
+  expect(matchIntegerPairedForLoop(writing, vars)).toBeNull();
+  const boxed = new Map(vars);
+  boxed.set("hi", { ...vars.get("hi")!, boxed: true });
+  expect(matchIntegerPairedForLoop(paired(number(0), number(9)), boxed)).toBeNull();
+  expect(matchIntegerPairedForLoop(paired(number(0), ref("lo")), vars)).toBeNull();
+  const unused = paired(number(0), number(9));
+  unused.body = [];
+  expect(matchIntegerPairedForLoop(unused, vars)).toBeNull();
 });

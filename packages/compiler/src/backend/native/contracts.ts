@@ -6,6 +6,10 @@ export interface CcOptions {
    * LLVM backend's .ll — clang compiles IR text natively on the same
    * command line, so both ride this one seat. */
   cPath: string;
+  /** Where the program TU's bytes are read from, when that is not `cPath`: an invocation-private
+   * copy that a concurrent build of another program cannot replace. `cPath` stays the spelling
+   * clang sees (`__FILE__`, debug file names) and the one cache keys name. */
+  cSourcePath?: string;
   /** Path of the native executable to produce. */
   outPath: string;
   /** Additional identity for a translation unit whose complete non-system
@@ -250,6 +254,12 @@ export interface CcOptions {
   /** crypto.createECDH and ECDH.convertKey: compiles scr_ecdh.c and links
    * the mbedTLS archive (shared with tls). */
   ecdh?: boolean;
+  /** Asymmetric KeyObjects and signatures: compiles scr_pki.c and links
+   * the mbedTLS archive. */
+  pki?: boolean;
+  /** Ed25519 with pki: compiles scr_ed25519.c (the vendored libsodium
+   * Ed25519). */
+  ed25519?: boolean;
   /** crypto.subtle importKey/sign/verify/digest: compiles scr_webcrypto.c. */
   webcrypto?: boolean;
   /** perf_hooks event-loop metrics: compiles scr_perf_loop.c. */

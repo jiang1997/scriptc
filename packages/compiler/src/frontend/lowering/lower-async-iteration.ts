@@ -428,7 +428,9 @@ function lowerNodeReadable(
         },
         {
           kind: "if",
-          cond: { kind: "dynTest", test: "undefined", value: chunkRef, type: BOOL, loc },
+          // the end is the done marker: an object-mode stream can yield
+          // undefined
+          cond: { kind: "libCall", fn: "stream.chunkDone", args: [chunkRef], type: BOOL, loc },
           then: [{ kind: "break", loc }],
           else_: null,
           loc,

@@ -30,6 +30,7 @@ import type {
 } from "./session.js";
 import { CheckerFacade } from "./checker.js";
 import {
+  jsxOptionName,
   moduleDetectionKindName,
   moduleKindName,
   moduleResolutionKindName,
@@ -81,6 +82,9 @@ function serializeOptions(options: Ts7CompilerOptions): Record<string, unknown> 
         break;
       case "moduleDetection":
         out[key] = moduleDetectionKindName(value as number)?.toLowerCase() ?? value;
+        break;
+      case "jsx":
+        out[key] = typeof value === "number" ? (jsxOptionName(value) ?? value) : value;
         break;
       case "lib":
         // 5.9.3 spells lib entries "lib.es2025.d.ts"; tsconfig wants "es2025".

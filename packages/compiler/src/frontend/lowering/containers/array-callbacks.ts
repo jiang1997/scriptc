@@ -452,7 +452,7 @@ function withFastCallback(fn: IrFunction, fastT: CallbackType | null, elem: IrTy
  * constant-callback census then calls it directly and LLVM can inline the
  * callback into the loop (TurboFan's builtin+callback inlining). Callback
  * values keep the shared, type-interned helper. */
-function callbackSite(fnArg: IrExpr): string {
+export function callbackSite(fnArg: IrExpr): string {
   return fnArg.kind === "closure" ? `@${fnArg.fnName}` : "";
 }
 

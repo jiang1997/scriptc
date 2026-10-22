@@ -9225,6 +9225,10 @@ ScrCryptoHash *scr_crypto_hmac_new_dyn(ScrStr *alg, ScrDyn *key, ScrDyn *options
   if (key_object) {
     bytes = scr_bytes_new(SCR_BYTES_U8, (double)key_object_len);
     if (key_object_len) memcpy(bytes->data, key_object, key_object_len);
+  } else if (scr_crypto_is_key_object(key)) {
+    /* A private or public KeyObject: scr_pki.c reports Node's error. */
+    scr_crypto_reject_asymmetric_secret(key);
+    return NULL;
   } else if (key->kind == SCR_DYN_STR) {
     ScrStr *utf8 = encoding ? NULL : scr_str_new("utf8", 4);
     bytes = scr_bytes_from_str_checked(key->v.str, encoding ? encoding : utf8);
@@ -9856,9 +9860,15 @@ const unsigned char *scr_key_object_bytes(const ScrDyn *value, size_t *len) {
   return key->data;
 }
 
-/* `value instanceof KeyObject`. */
+void (*scr_crypto_reject_asymmetric_secret)(const ScrDyn *key) = NULL;
+
+/* `value instanceof KeyObject`: a secret key, or a private or public key
+ * (scr_pki.c, matched by its handle tags so this unit does not link it). */
 bool scr_crypto_is_key_object(const ScrDyn *value) {
   size_t len;
+  if (value->kind == SCR_DYN_HANDLE &&
+      (value->v.handle.tag == SCR_DYNH_PRIVATE_KEY || value->v.handle.tag == SCR_DYNH_PUBLIC_KEY))
+    return true;
   return scr_key_object_bytes(value, &len) != NULL;
 }
 

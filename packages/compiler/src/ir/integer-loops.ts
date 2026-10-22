@@ -281,6 +281,120 @@ export function matchIntegerCountedForLoop(
   };
 }
 
+/** A for loop whose two counters close in on each other:
+ *
+ *   for (let lo = a, hi = b; lo < hi; lo++, hi--) { ... }
+ *
+ * The first counter only grows and the second only shrinks, by positive
+ * literal steps, the body writes neither, and the loop runs while the first
+ * is below (or at most) the second. Every body entry therefore holds both
+ * between the first start and the second start: exact integers when the
+ * starts are. A start without a proven integer range is tested at run time
+ * on a versioned loop, as a counted loop's is. */
+export interface IntegerPairedCounter {
+  localId: string;
+  start: IrExpr;
+  /** The signed step of each update. */
+  step: number;
+  startGuarded: boolean;
+}
+export interface IntegerPairedForLoop {
+  low: IntegerPairedCounter;
+  high: IntegerPairedCounter;
+  inclusive: boolean;
+  guarded: boolean;
+  /** Both counters' values on every body entry. */
+  range: IntegerRange;
+}
+
+export function matchIntegerPairedForLoop(
+  stmt: IrStmt & { kind: "for" },
+  locals: ReadonlyMap<string, IrLocal>,
+  ranges: IntegerRanges = new Map(),
+): IntegerPairedForLoop | null {
+  const init = stmt.init,
+    update = stmt.update,
+    cond = stmt.cond;
+  if (init?.kind !== "block" || init.body.length !== 2) return null;
+  if (update?.kind !== "block" || update.body.length !== 2) return null;
+  if (cond?.kind !== "bin" || (cond.op !== "<" && cond.op !== "<=")) return null;
+  if (cond.left.kind !== "varRef" || cond.right.kind !== "varRef") return null;
+  const lowId = cond.left.localId,
+    highId = cond.right.localId;
+  if (lowId === highId) return null;
+  const counter = (id: string): IntegerPairedCounter | null => {
+    const decl = init.body.find((d) => d.kind === "varDecl" && d.localId === id);
+    if (decl?.kind !== "varDecl" || !decl.init) return null;
+    const local = locals.get(id);
+    if (local?.type.kind !== "f64" || !local.mutable || local.boxed || local.tdz) return null;
+    const start = decl.init;
+    // Each start is evaluated once in the head and again on a fallback path.
+    if (
+      !stableLoopValue(start, locals, stmt.body, false, lowId) ||
+      !stableLoopValue(start, locals, stmt.body, false, highId)
+    )
+      return null;
+    const steps = update.body.map((u) => constantStep(u, id)).filter((v) => v !== null);
+    if (steps.length !== 1 || writesLocal(stmt.body, id)) return null;
+    const known =
+      start.kind === "numLit" && Number.isSafeInteger(start.value) && !Object.is(start.value, -0)
+        ? { min: start.value, max: start.value }
+        : ranges.get(start);
+    const startGuarded = !known && start.kind !== "numLit" && start.type.kind === "f64";
+    if (!known && !startGuarded) return null;
+    if (known && (known.min < -Number.MAX_SAFE_INTEGER || known.max > Number.MAX_SAFE_INTEGER))
+      return null;
+    return { localId: id, start, step: steps[0]!, startGuarded };
+  };
+  const low = counter(lowId),
+    high = counter(highId);
+  if (!low || !high || low.step <= 0 || high.step >= 0) return null;
+  const startRange = (c: IntegerPairedCounter): IntegerRange =>
+    c.startGuarded
+      ? { min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER }
+      : c.start.kind === "numLit"
+        ? { min: c.start.value, max: c.start.value }
+        : ranges.get(c.start)!;
+  const guarded = low.startGuarded || high.startGuarded;
+  // Only a loop whose counters index something gains from integer storage.
+  let useful = false,
+    cost = 0;
+  const isCounter = (e: IrExpr): boolean =>
+    (e.kind === "varRef" && (e.localId === lowId || e.localId === highId)) ||
+    (e.kind === "bin" &&
+      (e.op === "+" || e.op === "-") &&
+      (isCounter(e.left) || isCounter(e.right)));
+  const expr = (e: IrExpr): boolean => {
+    if (e.kind === "arrayGet" && isCounter(e.index)) useful = true;
+    if (e.kind === "strIntrinsic" && e.method === "charCodeAt" && e.args[0] && isCounter(e.args[0]))
+      useful = true;
+    if (e.kind === "bytesIntrinsic" && e.method === "get" && e.args[0] && isCounter(e.args[0]))
+      useful = true;
+    return (!guarded || ++cost <= 80) && everyExprChild(e, expr, bodyStmt);
+  };
+  const bodyStmt = (s: IrStmt): boolean => {
+    if ((s.kind === "arraySet" || s.kind === "bytesSet") && isCounter(s.index)) useful = true;
+    if (
+      guarded &&
+      (s.kind === "for" || s.kind === "forOf" || s.kind === "while" || s.kind === "doWhile")
+    )
+      return false;
+    return (!guarded || ++cost <= 80) && everyStmtChild(s, expr, bodyStmt);
+  };
+  if (!stmt.body.every(bodyStmt) || !useful) return null;
+  return {
+    low,
+    high,
+    inclusive: cond.op === "<=",
+    guarded,
+    // A loop whose starts already fail the condition never enters the body.
+    range: {
+      min: startRange(low).min,
+      max: Math.max(startRange(low).min, startRange(high).max),
+    },
+  };
+}
+
 /** True when a lowered subtree writes `localId`. Local ids are unique per
  * function, so typed traversal includes writes
  * nested in expressions, branches, nested loops, and try/finally bodies. */

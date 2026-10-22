@@ -18,6 +18,7 @@ import { compilerReleaseVersion } from "../library/sidecar.js";
 import { nativeArtifactDependenciesStillMatch } from "../backend/native/artifact-stamps.js";
 import { type NativeArtifactDependency } from "../backend/native/contracts.js";
 import { optimizationKeyParts } from "../backend/optimization.js";
+import { privateSiblingPath } from "../backend/build-cache.js";
 import type { CompilerImplementationDependency } from "../library/compiler-self-identity.js";
 import {
   installDarwinDebugSymbols,
@@ -96,6 +97,8 @@ export interface EarlyExecutableNativeFeatures {
   tls: boolean;
   cipher: boolean;
   ecdh: boolean;
+  pki: boolean;
+  ed25519: boolean;
   perfLoop: boolean;
   tlsCa: boolean;
   webcrypto: boolean;
@@ -179,6 +182,15 @@ interface EarlyExecutableImplementationProof {
 export interface EarlyExecutableCacheHit {
   llvmPath: string;
   irPath?: string;
+  /** When the executable was not restored: private copies of the cached LLVM text and IR beside
+   * llvmPath and irPath, which the build compiles from and installs at those names when it is done
+   * (index.ts BuildSources). A restored executable needs no compile, and its files are installed at
+   * llvmPath and irPath. */
+  llvmSourcePath?: string;
+  irSourcePath?: string;
+  /** llvmPath (irPath) already holds the cached bytes: the build leaves it as it is. */
+  llvmPathCurrent?: true;
+  irPathCurrent?: true;
   /** True when the final executable was restored after native dependencies
    * validated. False restores only frontend artifacts and must call compileC. */
   executableRestored: boolean;
@@ -228,6 +240,8 @@ const BOOLEAN_NATIVE_KEYS = [
   "tlsCa",
   "cipher",
   "ecdh",
+  "pki",
+  "ed25519",
   "webcrypto",
   "perfLoop",
 ] as const satisfies readonly (keyof EarlyExecutableNativeFeatures)[];
@@ -575,15 +589,6 @@ async function readExecutableCache(
       (await nativeArtifactDependenciesStillMatch(stamp.nativeDependencies));
     if (validateRoute !== undefined && !executableRestored) return null;
     const paths = outputPaths(options, stamp.native.backend);
-    if (!(await fileMatches(paths.llvmPath, stamp.files.translationUnit.digest))) {
-      await installBytes(translationUnit, paths.llvmPath);
-    }
-    if (
-      ir !== null &&
-      stamp.files.ir !== null &&
-      !(await fileMatches(paths.irPath, stamp.files.ir.digest))
-    )
-      await installBytes(ir, paths.irPath);
     if (executableRestored) {
       try {
         if (debugSymbols !== null) await installDarwinDebugSymbols(debugSymbols, options.outPath);
@@ -596,6 +601,32 @@ async function readExecutableCache(
         }
       } catch {
         executableRestored = false;
+      }
+    }
+    // A build that compiles from the cached translation unit compiles its own copy: a concurrent
+    // build of another program with the same entry name may replace the shared names meanwhile.
+    let llvmSourcePath: string | undefined;
+    let irSourcePath: string | undefined;
+    let llvmPathCurrent = false;
+    let irPathCurrent = false;
+    if (executableRestored) {
+      if (!(await fileMatches(paths.llvmPath, stamp.files.translationUnit.digest)))
+        await installBytes(translationUnit, paths.llvmPath);
+      if (
+        ir !== null &&
+        stamp.files.ir !== null &&
+        !(await fileMatches(paths.irPath, stamp.files.ir.digest))
+      )
+        await installBytes(ir, paths.irPath);
+    } else {
+      // The extension keeps clang reading the copy as LLVM IR rather than as a linker input.
+      llvmSourcePath = `${privateSiblingPath(paths.llvmPath, "llvm")}.ll`;
+      await installBytes(translationUnit, llvmSourcePath);
+      llvmPathCurrent = await fileMatches(paths.llvmPath, stamp.files.translationUnit.digest);
+      if (ir !== null && stamp.files.ir !== null) {
+        irSourcePath = privateSiblingPath(paths.irPath, "ir");
+        await installBytes(ir, irSourcePath);
+        irPathCurrent = await fileMatches(paths.irPath, stamp.files.ir.digest);
       }
     }
     const now = new Date();
@@ -619,6 +650,10 @@ async function readExecutableCache(
         ? { performance: stamp.performance }
         : {}),
       ...(ir === null ? {} : { irPath: paths.irPath }),
+      ...(llvmSourcePath === undefined ? {} : { llvmSourcePath }),
+      ...(irSourcePath === undefined ? {} : { irSourcePath }),
+      ...(llvmPathCurrent ? { llvmPathCurrent: true as const } : {}),
+      ...(irPathCurrent ? { irPathCurrent: true as const } : {}),
     };
   } catch {
     return null;

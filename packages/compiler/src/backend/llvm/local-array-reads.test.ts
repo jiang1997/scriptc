@@ -925,3 +925,18 @@ test.each([
     if (consumer !== "local") expect(ir).toContain("local.array.dense");
   }
 });
+
+test("a dense read tests the hole-free prefix before the capacity", () => {
+  const module = immediateFixture();
+  for (const bits of [32, 64] as const) {
+    const ir = workBody(module, bits);
+    // Field 6 is `filled` and field 2 `cap`: the first branch takes the value
+    // path below the prefix, and only the range block reads the capacity.
+    const firstFilled = ir.search(/getelementptr inbounds %ScrArr, ptr %[^,]+, i32 0, i32 6\b/);
+    const firstCap = ir.search(/getelementptr inbounds %ScrArr, ptr %[^,]+, i32 0, i32 2\b/);
+    expect(firstFilled).toBeGreaterThan(0);
+    expect(firstCap).toBeGreaterThan(firstFilled);
+    expect(ir.slice(firstFilled, firstCap)).toMatch(/br i1 [^,]+, label %local\.array\.value/);
+    expect(ir.lastIndexOf("local.array.range", firstCap)).toBeGreaterThan(firstFilled);
+  }
+});

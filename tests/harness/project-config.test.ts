@@ -307,6 +307,24 @@ test("node-types: TLSSocket.isSessionReused and keyed ??= timings under @types/n
   expect(comparableStderr(native.stderr)).toBe(node.stderr);
 });
 
+test("node-types: new tls.TLSSocket and tls.connect({ socket }) under @types/node", async () => {
+  const outDir = outDirFor("tls-socket-wrap");
+  const entry = join(nodeTypesDir, "tls-socket-wrap.ts");
+  const result = await compile(entry, {
+    outPath: join(outDir, process.platform === "win32" ? "tls-socket-wrap.exe" : "tls-socket-wrap"),
+    outDir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
 test("node-types: net.SocketAddress and net.BlockList under @types/node", async () => {
   const outDir = outDirFor("net-blocklist");
   const entry = join(nodeTypesDir, "net-blocklist.ts");
@@ -1104,6 +1122,38 @@ test("node-types: ECDH matches Node under @types/node", async () => {
   const outDir = outDirFor("node-ecdh");
   const entry = join(nodeTypesDir, "ecdh.ts");
   const result = await compile(entry, { outPath: join(outDir, "ecdh"), outDir, sanitize });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
+test("node-types: asymmetric keys and signatures match Node under @types/node", async () => {
+  const outDir = outDirFor("node-keys");
+  const entry = join(nodeTypesDir, "keys.ts");
+  const result = await compile(entry, { outPath: join(outDir, "keys"), outDir, sanitize });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
+test("node-types: WebCrypto ECDSA, Ed25519 and RSA match Node under @types/node", async () => {
+  const outDir = outDirFor("node-webcrypto-ecdsa");
+  const entry = join(nodeTypesDir, "webcrypto-ecdsa.ts");
+  const result = await compile(entry, {
+    outPath: join(outDir, "webcrypto-ecdsa"),
+    outDir,
+    sanitize,
+  });
   expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
   if (!result.ok) return;
   const [native, node] = await Promise.all([

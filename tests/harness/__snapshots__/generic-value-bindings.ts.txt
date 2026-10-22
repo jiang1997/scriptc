@@ -93,3 +93,10 @@ generic-value-bindings.ts:60:15 - error SC1090: calls of the generic method 'm' 
   60 |   console.log(a.m(4));
      |               ^~~~~~
   61 | }
+
+generic-value-bindings.ts:71:32 - error SC1090: generic arrow/function-expression bindings declared inside functions that code can call before their declaration runs (the binding 'picked' is a 'var' in a branch or block, or is called from a place that can run first — declare it with const before its uses) are not supported yet
+
+  70 |   }
+  71 |   const invoke = (): number => picked(1);
+     |                                ^~~~~~
+  72 |   return invoke();
