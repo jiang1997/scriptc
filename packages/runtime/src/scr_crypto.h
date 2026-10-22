@@ -229,7 +229,7 @@ ScrStr *scr_crypto_x509_valid_from(ScrBytes *data);
 ScrStr *scr_crypto_x509_valid_from_str(ScrStr *pem);
 ScrStr *scr_crypto_x509_valid_to(ScrBytes *data);
 ScrStr *scr_crypto_x509_valid_to_str(ScrStr *pem);
-/* X509Certificate fields: raw decodes the constructor's input (+1 Buffer,
+/* X509Certificate fields (scr_x509.c): raw decodes the constructor's input (+1 Buffer,
  * or NULL with Node's PEM error pending); the others read that DER
  * (borrowed) and never throw. subjectAltName, infoAccess and
  * signatureAlgorithm answer "" where Node answers undefined. */

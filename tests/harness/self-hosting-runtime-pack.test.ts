@@ -49,6 +49,7 @@ const base: NativeLinkFeatures = {
   tlsCa: false,
   cipher: false,
   ecdh: false,
+  x509: false,
   webcrypto: false,
   perfLoop: false,
 };

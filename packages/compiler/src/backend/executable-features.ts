@@ -56,6 +56,7 @@ export function executableLinkFeatures(mod: IrModule): NativeLinkFeatures {
     tlsCa: features.tlsCa,
     cipher: features.cipher,
     ecdh: features.ecdh,
+    x509: features.x509,
     webcrypto: features.webcrypto,
     perfLoop: features.perfLoop,
   };

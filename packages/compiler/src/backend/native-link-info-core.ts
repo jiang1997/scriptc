@@ -90,6 +90,9 @@ export interface NativeLinkFeatures {
   /** crypto.createECDH and ECDH.convertKey: scr_ecdh.c plus the mbedTLS
    * archive. */
   ecdh: boolean;
+  /** X509Certificate fields beyond the validity window and fingerprint:
+   * scr_x509.c. */
+  x509: boolean;
   /** perf_hooks event-loop metrics: scr_perf_loop.c. */
   perfLoop: boolean;
   tlsCa: boolean;

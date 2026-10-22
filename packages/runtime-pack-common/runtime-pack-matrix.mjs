@@ -151,6 +151,7 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_ecdh.c", "ecdh"],
   ["scr_wasm.c", "wasm"],
   ["scr_webcrypto.c", "webcrypto"],
+  ["scr_x509.c", "x509"],
   ["scr_fetch.c", "nativeFetch"],
 ];
 

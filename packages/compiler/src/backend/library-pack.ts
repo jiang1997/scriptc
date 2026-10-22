@@ -60,6 +60,7 @@ export async function compilePackedLibrary(
     tls: false,
     cipher: false,
     ecdh: false,
+    x509: options.x509 ?? false,
     webcrypto: false,
     perfLoop: false,
     tlsCa: false,

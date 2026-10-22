@@ -297,6 +297,7 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   unit((u) => u.opts.foreignFfi, "scr_ffi_queue.c"),
   unit((u) => u.opts.nodeTest, "scr_test.c"),
   unit((u) => u.opts.webcrypto, "scr_webcrypto.c"),
+  unit((u) => u.opts.x509 === true, "scr_x509.c"),
   // The CA-store unit rides its own gate OR the tls one: scr_tls.c
   // references its default-set override unconditionally.
   unit((u) => u.tlsCa, "scr_tls_ca.c"),

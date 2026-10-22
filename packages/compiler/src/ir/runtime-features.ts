@@ -880,6 +880,24 @@ const RUNTIME_FEATURE_RULES = {
   /** crypto.subtle importKey/sign/verify/digest and CryptoKey:
    * scr_webcrypto.c. */
   webcrypto: rule({ prefixes: ["webcrypto."] }),
+  /** scr_x509.c: the X509Certificate fields beyond the validity window and
+   * fingerprint, which stay in scr_lib.c. */
+  x509: rule({
+    fns: [
+      "crypto.x509Ca",
+      "crypto.x509Fingerprint256",
+      "crypto.x509Fingerprint512",
+      "crypto.x509InfoAccess",
+      "crypto.x509Issuer",
+      "crypto.x509Raw",
+      "crypto.x509RawStr",
+      "crypto.x509SerialNumber",
+      "crypto.x509SignatureAlgorithm",
+      "crypto.x509SignatureAlgorithmOid",
+      "crypto.x509Subject",
+      "crypto.x509SubjectAltName",
+    ],
+  }),
   zlib: rule({ prefixes: ["zlib."] }),
 };
 
@@ -910,6 +928,7 @@ function noRuntimeFeatures(): RuntimeFeatures {
     dynInvoke: false,
     dynTier: false,
     ecdh: false,
+    x509: false,
     emitter: false,
     eventTarget: false,
     eventsOnceSignal: false,
