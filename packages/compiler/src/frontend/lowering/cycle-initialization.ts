@@ -240,7 +240,12 @@ function resolvesTo(
   symbol: ts.Symbol,
   aliases: boolean,
 ): boolean {
-  let referenced = lowerer.checker.getSymbolAtLocation(node);
+  // A shorthand property's name (`{ K }`) carries the property's symbol;
+  // the binding it reads is the shorthand's value symbol.
+  let referenced =
+    ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+      ? lowerer.checker.getShorthandAssignmentValueSymbol(node.parent)
+      : lowerer.checker.getSymbolAtLocation(node);
   if (aliases && referenced !== undefined && referenced.flags & ts.SymbolFlags.Alias)
     referenced = lowerer.checker.getAliasedSymbol(referenced);
   return referenced === symbol;

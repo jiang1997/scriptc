@@ -3232,22 +3232,6 @@ export function lowerShorthandValue(
         `generic functions as values (call '${propName.text}' directly)`,
       );
     }
-    // A program class name (`{ parse, TomlError }`, an imported class
-    // included): the class object, exactly the long form `{ C: C }`.
-    // Generic classes keep the identifier path's contextual pinning.
-    const classInfo = lowerer.classBySymbol.get(resolved);
-    if (classInfo && !classInfo.generic) {
-      const decoratedGlobal = classInfo.classDecorators?.valueGlobalId;
-      if (decoratedGlobal !== undefined) {
-        return {
-          kind: "varRef",
-          localId: decoratedGlobal,
-          type: { kind: "classval", className: classInfo.def.name },
-          loc,
-        };
-      }
-      return lowerer.classValueRef(classInfo, propName);
-    }
   }
   lowerer.rejectUnresolvedSymbol(
     symbol

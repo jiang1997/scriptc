@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/6588-class-value-shorthand-early-reads.ts"
+ ],
+ "diags": []
+}

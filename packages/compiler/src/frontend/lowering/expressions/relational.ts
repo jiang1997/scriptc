@@ -821,15 +821,15 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
 
 /** A statically decided `instanceof` over computed operands: both operands
  * still evaluate, left then right, for their effects (a construction, a
- * call, a property read), and the folded answer follows. */
+ * call, a property read, a binding read that throws before the binding is
+ * initialized), and the folded answer follows. */
 function evaluatedOperandsThen(
   lowerer: Lowerer,
   left: IrExpr,
   right: ts.Expression,
   answer: IrExpr,
 ): IrExpr {
-  const stmts: IrStmt[] = [];
-  if (left.kind !== "varRef") stmts.push({ kind: "exprStmt", expr: left, loc: left.loc });
+  const stmts: IrStmt[] = [{ kind: "exprStmt", expr: left, loc: left.loc }];
   stmts.push({ kind: "exprStmt", expr: lowerer.lowerExpr(right), loc: locOf(right) });
   return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc: answer.loc };
 }
