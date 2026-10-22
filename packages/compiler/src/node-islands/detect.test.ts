@@ -100,6 +100,11 @@ describe("R2 object-model markers", () => {
       ),
     ).toEqual([]);
     expect(markers("const d = { __proto__: null };")).toEqual([]);
+    expect(
+      markers(
+        "class E extends Error { constructor() { super(); const p = new.target.prototype; if (Object.setPrototypeOf) { Object.setPrototypeOf(this, p); } else { this.__proto__ = p; } } }",
+      ),
+    ).toEqual([]);
   });
 
   test("R2.3 shape mutation outside the checker's view", () => {

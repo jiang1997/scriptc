@@ -23,7 +23,7 @@ import { findInstalledLibnodePack, hostLibnodeTarget, libnodePackPackage } from 
 export const NODE_ISLAND_MIN_NODE = "24.13.1";
 
 /** The bridge ABI this compiler's runtime speaks (scr_node_bridge.h). */
-export const NODE_BRIDGE_ABI = 4;
+export const NODE_BRIDGE_ABI = 9;
 
 /** The prefix of a recorded path relative to the executable's directory. */
 export const ORIGIN = "$ORIGIN/";
@@ -144,4 +144,22 @@ export function libnodeCacheKey(
     }
   }
   return `${option ?? ""}|${source}|${manifest}`;
+}
+
+/** The libnode pack directory the build-time probe of deferred islands
+ * runs in (scope-B NI-7): the same pack libnodeRecord records (before a
+ * `beside` copy), or null when the build host has none to run. */
+export function libnodeProbePack(
+  option: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  projectDir: string = process.cwd(),
+): string | null {
+  const fromEnv = env["SCRIPTC_LIBNODE"];
+  const explicit = option !== undefined && option !== "beside" ? option : fromEnv;
+  const source =
+    explicit !== undefined && explicit !== ""
+      ? explicit
+      : findInstalledLibnodePack({ targetName: hostLibnodeTarget(), projectDir });
+  if (source === undefined || source === null || source === "" || !isAbsolute(source)) return null;
+  return typeof readManifest(source) === "string" ? null : resolve(source);
 }

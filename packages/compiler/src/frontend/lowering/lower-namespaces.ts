@@ -37,7 +37,7 @@
  * statement is not modeled — same as top-level const reads through early
  * calls). */
 import * as ts from "../ts7/adapter.js";
-import { packageShimFor } from "../package-shims.js";
+import { isPackageShimFile, isShimIntrinsicName, packageShimFor } from "../package-shims.js";
 import type { Lowerer } from "./lowerer.js";
 import { boundIdentifiersOf } from "./lowerer.js";
 import type { FileParts } from "./lower-modules.js";
@@ -649,6 +649,12 @@ export function ambientUndefinedFnSymbolOf(
   const sym = lowerer.resolveValueSymbol(ident);
   if (!sym || !(sym.flags & ts.SymbolFlags.Function)) return null;
   if (lowerer.isStdlibSymbol(sym)) return null;
+  // A package shim's runtime intrinsic (lower-calls.ts) is defined.
+  if (
+    isShimIntrinsicName(ident.text) &&
+    sym.declarations.some((d) => isPackageShimFile(ts.getSourceFileOfNode(d).fileName))
+  )
+    return null;
   let sawFn = false;
   for (const d of sym.declarations) {
     if (ts.isInterfaceDeclaration(d) || ts.isTypeAliasDeclaration(d)) continue; // type-world merge partners

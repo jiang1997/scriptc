@@ -1,4 +1,7 @@
+import { isIslandPromisifyCall, noteIslandSubclass } from "./lower-node-island.js";
+import { isIslandSubclassDecl } from "../../node-islands/boundary.js";
 import { THREADS_MODULE } from "../threads-import.js";
+import { collectIslandImport, collectIslandRequires } from "./lower-node-island.js";
 import { NODE_API_MODULE } from "../node-api-import.js";
 import { EXPERIMENTAL_MODULE } from "../experimental-import.js";
 import { dynUndefinedExpr } from "../../ir/build.js";
@@ -12,6 +15,11 @@ import * as ts from "../ts7/adapter.js";
 import { collectRebindableFunctions, isRebindableFunction } from "./rebindable-functions.js";
 import { bindingSource } from "../binding-source.js";
 import type { Lowerer } from "./lowerer.js";
+import {
+  sharedInitFlagStores,
+  sharedModulePlans,
+  sharedModuleRegistrations,
+} from "./lower-shared-modules.js";
 import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
 import { packageNameOfPath, probeNodeImportRefusal } from "../npm.js";
 import { isNpmStaticPackage } from "../npm-static.js";
@@ -305,6 +313,9 @@ export function splitFiles(lowerer: Lowerer): FileParts[] {
       // the init body assigns first (rebindable-functions.ts).
       if (ts.isFunctionDeclaration(stmt) && rebindable.has(stmt)) fp.topStmts.push(stmt);
       else if (ts.isFunctionDeclaration(stmt)) fp.fnDecls.push(stmt);
+      // A native class extending an island class is a value the init body
+      // creates at its position (NI-5b, lower-node-island.ts).
+      else if (ts.isClassDeclaration(stmt) && noteIslandSubclass(lowerer, stmt)) fp.topStmts.push(stmt);
       else if (ts.isClassDeclaration(stmt)) fp.classDecls.push(stmt);
       // Namespaces: ambient/type-only ones are zero-runtime and skip;
       // instantiated bodies FLATTEN into this file's parts (functions/
@@ -676,13 +687,19 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
       // it, %main throws before any init runs, and the bindings never
 
       if (npm !== null && probeNodeImportRefusal(fp.sf.fileName, spec) !== null) continue;
+      // A Node island package (scope-B NI-4): loaded in Node at this
+      // module's position, its bindings are island values.
+      if (collectIslandImport(lowerer, fp.sf, stmt, spec)) continue;
       {
         lowerer.pushDiag(unsupportedPackageImportDiag(npm?.packageName ?? relPkg!, locOf(stmt)));
         continue;
       }
     }
   }
-  for (const fp of parts) collectDynamicImports(lowerer, fp.sf);
+  for (const fp of parts) {
+    collectDynamicImports(lowerer, fp.sf);
+    collectIslandRequires(lowerer, fp.sf);
+  }
 }
 
 /** Literal dynamic-import collection: every
@@ -1342,6 +1359,14 @@ export function collectGlobals(
   // collected earlier in this pass must resolve them (lower-expando.ts).
   collectExpandoMembers(lowerer, sf);
   for (const stmt of topStmts) {
+    if (ts.isClassDeclaration(stmt) && stmt.name && isIslandSubclassDecl(stmt)) {
+      const symbol = lowerer.checker.getSymbolAtLocation(stmt.name);
+      const g: IrGlobal = { id: `%g.${tag}${stmt.name.text}`, name: stmt.name.text, type: DYN, mutable: true };
+      if (symbol) lowerer.globalsBySymbol.set(symbol, g);
+      lowerer.globalsByDeclNode.set(stmt, g);
+      lowerer.globalsList.push(g);
+      continue;
+    }
     if (ts.isFunctionDeclaration(stmt) && stmt.name && isRebindableFunction(lowerer, stmt)) {
       const symbol = lowerer.checker.getSymbolAtLocation(stmt.name);
       if (symbol && !lowerer.globalsBySymbol.has(symbol)) {
@@ -2106,6 +2131,27 @@ export function collectGlobals(
               lowerer.globalsBySymbol.set(symbol, g);
               lowerer.globalsList.push(g);
               if (isVarDeclared(decl)) noteVarGlobalEntryInit(lowerer, sf, g);
+            }
+            continue;
+          }
+          // `const f = util.promisify(islandFn)` (NI-5b): an island function.
+          if (
+            ts.isIdentifier(decl.name) &&
+            nameNode === decl.name &&
+            decl.initializer !== undefined &&
+            isIslandPromisifyCall(lowerer, decl.initializer)
+          ) {
+            const symbol = lowerer.checker.getSymbolAtLocation(nameNode);
+            if (symbol) {
+              const g: IrGlobal = {
+                id: `%g.${tag}${nsPrefix}${nameNode.text}`,
+                name: nameNode.text,
+                type: DYN,
+                mutable: isLet,
+                source: bindingSource(nameNode),
+              };
+              lowerer.globalsBySymbol.set(symbol, g);
+              lowerer.globalsList.push(g);
             }
             continue;
           }
@@ -2961,6 +3007,10 @@ export function lowerFileInit(
       });
     }
     if (sf === lowerer.entry) header.push(...lowerer.punycodeLinkWarning());
+    // Modules shared with Node islands register before any module runs
+    // (NI-6); the plan also creates their declarations' TDZ flags.
+    if (sharedModulePlans(lowerer).length > 0 && sf === lowerer.entry)
+      header.push(...sharedModuleRegistrations(lowerer));
     // Top-level `this` of a CommonJS module: its object exists before the
     // module's first statement (lowerCjsTopLevelThis).
     const exportsThis = lowerer.cjsExportsThis.get(sf);
@@ -3197,6 +3247,7 @@ export function lowerFileInit(
         stmt,
         deferred ? [deferred] : lowerer.lowerStmts([stmt]),
       );
+      if (lowerer.sharedInitFlags.size > 0) stmtIr.push(...sharedInitFlagStores(lowerer, stmt));
       // Class EXPRESSIONS inside this statement queued their static
       // inits while it lowered: they land immediately before it — JS's
       // order for the supported whole-initializer positions.

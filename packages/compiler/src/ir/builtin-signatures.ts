@@ -183,6 +183,52 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
     argTypes: [STRING, STRING, STRING, DYN],
     result: { kind: "promise", inner: DYN },
   },
+  /** Node islands (scope-B NI-4, scr_node_island_handle.c): island values
+   * are dyn values (`foreign` lowers as dyn), objects are handle boxes
+   * whose identity is the V8 object's. require/import load an island
+   * module by its absolute (or `$ORIGIN/`) path; the rest are member reads,
+   * writes and calls on island values, argument lists as one dyn array.
+   * requireModule(specifier) of @scriptc/node lowers to require too. */
+  "nodeIsland.require": { argTypes: [STRING], result: DYN },
+  /** NI-7: a deferred island module (path, boot guards + interface snapshot). */
+  "nodeIsland.defer": { argTypes: [STRING, STRING], result: DYN },
+  "nodeIsland.import": { argTypes: [STRING], result: { kind: "promise", inner: DYN } },
+  "nodeIsland.get": { argTypes: [DYN, STRING], result: DYN },
+  "nodeIsland.getKey": { argTypes: [DYN, DYN], result: DYN },
+  "nodeIsland.set": { argTypes: [DYN, STRING, DYN], result: VOID },
+  "nodeIsland.setKey": { argTypes: [DYN, DYN, DYN], result: VOID },
+  "nodeIsland.invoke": { argTypes: [DYN, STRING, DYN], result: DYN },
+  "nodeIsland.apply": { argTypes: [DYN, DYN], result: DYN },
+  "nodeIsland.construct": { argTypes: [DYN, DYN], result: DYN },
+  "nodeIsland.instanceof": { argTypes: [DYN, DYN], result: BOOL },
+  /** Array.isArray of a dyn value in a program with Node islands: island
+   * arrays answer true too. */
+  "nodeIsland.isArray": { argTypes: [DYN], result: BOOL },
+  /** NI-5: a class instance crossing into an island, with the builder of
+   * its class's method table (run once per class). Answers the value. */
+  "nodeIsland.classMethods": { argTypes: [DYN, DYN], result: DYN },
+  /** NI-5b: native classes extending island classes. subclass(base, name,
+   * ctor, fields, methods, getters, setters) makes the JavaScript class;
+   * superConstruct(box, args) is the native constructor's super(...);
+   * superMethod(base, this, name, args) is super.name(...); defineField
+   * defines an instance field; promisify is util.promisify in the island. */
+  "nodeIsland.subclass": { argTypes: [DYN, STRING, DYN, DYN, DYN, DYN, DYN], result: DYN },
+  "nodeIsland.superConstruct": { argTypes: [DYN, DYN], result: DYN },
+  "nodeIsland.superMethod": { argTypes: [DYN, DYN, STRING, DYN], result: DYN },
+  "nodeIsland.defineField": { argTypes: [DYN, STRING, DYN], result: VOID },
+  "nodeIsland.promisify": { argTypes: [DYN], result: DYN },
+  /** NI-6 shared modules: registers a module the program shares with its
+   * islands (real path, exports JSON, accessor); the TDZ sentinel an
+   * accessor answers; the method table and constructor helper of an
+   * exported class by its class value (either may be undefined; answers
+   * the class value). */
+  "nodeIsland.share": { argTypes: [STRING, STRING, DYN], result: VOID },
+  "nodeIsland.sharedTdz": { argTypes: [], result: DYN },
+  "nodeIsland.classMethodsOf": { argTypes: [DYN, DYN, DYN], result: DYN },
+  /** `v instanceof Error` (or a builtin Error subclass) for an island value. */
+  "nodeIsland.instanceofGlobal": { argTypes: [DYN, STRING], result: BOOL },
+  /** Whether a dyn value is an island handle (never loads Node). */
+  "nodeIsland.isHandle": { argTypes: [DYN], result: BOOL },
   /** Keyed WRITE on a dyn value — `h.onDone = cb` / `h["k"] = v` on a
    * checked-dynamic object (args: receiver, key string, value — all
    * borrowed; the runtime copies the key and retains the value in). An
@@ -1531,6 +1577,13 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   },
   "dgram.sendStr": { argTypes: [DGRAMSOCK_T, STRING, F64, STRING], result: VOID },
   "dgram.sendBytes": { argTypes: [DGRAMSOCK_T, BYTES_U8, F64, STRING], result: VOID },
+  /** Connected AF_UNIX datagram sockets for the hot-shots package shim
+   * (the unix-dgram addon's surface): fd or result >= 0, -errno on
+   * failure; send answers 1 when the socket would block. */
+  "dgram.unixSocket": { argTypes: [], result: F64 },
+  "dgram.unixConnect": { argTypes: [F64, STRING], result: F64 },
+  "dgram.unixSend": { argTypes: [F64, BYTES_U8], result: F64 },
+  "dgram.unixClose": { argTypes: [F64], result: F64 },
   /** The send argument-validation ladder over dyn arguments (Node's
    * signature shuffle: slice bounds, list/type contracts, port/address
    * validation, connected-state errors), then the send: lists, connected

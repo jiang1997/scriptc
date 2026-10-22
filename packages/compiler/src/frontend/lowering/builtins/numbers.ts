@@ -1,7 +1,7 @@
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, own } from "../lowerer.js";
 import { lowerCheckedPredicateValue } from "../lower-builtin-values.js";
-import { locOf } from "../../program.js";
+import { isJsSourceFile, locOf } from "../../program.js";
 import { BOOL, F64, STRING, type IrExpr, type IrLibFn } from "../../../ir/ir.js";
 import { lowerBuiltinValuePreservingUndefined, lowerOptionalNumberPredicate } from "./arguments.js";
 import { tryLowerExpression } from "../expressions/try-lower-expression.js";
@@ -72,8 +72,9 @@ export function lowerNumberStaticCall(
     return { kind: "libCall", fn, args: [arg], type: BOOL, loc };
   }
   if (member === "parseFloat" || member === "parseInt") {
-    const want = member === "parseFloat" ? 1 : 2;
-    if (call.arguments.nodes.length !== want) {
+    // parseInt's radix is optional (0: decimal, or hex after "0x").
+    const count = call.arguments.nodes.length;
+    if (member === "parseFloat" ? count !== 1 : count !== 1 && count !== 2) {
       lowerer.noLowering(
         `Number.${member} with ${call.arguments.nodes.length} argument${call.arguments.nodes.length === 1 ? "" : "s"}`,
         call,
@@ -101,8 +102,18 @@ export function lowerNumberStaticCall(
       };
       if (member === "parseFloat")
         return { kind: "libCall", fn: "num.parseFloat", args: [text], type: F64, loc };
-      const radix = lowerer.lowerExprExpecting(call.arguments.nodes[1]!, F64);
+      const radixNode = call.arguments.nodes[1];
+      const radix: IrExpr = radixNode
+        ? lowerer.lowerExprExpecting(radixNode, F64)
+        : { kind: "numLit", value: 0, type: F64, loc };
       return { kind: "libCall", fn: "num.parseInt", args: [text, radix], type: F64, loc };
+    }
+    // JavaScript whose argument does not lower on its own (zod's
+    // `Number.parseInt(val.toFixed(n).replace(".", ""))` over an untyped
+    // parameter): the global parser's own JavaScript forms.
+    if (probed === null && member === "parseInt" && isJsSourceFile(ts.getSourceFileOfNode(call))) {
+      const parsed = lowerStaticNumberGlobal(lowerer, member, call, call.arguments.nodes, loc);
+      if (parsed !== null) return parsed;
     }
     const argText =
       probed !== null

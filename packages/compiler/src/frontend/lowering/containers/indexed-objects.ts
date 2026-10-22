@@ -1387,6 +1387,15 @@ export type IndexMergeContributor =
  * JS own-key order. Explicit values arrive pre-coerced to the target's
  * value slot. Null when a spread source is outside that matrix (the
  * caller keeps its fence). */
+/** A value of an index slot's type that holds a key's place until a later
+ * write replaces it, or null for slot types without a literal. */
+function indexSlotPlaceholder(slot: IrType, loc: SrcLoc): IrExpr | null {
+  if (slot.kind === "string") return { kind: "strLit", value: "", type: STRING, loc };
+  if (slot.kind === "f64") return { kind: "numLit", value: 0, type: slot, loc };
+  if (slot.kind === "bool") return { kind: "boolLit", value: false, type: slot, loc };
+  return null;
+}
+
 export function lowerIndexMergeHelper(
   lowerer: Lowerer,
   toId: string,
@@ -1409,9 +1418,9 @@ export function lowerIndexMergeHelper(
     shapeId: string;
     wrapTag: number;
     retag: string | null;
-    fields: Map<string, WidthLift | "dyn"> | null;
+    fields: Map<string, WidthLift | "dyn" | "placeholder"> | null;
   }[] = [];
-  for (const c of contributors) {
+  for (const [ci, c] of contributors.entries()) {
     // A conditional spread needs the undefined arm as its "absent"
     // value — a target slot without one can't carry the empty arm.
     if (
@@ -1425,15 +1434,26 @@ export function lowerIndexMergeHelper(
     if (!from || from.tuple) return null;
     if (!from.indexValue) {
       if (from.fields.some((f) => f.name.startsWith("%"))) return null;
-      const fields = new Map<string, WidthLift | "dyn">();
+      const fields = new Map<string, WidthLift | "dyn" | "placeholder">();
       for (const ff of from.fields) {
         const lift = typeEquals(ff.type, tIv)
           ? ({ how: "copy" } as WidthLift)
           : tIv.kind === "dyn" && (ff.type.kind === "dyn" || lowerer.dynConvertible(ff.type))
             ? "dyn"
             : lowerer.widthLiftPlan(ff.type, tIv);
-        if (lift === null) return null;
-        fields.set(ff.name, lift);
+        if (lift !== null) {
+          fields.set(ff.name, lift);
+          continue;
+        }
+        // A field a later plain property overrides (`{ ...tags, status:
+        // String(tags.status) }`): its value never survives, but its key
+        // keeps the spread's position, so a placeholder of the slot's
+        // type holds the place until the override writes.
+        const overridden = contributors
+          .slice(ci + 1)
+          .some((later) => later.kind === "field" && later.name === ff.name);
+        if (!overridden || indexSlotPlaceholder(tIv, loc) === null) return null;
+        fields.set(ff.name, "placeholder");
       }
       srcPlans.push({ shapeId: c.shapeId, wrapTag: -1, retag: null, fields });
       continue;
@@ -1568,7 +1588,16 @@ export function lowerIndexMergeHelper(
     // own planned lift (absent optionals skip — the unset convention);
     // no overflow exists to walk.
     if (plan.fields !== null) {
-      for (const ff of from.fields) {
+      // Keys enter in DECLARATION order, as the object's own keys do
+      // (declaredOrder omits internal '%'-fields, which never copy).
+      lowerer.keyOrder.observed.add(from.id);
+      const orderedFields = from.declaredOrder
+        ? from.declaredOrder.flatMap((n) => {
+            const f = from.fields.find((x) => x.name === n);
+            return f ? [f] : [];
+          })
+        : from.fields;
+      for (const ff of orderedFields) {
         const lift = plan.fields.get(ff.name)!;
         const raw: IrExpr = {
           kind: "recordGet",
@@ -1585,9 +1614,11 @@ export function lowerIndexMergeHelper(
           shapeId: toId,
           key: { kind: "strLit", value: ff.name, type: STRING, loc },
           value:
-            lift === "dyn"
-              ? { kind: "dynFrom", value: raw, type: DYN, loc }
-              : lowerer.applyWidthLift(lift, raw, tIv, loc),
+            lift === "placeholder"
+              ? indexSlotPlaceholder(tIv, loc)!
+              : lift === "dyn"
+                ? { kind: "dynFrom", value: raw, type: DYN, loc }
+                : lowerer.applyWidthLift(lift, raw, tIv, loc),
           overflowOnly: true,
           loc,
         };

@@ -16,6 +16,7 @@ import {
   CRYPTOHMAC_T,
   DATE_T,
   DYN,
+  FOREIGN,
   F64,
   funcOf,
   isSupportedArrayElem,
@@ -1109,6 +1110,10 @@ export type TypeParamTsResolver = (t: ts.Type) => ts.Type | null;
  * once per Lowerer and threaded through the recursion — adding a hook means
  * one new field here, not a new parameter at every call site. */
 export interface TypeMapperCtx {
+  /** Node islands (scope-B NI-4): whether a type's values are island
+   * handles, which map to the `foreign` type (a dyn value). Absent in
+   * programs without islands. */
+  foreignType?: (type: ts.Type) => boolean;
   /** Set only while a union maps an arm that is the type inferred from an
    * empty object literal, beside another non-nullish arm: that arm holds
    * only the literal's objects, so it maps to the empty record (see the
@@ -1653,6 +1658,7 @@ export function mapType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       return STRING;
     if (flags & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) return BOOL;
   }
+  if (ctx.foreignType !== undefined && ctx.foreignType(type)) return FOREIGN;
   const topLevel = mapTypeDepth === 0;
   const typeId = (type as { id?: number }).id;
   const memoizable = typeId !== undefined && (ctx.canMemoizeType?.() ?? true);

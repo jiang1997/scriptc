@@ -105,6 +105,11 @@ export interface ScrDiagnostic {
    * alone does not say it (a computed require(), a native addon, `with`).
    * Report-only: never part of the rendered message. */
   reason?: string;
+  /** Runtime fences only: the fenced site is in a module's top-level code
+   * (outside every function body), so it runs, and throws, when the module
+   * evaluates. Island selection treats such a fence like one that needs the
+   * runtime (scope-B NI-4). */
+  moduleInit?: true;
 }
 
 /** SC3002–SC3004 — native-helper target, installation, and execution
@@ -246,6 +251,58 @@ export function projectConfigDiag(
   };
 }
 
+/** SC8011 — a native class extends a class owned by a Node island. Native
+ * subclasses of island classes are scope-B milestone NI-5b. */
+export function nativeSubclassOfIslandDiag(loc: SrcLoc, detail?: string): ScrDiagnostic {
+  return {
+    code: "SC8011",
+    message:
+      detail === undefined
+        ? "a native class cannot extend a class owned by a Node island yet (native subclasses of island classes)"
+        : `a native class extending a class owned by a Node island cannot have ${detail} yet`,
+    loc,
+    hint: "keep the subclass in Node: move it into the island module, or mark its module as a Node island; a registry shim of the package also lifts this",
+  };
+}
+
+/** SC8020 — a stateful module the program compiles is duplicated across
+ * the Node island boundary (an explicit "duplicate", or a form NI-6 cannot
+ * share yet): each side has its own state. */
+export function sharedModuleDuplicatedDiag(
+  module: string,
+  why: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC8020",
+    message: `module '${module}' is duplicated across the Node island boundary although it is stateful: ${why}; the program and its islands each see their own copy`,
+    loc,
+    hint: 'remove "share": "duplicate" from its scriptc.packages entry to share one instance',
+  };
+}
+
+/** SC8022 — island code extends a class of a module the program compiles.
+ * A native instance cannot take an island subclass's overrides, so the
+ * module is not owned by the program: a package runs in Node for both
+ * sides (the build retries with it as a Node island); a program module is
+ * refused. */
+export function sharedClassExtendedDiag(
+  pkg: string | null,
+  file: string,
+  base: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC8022",
+    message:
+      pkg !== null
+        ? `package '${pkg}' is shared with a Node island that extends its class '${base}': it runs in Node for both sides`
+        : `module '${file}' cannot be shared with a Node island that extends its class '${base}' (island subclasses of native classes)`,
+    loc,
+    hint: "move the subclass into the program, or mark the module as a Node island",
+  };
+}
+
 /** SC8002 — Node islands are off (or limited to marked islands) and an
  * npm package is outside the native subset. */
 export function nodeIslandsOffDiag(pkg: string, why: string, loc: SrcLoc): ScrDiagnostic {
@@ -254,6 +311,51 @@ export function nodeIslandsOffDiag(pkg: string, why: string, loc: SrcLoc): ScrDi
     message: `npm package '${pkg}' is outside the native subset (${why}) and Node islands are off`,
     loc,
     hint: `allow Node islands (--node-islands=auto), mark it with --node-island=${pkg}, or replace the dependency`,
+  };
+}
+
+/** SC8001 — a package runs in a Node island (a note, once per island in
+ * the build output). */
+export function nodeIslandNoteDiag(
+  pkg: string,
+  version: string | null,
+  klass: string,
+  reason: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC8001",
+    message: `package '${version === null ? pkg : `${pkg}@${version}`}' runs in a Node island: ${klass}: ${reason}`,
+    loc,
+    hint: "it runs in Node.js loaded into the program on first use; --node-islands=off makes this an error",
+  };
+}
+
+/** SC8010 — a value crosses an island boundary in a way NI-4 cannot keep
+ * exact yet (callbacks, native objects, remote promises). */
+export function nodeIslandBoundaryDiag(what: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC8010",
+    message: `${what} cannot cross into or out of a Node island yet`,
+    loc,
+    hint: "pass primitives, strings, island objects or fresh object and array literals of those; callbacks, native objects and promises cross from NI-5 on",
+  };
+}
+
+/** SC8023 — the build that ran fenced packages as Node islands failed, so
+ * the program was built natively with those runtime fences (each throws
+ * when reached). A warning on the native build, with the island build's
+ * first error. */
+export function nodeIslandRetryFailedDiag(
+  packages: readonly string[],
+  first: ScrDiagnostic,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC8023",
+    message: `running ${packages.map((p) => `'${p}'`).join(", ")} in Node islands failed to compile (${first.code} at ${first.loc.file}:${first.loc.start}: ${first.message}); built natively instead, where their runtime fences throw when reached`,
+    loc,
+    hint: "fix the island build's error, or mark the packages with --node-island=<pkg> to see every error",
   };
 }
 

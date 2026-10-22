@@ -185,6 +185,7 @@ typedef enum {
   X(NET_SERVER, 3) /* ScrNetServer — net.Server (http.Server rides the same handle) */ \
   X(NET_SOCKET, 2) /* ScrNetSocket — net.Socket */ \
   X(NET_SOCKET_ADDRESS, 47) /* net.SocketAddress (scr_net.c) */ \
+  X(NODE_ISLAND, 65) /* a Node island value (scr_node_island_handle.c) */ \
   X(REGEXP, 26) /* native RegExp, shared compiled pattern */ \
   X(SEARCH_PARAMS, 33) /* live WHATWG URLSearchParams */ \
   X(SEGMENTER, 19) /* default Unicode grapheme segmentation */ \
@@ -1388,7 +1389,14 @@ typedef struct ScrDynHandleOps {
   /* Cross-thread structured clone (postMessage, workerData); NULL =
    * DataCloneError. See ScrDynHandleTransfer. */
   const struct ScrDynHandleTransfer *transfer;
+  /* The object's own ToPrimitive (Node island objects, whose
+   * Symbol.toPrimitive / toString / valueOf run in their own engine):
+   * hint SCR_DYN_HINT_*; +1 primitive dyn, or NULL with the exception
+   * pending. NULL hook = the class's fixed rendering above. */
+  ScrDyn *(*to_primitive)(void *h, const ScrDyn *self, int hint);
 } ScrDynHandleOps;
+
+enum { SCR_DYN_HINT_DEFAULT = 0, SCR_DYN_HINT_NUMBER = 1, SCR_DYN_HINT_STRING = 2 };
 
 /* How a handle crosses threads, supplied by the handle's owning unit so the
  * message encoder (scr_message.c) needs no reference to gated units and no

@@ -3517,6 +3517,18 @@ declare module "util" {
   export function promisify(
     fn: typeof import("node:dns").lookupService,
   ): (address: string, port: number) => Promise<{ hostname: string; service: string }>;
+  /* Error-first callback functions in general: lowered for Node island
+   * functions (Node's own promisify runs in the island); other targets
+   * fence at the call. */
+  export function promisify<T1, TResult>(
+    fn: (arg1: T1, callback: (err: any, result: TResult) => void) => void,
+  ): (arg1: T1) => Promise<TResult>;
+  export function promisify<T1, T2, TResult>(
+    fn: (arg1: T1, arg2: T2, callback: (err: any, result: TResult) => void) => void,
+  ): (arg1: T1, arg2: T2) => Promise<TResult>;
+  export function promisify<T1, T2, T3, TResult>(
+    fn: (arg1: T1, arg2: T2, arg3: T3, callback: (err: any, result: TResult) => void) => void,
+  ): (arg1: T1, arg2: T2, arg3: T3) => Promise<TResult>;
   /* Declared surface without full lowering (the type-level tolerance
    * story: guarded/diagnostic-path code must TYPECHECK; a reached use
    * without a lowering fences at its site). inspect's options carry the

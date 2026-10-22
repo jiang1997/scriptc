@@ -39,6 +39,7 @@
  *    JSON.parse's wording rather than tsc's, the one message-text delta on
  *    that path (no snapshot pins it). */
 
+import { isFrontendIsland } from "../node-islands/boundary.js";
 import { builtinModules } from "node:module";
 import { dirname, isAbsolute, resolve } from "node:path";
 import * as ts from "./ts7/adapter.js";
@@ -119,6 +120,7 @@ import {
   isRelativeSpecifier,
   isWorkspacePackageName,
   npmPackageNameOf,
+  packageNameOfSpecifier,
   registerWorkspacePackage,
   workspacePackageOfPath,
 } from "./workspace-registry.js";
@@ -5200,7 +5202,12 @@ function preflight7(load: LoadResult): {
                 ),
               );
             }
-          } else if (dep === null && !(!isRelative && ambientModules.has(spec))) {
+          } else if (
+            dep === null &&
+            !(!isRelative && ambientModules.has(spec)) &&
+            // A Node island module's namespace (scope-B NI-4).
+            !(!isRelative && isFrontendIsland(packageNameOfSpecifier(spec)))
+          ) {
             diags.push(unsupportedDiag("SC1013", locOf7(clause.namedBindings)));
           }
         }
@@ -5376,7 +5383,11 @@ function preflight7(load: LoadResult): {
                 // optional-dependency try/require pattern), so no fence.
                 // Binding forms keep the fence: their downstream reads
                 // would need the module that never loads.
-                if (req.decl !== null || probeNodeRequireRefusal(sf.fileName, req.spec) === null) {
+                if (
+                  (req.decl !== null || probeNodeRequireRefusal(sf.fileName, req.spec) === null) &&
+                  // A Node island package: loaded in Node at the require (NI-4).
+                  !isFrontendIsland(packageNameOfSpecifier(req.spec))
+                ) {
                   diags.push(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(req.spec)));
                 }
               }
@@ -5433,7 +5444,10 @@ function preflight7(load: LoadResult): {
           if (canonicalBuiltinModule(spec) === null && !processModuleAliasRequire7(spec, null)) {
             // Binding-less by construction — same require-site throw
             // channel as the statement-level form above.
-            if (probeNodeRequireRefusal(sf.fileName, spec) === null) {
+            if (
+              probeNodeRequireRefusal(sf.fileName, spec) === null &&
+              !isFrontendIsland(packageNameOfSpecifier(spec))
+            ) {
               diags.push(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(spec)));
             }
           }

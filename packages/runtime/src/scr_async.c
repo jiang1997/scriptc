@@ -136,6 +136,9 @@ static void scr_fiber_stack_free(void *stack) {
 enum { SCR_PROM_PENDING = 0, SCR_PROM_FULFILLED = 1, SCR_PROM_REJECTED = 2 };
 
 #define SCR_CB_SYNC SIZE_MAX
+#ifdef SCR_NODE_ISLANDS
+#define SCR_CB_ANY SIZE_MAX /* all_idx of an any-settlement callback */
+#endif
 #define SCR_CB_BATCH (SIZE_MAX - 1)
 
 typedef struct ScrFiber ScrFiber;
@@ -1549,9 +1552,26 @@ static void *scr_win_self(void) {
 }
 #endif
 
+#ifdef SCR_NODE_ISLANDS
+/* The lowest frame of Node's stack that is still live while a fiber runs:
+ * where runtime code on Node's stack (a job or host callback, however deep
+ * it went) last switched to a fiber. A call into Node from that fiber runs
+ * on Node's stack below it (scr_node_island.c), never over those frames.
+ * 0: none. scr_node_stack_has (set when Node starts) tells Node's stack. */
+uintptr_t scr_node_stack_low = 0;
+bool (*scr_node_stack_has)(uintptr_t sp) = NULL;
+#endif
+
 static void scr_switch(ScrCtx *from, ScrCtx *to, ScrFiber *to_fiber) {
 #ifdef SCR_ASAN_FIBERS
   ScrFiber *from_fiber = scr_current;
+#endif
+#ifdef SCR_NODE_ISLANDS
+  uintptr_t node_low = scr_node_stack_low;
+  if (to_fiber != NULL && scr_node_stack_has != NULL) {
+    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
+    if (scr_node_stack_has(here)) scr_node_stack_low = here;
+  }
 #endif
   scr_current = to_fiber;
   scr_exc_swap_cell(to_fiber ? &to_fiber->exc : NULL);
@@ -1592,6 +1612,9 @@ static void scr_switch(ScrCtx *from, ScrCtx *to, ScrFiber *to_fiber) {
 #endif
 #if !defined(_WIN32) && !defined(__wasi__)
   SCR_STACK_GUARD_SET(guard);
+#endif
+#ifdef SCR_NODE_ISLANDS
+  scr_node_stack_low = node_low; /* back on the stack that switched away */
 #endif
 }
 
@@ -1687,6 +1710,10 @@ static void scr_promise_cb_run(struct ScrPromiseCbWaiter *cb, ScrPromise *src) {
     scr_promise_all_state_release(cb->all);
   } else if (src->state == SCR_PROM_FULFILLED) {
     cb->adapt(cb->dst, src);
+#ifdef SCR_NODE_ISLANDS
+  } else if (cb->all_idx == SCR_CB_ANY) {
+    cb->adapt(cb->dst, src); /* scr_promise_on_settle_sync: rejections too */
+#endif
   } else {
     scr_promise_settle_from(cb->dst, src);
   }
@@ -1790,6 +1817,17 @@ void scr_promise_race_join(ScrPromise *race, ScrPromise *in,
   scr_promise_cb_subscribe(
       in, (struct ScrPromiseCbWaiter){ adapt, scr_promise_retain(race), NULL, 0, 0 });
 }
+
+#ifdef SCR_NODE_ISLANDS
+/* Node islands (NI-5): runs `cb(in, in)` inside `in`'s settlement, for
+ * fulfillments and rejections alike (a native promise's V8 representative
+ * settles at the same moment, so its reactions queue where a JavaScript
+ * promise's would). `in` must be pending. */
+void scr_promise_on_settle_sync(ScrPromise *in, void (*cb)(ScrPromise *dst, ScrPromise *src)) {
+  *scr_promise_cb_push(in) =
+      (struct ScrPromiseCbWaiter){ cb, scr_promise_retain(in), NULL, SCR_CB_ANY, SCR_CB_SYNC };
+}
+#endif
 
 void scr_promise_race_add(ScrPromise *race, ScrPromise *in,
                            void (*adapt)(ScrPromise *dst, ScrPromise *src)) {

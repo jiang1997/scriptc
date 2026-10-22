@@ -691,8 +691,10 @@ class ModuleScanner {
       this.add("R1.4", "loader-hook", `a ${what} of '${baseText}'`, node);
       return;
     }
-    // __proto__ writes
+    // __proto__ writes. `this.__proto__ = …` is the transpiled-Error idiom's
+    // fallback spelling (zod's ZodError), kept like `setPrototypeOf(this, …)`.
     if (propertyName(left) === "__proto__") {
+      if (base.kind === ts.SyntaxKind.ThisKeyword) return;
       this.add("R2.2", "prototype-write", `a ${what} of '__proto__'`, node);
       return;
     }

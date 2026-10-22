@@ -45,6 +45,7 @@ import type { IrExpr, IrFunction, IrRecordShape, IrStmt, IrType } from "../../ir
 import { shapeHasAccessorSlots, typeEquals, UNDEFINED_T } from "../../ir/ir.js";
 import { everyExprChild, everyStmtChild, everyTypeChild } from "../../ir/traverse.js";
 import type { Lowerer } from "./lowerer.js";
+import { LIB_FN_SIGS } from "../../ir/builtin-signatures.js";
 
 /** One property of an object literal, in source order. */
 export type KeyOrderSegment =
@@ -312,7 +313,10 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
         // Runtime surfaces (console, util.format, workers) that take a
         // record may walk its keys; runtime builders make new records.
         for (const arg of e.args) observedRoots.push(arg.type);
-        producedBy(e.type, true);
+        // A void runtime call typed by its use site is a throw standing in
+        // for a value (`error.nodeThrow` in a narrowing ternary): it never
+        // produces one.
+        if (LIB_FN_SIGS[e.fn].result.kind !== "void") producedBy(e.type, true);
         return;
       case "intrinsic":
         // Intrinsics hand back values built elsewhere, except allSettled's

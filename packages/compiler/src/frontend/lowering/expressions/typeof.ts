@@ -281,7 +281,16 @@ export function lowerTypeofExpr(lowerer: Lowerer, expr: ts.TypeOfExpression, loc
     undefinedT: "undefined",
     nullT: "object",
   };
-  const folded = FOLD[operand.type.kind];
+  let folded = FOLD[operand.type.kind];
+  // A callable class instance (a class whose merged interface carries a
+  // call signature keeps its call behavior in a `%call` field, the chalk
+  // shim's builder) is a function in JavaScript.
+  if (
+    operand.type.kind === "object" &&
+    lowerer.classes.get(operand.type.className)?.fields.get("%call")?.kind === "func"
+  ) {
+    folded = "function";
+  }
   if (folded) {
     const result: IrExpr = { kind: "strLit", value: folded, type: STRING, loc };
     return isSafeToDiscard(operand)

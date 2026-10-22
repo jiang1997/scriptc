@@ -10,6 +10,24 @@ import type { IrLibFn } from "./builtin-signatures.js";
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // The copied error of a synchronous call into Node (@scriptc/node).
   "nodeIsland.callSync",
+  // Island module evaluation and member operations run JavaScript.
+  "nodeIsland.require",
+  "nodeIsland.defer",
+  "nodeIsland.get",
+  "nodeIsland.getKey",
+  "nodeIsland.set",
+  "nodeIsland.setKey",
+  "nodeIsland.invoke",
+  "nodeIsland.apply",
+  "nodeIsland.construct",
+  "nodeIsland.instanceof",
+  "nodeIsland.classMethods",
+  "nodeIsland.subclass",
+  "nodeIsland.superConstruct",
+  "nodeIsland.superMethod",
+  "nodeIsland.defineField",
+  "nodeIsland.promisify",
+  "nodeIsland.classMethodsOf",
   // Node's argument, cipher-name, IV, tag-length and key-length errors.
   "crypto.cipherNew",
   // Node's curve, key, point, encoding and format errors.

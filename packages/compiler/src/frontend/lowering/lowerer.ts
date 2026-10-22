@@ -1,4 +1,11 @@
 import { relieveHeapPressure } from "../../heap-pressure.js";
+import {
+  activeNodeIslands,
+  isForeignType,
+  setActiveNodeIslands,
+  type NodeIslandSet,
+} from "../../node-islands/boundary.js";
+import type { IslandModuleBinding } from "./lower-node-island.js";
 import { onlyForwarded, stripTypeWrappers } from "./typed-arguments.js";
 import {
   needsGeneralNodeStreams,
@@ -227,6 +234,7 @@ import {
   arrayOf,
   BOOL,
   canAdaptDynFuncTo,
+  canBoxFuncIntoDyn,
   canDynCheckTo,
   canConvertToDyn,
   DYN,
@@ -799,6 +807,9 @@ export interface LowerResult {
 }
 
 export interface LowerOptions {
+  /** Packages that run in Node islands (scope-B NI-4): their imports lower
+   * to island loads and their values to island handles. */
+  nodeIslands?: NodeIslandSet | null;
   /** Parser/checker services owned by the load; required for npm graph analysis. */
   frontendServices?: FrontendServices | undefined;
   /** The project's tsconfig sets `checkJs` (see isCheckedJsSourceFile). */
@@ -1010,6 +1021,56 @@ export function lowerToIr(
   moduleOrder: ts.SourceFile[],
   options: LowerOptions = {},
 ): LowerResult {
+  setActiveNodeIslands(options.nodeIslands ?? null);
+  try {
+    const result = lowerToIrWithIslands(program, entry, moduleOrder, options);
+    markModuleInitFences(program, result.runtimeFences);
+    return result;
+  } finally {
+    setActiveNodeIslands(null);
+  }
+}
+
+/** Marks the runtime fences in npm package code whose site is top-level
+ * module code (outside every function body): they throw when the module
+ * evaluates (ScrDiagnostic.moduleInit). */
+function markModuleInitFences(program: ts.Program, fences: readonly ScrDiagnostic[]): void {
+  for (const d of fences) {
+    if (!d.loc.file.includes("/node_modules/")) continue;
+    const sf = program.getSourceFile(d.loc.file);
+    if (sf === undefined) continue;
+    let inFunction = false;
+    let node: ts.Node | undefined = sf;
+    while (node !== undefined && !inFunction) {
+      let next: ts.Node | undefined;
+      ts.forEachChild(node, (child) => {
+        if (
+          next === undefined &&
+          ts.tokenStartOfNode(child) <= d.loc.start &&
+          d.loc.start < child.end
+        )
+          next = child;
+        return undefined;
+      });
+      if (next === undefined) break;
+      if (
+        ts.isFunctionLike(next) ||
+        (ts.isPropertyDeclaration(next) &&
+          !next.modifiers?.nodes.some((m) => m.kind === ts.SyntaxKind.StaticKeyword))
+      )
+        inFunction = true;
+      node = next;
+    }
+    if (!inFunction) d.moduleInit = true;
+  }
+}
+
+function lowerToIrWithIslands(
+  program: ts.Program,
+  entry: ts.SourceFile,
+  moduleOrder: ts.SourceFile[],
+  options: LowerOptions,
+): LowerResult {
   const phaseTiming = process.env["SCRIPTC_TIMING"] === "1";
   const phaseStarted = performance.now();
   let phaseLast = phaseStarted;
@@ -1191,7 +1252,10 @@ export function lowerToIr(
   }
   // Divergence warnings over the program's own modules: computed once,
   // after lowering, from the same checker (never part of a failure).
-  const divergences = scanDivergences(resultLowerer, moduleOrder);
+  const divergences = [
+    ...scanDivergences(resultLowerer, moduleOrder),
+    ...resultLowerer.sharedModuleWarnings,
+  ];
   timing("divergence-scan", { found: divergences.length });
   if (divergences.length > 0) result = { ...result, divergences };
   // The performance warning (SC6101): likely-hot functions of the program
@@ -3054,6 +3118,16 @@ export class Lowerer {
   /** The program calls into Node.js (@scriptc/node): the module carries
    * the nodeIsland record, which the executable build fills in. */
   usesNodeIsland = false;
+  /** The program's Node island packages (scope-B NI-4), or null. */
+  readonly nodeIslands: NodeIslandSet | null = activeNodeIslands();
+  /** Island module loads, by the importing file and specifier: the module
+   * global holding what the import form sees (lower-node-island.ts). */
+  readonly islandModules = new Map<string, IslandModuleBinding>();
+  /** NI-6: the modules shared with Node islands (lower-shared-modules.ts),
+   * their SC8020 warnings, and the TDZ flags their declarations set. */
+  sharedModules: import("./lower-shared-modules.js").SharedModulePlan[] | null = null;
+  readonly sharedModuleWarnings: ScrDiagnostic[] = [];
+  readonly sharedInitFlags = new Map<ts.Statement, string[]>();
   /** Per-directory answers of experimental-import.ts's declaration-file test. */
   readonly experimentalFiles = new Map<string, boolean>();
   /** Interned LifetimeRegion.run helpers, by callback type key. */
@@ -3521,7 +3595,11 @@ export class Lowerer {
     this.externalTypeSpecifiersByFile =
       mode.externalTypeSpecifiersByFile ?? directExternalTypeSpecifiersByFile(this.externalTypes);
     this.checker = program.getTypeChecker();
+    const islands = this.nodeIslands;
     this.typeCtx = {
+      ...(islands !== null
+        ? { foreignType: (t: ts.Type) => isForeignType(islands, t, this.checker) }
+        : {}),
       checker: this.checker,
       shapes: this.shapes,
       unions: this.unions,
@@ -9211,6 +9289,21 @@ export class Lowerer {
    * type-mapper.ts's chalk-shape mapping — call paths and func-slot coercions
    * share it. */
   hybridCallUnwrap(expr: IrExpr): IrExpr {
+    // A callable CLASS instance: a class whose merged interface carries a
+    // call signature stores its call behavior in a `%call` field (the
+    // chalk package shim's builder). Calls read the field.
+    if (expr.type.kind === "object") {
+      const callType = this.classes.get(expr.type.className)?.fields.get("%call");
+      if (callType === undefined || callType.kind !== "func") return expr;
+      return {
+        kind: "fieldGet",
+        obj: expr,
+        className: expr.type.className,
+        field: "%call",
+        type: callType,
+        loc: expr.loc,
+      };
+    }
     if (expr.type.kind !== "record") return expr;
     const shape = this.shapes.get(expr.type.shapeId);
     const call = shape?.fields.find((f) => f.name === "%call");
@@ -9541,9 +9634,27 @@ export class Lowerer {
     // A HYBRID (function-with-properties) record flowing into a plain
     // func slot extracts its reserved %call field — the chalk shape's
     // "the value IS callable" half (type-mapper.ts's hybrid mapping).
-    if (expected.kind === "func" && expr.type.kind === "record") {
+    if (expected.kind === "func" && (expr.type.kind === "record" || expr.type.kind === "object")) {
       const un = this.hybridCallUnwrap(expr);
       if (un !== expr && typeEquals(un.type, expected)) return un;
+      // A callable class instance (the chalk shim's variadic builder) in a
+      // narrower function slot: its call closure crosses the checked
+      // function boundary, which adapts the arity.
+      if (
+        un !== expr &&
+        expr.type.kind === "object" &&
+        un.type.kind === "func" &&
+        canBoxFuncIntoDyn(
+          un.type,
+          (id) => this.shapes.get(id),
+          (id) => this.unions.get(id),
+        )
+      ) {
+        return this.coerceToExpected(
+          { kind: "dynFrom", value: un, type: DYN, loc: un.loc },
+          expected,
+        );
+      }
     }
     // A zero-param function whose RETURN is a wider record array than the
     // slot's (`getRoutes: () => cachedRoutes` against `() => Narrow[]`):

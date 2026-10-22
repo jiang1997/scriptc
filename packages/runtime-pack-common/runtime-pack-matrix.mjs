@@ -60,7 +60,9 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_assert.c", any("assert", "regex", "symbol")],
   ["scr_inspect.c", "inspect"],
   ["scr_console_native.c", "inspect"],
-  ["scr_dyn_invoke.c", any("dynInvoke", "nativeFetch")],
+  // Island libCalls on native values typed by island declarations invoke
+  // through the checked-dynamic path (scr_node_island_handle.c).
+  ["scr_dyn_invoke.c", any("dynInvoke", "nativeFetch", "nodeIsland")],
   // Buffer.prototype methods called on checked-dynamic values.
   ["scr_bytes_dyn.c", all("dynBuffer", "dynInvoke")],
   // Builtin functions read as values in JavaScript dependencies.
@@ -71,7 +73,10 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_js_value.c", "dynTier"],
   ["scr_js_object.c", "dynTier"],
   ["scr_event_target.c", any("eventTarget", "nativeFetch")],
-  ["scr_async_dyn.c", any("dynAsync", "dynInvoke", "dc", "fileHandle", "nativeFetch")],
+  [
+    "scr_async_dyn.c",
+    any("dynAsync", "dynInvoke", "dc", "fileHandle", "nativeFetch", "nodeIsland"),
+  ],
   // The performance timeline emits its buffer warning through scr_async_dyn.c.
   ["scr_perf.c", "dynAsync"],
   // perf_hooks event-loop metrics, only for programs that read them.
@@ -155,6 +160,9 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   // Node islands: libnode loaded on first use (explicit @scriptc/node calls),
   // over the SCR_NODE_ISLANDS build of scr_async.c.
   ["scr_node_island.c", "nodeIsland"],
+  ["scr_node_island_handle.c", "nodeIsland"],
+  ["scr_node_island_export.c", "nodeIsland"],
+  ["scr_node_island_boot.c", "nodeIsland"],
 ];
 
 export function variantsFor(source) {
@@ -164,6 +172,31 @@ export function variantsFor(source) {
   // ordinary object, byte for byte.
   if (source === "scr_json.c") {
     variants.push({ id: "dyn-tier", when: { dynTier: true }, defines: ["SCR_JS_TIER"] });
+    // Dynamic operations on Node island handles (typeof, calls, `in`,
+    // delete, Object.keys) route to scr_node_island_handle.c.
+    variants.push({
+      id: "node-island",
+      when: { nodeIsland: true },
+      defines: ["SCR_NODE_ISLANDS"],
+    });
+    variants.push({
+      id: "dyn-tier-node-island",
+      when: { dynTier: true, nodeIsland: true },
+      defines: ["SCR_JS_TIER", "SCR_NODE_ISLANDS"],
+    });
+  }
+  // util.inspect and instanceof of Node island handles; Node's report for
+  // an uncaught island error.
+  if (
+    source === "scr_inspect.c" ||
+    source === "scr_dyn_builtin_class.c" ||
+    source === "scr_exception.c"
+  ) {
+    variants.push({
+      id: "node-island",
+      when: { nodeIsland: true },
+      defines: ["SCR_NODE_ISLANDS"],
+    });
   }
   if (source === "scr_bytes.c") {
     variants.push({

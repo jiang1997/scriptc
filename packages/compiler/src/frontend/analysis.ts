@@ -111,8 +111,11 @@ export function analyzeWithFrontend(
             entry: entryPath,
             scan: fe.nodeIslandScan({ userJs: policy.strictUserJs }),
             npm: fe.npmStatic,
-            diagnostics: [...lowered.diagnostics, ...(lowered.unreached?.diagnostics ?? [])],
-            fences: [...lowered.runtimeFences, ...(lowered.unreached?.runtimeFences ?? [])],
+            // Code the program never reaches cannot run, natively or in
+            // Node, so its refusals (zod's standard-schema `~validate`)
+            // are not island reasons.
+            diagnostics: lowered.diagnostics,
+            fences: lowered.runtimeFences,
             policy,
           });
     const nodeIslands =

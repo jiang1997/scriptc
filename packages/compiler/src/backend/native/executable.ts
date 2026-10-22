@@ -179,7 +179,10 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   ),
   unit((u) => u.opts.assert || u.regex || u.opts.symbol, "scr_assert.c"),
   unit((u) => u.opts.inspect, "scr_inspect.c", "scr_console_native.c"),
-  unit((u) => u.opts.dynInvoke || u.opts.workers || u.nativeFetch, "scr_dyn_invoke.c"),
+  unit(
+    (u) => u.opts.dynInvoke || u.opts.workers || u.nativeFetch || u.opts.nodeIsland === true,
+    "scr_dyn_invoke.c",
+  ),
   // Buffer.prototype methods called on checked-dynamic values.
   unit((u) => u.opts.dynBuffer === true && u.opts.dynInvoke, "scr_bytes_dyn.c"),
   // Builtin functions read as values in JavaScript dependencies.
@@ -195,7 +198,9 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
       u.opts.workers ||
       u.opts.dc ||
       u.opts.fileHandle ||
-      u.nativeFetch,
+      u.nativeFetch ||
+      // Island promises cross as dyn promise boxes (scr_node_island_handle.c).
+      u.opts.nodeIsland === true,
     "scr_async_dyn.c",
   ),
   // The performance timeline (every perf_hooks user-timing call selects
@@ -323,7 +328,13 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   unitArgs((u) => (u.tlsCa && targetPlatform(u.driver) === "win32" ? ["-lcrypt32"] : [])),
   // Fetch uses the native network, TLS, and HTTP runtime.
   unit((u) => u.nativeFetch, "scr_fetch.c"),
-  unit((u) => u.opts.nodeIsland === true, "scr_node_island.c"),
+  unit(
+    (u) => u.opts.nodeIsland === true,
+    "scr_node_island.c",
+    "scr_node_island_handle.c",
+    "scr_node_island_export.c",
+    "scr_node_island_boot.c",
+  ),
 ];
 
 /** The arguments of the optional runtime inputs, in link order. */

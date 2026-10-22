@@ -304,8 +304,15 @@ static void ni_nested_trampoline(void) {
 static void ni_on_node_stack_below_mark(void (*job)(void *), void *arg) {
   ucontext_t nested, caller;
   char *lo = ni_stack + NI_GUARD;
-  /* Below the red zone and 16-byte aligned, as makecontext expects. */
-  uintptr_t hi = (ni_mark - 512) & ~(uintptr_t)15;
+  /* Below every live frame of Node's stack: the mark the host callback
+   * recorded, or lower where runtime code it ran went deeper before it
+   * switched to this fiber (an async call's eager start, a job: the
+   * spawner's frame and its saved context are still in use there). Below
+   * the red zone and the swap's own frame, 16-byte aligned, as makecontext
+   * expects. */
+  uintptr_t top = ni_mark;
+  if (scr_node_stack_low != 0 && scr_node_stack_low < top) top = scr_node_stack_low;
+  uintptr_t hi = (top - 1024) & ~(uintptr_t)15;
   if (getcontext(&nested) != 0) scr_trap("scriptc: getcontext failed\n");
   nested.uc_stack.ss_sp = lo;
   nested.uc_stack.ss_size = hi - (uintptr_t)lo;
@@ -338,10 +345,14 @@ static void ni_on_node_stack(void (*job)(void *), void *arg) {
       job(arg);
     return;
   }
+  /* Island code is about to run: it sees the current native values of
+   * shared exports (NI-6). */
+  scr_ni_shared_refresh();
   if (ni_stack == NULL) {
     ni_stack = mmap(NULL, NI_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (ni_stack == MAP_FAILED) ni_oom();
     (void)mprotect(ni_stack, NI_GUARD, PROT_NONE);
+    scr_node_stack_has = &ni_stack_has;
 #ifdef NI_ASAN
     if (__lsan_register_root_region) __lsan_register_root_region(ni_stack, NI_STACK);
 #endif
@@ -437,6 +448,7 @@ static void ni_host_exit(int code) {
 static void ni_host_run(uint32_t kind, uint32_t token) {
   NI_MARK_BEGIN;
   scr_loop_hosted_run(kind, token);
+  scr_ni_shared_refresh();
   NI_MARK_END;
 }
 
@@ -469,20 +481,51 @@ static const ScrNodeBridgeHost ni_host = {
     &ni_host_listen,
     &ni_stack_limit,
     &ni_stack_start,
+    &scr_ni_settle_value,
+    &scr_ni_bytes_free,
+    &scr_ni_host_export_call,
+    &scr_ni_host_export_construct,
+    &scr_ni_host_export_get,
+    &scr_ni_host_export_set,
+    &scr_ni_host_export_has,
+    &scr_ni_host_export_delete,
+    &scr_ni_host_export_keys,
+    &scr_ni_host_export_watch,
+    &scr_ni_host_export_release,
+    &scr_ni_host_export_instance_of,
+    &scr_ni_host_shared_table,
+    &scr_ni_host_shared_get,
+    &scr_ni_host_shared_tdz,
+    &scr_ni_host_export_op,
 };
 
+typedef struct {
+  uint32_t event, listener;
+  const char *name;
+  int arg;
+} NiEmit;
+
+static void ni_emit_job(void *p) {
+  NiEmit *e = p;
+  ni_bridge->emit(e->event, e->listener, e->name, e->arg);
+}
+
+/* An island listener of a process event, on Node's stack (an exit listener
+ * runs from the runtime's exit sequence, on whatever stack called it). */
 void scr_node_island_emit(uint32_t event, uint32_t listener, ScrStr *name, int arg) {
   if (ni_bridge == NULL) return;
   char *n = malloc(name->len + 1);
   if (n == NULL) ni_oom();
   memcpy(n, name->data, name->len);
   n[name->len] = '\0';
-  ni_bridge->emit(event, listener, n, arg);
+  NiEmit e = {event, listener, n, arg};
+  ni_on_node_stack(ni_emit_job, &e);
   free(n);
 }
 
 static void ni_stop_job(void *p) {
   (void)p;
+  scr_ni_stop();
   ni_bridge->stop();
 }
 
@@ -491,7 +534,16 @@ static void ni_stop_job(void *p) {
  * the events unit's own, which then finds them done), then Node stops. */
 static void ni_stop_atexit(void) {
   scr_run_exit_listeners((double)scr_exit_code_hint_get());
+  /* SCRIPTC_NODE_ISLANDS_TRACE=handles: the import table at exit (leak
+   * tests: acyclic island objects the program dropped are released). */
+  const char *trace = getenv("SCRIPTC_NODE_ISLANDS_TRACE");
+  if (trace != NULL && strcmp(trace, "handles") == 0) {
+    fflush(stdout);
+    fprintf(stderr, "[node-islands] live handles %u\n", scr_ni_live_handles());
+  }
   ni_on_node_stack(ni_stop_job, NULL);
+  /* Node is gone: no representative can call in again. */
+  scr_ni_exports_release_all();
 }
 
 /* The hosted loop's run_loop on Node's stack. */
@@ -510,16 +562,91 @@ static int ni_run_loop(int continue_turn) {
   return a.code;
 }
 
-/* The bridge as the hosted loop sees it: Node's loop runs on Node's stack. */
+/* The bridge as the hosted loop sees it. Every entry that runs JavaScript
+ * (scheduling a tick, timer or immediate goes through the bootstrap's
+ * helpers; a checkpoint drains queues; Node's loop) runs on Node's stack,
+ * below the mark when it comes from an async fiber that a host callback
+ * resumed, like every other entry: V8 scans only Node's stack, so no frame
+ * of Node may live on a fiber's stack or the main thread's. */
+typedef struct {
+  int op;
+  uint32_t a, b;
+  double d0, d1;
+  int i0;
+  uint32_t result;
+} NiHosted;
+
+enum {
+  NI_H_MICROTASK,
+  NI_H_TICK,
+  NI_H_TIMER,
+  NI_H_TIMER_CLEAR,
+  NI_H_TIMER_REF,
+  NI_H_TIMER_REFRESH,
+  NI_H_IMMEDIATE,
+  NI_H_IMMEDIATE_CLEAR,
+  NI_H_IMMEDIATE_REF,
+  NI_H_CHECKPOINT,
+};
+
+static void ni_hosted_job(void *p) {
+  NiHosted *h = p;
+  switch (h->op) {
+  case NI_H_MICROTASK: ni_bridge->microtask(h->a); break;
+  case NI_H_TICK: ni_bridge->tick(h->a); break;
+  case NI_H_TIMER: h->result = ni_bridge->timer(h->d0, h->d1, h->i0, h->a); break;
+  case NI_H_TIMER_CLEAR: ni_bridge->timer_clear(h->a); break;
+  case NI_H_TIMER_REF: ni_bridge->timer_ref(h->a, h->i0); break;
+  case NI_H_TIMER_REFRESH: ni_bridge->timer_refresh(h->a); break;
+  case NI_H_IMMEDIATE: h->result = ni_bridge->immediate(h->i0, h->a); break;
+  case NI_H_IMMEDIATE_CLEAR: ni_bridge->immediate_clear(h->a); break;
+  case NI_H_IMMEDIATE_REF: ni_bridge->immediate_ref(h->a, h->i0); break;
+  case NI_H_CHECKPOINT: ni_bridge->checkpoint(h->i0); break;
+  default: break;
+  }
+}
+
+static uint32_t ni_hosted_run(int op, uint32_t a, double d0, double d1, int i0) {
+  NiHosted h = {op, a, 0, d0, d1, i0, 0};
+  ni_on_node_stack(ni_hosted_job, &h);
+  return h.result;
+}
+
+static void ni_h_microtask(uint32_t token) { ni_hosted_run(NI_H_MICROTASK, token, 0, 0, 0); }
+static void ni_h_tick(uint32_t token) { ni_hosted_run(NI_H_TICK, token, 0, 0, 0); }
+static uint32_t ni_h_timer(double delay, double repeat, int ref, uint32_t token) {
+  return ni_hosted_run(NI_H_TIMER, token, delay, repeat, ref);
+}
+static void ni_h_timer_clear(uint32_t h) { ni_hosted_run(NI_H_TIMER_CLEAR, h, 0, 0, 0); }
+static void ni_h_timer_ref(uint32_t h, int ref) { ni_hosted_run(NI_H_TIMER_REF, h, 0, 0, ref); }
+static void ni_h_timer_refresh(uint32_t h) { ni_hosted_run(NI_H_TIMER_REFRESH, h, 0, 0, 0); }
+static uint32_t ni_h_immediate(int ref, uint32_t token) {
+  return ni_hosted_run(NI_H_IMMEDIATE, token, 0, 0, ref);
+}
+static void ni_h_immediate_clear(uint32_t h) { ni_hosted_run(NI_H_IMMEDIATE_CLEAR, h, 0, 0, 0); }
+static void ni_h_immediate_ref(uint32_t h, int ref) {
+  ni_hosted_run(NI_H_IMMEDIATE_REF, h, 0, 0, ref);
+}
+static void ni_h_checkpoint(int microtasks_first) {
+  ni_hosted_run(NI_H_CHECKPOINT, 0, 0, 0, microtasks_first);
+}
+
 static ScrNodeBridge ni_hosted;
 
 /* ── loading Node ─────────────────────────────────────────────────────── */
+
+void (*scr_ni_started_hook)(void) = NULL;
 
 static void ni_start(void) {
   if (ni_bridge != NULL) return;
   /* Timers pending now keep their deadlines relative to this moment: the
    * time Node takes to load is invisible to their order. */
   double since = scr_now_ms();
+  const char *trace = getenv("SCRIPTC_NODE_ISLANDS_TRACE");
+  if (trace != NULL && strstr(trace, "boot") != NULL) {
+    fflush(stdout);
+    fprintf(stderr, "[node-islands] starting Node\n");
+  }
   const char *dir = ni_pack_dir();
   char path[4352];
   snprintf(path, sizeof path, "%s/%s", dir, NI_BRIDGE_FILE);
@@ -552,10 +679,11 @@ static void ni_start(void) {
              ni_node_version, bridge->node_version, bridge->module_version, dir);
     ni_fatal(message);
   }
-  ScrStr *self = scr_process_exec_path();
-  char argv0[4096];
-  snprintf(argv0, sizeof argv0, "%.*s", (int)self->len, self->data);
-  scr_str_release(self);
+  /* Node's argv[0] is "node": island process.argv0 reads it, and Node's
+   * warning hint is built from it ("(Use `node --trace-deprecation ...`"),
+   * which the runtime's own warnings print too. process.execPath stays the
+   * executable (libuv's exepath). */
+  char argv0[] = "node";
   /* Flush first: Node writes to the same stdout. */
   fflush(stdout);
   ni_bridge = bridge;
@@ -573,11 +701,36 @@ static void ni_start(void) {
    * delivery; installed before the stop handler, whose 'exit' listeners
    * run first. */
   scr_events_install();
+  scr_ni_handles_install();
   scr_atexit(ni_stop_atexit);
   ni_hosted = *bridge;
   ni_hosted.run_loop = &ni_run_loop;
+  ni_hosted.microtask = &ni_h_microtask;
+  ni_hosted.tick = &ni_h_tick;
+  ni_hosted.timer = &ni_h_timer;
+  ni_hosted.timer_clear = &ni_h_timer_clear;
+  ni_hosted.timer_ref = &ni_h_timer_ref;
+  ni_hosted.timer_refresh = &ni_h_timer_refresh;
+  ni_hosted.immediate = &ni_h_immediate;
+  ni_hosted.immediate_clear = &ni_h_immediate_clear;
+  ni_hosted.immediate_ref = &ni_h_immediate_ref;
+  ni_hosted.checkpoint = &ni_h_checkpoint;
   scr_loop_host(&ni_hosted, since);
+  /* NI-7: deferred island modules evaluate now, before the operation that
+   * needed Node, in their import order. */
+  if (scr_ni_started_hook != NULL) scr_ni_started_hook();
 }
+
+const ScrNodeBridge *scr_ni_bridge(void) {
+  ni_start();
+  return ni_bridge;
+}
+
+const ScrNodeBridge *scr_ni_bridge_loaded(void) { return ni_bridge; }
+
+const char *scr_ni_pack_dir(void) { return ni_pack_dir(); }
+
+void scr_ni_on_node_stack(void (*job)(void *), void *arg) { ni_on_node_stack(job, arg); }
 
 /* ── calls ────────────────────────────────────────────────────────────── */
 
