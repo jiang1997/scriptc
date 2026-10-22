@@ -161,7 +161,7 @@ for (const backend of ["llvm"] as const) {
           name: string,
           request = llvmEmitterRequest(),
         ): Promise<string> => {
-          writeFileSync(input, serializeModule(mod));
+          writeFileSync(input, serializeModule(mod, true));
           writeFileSync(config, JSON.stringify(request));
           const result = await execFileAsync(stage, [input, output, config], {
             ...runOptions,
@@ -195,7 +195,7 @@ for (const backend of ["llvm"] as const) {
             loc: { file: rejected.sourceFile, start: 0, end: 0 },
           },
         ];
-        writeFileSync(input, serializeModule(rejected));
+        writeFileSync(input, serializeModule(rejected, true));
         writeFileSync(config, JSON.stringify(llvmEmitterRequest()));
         writeFileSync(output, "untouched");
         const args = [input, output, config];

@@ -76,7 +76,7 @@ function dynNativeStream(
 
 /** Runs `lower` with `node` lowering to `value` and its member calls taking
  * `type` as the receiver representation. */
-function withStreamReceiver<T>(
+export function withStreamReceiver<T>(
   lowerer: Lowerer,
   node: ts.Expression,
   value: IrExpr,

@@ -1222,7 +1222,7 @@ class HostFrame implements ChainFrame {
 
 /** The locals and parameters of a lifted helper function under
  * construction. */
-class LiftedFrame implements ChainFrame {
+export class LiftedFrame implements ChainFrame {
   readonly locals: IrLocal[] = [];
   readonly params: IrParam[] = [];
   private n = 0;
@@ -1252,7 +1252,7 @@ class LiftedFrame implements ChainFrame {
  * step leave it unclosed, as in Node. The generator counts as unfinished
  * before the first step, so a `pre` that breaks at once (take(0)) closes
  * a source it never pulled. `genT` must be stepDrivable. */
-function driveGenerator(
+export function driveGenerator(
   lowerer: Lowerer,
   frame: ChainFrame,
   genId: string,

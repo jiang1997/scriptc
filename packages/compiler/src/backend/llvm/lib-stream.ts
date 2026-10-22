@@ -2,6 +2,7 @@
 import { InternalCompilerError } from "../../errors.js";
 import type { LlvmEmitterContext, LibCallExpr, LlValue } from "./expr-context.js";
 import { f64Lit } from "./common.js";
+import { pipelinePumpedRuns } from "../../ir/builtin-signatures.js";
 
 const STREAM_CANONICAL_CBS: Record<string, ("r" | "w" | "f" | "d" | "t" | "l")[]> = {
   readable: ["r", "d"],
@@ -662,14 +663,14 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     e.fn === "stream.pipelineStages" ||
     e.fn === "stream.pipelineStagesDyn"
   ) {
-    // (n, at, k, flags, mask, s1..sn, stage1..stagek, (next, read,
-    // return)?, box?, (signal, abort)?[, cb]): the streams and the stage
-    // closures ride stack arrays; absent groups pass null.
-    const [nArg, atArg, kArg, flagsArg, maskArg] = e.args;
+    // (n, k, positions, flags, mask, s1..sn, stage1..stagek, helpers...,
+    // box?, (signal, abort)?[, cb]): the streams, the stage closures and
+    // the helpers ride stack arrays; absent groups pass null.
+    const [nArg, kArg, positionsArg, flagsArg, maskArg] = e.args;
     if (
       nArg?.kind !== "numLit" ||
-      atArg?.kind !== "numLit" ||
       kArg?.kind !== "numLit" ||
+      positionsArg?.kind !== "numLit" ||
       flagsArg?.kind !== "numLit" ||
       maskArg?.kind !== "numLit"
     )
@@ -677,6 +678,7 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     const n = nArg.value;
     const k = kArg.value;
     const flags = flagsArg.value;
+    const helperCount = 3 * pipelinePumpedRuns(n + k, positionsArg.value);
     const args = e.args.map((a) => host.emitExpr(a));
     const packed = (from: number, count: number): string => {
       if (count === 0) return "null";
@@ -691,20 +693,17 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     };
     const streams = packed(5, n);
     const stages = packed(5 + n, k);
-    let at = 5 + n + k;
+    const helpers = packed(5 + n + k, helperCount);
+    let at = 5 + n + k + helperCount;
     const take = (present: boolean): string => (present ? args[at++]!.name : "null");
-    const hasHelpers = (flags & 8) !== 0;
-    const next = take(hasHelpers);
-    const read = take(hasHelpers);
-    const ret = take(hasHelpers);
-    const box = take((flags & 16) !== 0);
+    const box = take(((flags >> 1) & 3) === 2);
     const signal = take((flags & 32) !== 0);
     const abort = take((flags & 32) !== 0);
     const head =
-      `double ${f64Lit(n)}, ptr ${streams}, double ${f64Lit(atArg.value)}, double ${f64Lit(k)}, ` +
-      `ptr ${stages}, double ${f64Lit(flags)}, double ${f64Lit(maskArg.value)}, ` +
-      `ptr ${next}, ptr ${read}, ptr ${ret}, ptr ${box}, ptr ${signal}, ptr ${abort}`;
-    const params = "double, ptr, double, double, ptr, double, double, ptr, ptr, ptr, ptr, ptr, ptr";
+      `double ${f64Lit(n)}, ptr ${streams}, double ${f64Lit(k)}, ptr ${stages}, ` +
+      `double ${f64Lit(positionsArg.value)}, double ${f64Lit(flags)}, double ${f64Lit(maskArg.value)}, ` +
+      `ptr ${helpers}, ptr ${box}, ptr ${signal}, ptr ${abort}`;
+    const params = "double, ptr, double, ptr, double, double, double, ptr, ptr, ptr, ptr";
     const t = B.tmp();
     if (e.fn === "sp.pipelineStages") {
       host.declare(`declare ptr @scr_sp_pipeline_stages(${params})`);

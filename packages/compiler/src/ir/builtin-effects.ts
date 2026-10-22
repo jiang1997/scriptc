@@ -80,6 +80,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "procStream.write",
   "child.stdioStream",
   "stream.unboxDyn",
+  "stream.handleStream",
   "stream.pipeDyn",
   "stream.unpipeDyn",
   "weakMap.new",

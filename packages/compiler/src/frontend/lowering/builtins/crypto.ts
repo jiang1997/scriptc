@@ -908,7 +908,8 @@ export function v8CalleeText(node: ts.Expression): string {
 
 /** Calls on native Cipheriv/Decipheriv handles dispatch through the
  * handle's methods with checked-dynamic arguments. The stream.Transform
- * members the classes inherit are refused. */
+ * members the classes inherit lower over the cipher's Transform
+ * (lowerHashStreamCall, which runs first); other members are refused. */
 export function lowerCipherMethodCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -921,7 +922,7 @@ export function lowerCipherMethodCall(
     lowerer.noLowering(
       `Cipheriv/Decipheriv.${name}`,
       call,
-      "update(), final(), setAAD(), setAutoPadding(), getAuthTag(), and setAuthTag() are supported; cipher streams are not",
+      "update(), final(), setAAD(), setAutoPadding(), getAuthTag(), setAuthTag(), and the stream members are supported",
     );
   }
   if (call.arguments.nodes.some(ts.isSpreadElement))

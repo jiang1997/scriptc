@@ -35,6 +35,7 @@ import { tryLowerExpression } from "./try-lower-expression.js";
 import { fenceSymbolFieldCopy } from "../symbol-fields.js";
 import { planUnionRetag } from "../union-retag.js";
 import { jsHoldsDynObject, runtimeOptionalStorageOperand } from "../lower-exprs.js";
+import { builtinGlobalValue } from "./property-access.js";
 
 /** `{ a: 1, b: "x" }` → recordLit. The record type comes from the
  * contextual type when tsc has one (annotated declarations, arguments,
@@ -393,9 +394,11 @@ export function lowerDynObjectLiteral(
       const lowerValue = (): IrExpr =>
         ts.isMethodDeclaration(prop)
           ? lowerer.lowerLambda(prop, true)
-          : !boxValue && ts.isObjectLiteralExpression(valueExpr)
-            ? lowerer.lowerExprExpecting(valueExpr, DYN)
-            : lowerer.lowerExpr(valueExpr as ts.Expression);
+          : ts.isShorthandPropertyAssignment(prop) && shorthandBuiltinValue(lowerer, prop)
+            ? shorthandBuiltinValue(lowerer, prop)!
+            : !boxValue && ts.isObjectLiteralExpression(valueExpr)
+              ? lowerer.lowerExprExpecting(valueExpr, DYN)
+              : lowerer.lowerExpr(valueExpr as ts.Expression);
       raw = fenceClosureProbe(lowerer, valueExpr, undefined, lowerValue) ?? lowerValue();
     } catch (err) {
       // A PURE member read a JS file cannot lower (a namespace object
@@ -3153,6 +3156,20 @@ function lowerDeclaredSpreadMerge(
 /** The value of a shorthand property (`{ x }`): the binding `x` refers to.
  * The property name's own symbol is the PROPERTY, so resolution goes
  * through getShorthandAssignmentValueSymbol. */
+/** `{ TypeError }`: a stdlib global in shorthand position reads as the value
+ * its name reads as elsewhere (the interned constructor or function value),
+ * or null when the global has no such value. The shorthand's name carries
+ * the property's symbol, so the identifier path cannot resolve it. */
+function shorthandBuiltinValue(
+  lowerer: Lowerer,
+  prop: ts.ShorthandPropertyAssignment,
+): IrExpr | null {
+  const symbol = lowerer.checker.getShorthandAssignmentValueSymbol(prop);
+  if (!symbol || !lowerer.isStdlibSymbol(symbol)) return null;
+  const js = isJsSourceFile(ts.getSourceFileOfNode(prop));
+  return builtinGlobalValue(ts.symbolName(symbol), locOf(prop.name), js);
+}
+
 export function lowerShorthandValue(
   lowerer: Lowerer,
   prop: ts.ShorthandPropertyAssignment,
@@ -3169,6 +3186,8 @@ export function lowerShorthandValue(
     const callable = lowerer.lowerBuiltinCallableValue(builtin, loc);
     if (callable) return callable;
   }
+  const builtinValue = shorthandBuiltinValue(lowerer, prop);
+  if (builtinValue) return builtinValue;
   if (symbol) {
     if (lowerer.ctx.selfSymbol === symbol) {
       return { kind: "selfRef", type: lowerer.ctx.selfType!, loc };

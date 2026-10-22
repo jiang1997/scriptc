@@ -3,6 +3,7 @@ import { declaredMemberOf, isPromisePrototypeRead } from "./expressions/property
 import { hostsAll } from "./expressions/hosted-narrowing.js";
 import { requestGeneralStreamSurface } from "./general-streams.js";
 import { lowerForAwaitDynStream } from "./dyn-streams.js";
+import { lowerForAwaitValueStream } from "./builtins/hash-stream.js";
 import { lowerChildPropertyWrite } from "./handle-properties.js";
 import {
   matchAllRowsReadByElements,
@@ -3888,6 +3889,9 @@ function stdlibGlobalTokenDestructure(
   if (decl.initializer === undefined || !isJsSourceFile(ts.getSourceFileOfNode(decl))) return null;
   const globalName = stdlibGlobalNameOf(lowerer, decl.initializer);
   if (globalName === null) return null;
+  // `workerData` is a value (the data the worker was started with), not an
+  // API surface: its members destructure as any untyped value's do.
+  if (globalName === "workerData") return null;
   if (!ts.isObjectBindingPattern(decl.name)) {
     lowerer.unsupported(
       "SC1031",
@@ -9394,10 +9398,11 @@ export function lowerForOf(lowerer: Lowerer, stmt: ts.ForOfStatement): IrStmt {
     ) {
       return lowerForAwaitStdin(lowerer, stmt);
     }
-    // A checked-dynamic NodeJS.ReadableStream iterates its native stream.
-    const dynStream = lowerForAwaitDynStream(lowerer, stmt, () =>
-      lowerForAwaitBuiltin(lowerer, stmt),
-    );
+    // A checked-dynamic NodeJS.ReadableStream iterates its native stream,
+    // and a Hash, Hmac, Cipheriv or Decipheriv iterates its Transform.
+    const dynStream =
+      lowerForAwaitDynStream(lowerer, stmt, () => lowerForAwaitBuiltin(lowerer, stmt)) ??
+      lowerForAwaitValueStream(lowerer, stmt, () => lowerForAwaitBuiltin(lowerer, stmt));
     if (dynStream) return dynStream;
     const builtin = lowerForAwaitBuiltin(lowerer, stmt);
     if (builtin) return builtin;

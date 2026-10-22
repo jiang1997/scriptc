@@ -725,6 +725,9 @@ ScrDyn *scr_dyn_array_constructor(void);
 /* The interned builtin constructor `name` (Object, Date, RegExp, Map, Set,
  * Promise, WeakMap, WeakSet) as a dynamic function value: +1. */
 ScrDyn *scr_dyn_global_constructor(const ScrStr *name);
+/* The interned function value of an error constructor ("TypeError"), or
+ * NULL for other names. */
+ScrDyn *scr_dyn_error_constructor(const char *name);
 /* A builtin global function (setTimeout, setImmediate, process.nextTick, ...)
  * as an interned dynamic function value: +1. */
 ScrDyn *scr_dyn_builtin_function(const ScrStr *name);
@@ -1388,7 +1391,36 @@ typedef struct ScrDynHandleOps {
   /* Cross-thread structured clone (postMessage, workerData); NULL =
    * DataCloneError. See ScrDynHandleTransfer. */
   const struct ScrDynHandleTransfer *transfer;
+  /* A handle that is also a Node Transform (Cipheriv, Decipheriv): the
+   * stream unit builds the handle's Transform from these operations on its
+   * first stream use. NULL = the class is not a stream. */
+  const struct ScrDynHandleTransform *transform;
 } ScrDynHandleOps;
+
+/* The operations a Transform handle gives the stream unit (scr_stream.c):
+ * the slot where the handle keeps its stream (+1) with the stream's
+ * release, update() and final() over bytes (+1 Buffer, or NULL with the
+ * exception pending), and the handle's collector trace, since the
+ * stream's steps hold the handle. */
+typedef struct ScrDynHandleTransform {
+  void *(*stream)(void *h);
+  void (*set_stream)(void *h, void *stream, void (*release)(void *));
+  struct ScrBytes *(*update)(void *h, struct ScrBytes *chunk);
+  struct ScrBytes *(*final)(void *h);
+  ScrTraceFn trace;
+} ScrDynHandleTransform;
+
+/* Checked-dynamic member calls and property reads on a Transform handle,
+ * installed by the stream unit (scr_stream_install); NULL in a program
+ * without it. call answers true with *result set (+1, or NULL with the
+ * exception pending) for the members a native stream answers, and get
+ * answers a stream property (+1), or NULL for other keys. */
+typedef struct ScrHandleStreamHooks {
+  bool (*call)(const ScrDynHandleOps *ops, void *h, ScrDyn *self, const char *method,
+               ScrDyn *const *args, size_t argc, ScrDyn **result);
+  ScrDyn *(*get)(const ScrDynHandleOps *ops, void *h, const char *key, size_t key_len);
+} ScrHandleStreamHooks;
+extern SCR_TL const ScrHandleStreamHooks *scr_handle_stream_hooks;
 
 /* How a handle crosses threads, supplied by the handle's owning unit so the
  * message encoder (scr_message.c) needs no reference to gated units and no

@@ -17,8 +17,11 @@ static bool scr_stream_dyn_within(const ScrVt *vt, const ScrVt *cls) {
 
 /* The native stream a checked-dynamic value boxes (+1), when it has the
  * requested side (1 readable, 2 writable; Duplex, Transform and PassThrough
- * have both), or NULL for any other value. Never throws. */
+ * have both), or the stream of a stream handle, or NULL for any other
+ * value. Never throws. */
 ScrStream *scr_stream_dyn_native(const ScrDyn *value, double side) {
+  /* A Cipheriv or Decipheriv is a Transform. */
+  if (value->kind == SCR_DYN_HANDLE) return scr_stream_of_handle(value);
   if (value->kind != SCR_DYN_TYPED_REF || value->v.typed_ref.type_key_len <= 7 ||
       memcmp(value->v.typed_ref.type_key, "object:", 7) != 0)
     return NULL;

@@ -1077,11 +1077,20 @@ export function lowerBytesMethodCall(
     // Array-toString (comma join), a different operation: fenced.
     const declaredOnBuffer = (() => {
       const nameSym = lowerer.checker.getSymbolAtLocation(access.name);
-      return (
+      if (
         nameSym !== undefined &&
         nameSym.declarations.some(
           (d) => ts.isInterfaceDeclaration(d.parent) && d.parent.name.text === "Buffer",
         )
+      )
+        return true;
+      // A receiver the lowering types as a Buffer where the checker says
+      // `any` (a JavaScript pipeline stage's chunk).
+      const receiverSym = lowerer.typeOf(access.expression).getSymbol();
+      return (
+        receiverSym !== undefined &&
+        ts.symbolName(receiverSym) === "Buffer" &&
+        receiverSym.declarations.some((d) => lowerer.isStdlibFile(ts.getSourceFileOfNode(d)))
       );
     })();
     if (receiverIr.elem !== "u8" || !declaredOnBuffer) {

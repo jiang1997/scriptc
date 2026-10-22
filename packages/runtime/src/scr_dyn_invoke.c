@@ -1913,6 +1913,8 @@ static ScrDyn *dyn_function_constructor(void) {
 
 ScrDyn *scr_dyn_global_constructor(const ScrStr *name) {
   if (strcmp(name->data, dyn_s20) == 0) return dyn_function_constructor();
+  ScrDyn *error = scr_dyn_error_constructor(name->data);
+  if (error) return error;
   ScrDyn *ctor = dyn_global_ctor(name->data);
   if (!ctor) scr_trap(dyn_s3);
   return ctor;

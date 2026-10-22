@@ -2931,7 +2931,8 @@ declare module "crypto" {
   ): void;
   export type BinaryLike = string | ArrayBuffer | ArrayBufferView;
   /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, and gcm modes and
-   * chacha20-poly1305. The stream.Transform members are not declared. */
+   * chacha20-poly1305. Both are Transforms: written chunks go through
+   * update(), and the end pushes final(). */
   export type CipherGCMTypes = "aes-128-gcm" | "aes-192-gcm" | "aes-256-gcm";
   export type CipherChaCha20Poly1305Types = "chacha20-poly1305";
   export type CipherKey = BinaryLike | KeyObject;
@@ -2941,7 +2942,7 @@ declare module "crypto" {
   export interface CipherChaCha20Poly1305Options {
     authTagLength?: number;
   }
-  export interface Cipheriv {
+  export interface Cipheriv extends Transform {
     update(data: string | ArrayBufferView): Buffer;
     update(data: string, inputEncoding: BufferEncoding): Buffer;
     update(data: ArrayBufferView, inputEncoding: undefined, outputEncoding: BufferEncoding): string;
@@ -2962,7 +2963,7 @@ declare module "crypto" {
     setAAD(buffer: ArrayBufferView, options?: { plaintextLength: number }): this;
     getAuthTag(): Buffer;
   }
-  export interface Decipheriv {
+  export interface Decipheriv extends Transform {
     update(data: ArrayBufferView): Buffer;
     update(data: string, inputEncoding: BufferEncoding): Buffer;
     update(data: ArrayBufferView, inputEncoding: undefined, outputEncoding: BufferEncoding): string;
