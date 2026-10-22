@@ -1316,6 +1316,16 @@ static ScrDyn *nh_op_invoke(void *h, ScrDyn *self, const char *method, ScrDyn *c
   (void)h;
   ScrDyn *fn = scr_ni_get_str(self, method, strlen(method));
   if (fn == NULL) return NULL;
+  /* A native function stored on the island object (its representative
+   * crossed back as the native value): call it here, with the island
+   * object as `this`, as V8 would call the representative. */
+  if (fn->kind == SCR_DYN_FUNC) {
+    scr_dyn_this_push_dyn(self);
+    ScrDyn *result = scr_dyn_call(fn, args, argc, what != NULL ? what : method);
+    scr_dyn_this_pop();
+    scr_dyn_release(fn);
+    return result;
+  }
   if (!scr_ni_is_function(fn)) {
     scr_dyn_release(fn);
     char message[512];
