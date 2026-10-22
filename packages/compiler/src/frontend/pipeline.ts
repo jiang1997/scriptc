@@ -253,7 +253,12 @@ function detectAutoPackages(
     // program loads at run time too. They count only to refuse a package
     // that ships no declarations, which then runs in a Node island; any
     // other package keeps the top-level edge rule.
-    if (mode === "lib" && !viaTransitive && owner === null && !sf.fileName.includes("/node_modules/")) {
+    if (
+      mode === "lib" &&
+      !viaTransitive &&
+      owner === null &&
+      !sf.fileName.includes("/node_modules/")
+    ) {
       const topLevel = new Set(edges.map((e) => `${e.spec}@${e.loc.start}`));
       for (const call of moduleSourceCandidates(load.program, sf).calls) {
         const arg = call.arguments.nodes[0];
