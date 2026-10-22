@@ -16,7 +16,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import * as ts from "../ts7/adapter.js";
-import { locOf } from "../program.js";
+import { isJsSourceFile, locOf } from "../program.js";
 import type { NodeApiMember } from "../node-api-import.js";
 import { PoisonError, newFnCtx, type Lowerer } from "./lowerer.js";
 import {
@@ -461,7 +461,7 @@ function islandBindingOf(lowerer: Lowerer, ident: ts.Identifier): IslandBinding 
     // `const { name } = require("pkg")`: a member of module.exports, read
     // at each use (shortcut: not copied once at the declaration).
     const property = requiredPropertyOf(decl);
-    if (property !== null && islandPatternBindable(decl.parent as ts.ObjectBindingPattern)) {
+    if (property !== null && loadsAtStatement(property.declaration)) {
       const spec = requireInitSpecOf(property.declaration);
       if (spec === null) return null;
       const file = ts.getSourceFileOfNode(decl).fileName;
@@ -1875,17 +1875,35 @@ function islandPatternBindable(pattern: ts.ObjectBindingPattern): boolean {
   return pattern.elements.nodes.every((e) => requiredPropertyOf(e) !== null);
 }
 
-/** The statement `const { a, b: c } = require("<island>")` at module top
- * level: assigns the island module (deferred like any top-level require)
- * to its module global at the statement's position; `a` and `c` read its
- * members at each use. Null for any other declaration. */
-export function lowerIslandRequirePattern(
+/** Whether the top-level declaration `decl` of a JavaScript module loads
+ * its island module at the statement (lowerIslandRequireAtStatement)
+ * rather than in the module's %init prelude: `const`/`let` declarations
+ * binding an identifier or a plain object pattern. Reads before the
+ * statement are TDZ errors in Node, so the binding is never observed
+ * unassigned. `var` keeps the prelude load (shortcut: a hoisted `var` read
+ * before its statement sees the module, where Node sees undefined). */
+function loadsAtStatement(decl: ts.VariableDeclaration): boolean {
+  const list = decl.parent;
+  if (list === undefined || !ts.isVariableDeclarationList(list)) return false;
+  if ((list.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let)) === 0) return false;
+  if (!isJsSourceFile(ts.getSourceFileOfNode(decl))) return false;
+  if (ts.isIdentifier(decl.name)) return true;
+  return ts.isObjectBindingPattern(decl.name) && islandPatternBindable(decl.name);
+}
+
+/** The top-level statement `const x = require("<island>")` or `const { a,
+ * b: c } = require("<island>")` of a JavaScript module: assigns the island
+ * module (deferred like any top-level require) to its module global at the
+ * statement's position, so writes before it (`process.env.NODE_ENV = …`)
+ * are visible to the module's evaluation, as in Node; `x` is the module,
+ * `a` and `c` read its members at each use (shortcut: not copied once at
+ * the declaration). Null for any other declaration. */
+export function lowerIslandRequireAtStatement(
   lowerer: Lowerer,
   decl: ts.VariableDeclaration,
 ): IrStmt | null {
   const islands = lowerer.nodeIslands;
-  if (islands === null || !ts.isObjectBindingPattern(decl.name)) return null;
-  if (!islandPatternBindable(decl.name)) return null;
+  if (islands === null || !loadsAtStatement(decl)) return null;
   const spec = requireInitSpecOf(decl);
   if (spec === null) return null;
   const path = islandModuleFile(islands, ts.getSourceFileOfNode(decl).fileName, spec, "require");
@@ -1916,7 +1934,8 @@ function requireInitSpecOf(decl: ts.VariableDeclaration): string | null {
 /** Top-level `const x = require("pkg")` statements of island packages in a
  * compiled module (a native package requiring an island package): load the
  * island module in the module's %init prelude (shortcut: before the body,
- * not at the statement), deferred exactly like a static import (scope-B
+ * not at the statement; JavaScript `const`/`let` declarations load at the
+ * statement instead, loadsAtStatement), deferred exactly like a static import (scope-B
  * NI-7d: the build decides from the probe, stubs stand in until first use). */
 export function collectIslandRequires(lowerer: Lowerer, sf: ts.SourceFile): void {
   const islands = lowerer.nodeIslands;
@@ -1924,13 +1943,13 @@ export function collectIslandRequires(lowerer: Lowerer, sf: ts.SourceFile): void
   for (const stmt of sf.statements.nodes) {
     if (!ts.isVariableStatement(stmt)) continue;
     for (const decl of stmt.declarationList.declarations.nodes) {
-      // `const { name } = require("<island>")`: the module global exists
-      // from here on; the statement itself loads the module at its
-      // position (lowerIslandRequirePattern).
-      if (ts.isObjectBindingPattern(decl.name)) {
+      // JavaScript `const`/`let` requires: the module global exists from
+      // here on; the statement itself loads the module at its position
+      // (lowerIslandRequireAtStatement).
+      if (loadsAtStatement(decl)) {
         const spec = requireInitSpecOf(decl);
         const path = spec === null ? null : islandModuleFile(islands, sf.fileName, spec, "require");
-        if (path !== null && islandPatternBindable(decl.name)) {
+        if (path !== null) {
           lowerer.usesNodeIsland = true;
           islandModuleGlobal(lowerer, path);
         }
