@@ -798,6 +798,7 @@ export function lowerObjectLiteral(
 ): IrExpr {
   // Unannotated JavaScript accumulator fields have no element contract.
   // Preserve their checked arrays instead of assigning never[] a numeric ABI.
+  // An empty object field is a map the program adds keys to.
   if (
     !expected &&
     isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
@@ -806,6 +807,8 @@ export function lowerObjectLiteral(
         ts.isPropertyAssignment(prop) &&
         ((ts.isArrayLiteralExpression(prop.initializer) &&
           prop.initializer.elements.nodes.length === 0) ||
+          (ts.isObjectLiteralExpression(prop.initializer) &&
+            prop.initializer.properties.nodes.length === 0) ||
           neverTaintedJsType(lowerer, prop.initializer, lowerer.typeOf(prop.initializer))),
     )
   ) {

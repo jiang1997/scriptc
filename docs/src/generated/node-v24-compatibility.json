@@ -12442,9 +12442,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12465,9 +12465,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12581,7 +12581,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12604,7 +12604,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12627,7 +12627,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12650,7 +12650,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12673,7 +12673,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12696,7 +12696,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12719,7 +12719,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12742,7 +12742,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12765,7 +12765,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12788,7 +12788,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12811,7 +12811,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -12834,7 +12834,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -79656,9 +79656,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -79680,7 +79680,7 @@
       },
       "static": {
         "status": "supported",
-        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
         "verification": "test-backed"
       }
     },
@@ -79703,7 +79703,7 @@
       },
       "static": {
         "status": "supported",
-        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
         "verification": "test-backed"
       }
     },
@@ -80001,9 +80001,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80024,9 +80024,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80047,9 +80047,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80139,9 +80139,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80162,9 +80162,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80208,9 +80208,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {

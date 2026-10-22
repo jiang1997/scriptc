@@ -72,6 +72,8 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_js_object.c", "dynTier"],
   ["scr_event_target.c", any("eventTarget", "nativeFetch")],
   ["scr_async_dyn.c", any("dynAsync", "dynInvoke", "dc", "fileHandle", "nativeFetch")],
+  // The crypto global's object extends scr_async_dyn.c's crypto object.
+  ["scr_webcrypto_object.c", all("webcrypto", "dynAsync")],
   // The performance timeline emits its buffer warning through scr_async_dyn.c.
   ["scr_perf.c", "dynAsync"],
   // perf_hooks event-loop metrics, only for programs that read them.
@@ -151,6 +153,8 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_ecdh.c", "ecdh"],
   ["scr_wasm.c", "wasm"],
   ["scr_webcrypto.c", "webcrypto"],
+  // WebCrypto's AES ciphers run over the cipher feature's mbedTLS archive.
+  ["scr_webcrypto_aes.c", all("cipher", "webcrypto")],
   ["scr_fetch.c", "nativeFetch"],
 ];
 

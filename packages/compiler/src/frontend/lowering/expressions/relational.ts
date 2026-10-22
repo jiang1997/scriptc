@@ -1,4 +1,5 @@
 /* instanceof and in, including private-name and runtime-key in. */
+import { dateRootOf } from "../builtins/date-classes.js";
 import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { builtinClassInstanceOfAny, builtinClassKind } from "../builtins/builtin-class-dyn.js";
@@ -266,7 +267,12 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         stmts: [{ kind: "exprStmt", expr: value, loc }],
         result: {
           kind: "boolLit",
-          value: value.type.kind === (date ? "date" : "url"),
+          value:
+            value.type.kind === (date ? "date" : "url") ||
+            // An instance of a class declared `extends Date`.
+            (date &&
+              value.type.kind === "object" &&
+              dateRootOf(lowerer.classes.get(value.type.className)) !== null),
           type: BOOL,
           loc,
         },
@@ -566,7 +572,33 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         loc,
       };
     };
-    const test = caughtInstanceOf(target);
+    let test = caughtInstanceOf(target);
+    // A thrown checked-dynamic object whose prototype chain reaches
+    // Error.prototype (an ES5 constructor function inheriting from it).
+    if (target.def.name === "%Error" && lowerer.errorPrototypeValues) {
+      const value = varRef(caughtLocal.id, CAUGHT, loc);
+      test = {
+        kind: "logical",
+        op: "||",
+        left: test,
+        right: {
+          kind: "logical",
+          op: "&&",
+          left: { kind: "caughtTest", value, test: "dynamic", type: BOOL, loc },
+          right: {
+            kind: "libCall",
+            fn: "dyn.inheritsErrorPrototype",
+            args: [{ kind: "caughtToDyn", value, type: DYN, loc }],
+            type: BOOL,
+            loc,
+          },
+          type: BOOL,
+          loc,
+        },
+        type: BOOL,
+        loc,
+      };
+    }
     return duplex
       ? { kind: "logical", op: "||", left: test, right: caughtInstanceOf(duplex), type: BOOL, loc }
       : test;
@@ -591,8 +623,34 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
   ) {
     return classInstanceOf(lowerer, left, target, loc);
   }
-  if (left.type.kind === "dyn" && target.def.name === "%Error") {
+  if (left.type.kind === "dyn" && target.def.name === "%Error" && !lowerer.errorPrototypeValues) {
     return { kind: "dynTest", test: "error", value: left, type: BOOL, loc };
+  }
+  // An object whose prototype chain reaches Error.prototype (an ES5
+  // constructor function inheriting from it) is an instance as well.
+  if (left.type.kind === "dyn" && target.def.name === "%Error") {
+    const local = lowerer.declareHiddenLocal("%instanceofValue", DYN);
+    const value = varRef(local.id, DYN, loc);
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "varDecl", localId: local.id, init: left, loc }],
+      result: {
+        kind: "logical",
+        op: "||",
+        left: { kind: "dynTest", test: "error", value, type: BOOL, loc },
+        right: {
+          kind: "libCall",
+          fn: "dyn.inheritsErrorPrototype",
+          args: [value],
+          type: BOOL,
+          loc,
+        },
+        type: BOOL,
+        loc,
+      },
+      type: BOOL,
+      loc,
+    };
   }
   // `u instanceof TypeError` (and the other BUILTIN error classes) on a
   // dyn value: the from_error cache holds the checked-dynamic tree↔error identity edge,

@@ -13008,9 +13008,116 @@ bool scr_dyn_native_date_is(const ScrDyn *value) {
   return value && value->kind == SCR_DYN_HANDLE && value->v.handle.tag == SCR_DYNH_DATE;
 }
 
+/* Instances of program classes declared `extends Date` keep their time
+ * value in a compiled field. In checked-dynamic code such an instance is a
+ * typed reference, and the runtime reaches its time value and methods
+ * through the functions %main installs (builtins/date-classes.ts), called
+ * as (op, value, argument): for op 0 the time function answers the time
+ * value, or undefined for any other value, and for op 1 sets it; for ops 2
+ * to 5 the method function calls the instance's toISOString,
+ * toJSON(argument), toString and valueOf. */
+enum {
+  SCR_DATE_CLASS_TIME,
+  SCR_DATE_CLASS_SET_TIME,
+  SCR_DATE_CLASS_TO_ISO_STRING,
+  SCR_DATE_CLASS_TO_JSON,
+  SCR_DATE_CLASS_TO_STRING,
+  SCR_DATE_CLASS_VALUE_OF,
+  SCR_DATE_CLASS_NAME,
+};
+static SCR_TL ScrDyn *scr_date_class_operation;
+static SCR_TL ScrDyn *scr_date_class_methods;
+
+static void scr_date_class_operation_cleanup(void) {
+  ScrDyn *operation = scr_date_class_operation;
+  ScrDyn *methods = scr_date_class_methods;
+  scr_date_class_operation = scr_date_class_methods = NULL;
+  scr_dyn_release(operation);
+  scr_dyn_release(methods);
+}
+
+static bool scr_date_class_time_of(const ScrDyn *value, double *time);
+static ScrDyn *scr_date_class_to_json(const ScrDyn *value, const ScrDyn *key);
+static ScrDyn *scr_date_class_to_string(const ScrDyn *value);
+static ScrDyn *scr_date_class_value_of(const ScrDyn *value);
+static ScrStr *scr_date_class_name(const ScrDyn *value);
+static ScrDyn *scr_date_class_method(const ScrDyn *value, const char *key, size_t key_len);
+
+/* The installation also publishes these functions to the rest of the
+ * runtime (scr_date_class_hooks), so only a program that declares a class
+ * extending Date links them. */
+static const ScrDateClassHooks scr_date_class_hook_table = {
+  scr_date_class_time_of, scr_date_class_to_json, scr_date_class_to_string,
+  scr_date_class_value_of, scr_date_class_name, scr_date_class_method,
+};
+
+void scr_date_class_operation_install(ScrDyn *time, ScrDyn *methods) {
+  scr_date_class_hooks = &scr_date_class_hook_table;
+  if (!scr_date_class_operation) scr_atexit(scr_date_class_operation_cleanup);
+  scr_dyn_release(scr_date_class_operation);
+  scr_dyn_release(scr_date_class_methods);
+  scr_date_class_operation = scr_dyn_retain(time);
+  scr_date_class_methods = scr_dyn_retain(methods);
+}
+
+/* The installed operation `op` on `value`: +1, or NULL with an exception
+ * pending. */
+static ScrDyn *scr_date_class_call(int op, const ScrDyn *value, const ScrDyn *argument) {
+  ScrDyn *code = scr_dyn_new_num(op);
+  ScrDyn *args[] = { code, (ScrDyn *)value, (ScrDyn *)(argument ? argument : scr_dyn_undefined()) };
+  bool time = op < SCR_DATE_CLASS_TO_ISO_STRING || op == SCR_DATE_CLASS_NAME;
+  ScrDyn *result = scr_dyn_call(time ? scr_date_class_operation : scr_date_class_methods, args, 3, "Date");
+  scr_dyn_release(code);
+  return result;
+}
+
+/* True, with the time value in *time, when `value` holds an instance of a
+ * class declared `extends Date`. */
+static bool scr_date_class_time_of(const ScrDyn *value, double *time) {
+  if (!scr_date_class_operation || !value || value->kind != SCR_DYN_TYPED_REF) return false;
+  ScrDyn *result = scr_date_class_call(SCR_DATE_CLASS_TIME, value, NULL);
+  bool found = result && result->kind == SCR_DYN_NUM;
+  if (found) *time = result->v.num;
+  scr_dyn_release(result);
+  return found;
+}
+
+/* `value instanceof Date`: a Date, or an instance of a class declared
+ * `extends Date`. */
+bool scr_dyn_date_instance_is(const ScrDyn *value) {
+  double time;
+  return scr_dyn_native_date_is(value) || scr_dyn_date_class_time(value, &time);
+}
+
+/* toJSON(key), toString() or valueOf() of an instance of a class declared
+ * `extends Date` (scr_dyn_date_class_time answered true): the class's
+ * declaration or the Date method. +1, or NULL with an exception pending. */
+static ScrDyn *scr_date_class_to_json(const ScrDyn *value, const ScrDyn *key) {
+  return scr_date_class_call(SCR_DATE_CLASS_TO_JSON, value, key);
+}
+static ScrDyn *scr_date_class_to_string(const ScrDyn *value) {
+  return scr_date_class_call(SCR_DATE_CLASS_TO_STRING, value, NULL);
+}
+static ScrDyn *scr_date_class_value_of(const ScrDyn *value) {
+  return scr_date_class_call(SCR_DATE_CLASS_VALUE_OF, value, NULL);
+}
+
+/* The name of the class of an instance of a class declared `extends
+ * Date`: +1, or NULL for any other value. */
+static ScrStr *scr_date_class_name(const ScrDyn *value) {
+  if (!scr_date_class_operation || !value || value->kind != SCR_DYN_TYPED_REF) return NULL;
+  ScrDyn *result = scr_date_class_call(SCR_DATE_CLASS_NAME, value, NULL);
+  ScrStr *name = result && result->kind == SCR_DYN_STR ? scr_str_retain(result->v.str) : NULL;
+  scr_dyn_release(result);
+  return name;
+}
+
 double scr_dyn_native_date_value(const ScrDyn *value) {
-  if (!scr_dyn_native_date_is(value)) { scr_dyn_check_fail(NULL, "Date", value); return NAN; }
-  return ((ScrNativeDate *)value->v.handle.ptr)->milliseconds;
+  if (scr_dyn_native_date_is(value)) return ((ScrNativeDate *)value->v.handle.ptr)->milliseconds;
+  double time;
+  if (scr_dyn_date_class_time(value, &time)) return time;
+  scr_dyn_check_fail(NULL, "Date", value);
+  return NAN;
 }
 
 /* Method names without another use in this file, in named arrays (see
@@ -13020,13 +13127,14 @@ static const char scr_date_to_time_string_name[] = "toTimeString";
 
 static ScrDyn *scr_native_date_invoke(void *ptr, ScrDyn *self, const char *method,
     ScrDyn *const *args, size_t argc, const char *what) {
-  (void)self; (void)args; (void)argc; (void)what;
+  (void)self; (void)what;
   double ms = ((ScrNativeDate *)ptr)->milliseconds;
   if (!strcmp(method, "getTime") || !strcmp(method, "valueOf")) return scr_dyn_new_num(ms);
   if (!strcmp(method, "toString") || !strcmp(method, scr_date_to_date_string_name) ||
-      !strcmp(method, scr_date_to_time_string_name)) {
+      !strcmp(method, scr_date_to_time_string_name) || !strcmp(method, "toUTCString")) {
     ScrStr *text = !strcmp(method, "toString")                     ? scr_date_to_string(ms)
                    : !strcmp(method, scr_date_to_date_string_name) ? scr_date_to_date_string(ms)
+                   : !strcmp(method, "toUTCString")                ? scr_date_to_utc_string(ms)
                                                                    : scr_date_to_time_string(ms);
     ScrDyn *result = scr_dyn_new_str(text);
     scr_str_release(text);
@@ -13039,6 +13147,12 @@ static ScrDyn *scr_native_date_invoke(void *ptr, ScrDyn *self, const char *metho
     ScrDyn *result = scr_dyn_new_str(text);
     scr_str_release(text);
     return result;
+  }
+  if (!strcmp(method, "setTime")) {
+    double time = NAN;
+    if (argc > 0 && !scr_dyn_number_coerce_js(args[0], &time)) return NULL;
+    ((ScrNativeDate *)ptr)->milliseconds = scr_date_new_ms(time);
+    return scr_dyn_new_num(((ScrNativeDate *)ptr)->milliseconds);
   }
 #define DATE_GET(name, fn) if (!strcmp(method, name)) return scr_dyn_new_num(fn(ms))
   DATE_GET("getFullYear", scr_date_get_full_year_local);
@@ -13070,11 +13184,23 @@ ScrDyn *scr_dyn_native_date_new(const ScrDyn *arguments) {
   else {
     ScrDyn *value = arguments->v.arr.items[0];
     if (scr_dyn_native_date_is(value)) ms = scr_dyn_native_date_value(value);
-    else if (value->kind == SCR_DYN_STR) ms = scr_date_parse_get_time(value->v.str);
+    else if (scr_dyn_date_class_time(value, &ms)) {
+    } else if (value->kind == SCR_DYN_STR) ms = scr_date_parse_get_time(value->v.str);
     else if (!scr_dyn_number_coerce_js(value, &ms)) return NULL;
     ms = scr_date_new_ms(ms);
   }
   return scr_dyn_native_date_from_ms(ms);
+}
+
+/* The time value `new Date(...arguments)` constructs (super(...) in a
+ * class declared `extends Date`), or NaN with an exception pending. */
+double scr_dyn_date_arguments_time(const ScrDyn *arguments) {
+  ScrDyn *date = arguments->v.arr.len > 1 ? scr_dyn_native_date_new_fields(arguments)
+                                          : scr_dyn_native_date_new_value(arguments);
+  if (!date) return NAN;
+  double time = ((ScrNativeDate *)date->v.handle.ptr)->milliseconds;
+  scr_dyn_release(date);
+  return time;
 }
 
 /* new Date(value) in JavaScript: a string parses with the full parser;
@@ -13103,11 +13229,11 @@ ScrDyn *scr_dyn_native_date_new_fields(const ScrDyn *arguments) {
 /* The Date.prototype methods scr_native_date_invoke answers. */
 static const char *const scr_native_date_methods[] = {
   "getTime", "valueOf", "toISOString", "toJSON", "toString", scr_date_to_date_string_name,
-  scr_date_to_time_string_name,
+  scr_date_to_time_string_name, "toUTCString",
   "getFullYear", "getUTCFullYear", "getMonth",
   "getUTCMonth", "getDate", "getUTCDate", "getDay", "getUTCDay", "getHours", "getUTCHours",
   "getMinutes", "getUTCMinutes", "getSeconds", "getUTCSeconds", "getMilliseconds",
-  "getUTCMilliseconds", "getTimezoneOffset",
+  "getUTCMilliseconds", "getTimezoneOffset", "setTime",
 };
 #define SCR_NATIVE_DATE_METHODS (sizeof scr_native_date_methods / sizeof scr_native_date_methods[0])
 static SCR_TL ScrDyn *scr_native_date_method_values[SCR_NATIVE_DATE_METHODS];
@@ -13122,19 +13248,55 @@ static void scr_native_date_methods_cleanup(void) {
 }
 
 /* A Date method read as a value and called later: the closure's function
- * slot holds the method's name, and the receiver must be a Date. */
+ * slot holds the method's name, and the receiver must be a Date. On an
+ * instance of a class declared `extends Date` the method runs over its
+ * time value; toJSON calls the instance's toISOString. */
 static ScrDyn *scr_native_date_method_call(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   const char *method = closure->fn;
   ScrDyn *self = scr_dyn_this_get();
   ScrDyn *result = NULL;
+  double time;
   if (scr_dyn_native_date_is(self)) {
     result = scr_native_date_invoke(self->v.handle.ptr, self, method, args, argc, method);
+  } else if (scr_dyn_date_class_time(self, &time)) {
+    if (!strcmp(method, "toJSON")) {
+      result = isfinite(time) ? scr_date_class_call(SCR_DATE_CLASS_TO_ISO_STRING, self, NULL)
+                              : scr_dyn_new_null();
+    } else {
+      ScrNativeDate date = { 1, time };
+      result = scr_native_date_invoke(&date, self, method, args, argc, method);
+      if (result && date.milliseconds != time && !(isnan(date.milliseconds) && isnan(time))) {
+        ScrDyn *stored = scr_dyn_new_num(date.milliseconds);
+        ScrDyn *set = scr_date_class_call(SCR_DATE_CLASS_SET_TIME, self, stored);
+        scr_dyn_release(stored);
+        if (!set) {
+          scr_dyn_release(result);
+          result = NULL;
+        }
+        scr_dyn_release(set);
+      }
+    }
   } else {
     static const char message[] = "this is not a Date object.";
     scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
   }
   scr_dyn_release(self);
   return result;
+}
+
+static ScrDyn *scr_native_date_get(void *ptr, const char *key, size_t key_len);
+
+/* The Date method `key` as a function value when `value` holds an instance
+ * of a class declared `extends Date`, or NULL. The class's own members are
+ * read first, by the caller. */
+static ScrDyn *scr_date_class_method(const ScrDyn *value, const char *key, size_t key_len) {
+  if (!scr_date_class_operation) return NULL;
+  bool named = false;
+  for (size_t i = 0; i < SCR_NATIVE_DATE_METHODS && !named; i++)
+    named = strlen(scr_native_date_methods[i]) == key_len && !memcmp(scr_native_date_methods[i], key, key_len);
+  double time;
+  if (!named || !scr_dyn_date_class_time(value, &time)) return NULL;
+  return scr_native_date_get(NULL, key, key_len);
 }
 
 /* Property reads of a Date: its methods as function values, one per name

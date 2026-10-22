@@ -149,6 +149,7 @@ import { forkTargetPaths } from "../fork-target.js";
 import { workerTargetPaths } from "../worker-target.js";
 import { isNativeProxyInitializer } from "./expressions/native-proxy.js";
 import { handleEventReaderPrelude } from "./lower-event-target.js";
+import { dateClassOperationPrelude } from "./builtins/date-classes.js";
 import { cjsAccessorSnapshotStores, jsHoldsDynObject } from "./lower-exprs.js";
 import { keptIdentityAssertion } from "./assertion-identity.js";
 
@@ -3383,6 +3384,7 @@ export function buildMain(lowerer: Lowerer): IrFunction {
     ...lowerer.mainPrelude,
     ...cjsModuleRegistryPrelude(lowerer, loc),
     ...handleEventReaderPrelude(lowerer, loc),
+    ...dateClassOperationPrelude(lowerer, loc),
   ];
   const roots = [lowerer.entry, ...lowerer.forkTargets, ...lowerer.workerTargets];
   const isAsync = roots.some((root) => lowerer.asyncInitFiles.has(root));

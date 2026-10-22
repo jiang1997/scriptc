@@ -276,16 +276,26 @@ export function guardedLoopCounterFacts(
     else budget.set(id, (budget.get(id) ?? 0) + delta);
   };
   // Nested while loops outside opaque regions, checked against their own
-  // conditions once the stable bounds are known.
+  // conditions once the stable bounds are known. Only loops that highestCount
+  // walks pass by pass qualify: statements of the body, its blocks and its
+  // branches. One in a labeled block or among an expression's statements
+  // (`indirect`) is an ordinary loop region.
   const nested: (IrStmt & { kind: "while" })[] = [];
+  let indirect = 0;
   const expr = (e: IrExpr): boolean => {
     if (e.kind === "assignExpr") write(e.localId, increment(e.localId, e.value));
     if (e.kind === "incDec") write(e.localId, e.op === "+" ? 1 : null);
-    return everyExprChild(e, expr, stmt);
+    return everyExprChild(e, expr, (x) => {
+      indirect++;
+      const completed = stmt(x);
+      indirect--;
+      return completed;
+    });
   };
   const condition = new Set<string>();
   const stmt = (s: IrStmt): boolean => {
-    const bounded = s.kind === "while" && opaque === 0 && !s.labels?.length;
+    const bounded = s.kind === "while" && opaque === 0 && indirect === 0 && !s.labels?.length;
+    const labeled = s.kind === "block" && !!s.labels?.length;
     const region =
       !bounded &&
       (s.kind === "for" ||
@@ -299,10 +309,12 @@ export function guardedLoopCounterFacts(
       conditionWrites(s.cond);
     }
     if (region) opaque++;
+    if (labeled) indirect++;
     if (s.kind === "assign") write(s.localId, increment(s.localId, s.value));
     if (s.kind === "varDecl" || s.kind === "forOf") write(s.localId, null);
     if (s.kind === "tryCatch" && s.catchLocalId) write(s.catchLocalId, null);
     const completed = everyStmtChild(s, expr, stmt);
+    if (labeled) indirect--;
     if (region) opaque--;
     return completed;
   };

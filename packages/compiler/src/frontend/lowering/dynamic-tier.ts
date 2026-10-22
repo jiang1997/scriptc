@@ -304,7 +304,18 @@ export function scanDynamicTier(lowerer: Lowerer, module: IrModule): DynamicTier
     });
   }
   const rank = { loop: 0, "called-in-loop": 1, recursive: 2 } as const;
-  hot.sort((a, b) => rank[a.hot] - rank[b.hot] || b.loopOperations - a.loopOperations);
+  // Functions that rank alike list in source order: by the file's place in
+  // the module order, then by position.
+  const fileOrder = new Map(lowerer.moduleOrder.map((sf, index) => [sf.fileName, index]));
+  const fileRank = (file: string): number => fileOrder.get(file) ?? lowerer.moduleOrder.length;
+  hot.sort(
+    (a, b) =>
+      rank[a.hot] - rank[b.hot] ||
+      b.loopOperations - a.loopOperations ||
+      fileRank(a.loc.file) - fileRank(b.loc.file) ||
+      (a.loc.file < b.loc.file ? -1 : a.loc.file > b.loc.file ? 1 : 0) ||
+      a.loc.start - b.loc.start,
+  );
   return {
     hot,
     packages: [...packages]
@@ -332,14 +343,15 @@ function boundName(lowerer: Lowerer, loc: SrcLoc): string | null {
 
 /** A function's name as the source spells it, without a module prefix
  * (`%%m144.Session.finish` → `Session.finish`, `m163.find` → `find`). A
- * function expression (`%fn<n>`) takes its own name, else the name it is
- * bound to, else `anonymous function`. */
+ * function expression (`%fn.<hash>`, with `_<name>` when the expression is
+ * named) takes its own name, else the name it is bound to, else
+ * `anonymous function`. */
 function displayName(lowerer: Lowerer, f: HotDynamicFunction): string {
   const plain = f.name
     .replace(/^%+/, "")
     .replace(/^m\d+\./, "")
     .replace(/^%+/, "");
-  const lambda = /^fn\d+(?:_(.+))?$/.exec(plain);
+  const lambda = /^fn\.[0-9a-f]+(?:_(.+))?$/.exec(plain);
   if (lambda === null) return plain;
   return lambda[1] ?? boundName(lowerer, f.loc) ?? "anonymous function";
 }

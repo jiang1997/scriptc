@@ -1652,7 +1652,40 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
        * view of its fields does not carry. */
       const ScrStr *name = scr_dyn_typed_ref_class_name(d);
       ScrStr *out;
-      if (name && materialized->kind == SCR_DYN_OBJ &&
+      double time;
+      ScrStr *date_class = materialized->kind == SCR_DYN_OBJ && scr_dyn_date_class_time(d, &time)
+          ? scr_dyn_date_class_name(d) : NULL;
+      if (date_class) {
+        /* An instance of a class declared `extends Date`: the class name and
+         * the time as Date.prototype.toISOString formats it, then its own
+         * enumerable properties when it has any. */
+        ScrStr *iso = scr_insp_date(time);
+        InspBuf head = {0};
+        ib_bytes(&head, date_class->data, date_class->len);
+        scr_str_release(date_class);
+        ib_char(&head, ' ');
+        ib_bytes(&head, iso->data, iso->len);
+        scr_str_release(iso);
+        ScrStr *prefix = ib_take(&head);
+        bool fields = false;
+        for (size_t i = 0; i < materialized->v.obj.len && !fields; i++)
+          fields = materialized->v.obj.entries[i].enumerable;
+        if (!fields || recurse > depth) {
+          scr_dyn_release(materialized);
+          return prefix;
+        }
+        char *cls = malloc(prefix->len + 1);
+        if (!cls) scr_trap("scriptc: out of memory\n");
+        memcpy(cls, prefix->data, prefix->len);
+        cls[prefix->len] = '\0';
+        scr_str_release(prefix);
+        size_t nseen = g_nseen;
+        g_pending_seen = instance;
+        out = scr_insp_obj(materialized, recurse, depth, cls);
+        g_pending_seen = NULL;
+        if (g_nseen > nseen) g_nseen = nseen;
+        free(cls);
+      } else if (name && materialized->kind == SCR_DYN_OBJ &&
           scr_dyn_obj_get(materialized, "%error", 6) == NULL) {
         char *cls = malloc(name->len + 1);
         if (!cls) scr_trap("scriptc: out of memory\n");

@@ -104,7 +104,8 @@ static void scr_zs_finish(ScrZlibStream *zs, ScrStream *s) {
     zs->flushing = false;
     scr_stream_flush_done(s, NULL, NULL, NULL);
   } else {
-    scr_stream_transform_done(s, NULL, NULL, NULL);
+    /* scr_zs_complete has applied Transform._write's callback rule. */
+    scr_stream_write_done(s, NULL);
   }
 }
 

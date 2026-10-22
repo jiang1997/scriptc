@@ -47,6 +47,10 @@ export class StructuralPositions {
   private readonly nodesByKey = new Map<ts.Node, Map<string, number[]>>();
   private readonly paths = new Map<ts.Node, string>();
 
+  /** `fileKey` names a source file in positions (its file name when
+   * absent). */
+  constructor(private readonly fileKey?: (sf: ts.SourceFile) => string) {}
+
   /** The ordinal of `node` among the nodes of `anchor` with its key. */
   private ordinalIn(anchor: ts.Node, node: ts.Node, key: string): number {
     let byKey = this.nodesByKey.get(anchor);
@@ -74,7 +78,7 @@ export class StructuralPositions {
     const cached = this.paths.get(anchor);
     if (cached !== undefined) return cached;
     let path: string;
-    if (ts.isSourceFile(anchor)) path = anchor.fileName;
+    if (ts.isSourceFile(anchor)) path = this.fileKey?.(anchor) ?? anchor.fileName;
     else {
       const parent = anchorOf(anchor);
       // The kind keeps declarations of one name apart: a getter and its

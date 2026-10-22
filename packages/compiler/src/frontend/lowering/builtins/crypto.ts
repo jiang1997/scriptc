@@ -7,6 +7,7 @@ import { type Lowerer, own } from "../lowerer.js";
 import { locOf } from "../../program.js";
 import { CIPHER_TYPE_NAMES } from "../../type-mapper.js";
 import { CRYPTO_CIPHERS, CRYPTO_CURVES, CRYPTO_HASHES } from "../crypto-tables.js";
+import { stdlibGlobalNameOf } from "../surfaces.js";
 import {
   BOOL,
   BYTES_U8,
@@ -907,7 +908,8 @@ export function v8CalleeText(node: ts.Expression): string {
 
 /** Calls on native Cipheriv/Decipheriv handles dispatch through the
  * handle's methods with checked-dynamic arguments. The stream.Transform
- * members the classes inherit are refused. */
+ * members the classes inherit lower over the cipher's Transform
+ * (lowerHashStreamCall, which runs first); other members are refused. */
 export function lowerCipherMethodCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -920,7 +922,7 @@ export function lowerCipherMethodCall(
     lowerer.noLowering(
       `Cipheriv/Decipheriv.${name}`,
       call,
-      "update(), final(), setAAD(), setAutoPadding(), getAuthTag(), and setAuthTag() are supported; cipher streams are not",
+      "update(), final(), setAAD(), setAutoPadding(), getAuthTag(), setAuthTag(), and the stream members are supported",
     );
   }
   if (call.arguments.nodes.some(ts.isSpreadElement))
@@ -1316,8 +1318,10 @@ export function lowerCryptoGetRandomValues(
 }
 
 /** Whether `receiver` names a WebCrypto Crypto object: the `crypto`
- * global (also through globalThis) or node:crypto's `webcrypto`. */
+ * global (also through globalThis or an alias of it) or node:crypto's
+ * `webcrypto`. */
 export function isWebCryptoReceiver(lowerer: Lowerer, receiver: ts.Expression): boolean {
+  if (stdlibGlobalNameOf(lowerer, receiver) === "crypto") return true;
   if (ts.isIdentifier(receiver)) {
     if (receiver.text === "crypto" && lowerer.isStdlibGlobal(receiver, "crypto")) return true;
     const imported = lowerer.builtinImportOf(receiver);

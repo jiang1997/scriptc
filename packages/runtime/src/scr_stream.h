@@ -143,6 +143,13 @@ ScrStream *scr_stream_pipe_general(ScrStream *src, ScrStream *dst, bool end);
 /* A boxed native stream out of a checked-dynamic pipeline stage (+1), or
  * NULL with `message` thrown as the not-supported Error. */
 ScrStream *scr_stream_unbox_dyn(const struct ScrDyn *value, const ScrStr *message);
+/* Handles that are Transforms (ScrDynHandleOps.transform: Cipheriv and
+ * Decipheriv). scr_stream_of_handle: the handle's Transform (+1), built on
+ * first use, or NULL when the value is not such a handle.
+ * stream.handleStream: the same, throwing the coded SC2020 error for any
+ * other value. */
+ScrStream *scr_stream_of_handle(const struct ScrDyn *value);
+ScrStream *scr_stream_handle(const struct ScrDyn *value);
 /* Checked-dynamic stream slots (scr_stream_dyn.c): the native stream a
  * value boxes with the requested side (1 readable, 2 writable; +1, or
  * NULL), and readable.pipe()/unpipe() for a destination that is not a
@@ -197,35 +204,34 @@ ScrStream *scr_stream_pipeline(double n, ScrStream **streams, ScrClosure *cb, Sc
  * mustCall wrappers; borrowed). */
 ScrClosure *scr_stream_finished_dyn(ScrStream *s, struct ScrDyn *cb);
 ScrStream *scr_stream_pipeline_dyn(double n, ScrStream **streams, struct ScrDyn *cb);
-/* pipeline(...[, cb]) with one run of function stages (pipeline.js): the
- * run starts at streams[at] (count functions). flags bit 0: the first
- * stage is a source function, called with only its options; bits 1-2:
- * the last stage is a function destination (2: an async function whose
- * promise, boxed through box, carries the value to the callback), and
- * pipeline() answers a PassThrough. Other
- * stages get the previous stream itself or the previous stage's async
- * generator. mask bit i: stage i takes { signal } (the pipeline's own
- * AbortSignal, aborted through abort when the pipeline finishes). The
- * last generator before a stream or a PassThrough is pumped
- * (pumpToNode) through its helpers: next/ret answer the resume's
- * promise, read maps its IteratorResult to the value or
- * scr_stream_from_done. Streams and closures borrowed (helpers, box,
- * signal and abort NULL when unused); cb moves. */
-ScrStream *scr_stream_pipeline_stages(double n, ScrStream **streams, double at, double count,
-                                      ScrClosure **stages, double flags, double mask,
-                                      ScrClosure *next, ScrClosure *read, ScrClosure *ret,
-                                      ScrClosure *box, struct ScrDyn *signal, ScrClosure *abort,
-                                      ScrClosure *cb, ScrStreamErrInv inv);
-ScrStream *scr_stream_pipeline_stages_dyn(double n, ScrStream **streams, double at, double count,
-                                          ScrClosure **stages, double flags, double mask,
-                                          ScrClosure *next, ScrClosure *read, ScrClosure *ret,
-                                          ScrClosure *box, struct ScrDyn *signal,
-                                          ScrClosure *abort, struct ScrDyn *cb);
-struct ScrPromise *scr_sp_pipeline_stages(double n, ScrStream **streams, double at, double count,
-                                          ScrClosure **stages, double flags, double mask,
-                                          ScrClosure *next, ScrClosure *read, ScrClosure *ret,
-                                          ScrClosure *box, struct ScrDyn *signal,
-                                          ScrClosure *abort);
+/* pipeline(...[, cb]) with function stages (pipeline.js): positions bit j
+ * marks the j-th of the n + count stages a function. A function at
+ * position 0 is a source function, called with only its options. flags
+ * bits 1-2: the last stage is a function destination (2: an async
+ * function whose promise, boxed through box, carries the value to the
+ * callback), and pipeline() answers a PassThrough. Other stages get the
+ * previous stream itself or the previous stage's async generator. mask
+ * bit i: function i takes { signal } (the pipeline's own AbortSignal,
+ * aborted through abort when the pipeline finishes). The last generator
+ * of each run that a stream follows is pumped (pumpToNode) through its
+ * three helpers in `helpers`: next/ret answer the resume's promise, read
+ * maps its IteratorResult to the value or scr_stream_from_done. Streams
+ * and closures borrowed (helpers, box, signal and abort NULL when
+ * unused); cb moves. */
+ScrStream *scr_stream_pipeline_stages(double n, ScrStream **streams, double count,
+                                      ScrClosure **stages, double positions, double flags,
+                                      double mask, ScrClosure **helpers, ScrClosure *box,
+                                      struct ScrDyn *signal, ScrClosure *abort, ScrClosure *cb,
+                                      ScrStreamErrInv inv);
+ScrStream *scr_stream_pipeline_stages_dyn(double n, ScrStream **streams, double count,
+                                          ScrClosure **stages, double positions, double flags,
+                                          double mask, ScrClosure **helpers, ScrClosure *box,
+                                          struct ScrDyn *signal, ScrClosure *abort,
+                                          struct ScrDyn *cb);
+struct ScrPromise *scr_sp_pipeline_stages(double n, ScrStream **streams, double count,
+                                          ScrClosure **stages, double positions, double flags,
+                                          double mask, ScrClosure **helpers, ScrClosure *box,
+                                          struct ScrDyn *signal, ScrClosure *abort);
 /* stream.compose(s1..sn): a pipeline over the streams and a Duplex that
  * writes to the first and reads from the last (compose.js). One stream
  * answers itself (Duplex.from of a duplex). +1, or NULL with

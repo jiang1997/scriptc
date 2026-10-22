@@ -62,7 +62,7 @@ import { resolveRequireRuntime } from "../runtime-resolve.js";
 import { lowerKeyObjectCall } from "./builtins/key-object.js";
 import { isEcdhType, lowerEcdhCall } from "./builtins/ecdh.js";
 import { fenceWebCryptoMember, lowerWebCryptoCall } from "./builtins/webcrypto.js";
-import { hashStreamOf } from "./builtins/hash-stream.js";
+import { valueStreamOf } from "./builtins/hash-stream.js";
 import { lowerNetAddressCall, lowerNetAddressNew } from "./builtins/net-address.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, varRef } from "../../ir/build.js";
 import { iteratorSlotAdapter } from "./iterator-adapters.js";
@@ -499,7 +499,8 @@ import {
   lowerTracingChannelProperty,
 } from "./builtins/async-context.js";
 import { lowerDisposableStackNew } from "./builtins/disposable-stack.js";
-import { lowerErrorCodeProperty } from "./builtins/errors.js";
+import { lowerErrorCodeProperty, lowerErrorFunctionCall } from "./builtins/errors.js";
+import { noteDateClassMethods } from "./builtins/date-classes.js";
 import {
   lowerProcessProperty,
   lowerProcessMethodCall,
@@ -2178,6 +2179,12 @@ export class Lowerer {
   /** Instance types (by checker type id) of the local classes generic
    * factory calls return, and the per-instance class each names. */
   readonly localClassInstanceTypes = new Map<number, string>();
+  /** A generic factory's instantiated result type → the class value of the
+   * local class it returns (TypeMapperCtx.localClassValue). */
+  readonly localClassValueTypes = new Map<number, IrType>();
+  /** While a generic factory instance lowers: its declared result type → the
+   * class value of the local class it returns. */
+  instanceResultClass: { declared: number; value: IrType } | null = null;
   /** The ts-level twin of typeParamBindings, non-null while a CALL-keyed
    * instance body lowers: type-parameter symbol → the bound CHECKER type,
    * consulted where the mapped IrType has already widened away information
@@ -2952,6 +2959,10 @@ export class Lowerer {
   /** Named method slots observed before class collection need a callable
    * ABI and shared prototype descriptors instead of call-site specialization. */
   readonly prototypeMethodAccesses = new Map<string, ts.Node>();
+  /** Whether the program reads `Error.prototype`, the checked-dynamic
+   * object an ES5 constructor function can inherit from: only then can a
+   * value that is not an Error instance be `instanceof Error`. */
+  errorPrototypeValues = false;
   /** Well-known symbol methods (`sym:iterator`) the program may replace
    * through a symbol-keyed write: an instance or prototype property, or a
    * reflection call. */
@@ -3030,10 +3041,10 @@ export class Lowerer {
   /** Inline Promise.then parameters whose contextual type is a builtin
    * module namespace anonymous object. The settled native token is the
    * ABI truth even when the checker type has no stable module symbol. */
-  /** Receivers of a stream call on a Hash or Hmac (lowerHashStreamCall):
-   * for the duration of that call, the receiver lowers to the Transform of
-   * the value held in the named local. */
-  readonly hashStreamReceivers = new Map<ts.Expression, { localId: string; type: IrType }>();
+  /** Receivers of a stream call on a Hash, Hmac, Cipheriv or Decipheriv
+   * (lowerHashStreamCall): for the duration of that call, the receiver
+   * lowers to the Transform of the value held in the named local. */
+  readonly valueStreamReceivers = new Map<ts.Expression, { localId: string; type: IrType }>();
   /** fs call arguments evaluated ahead of a URL path's conversion
    * (builtins/fs-paths.ts): each lowers to the hidden local that holds its
    * value, which is null until the path's lowering has saved it. */
@@ -3177,7 +3188,13 @@ export class Lowerer {
   errorPropertyDispatchRevision: string | null = null;
   /** Structural source positions (structural-positions.ts) for names that
    * stay the same when unrelated code moves. */
-  readonly positions = new StructuralPositions();
+  /** Default library files are named by their base name: two checkers
+   * install them in different directories. */
+  readonly positions = new StructuralPositions((sf) =>
+    this.program.isSourceFileDefaultLibrary(sf)
+      ? `lib:${sf.fileName.slice(sf.fileName.lastIndexOf("/") + 1)}`
+      : sf.fileName,
+  );
 
   /** The outermost node whose token span is exactly `loc`, or null. */
   nodeAtLoc(loc: SrcLoc): ts.Node | null {
@@ -3578,6 +3595,10 @@ export class Lowerer {
       genericClassInstance: (decl, ref, mapArgument) =>
         this.genericClassInstanceType(decl, ref, mapArgument),
       runtimeClassValue: (type) => runtimeClassValueOfType(this, type),
+      localClassValue: (type) =>
+        this.instanceResultClass?.declared === type.id
+          ? this.instanceResultClass.value
+          : (this.localClassValueTypes.get(type.id) ?? null),
       mixinClassInstance: (decl) =>
         this.mixinTypeContext && this.mixinTypeContext.classNode === decl
           ? { kind: "object", className: this.mixinTypeContext.className }
@@ -8192,6 +8213,7 @@ export class Lowerer {
     // turn queue more instances. Continue to the joint fixpoint; the initial
     // queue above is the only portion whose discovery order differed from
     // historical emit order.
+    noteDateClassMethods(this);
     const classDispatch = new ClassDynamicDispatch(extraRoots !== undefined);
     // Units in declaration order, so the passes below meet functions, and the
     // classes they collect, in an order that does not depend on lowering order.
@@ -12486,8 +12508,9 @@ export class Lowerer {
   /* ── expressions ──────────────────────────────────────────────────── */
 
   lowerExpr(expr: ts.Expression): IrExpr {
-    const hash = this.hashStreamReceivers.get(expr);
-    if (hash) return hashStreamOf(varRef(hash.localId, hash.type, locOf(expr)));
+    const streamValue = this.valueStreamReceivers.get(expr);
+    if (streamValue)
+      return valueStreamOf(varRef(streamValue.localId, streamValue.type, locOf(expr)));
     return this.stagedArgument(expr) ?? lowerExpr(this, expr);
   }
 
@@ -12827,6 +12850,25 @@ export class Lowerer {
     );
   }
 
+  /** withExpressionOverride for several nodes at once. */
+  withExpressionOverrides<T>(
+    overrides: readonly { node: ts.Expression; value: IrExpr }[],
+    lower: () => T,
+  ): T {
+    const previous = overrides.map((override) => this.chainRecvByNode.get(override.node));
+    for (const override of overrides) this.chainRecvByNode.set(override.node, override.value);
+    try {
+      return lower();
+    } finally {
+      for (let i = overrides.length - 1; i >= 0; i--) {
+        const node = overrides[i]!.node;
+        const value = previous[i];
+        if (value) this.chainRecvByNode.set(node, value);
+        else this.chainRecvByNode.delete(node);
+      }
+    }
+  }
+
   withExpressionOverride<T>(node: ts.Expression, value: IrExpr, lower: () => T): T {
     const previous = this.chainRecvByNode.get(node);
     this.chainRecvByNode.set(node, value);
@@ -12846,6 +12888,7 @@ export class Lowerer {
     if (webAssembly !== null) return webAssembly;
     refuseWebAssemblyUse(this, expr.expression);
     return (
+      lowerErrorFunctionCall(this, expr) ??
       lowerLifetimeRegionCall(this, expr) ??
       lowerInternTableCall(this, expr) ??
       lowerThreadSlotsCall(this, expr) ??
@@ -13478,6 +13521,10 @@ export class Lowerer {
     {
       const callable = this.lowerBuiltinCallableValue(bi, loc);
       if (callable) return callable;
+    }
+    // node:crypto's webcrypto is the WebCrypto global's object.
+    if (bi.module === "crypto" && bi.member === "webcrypto") {
+      return { kind: "libCall", fn: "webcrypto.object", args: [], type: DYN, loc };
     }
     // node:stream/web's exports are the web stream globals themselves: in
     // JavaScript sources the same identity token as the global spelling

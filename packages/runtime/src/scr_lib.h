@@ -366,6 +366,9 @@ typedef struct ScrBytes ScrBytes;
 ScrStr *scr_atomics_wait(ScrBytes *, double, double, double);
 double scr_atomics_notify(ScrBytes *, double, double);
 double scr_atomics_op(ScrBytes *, double, double, double, double);
+double scr_atomics_op_dyn(const ScrDyn *, double, double, double, double);
+ScrStr *scr_atomics_wait_dyn(const ScrDyn *, double, double, double);
+double scr_atomics_notify_dyn(const ScrDyn *, double, double);
 
 /* isatty(3) over an fd (0/1/2): a real boolean — false where Node's
  * non-TTY streams expose undefined (SEMANTICS.md). stdin_destroy is a

@@ -75,6 +75,8 @@ const DYN_ASYNC_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "child.propsInstall",
   "child.propsResolve",
   "crypto.native",
+  // The crypto global's object extends crypto.native's.
+  "webcrypto.object",
   "dyn.promiseAll",
   "dyn.promiseAllSettled",
   "dyn.promiseAny",
@@ -237,6 +239,7 @@ const STREAM_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.prop",
   "stream.stdioWritable",
   "stream.unboxDyn",
+  "stream.handleStream",
   "stream.unpipeDyn",
   "stream.workerStdio",
 ]);
@@ -647,8 +650,9 @@ const RUNTIME_FEATURE_RULES = {
   }),
   /** scr_cipher.c over the mbedTLS archive; DEP0182 reports through the
    * process-warning unit, and unknown output encodings render through the
-   * inspect unit. */
-  cipher: rule({ fns: ["crypto.cipherNew"] }),
+   * inspect unit. WebCrypto's encrypt and decrypt (scr_webcrypto_aes.c)
+   * link the same archive. */
+  cipher: rule({ fns: ["crypto.cipherNew", "webcrypto.encrypt", "webcrypto.decrypt"] }),
   copying: rule({
     expr: (node, _tables) =>
       (node.kind === "arrIntrinsic" && COPYING_ARR_METHODS.has(node.method)) ||
@@ -675,12 +679,15 @@ const RUNTIME_FEATURE_RULES = {
       ),
     // The legacy url functions, crypto.createCipheriv and
     // ecdh.setPublicKey emit their deprecation warnings through the
-    // dyn-async unit; scr_wasm.c boxes its handles and promises through it.
+    // dyn-async unit (WebCrypto's encrypt and decrypt link scr_cipher.c
+    // too); scr_wasm.c boxes its handles and promises through it.
     fns: [
       ...DYN_ASYNC_LIB_FNS,
       ...READABLE_DYN_ASYNC_LIB_FNS,
       ...LEGACY_URL_LIB_FNS,
       "crypto.cipherNew",
+      "webcrypto.encrypt",
+      "webcrypto.decrypt",
       "crypto.ecdhNew",
     ],
     prefixes: [...READABLE_DYN_ASYNC_PREFIXES, "wasm."],
@@ -787,6 +794,8 @@ const RUNTIME_FEATURE_RULES = {
       "global.native",
       "util.styleText",
       "crypto.cipherNew",
+      "webcrypto.encrypt",
+      "webcrypto.decrypt",
       "crypto.ecdhNew",
       "crypto.ecdhConvertKey",
       ...BUILTIN_CLASS_LIB_FNS,

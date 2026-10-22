@@ -128,6 +128,8 @@ export function emitFunction(emitter: LlEmitter, fn: IrFunction): string {
   emitter.stableCaptureIds =
     fn.captures !== undefined ? emitter.lazyCaptures.stableCaptures(fn.name) : new Set();
   emitter.integerLoopBindings.clear();
+  emitter.integerTemps.clear();
+  emitter.integerTempsEnabled = emitter.debug === null && !fn.async && !fn.generator;
   emitter.countedLoopsEnabled = emitter.debug === null && !fn.async && !fn.generator;
   emitter.speculativeLoopsEnabled = emitter.countedLoopsEnabled;
   emitter.speculativeFunction = fn.name;
@@ -228,6 +230,7 @@ export function emitFunction(emitter: LlEmitter, fn: IrFunction): string {
   emitter.integerLoopRanges = rangeFacts.loopRanges;
   emitter.int32Elements = slotFacts.elements ?? null;
   emitter.bytesBounds = findBytesBounds(numericFn, emitter.integerRanges);
+  emitter.bytesOwned = new Set();
   // Debug builds keep every number local a double for the debugger's
   // variable view. Lazily boxed captured parameters keep their double,
   // which the box is created from, and so do plain copies of a capture or

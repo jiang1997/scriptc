@@ -3057,8 +3057,10 @@ export function lowerFieldCompound(
  * returns the zero-capture closure over it. Typed sources use the mapped
  * `(value: string) => primitive` signature; a recognized JavaScript
  * concise-arrow selector (`() => String`, the picocolors fallback) takes
- * dyn so its ordinary coercion signature survives inference residue. The
- * dyn bodies run exact ToString/ToNumber/ToBoolean, including object hooks.
+ * dyn so its ordinary coercion signature survives inference residue, and a
+ * boxed constructor value takes dyn too (coerceToExpected). The dyn bodies
+ * run what the constructors do for any argument: String() (a symbol's
+ * description form included), ToNumber and ToBoolean, with object hooks.
  * Interning makes every reference under one ABI the SAME immortal closure,
  * so `opt.type === String` compares like JS function identity. */
 export function primitiveCtorClosure(
@@ -3081,7 +3083,7 @@ export function primitiveCtorClosure(
       ? name === "BigInt"
         ? { kind: "libCall", fn: "dyn.bigintConstructor", args: [v], type: BIGINT_T, loc }
         : name === "String"
-          ? { kind: "libCall", fn: "dyn.toStringCoerce", args: [v], type: STRING, loc }
+          ? { kind: "libCall", fn: "dyn.stringConstructor", args: [v], type: STRING, loc }
           : name === "Number"
             ? { kind: "libCall", fn: "dyn.numberConstructor", args: [v], type: F64, loc }
             : { kind: "dynTest", test: "truthy", value: v, type: BOOL, loc }

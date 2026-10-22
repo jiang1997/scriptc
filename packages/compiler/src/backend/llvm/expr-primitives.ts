@@ -59,7 +59,8 @@ export function emitLiteralExpr(
       throw new InternalCompilerError(`llvm emitter bug: bare unitLit '${e.unit}'`);
     case "varRef": {
       host.materializeSplitLocal(e.localId);
-      const integerSlot = host.integerLoopBindings.get(e.localId);
+      const integerSlot =
+        host.integerLoopBindings.get(e.localId) ?? host.integerTemps.get(e.localId);
       if (integerSlot !== undefined) {
         const integer = B.tmp();
         const number = B.tmp();

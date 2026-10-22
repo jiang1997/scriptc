@@ -406,3 +406,45 @@ test("large record clones stay outlined while small clones remain inlineable", (
   expect(large).toContain("define internal ptr @sc_rclone_large(ptr %src) #2");
   expect(large).toContain("attributes #2 = { noinline sanitize_address }");
 });
+
+test("Uint8ClampedArray stores clamp and round without a runtime call", () => {
+  const type = bytesOf("u8c");
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      {
+        name: "store",
+        params: [
+          { localId: "px", name: "px", type },
+          { localId: "v", name: "v", type: F64 },
+        ],
+        returnType: VOID,
+        locals: [
+          { id: "px", name: "px", type, mutable: false },
+          { id: "v", name: "v", type: F64, mutable: false },
+        ],
+        body: [
+          {
+            kind: "bytesSet",
+            arr: { kind: "varRef", localId: "px", type, loc },
+            index: { kind: "numLit", value: 0, type: F64, loc },
+            value: { kind: "varRef", localId: "v", type: F64, loc },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+  };
+  expect(validateModule(mod)).toEqual([]);
+  const body = /^define internal [^\n]*@sc_bf_store[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  expect(body).not.toContain("scr_bytes_to_u8_clamp");
+  expect(body).toMatch(/fcmp ogt double %\S+, 0\.0/);
+  expect(body).toMatch(/fcmp oge double %\S+, 255\.0/);
+  expect(body).toMatch(/fadd double %\S+, 0x4330000000000000/);
+  expect(body).toMatch(/fsub double %\S+, 0x4330000000000000/);
+  expect(body).toMatch(/store i8 [^\n]*, align 1/);
+});

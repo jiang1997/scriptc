@@ -176,6 +176,17 @@ export function emitBytesLength(
   return { name: out, type: F64 };
 }
 
+/** A view's shared backing (null for a buffer this thread owns). It is
+ * set at construction, before script code can see the view. */
+export function emitBytesSharedStorage(host: LlvmEmitterContext, receiver: string): string {
+  const B = host.B;
+  const slot = B.tmp(),
+    storage = B.tmp();
+  B.line(`${slot} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 9`);
+  B.line(`${storage} = load ptr, ptr ${slot}${bytesHeaderAlias(host)}`);
+  return storage;
+}
+
 /** Worker programs: an element of a view of a SharedArrayBuffer (`shared` is
  * fixed before script code can see the view) is read and written with one
  * relaxed atomic access of its width, as the runtime's shared accessors do;
@@ -186,12 +197,9 @@ export function emitBytesLength(
 function emitSharedBytesSplit(host: LlvmEmitterContext, receiver: string): string {
   const B = host.B;
   host.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
-  const slot = B.tmp(),
-    storage = B.tmp(),
+  const storage = emitBytesSharedStorage(host, receiver),
     isShared = B.tmp(),
     expected = B.tmp();
-  B.line(`${slot} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 9`);
-  B.line(`${storage} = load ptr, ptr ${slot}${bytesHeaderAlias(host)}`);
   B.line(`${isShared} = icmp ne ptr ${storage}, null`);
   B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${isShared}, i1 false)`);
   const shared = B.newLabel("bytes.shared"),
@@ -209,15 +217,17 @@ export function emitBytesGet(
   expr?: IrExpr,
   inBounds = false,
   invalidNaN = false,
+  owned = false,
 ): LlValue {
   const B = host.B;
   // Any invalid index traps (the array runtime's discipline).
-  if (!invalidNaN) return emitBytesLoad(host, elem, receiver, index, expr, inBounds, undefined);
+  if (!invalidNaN)
+    return emitBytesLoad(host, elem, receiver, index, expr, inBounds, undefined, owned);
   // The numeric view of an ordinary read: an invalid index never touches
   // storage and reads as NaN — ToNumber of Node's undefined.
   const invalid = B.newLabel("bytes.read.invalid");
   const done = B.newLabel("bytes.read.done");
-  const loaded = emitBytesLoad(host, elem, receiver, index, expr, inBounds, invalid);
+  const loaded = emitBytesLoad(host, elem, receiver, index, expr, inBounds, invalid, owned);
   const ok = B.newLabel("bytes.read.ok");
   B.br(ok);
   B.startBlock(ok);
@@ -260,8 +270,10 @@ function emitBytesLoad(
   expr: IrExpr | undefined,
   inBounds: boolean,
   invalid: string | undefined,
+  owned: boolean,
 ): LlValue {
-  if (host.mod.workers) {
+  // `owned`: an enclosing version guard proved the view thread-owned.
+  if (host.mod.workers && !owned) {
     const idx = emitBytesIndex(host, receiver, index, expr, invalid, inBounds);
     return emitSharedOrLocalLoad(host, elem, receiver, idx);
   }
@@ -515,13 +527,14 @@ export function emitBytesSet(
   indexExpr?: IrExpr,
   expr?: IrExpr,
   inBounds = false,
+  owned = false,
 ): void {
   const B = host.B;
   // Invalid integer-indexed writes are ignored after evaluating the RHS.
   const done = B.newLabel("bytes.store.done");
   const data = host.emitBytesData(receiver);
   const idx = emitBytesIndex(host, receiver, index, indexExpr, done, inBounds);
-  if (host.mod.workers && elem === "f16") {
+  if (host.mod.workers && !owned && elem === "f16") {
     host.declare(`declare void @scr_bytes_shared_set(ptr, ${host.sizeType}, double)`);
     const local = emitSharedBytesSplit(host, receiver);
     B.line(
@@ -532,10 +545,24 @@ export function emitBytesSet(
   }
   let stored: string | null;
   if (elem === "u8c") {
-    host.declare(`declare double @scr_bytes_to_u8_clamp(double)`);
-    const clamped = B.tmp();
+    // ToUint8Clamp, as scr_bytes_to_u8_clamp computes it: NaN and values
+    // at most 0 store 0, values at least 255 store 255, and values between
+    // round to the nearest integer, ties to even. Adding and subtracting
+    // 2^52 rounds a value in (0, 255) that way in the default rounding mode,
+    // with no call or branch, so loops of clamped stores can vectorize.
+    const positive = B.tmp(),
+      high = B.tmp(),
+      shifted = B.tmp(),
+      rounded = B.tmp(),
+      upper = B.tmp(),
+      clamped = B.tmp();
     stored = B.tmp();
-    B.line(`${clamped} = call double @scr_bytes_to_u8_clamp(double ${value.name})`);
+    B.line(`${positive} = fcmp ogt double ${value.name}, 0.0`);
+    B.line(`${high} = fcmp oge double ${value.name}, 255.0`);
+    B.line(`${shifted} = fadd double ${value.name}, 0x4330000000000000`);
+    B.line(`${rounded} = fsub double ${shifted}, 0x4330000000000000`);
+    B.line(`${upper} = select i1 ${high}, double 255.0, double ${rounded}`);
+    B.line(`${clamped} = select i1 ${positive}, double ${upper}, double 0.0`);
     B.line(`${stored} = fptoui double ${clamped} to i32`);
   } else
     stored =
@@ -572,7 +599,7 @@ export function emitBytesSet(
     ty = "i32";
     operand = stored!;
   }
-  if (host.mod.workers) {
+  if (host.mod.workers && !owned) {
     // A shared view's element takes a relaxed atomic store of its width.
     const local = emitSharedBytesSplit(host, receiver);
     const p = B.tmp();
@@ -721,6 +748,7 @@ export function emitBytesIntrinsic(
         e.args[0],
         host.bytesBounds.has(e),
         e.invalidNaN === true,
+        host.bytesOwned.has(e),
       );
     case "slice":
       return call(

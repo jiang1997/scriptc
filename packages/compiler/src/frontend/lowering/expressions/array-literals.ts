@@ -184,6 +184,21 @@ export function lowerArrayLiteral(
         if (arms.length === 1) mapped = arms[0]!;
       }
     }
+    // A NON-EMPTY literal whose own type is an array, under a union with
+    // exactly one array arm and no tuple arm (`[1, { n: true }]` in a
+    // `Json[]` arm of a recursive `Json`): the checker types each element
+    // from the arm, so its object literals lower as the arm's elements,
+    // and the literal's own element type (`number | { n: boolean }`)
+    // cannot hold them. Build it as the arm; its value only flows into the
+    // union slot.
+    if (ctxUnion && expr.elements.nodes.length > 0 && mapped?.kind === "array") {
+      const def = lowerer.unions.get(ctxUnion.unionId);
+      const arrayArms = def?.arms.filter((a) => a.kind === "array") ?? [];
+      const tupleArms =
+        def?.arms.filter((a) => a.kind === "record" && !!lowerer.shapes.get(a.shapeId)?.tuple) ??
+        [];
+      if (arrayArms.length === 1 && tupleArms.length === 0) mapped = arrayArms[0]!;
+    }
   }
   // A Date's toJSON() element keeps its null in a literal with no declared
   // destination: the lib types say string.

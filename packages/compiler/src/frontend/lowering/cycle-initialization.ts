@@ -463,16 +463,38 @@ export function checkCycleBindingAccesses(lowerer: Lowerer, mod: IrModule): void
 /** Writes to a binding declared without an initializer that run after its
  * declaration store into an initialized binding whose slot may still be
  * empty: the pointer guard must not refuse them. Writes that can run
- * earlier carry the flag check rewriteFunction inserted. */
+ * earlier carry the flag check rewriteFunction inserted. An assignment in
+ * expression position (`(f = v)`) becomes an initializing `assign` whose
+ * value a temp holds and yields. */
 function markUninitializedWrites(lowerer: Lowerer, mod: IrModule): void {
   const ids = new Set<string>();
   for (const [id, flag] of lowerer.cycleInitFlags) if (flag.uninitialized) ids.add(id);
   if (ids.size === 0) return;
   const mark = (s: IrStmt): IrStmt =>
     s.kind === "assign" && !s.initializes && ids.has(s.localId) ? { ...s, initializes: true } : s;
-  const rewriteExpr = (e: IrExpr): IrExpr => mapExprChildren(e, rewriteExpr, rewriteStmt);
-  const rewriteStmt = (s: IrStmt): IrStmt => mark(mapStmtChildren(s, rewriteExpr, rewriteStmt));
-  for (const fn of mod.functions) fn.body = fn.body.map(rewriteStmt);
+  for (const fn of mod.functions) {
+    let temps = 0;
+    const markExpr = (e: IrExpr): IrExpr => {
+      if (e.kind !== "assignExpr" || !ids.has(e.localId)) return e;
+      const t = `%uninitWrite.${temps++}`;
+      fn.locals.push({ id: t, name: "%uninitWrite", type: e.value.type, mutable: false });
+      const value: IrExpr = { kind: "varRef", localId: t, type: e.value.type, loc: e.loc };
+      return {
+        kind: "seqExpr",
+        stmts: [
+          { kind: "varDecl", localId: t, init: e.value, loc: e.loc },
+          { kind: "assign", localId: e.localId, value, initializes: true, loc: e.loc },
+        ],
+        result: value,
+        type: e.type,
+        loc: e.loc,
+      };
+    };
+    const rewriteExpr = (e: IrExpr): IrExpr =>
+      markExpr(mapExprChildren(e, rewriteExpr, rewriteStmt));
+    const rewriteStmt = (s: IrStmt): IrStmt => mark(mapStmtChildren(s, rewriteExpr, rewriteStmt));
+    fn.body = fn.body.map(rewriteStmt);
+  }
 }
 
 function rewriteFunction(

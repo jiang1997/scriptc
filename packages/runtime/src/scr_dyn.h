@@ -662,6 +662,40 @@ bool scr_dyn_native_url_is(const ScrDyn *value);
 ScrDyn *scr_dyn_native_search_params(ScrSearchParams *value);
 bool scr_dyn_native_search_params_is(const ScrDyn *value);
 bool scr_dyn_native_date_is(const ScrDyn *value);
+/* Instances of program classes declared `extends Date` (scr_lib.c). */
+void scr_date_class_operation_install(ScrDyn *time, ScrDyn *methods);
+/* Set by scr_date_class_operation_install; NULL in a program without such
+ * a class, where every wrapper below answers false or NULL. */
+typedef struct {
+  bool (*time)(const ScrDyn *value, double *time);
+  ScrDyn *(*to_json)(const ScrDyn *value, const ScrDyn *key);
+  ScrDyn *(*to_string)(const ScrDyn *value);
+  ScrDyn *(*value_of)(const ScrDyn *value);
+  ScrStr *(*name)(const ScrDyn *value);
+  ScrDyn *(*method)(const ScrDyn *value, const char *key, size_t key_len);
+} ScrDateClassHooks;
+extern const ScrDateClassHooks *scr_date_class_hooks;
+static inline bool scr_dyn_date_class_time(const ScrDyn *value, double *time) {
+  return scr_date_class_hooks && scr_date_class_hooks->time(value, time);
+}
+static inline ScrDyn *scr_dyn_date_class_to_json(const ScrDyn *value, const ScrDyn *key) {
+  return scr_date_class_hooks->to_json(value, key);
+}
+static inline ScrDyn *scr_dyn_date_class_to_string(const ScrDyn *value) {
+  return scr_date_class_hooks->to_string(value);
+}
+static inline ScrDyn *scr_dyn_date_class_value_of(const ScrDyn *value) {
+  return scr_date_class_hooks->value_of(value);
+}
+static inline ScrStr *scr_dyn_date_class_name(const ScrDyn *value) {
+  return scr_date_class_hooks ? scr_date_class_hooks->name(value) : NULL;
+}
+static inline ScrDyn *scr_dyn_date_class_method(const ScrDyn *value, const char *key, size_t key_len) {
+  return scr_date_class_hooks ? scr_date_class_hooks->method(value, key, key_len) : NULL;
+}
+bool scr_dyn_date_instance_is(const ScrDyn *value);
+ScrDyn *scr_dyn_date_class_member(const ScrDyn *d, const char *key, size_t key_len);
+double scr_dyn_date_arguments_time(const ScrDyn *arguments);
 ScrDyn *scr_dyn_native_date_new(const ScrDyn *arguments);
 ScrDyn *scr_dyn_native_date_new_fields(const ScrDyn *arguments);
 ScrDyn *scr_dyn_native_date_new_value(const ScrDyn *arguments);
@@ -1048,6 +1082,10 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc);
  * prototype chain has no toString (Node's answer). */
 ScrStr *scr_dyn_to_string_method(const ScrDyn *d, const ScrStr *enc, const ScrStr *what);
 ScrDyn *scr_dyn_object_prototype(void);
+ScrDyn *scr_dyn_error_prototype(void);
+bool scr_dyn_inherits_error_prototype(const ScrDyn *value);
+ScrDyn *scr_dyn_error_capture_stack_trace(ScrDyn *target);
+ScrDyn *scr_dyn_error_capture_stack_trace_function(void);
 ScrDyn *scr_dyn_function_apply(void);
 ScrDyn *scr_dyn_reflect_apply(ScrDyn *target, ScrDyn *receiver, ScrDyn *arguments_list);
 ScrDyn *scr_dyn_apply_array_like(const ScrDyn *target, const ScrDyn *receiver, const ScrDyn *arguments, const char *what);
@@ -1388,7 +1426,36 @@ typedef struct ScrDynHandleOps {
   /* Cross-thread structured clone (postMessage, workerData); NULL =
    * DataCloneError. See ScrDynHandleTransfer. */
   const struct ScrDynHandleTransfer *transfer;
+  /* A handle that is also a Node Transform (Cipheriv, Decipheriv): the
+   * stream unit builds the handle's Transform from these operations on its
+   * first stream use. NULL = the class is not a stream. */
+  const struct ScrDynHandleTransform *transform;
 } ScrDynHandleOps;
+
+/* The operations a Transform handle gives the stream unit (scr_stream.c):
+ * the slot where the handle keeps its stream (+1) with the stream's
+ * release, update() and final() over bytes (+1 Buffer, or NULL with the
+ * exception pending), and the handle's collector trace, since the
+ * stream's steps hold the handle. */
+typedef struct ScrDynHandleTransform {
+  void *(*stream)(void *h);
+  void (*set_stream)(void *h, void *stream, void (*release)(void *));
+  struct ScrBytes *(*update)(void *h, struct ScrBytes *chunk);
+  struct ScrBytes *(*final)(void *h);
+  ScrTraceFn trace;
+} ScrDynHandleTransform;
+
+/* Checked-dynamic member calls and property reads on a Transform handle,
+ * installed by the stream unit (scr_stream_install); NULL in a program
+ * without it. call answers true with *result set (+1, or NULL with the
+ * exception pending) for the members a native stream answers, and get
+ * answers a stream property (+1), or NULL for other keys. */
+typedef struct ScrHandleStreamHooks {
+  bool (*call)(const ScrDynHandleOps *ops, void *h, ScrDyn *self, const char *method,
+               ScrDyn *const *args, size_t argc, ScrDyn **result);
+  ScrDyn *(*get)(const ScrDynHandleOps *ops, void *h, const char *key, size_t key_len);
+} ScrHandleStreamHooks;
+extern SCR_TL const ScrHandleStreamHooks *scr_handle_stream_hooks;
 
 /* How a handle crosses threads, supplied by the handle's owning unit so the
  * message encoder (scr_message.c) needs no reference to gated units and no

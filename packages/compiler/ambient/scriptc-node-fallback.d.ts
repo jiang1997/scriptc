@@ -544,12 +544,15 @@ declare var DOMException: {
   readonly prototype: DOMException;
 };
 
-/* WebCrypto's HMAC slice (scr_webcrypto.c): crypto.subtle's importKey for
- * raw HMAC keys, HMAC sign/verify and the SHA-1/SHA-2 digests, typed as
+/* WebCrypto's secret-key slice (scr_webcrypto.c): crypto.subtle's
+ * importKey, generateKey and exportKey for HMAC and AES keys (importKey
+ * also for PBKDF2 and HKDF keys), AES-GCM/CBC/CTR encrypt and decrypt,
+ * PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign/verify and the SHA-1/SHA-2 digests, typed as
  * exactly that surface (the declarations mirror @types/node's webcrypto
- * shapes). Every other SubtleCrypto method and crypto member is absent,
- * so a use is an honest type error. CryptoKey values are native handles
- * whose four members read through the handle. */
+ * shapes), plus the global's randomUUID and getRandomValues. Every other
+ * SubtleCrypto method and crypto member is absent, so a use is an honest
+ * type error. CryptoKey values are native handles whose four members read
+ * through the handle. */
 declare var crypto: Crypto;
 /* The Crypto and SubtleCrypto constructors (feature probes only) stay
  * `unknown`; the values keep this declaration order. */
@@ -582,8 +585,43 @@ interface HmacImportParams extends Algorithm {
   hash: HashAlgorithmIdentifier;
   length?: number;
 }
+interface HmacKeyGenParams extends Algorithm {
+  hash: HashAlgorithmIdentifier;
+  length?: number;
+}
+interface AesKeyGenParams extends Algorithm {
+  length: number;
+}
+interface AesGcmParams extends Algorithm {
+  additionalData?: BufferSource;
+  iv: BufferSource;
+  tagLength?: number;
+}
+interface AesCbcParams extends Algorithm {
+  iv: BufferSource;
+}
+interface AesCtrParams extends Algorithm {
+  counter: BufferSource;
+  length: number;
+}
+interface Pbkdf2Params extends Algorithm {
+  hash: HashAlgorithmIdentifier;
+  iterations: number;
+  salt: BufferSource;
+}
+interface HkdfParams extends Algorithm {
+  hash: HashAlgorithmIdentifier;
+  info: BufferSource;
+  salt: BufferSource;
+}
+interface AesDerivedKeyParams extends Algorithm {
+  length: number;
+}
 interface KeyAlgorithm {
   name: string;
+}
+interface AesKeyAlgorithm extends KeyAlgorithm {
+  length: number;
 }
 interface HmacKeyAlgorithm extends KeyAlgorithm {
   hash: KeyAlgorithm;
@@ -623,10 +661,37 @@ interface JsonWebKey {
   x?: string;
   y?: string;
 }
-/* The 'jwk' form type-checks like @types/node's; the compiler refuses it
- * (the JsonWebKey import is not implemented). */
 interface SubtleCrypto {
+  decrypt(
+    algorithm: AesGcmParams | AesCbcParams | AesCtrParams,
+    key: CryptoKey,
+    data: BufferSource,
+  ): Promise<ArrayBuffer>;
+  deriveBits(
+    algorithm: Pbkdf2Params | HkdfParams,
+    baseKey: CryptoKey,
+    length?: number | null,
+  ): Promise<ArrayBuffer>;
+  deriveKey(
+    algorithm: Pbkdf2Params | HkdfParams,
+    baseKey: CryptoKey,
+    derivedKeyType: AlgorithmIdentifier | AesDerivedKeyParams | HmacImportParams,
+    extractable: boolean,
+    keyUsages: readonly KeyUsage[],
+  ): Promise<CryptoKey>;
   digest(algorithm: AlgorithmIdentifier, data: BufferSource): Promise<ArrayBuffer>;
+  encrypt(
+    algorithm: AesGcmParams | AesCbcParams | AesCtrParams,
+    key: CryptoKey,
+    data: BufferSource,
+  ): Promise<ArrayBuffer>;
+  exportKey(format: "jwk", key: CryptoKey): Promise<JsonWebKey>;
+  exportKey(format: Exclude<KeyFormat, "jwk">, key: CryptoKey): Promise<ArrayBuffer>;
+  generateKey(
+    algorithm: AesKeyGenParams | HmacKeyGenParams,
+    extractable: boolean,
+    keyUsages: readonly KeyUsage[],
+  ): Promise<CryptoKey>;
   importKey(
     format: "jwk",
     keyData: JsonWebKey,
@@ -651,6 +716,21 @@ interface SubtleCrypto {
 }
 interface Crypto {
   readonly subtle: SubtleCrypto;
+  getRandomValues<
+    T extends
+      | Int8Array
+      | Uint8Array
+      | Uint8ClampedArray
+      | Int16Array
+      | Uint16Array
+      | Int32Array
+      | Uint32Array
+      | BigInt64Array
+      | BigUint64Array,
+  >(
+    typedArray: T,
+  ): T;
+  randomUUID(): `${string}-${string}-${string}-${string}-${string}`;
 }
 
 /* Capability-gated globals harness code probes behind feature guards
@@ -2784,8 +2864,7 @@ declare module "crypto" {
     b: ArrayBufferView | ArrayBufferLike,
   ): boolean;
   /* WebCrypto's getRandomValues (also the webcrypto object's): integer
-   * typed arrays, filled in place and returned. The crypto GLOBAL stays
-   * unknown in fallback builds. */
+   * typed arrays, filled in place and returned. */
   type RandomValuesArray =
     | Int8Array
     | Uint8Array
@@ -2797,9 +2876,9 @@ declare module "crypto" {
     | BigInt64Array
     | BigUint64Array;
   export function getRandomValues<T extends RandomValuesArray>(typedArray: T): T;
-  export const webcrypto: {
-    getRandomValues<T extends RandomValuesArray>(typedArray: T): T;
-  };
+  /* The WebCrypto global's object and its SubtleCrypto. */
+  export const webcrypto: Crypto;
+  export const subtle: SubtleCrypto;
   export function randomFillSync<T extends ArrayBufferView | ArrayBufferLike>(
     buffer: T,
     offset?: number,
@@ -2852,7 +2931,8 @@ declare module "crypto" {
   ): void;
   export type BinaryLike = string | ArrayBuffer | ArrayBufferView;
   /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, and gcm modes and
-   * chacha20-poly1305. The stream.Transform members are not declared. */
+   * chacha20-poly1305. Both are Transforms: written chunks go through
+   * update(), and the end pushes final(). */
   export type CipherGCMTypes = "aes-128-gcm" | "aes-192-gcm" | "aes-256-gcm";
   export type CipherChaCha20Poly1305Types = "chacha20-poly1305";
   export type CipherKey = BinaryLike | KeyObject;
@@ -2862,7 +2942,7 @@ declare module "crypto" {
   export interface CipherChaCha20Poly1305Options {
     authTagLength?: number;
   }
-  export interface Cipheriv {
+  export interface Cipheriv extends Transform {
     update(data: string | ArrayBufferView): Buffer;
     update(data: string, inputEncoding: BufferEncoding): Buffer;
     update(data: ArrayBufferView, inputEncoding: undefined, outputEncoding: BufferEncoding): string;
@@ -2883,7 +2963,7 @@ declare module "crypto" {
     setAAD(buffer: ArrayBufferView, options?: { plaintextLength: number }): this;
     getAuthTag(): Buffer;
   }
-  export interface Decipheriv {
+  export interface Decipheriv extends Transform {
     update(data: ArrayBufferView): Buffer;
     update(data: string, inputEncoding: BufferEncoding): Buffer;
     update(data: ArrayBufferView, inputEncoding: undefined, outputEncoding: BufferEncoding): string;

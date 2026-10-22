@@ -160,6 +160,60 @@ function brandCall(
   return { kind: "call", callee: helper, args: [receiver, evaluation], type: resultType, loc };
 }
 
+/** The class whose body declares the private name `priv` (the nearest
+ * enclosing one, as JavaScript scoping resolves it), when it is a
+ * declaration-level class, or null. */
+export function privateNameClass(lowerer: Lowerer, priv: ts.PrivateIdentifier): ClassInfo | null {
+  for (let node: ts.Node | undefined = priv.parent; node; node = node.parent) {
+    if (!ts.isClassDeclaration(node) && !ts.isClassExpression(node)) continue;
+    const declares = node.members.nodes.some((member) => {
+      const name = (member as { name?: ts.PropertyName }).name;
+      return name !== undefined && ts.isPrivateIdentifier(name) && name.text === priv.text;
+    });
+    if (!declares) continue;
+    const symbol = node.name ? lowerer.checker.getSymbolAtLocation(node.name) : undefined;
+    const info =
+      lowerer.currentClass?.decl === node
+        ? lowerer.currentClass
+        : symbol
+          ? lowerer.classBySymbol.get(symbol)
+          : undefined;
+    if (!info || info.localClass || info.generic || info.genericInstance) return null;
+    return info;
+  }
+  return null;
+}
+
+/** `value.#x` on a checked-dynamic `value` in a declaration-level class
+ * `info`: the receiver as an instance of `info` when the value is one (an
+ * instance of the class or a subclass), else Node's TypeError for a missing
+ * private member (also for undefined and null). */
+export function checkedPrivateValue(
+  lowerer: Lowerer,
+  info: ClassInfo,
+  access: ts.PropertyAccessExpression,
+  receiver: IrExpr,
+  loc: SrcLoc,
+): IrExpr {
+  const use: BrandUse = isPrivateWriteTarget(access) ? "write" : "read";
+  const className = info.def.name;
+  const resultType: IrType = { kind: "object", className };
+  const helper = `${PREFIX}${use}:${className}:${access.name.text}`;
+  if (!lowerer.valueHelpers.has(helper)) {
+    lowerer.liftedFns.push({
+      name: helper,
+      params: [{ localId: "value.0", name: "value", type: DYN }],
+      returnType: resultType,
+      locals: [{ id: "value.0", name: "value", type: DYN, mutable: false }],
+      // finalizePrivateBrands fills the body.
+      body: [],
+      loc: helperLoc(loc),
+    });
+    lowerer.valueHelpers.set(helper, helper);
+  }
+  return { kind: "call", callee: helper, args: [receiver], type: resultType, loc };
+}
+
 /** A plain assignment, a destructuring target, or a for-in/of target writes
  * the field. Compound assignments and updates read it first, and Node
  * reports the failed read. */
@@ -203,7 +257,9 @@ export function finalizePrivateBrands(lowerer: Lowerer, functions: IrFunction[])
     const name = spec.slice(spec.lastIndexOf(":") + 1);
     const loc = fn.loc;
     const value = varRef("value.0", DYN, loc);
-    const evaluation = varRef("class.0", { kind: "classval", className }, loc);
+    // A declaration-level class has one brand: the helper takes no class.
+    const evaluation =
+      fn.params.length > 1 ? varRef("class.0", { kind: "classval", className }, loc) : null;
     const ownerType: IrType = { kind: "object", className };
     const body: IrStmt[] = [];
     let matches = 0;
@@ -218,21 +274,23 @@ export function finalizePrivateBrands(lowerer: Lowerer, functions: IrFunction[])
       const local = `receiver.${matches++}`;
       fn.locals.push({ id: local, name: "receiver", type: ownerType, mutable: false });
       const receiver = varRef(local, ownerType, loc);
-      const sameEvaluation: IrExpr = {
-        kind: "bin",
-        op: "===",
-        left: {
-          kind: "fieldGet",
-          obj: receiver,
-          className,
-          field: `%classEnvironment:${className}`,
-          type: evaluation.type,
-          loc,
-        },
-        right: evaluation,
-        type: BOOL,
-        loc,
-      };
+      const sameEvaluation: IrExpr = evaluation
+        ? {
+            kind: "bin",
+            op: "===",
+            left: {
+              kind: "fieldGet",
+              obj: receiver,
+              className,
+              field: `%classEnvironment:${className}`,
+              type: evaluation.type,
+              loc,
+            },
+            right: evaluation,
+            type: BOOL,
+            loc,
+          }
+        : { kind: "boolLit", value: true, type: BOOL, loc };
       const match = (typed: IrExpr): IrStmt[] => [
         { kind: "varDecl", localId: local, init: typed, loc },
         {

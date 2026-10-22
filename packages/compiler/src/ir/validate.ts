@@ -60,7 +60,7 @@ import { DYN_CLASS_PROPERTIES, callSiteReturnType, classValueConstructor } from 
 import { unionWideningTags } from "./analysis.js";
 import { alwaysReturns } from "./control-flow.js";
 import { dynamicOperationOf, functionTier } from "./tiers.js";
-import { LIB_FN_SIGS } from "./builtin-signatures.js";
+import { LIB_FN_SIGS, pipelinePumpedRuns } from "./builtin-signatures.js";
 
 /** The promisified crypto calls' value kinds besides checked-dynamic. */
 const CRYPTO_PROMISE_VALUES: Readonly<Record<string, "buffer" | "view" | "number" | "dyn">> = {
@@ -5614,23 +5614,34 @@ function validateFunction(
         e.fn === "stream.pipelineStagesDyn" ||
         e.fn === "sp.pipelineStages"
       ) {
-        // (n, at, k, flags, mask, s1..sn, stage1..stagek, (next, read,
-        // return)?, box?, (signal, abort)?[, cb]): flags bit 0 a source
-        // function, bits 1-2 the destination, bits 3/4/5 the groups.
-        const [n, at, k, flags] = e.args
+        // (n, k, positions, flags, mask, s1..sn, stage1..stagek,
+        // helpers..., box?, (signal, abort)?[, cb]): positions bit j marks
+        // stage j a function, flags bits 1-2 the destination, bit 5 the
+        // signal group; helpers are three per function run a stream
+        // follows.
+        const [n, k, positions, flags] = e.args
           .slice(0, 4)
           .map((a) => (a?.kind === "numLit" ? a.value : -1));
-        const source = (flags! & 1) !== 0;
+        const total = n! + k!;
         const destKind = (flags! >> 1) & 3;
-        const groups = (flags! & 8 ? 3 : 0) + (flags! & 16 ? 1 : 0) + (flags! & 32 ? 2 : 0);
+        let functions = 0;
+        for (let j = 0; j < total && j < 53; j++) {
+          if (Math.floor(positions! / 2 ** j) % 2 === 1) functions++;
+        }
+        const lastIsFunction = Math.floor(positions! / 2 ** (total - 1)) % 2 === 1;
+        const helperCount = 3 * pipelinePumpedRuns(total, positions!);
+        const groups = helperCount + (destKind === 2 ? 1 : 0) + (flags! & 32 ? 2 : 0);
         const cbArgs = e.fn === "sp.pipelineStages" ? 0 : 1;
         if (
           flags! < 0 ||
           n! < 0 ||
           k! < 1 ||
-          (source ? at !== 0 : at! < 1) ||
-          (destKind === 0 ? at! + 0 >= n! : at! !== n!) ||
-          n! + k! < 2 ||
+          positions! < 1 ||
+          total > 52 ||
+          positions! >= 2 ** total ||
+          functions !== k ||
+          (destKind === 2) !== lastIsFunction ||
+          total < 2 ||
           e.args.length !== 5 + n! + k! + groups + cbArgs
         ) {
           err(`libCall ${e.fn} count/arity mismatch`, e.loc);
@@ -5647,7 +5658,7 @@ function validateFunction(
             err(`libCall ${e.fn} stage function ${i} must be a func`, e.loc);
         }
         at2 += k!;
-        const helpers = (flags! & 8 ? 3 : 0) + (flags! & 16 ? 1 : 0);
+        const helpers = helperCount + (destKind === 2 ? 1 : 0);
         for (let i = at2; i < at2 + helpers; i++) {
           if (e.args[i]?.type.kind !== "func")
             err(`libCall ${e.fn} helper ${i} must be a func`, e.loc);

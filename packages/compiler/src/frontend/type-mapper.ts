@@ -147,6 +147,16 @@ export const WEBCRYPTO_DYN_TYPES: ReadonlySet<string> = new Set([
   "KeyAlgorithm",
   "HmacImportParams",
   "HmacKeyAlgorithm",
+  "HmacKeyGenParams",
+  "AesKeyGenParams",
+  "AesKeyAlgorithm",
+  "JsonWebKey",
+  "AesGcmParams",
+  "AesCbcParams",
+  "AesCtrParams",
+  "Pbkdf2Params",
+  "HkdfParams",
+  "AesDerivedKeyParams",
 ]);
 
 export const FETCH_AMBIENT_TYPES = [
@@ -394,7 +404,7 @@ export class ShapeRegistry {
   /** The shape id a back-reference to an in-progress type resolves to:
    * reuses the type's persistent recursive id or mints a PLACEHOLDER
    * entry (empty fields) the outer frame finalizes. `describe` names a new
-   * placeholder (recursiveTypeName). */
+   * placeholder (checkerTypeDescription). */
   recursiveRef(t: ts.Type, describe: () => string): string {
     let id = this.recIds.get(t);
     if (id === undefined) {
@@ -546,7 +556,7 @@ export class ShapeRegistry {
 }
 
 /** The id of a recursive placeholder described by `description`. Two
- * different types can still share a description (recursiveTypeName stops
+ * different types can still share a description (checkerTypeDescription stops
  * after a few levels of type arguments); the later one takes the first free
  * name with a numbered suffix. */
 function recursivePlaceholderName(
@@ -561,15 +571,16 @@ function recursivePlaceholderName(
   return name;
 }
 
-/** How many levels of type arguments recursiveTypeName describes. */
+/** How many levels of type arguments checkerTypeDescription describes. */
 const RECURSIVE_NAME_DEPTH = 3;
 
-/** A recursive checker type's description, which names its placeholder
- * whichever frame first reaches it: its printed form, the structural
- * position of its first declaration, and the same for its type arguments
- * (two instantiations print the same when their type arguments are type
- * parameters or classes of the same name from different declarations). */
-function recursiveTypeName(
+/** A checker type's description for names that must not depend on checker
+ * type ids (a recursive placeholder, a generic class instance keyed by a
+ * literal): its printed form, the structural position of its first
+ * declaration, and the same for its type arguments (two instantiations
+ * print the same when their type arguments are type parameters or classes
+ * of the same name from different declarations). */
+export function checkerTypeDescription(
   t: ts.Type,
   ctx: Pick<TypeMapperCtx, "checker" | "positionOf">,
   depth = 0,
@@ -591,7 +602,7 @@ function recursiveTypeName(
           ? ctx.checker.getTypeArguments(t)
           : [];
     if (typeArguments.length > 0)
-      description += `<${typeArguments.map((arg) => recursiveTypeName(arg, ctx, depth + 1)).join(",")}>`;
+      description += `<${typeArguments.map((arg) => checkerTypeDescription(arg, ctx, depth + 1)).join(",")}>`;
   }
   return description;
 }
@@ -625,7 +636,7 @@ export class UnionRegistry {
   /** The union id a back-reference to an in-progress union resolves to:
    * reuses the type's persistent recursive id or mints a PLACEHOLDER
    * entry (empty arms) the outer frame finalizes. `describe` names a new
-   * placeholder (recursiveTypeName). */
+   * placeholder (checkerTypeDescription). */
   recursiveRef(t: ts.Type, describe: () => string): string {
     let id = this.recIds.get(t);
     if (id === undefined) {
@@ -1172,6 +1183,12 @@ export interface TypeMapperCtx {
    * only the literal's objects, so it maps to the empty record (see the
    * empty object type rule in the object mapping). */
   emptyLiteralArm?: boolean;
+  /** The class value a generic factory's result type names when the factory
+   * returns one of its own local classes through a constructor type
+   * (`function struct<S>(v: S): Struct<S> { class Base {}; return Base as
+   * Struct<S>; }`), by the checker type: the declared result inside the
+   * instance being lowered, the instantiated result at its calls. */
+  localClassValue?: (type: ts.Type) => IrType | null;
   checker: ts.TypeChecker;
   /** The structural position of a declaration (structural-positions.ts),
    * which names recursive placeholders independently of where unrelated
@@ -1714,6 +1731,11 @@ export function mapType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral | ts.TypeFlags.TemplateLiteral))
       return STRING;
     if (flags & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) return BOOL;
+  }
+  const localValue = ctx.localClassValue?.(type);
+  if (localValue) {
+    contextResolutions++;
+    return localValue;
   }
   const topLevel = mapTypeDepth === 0;
   const typeId = (type as { id?: number }).id;
@@ -4715,7 +4737,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (unions.inProgress.has(widened)) {
       return {
         kind: "union",
-        unionId: unions.recursiveRef(widened, () => recursiveTypeName(widened, ctx)),
+        unionId: unions.recursiveRef(widened, () => checkerTypeDescription(widened, ctx)),
       };
     }
     unions.inProgress.add(widened);
@@ -7062,7 +7084,7 @@ function mapRecordType(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
   if (shapes.inProgress.has(widened)) {
     return {
       kind: "record",
-      shapeId: shapes.recursiveRef(widened, () => recursiveTypeName(widened, ctx)),
+      shapeId: shapes.recursiveRef(widened, () => checkerTypeDescription(widened, ctx)),
     };
   }
   shapes.inProgress.add(widened);

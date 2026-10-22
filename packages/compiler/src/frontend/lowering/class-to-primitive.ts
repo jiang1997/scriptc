@@ -1,10 +1,21 @@
 import { varRef } from "../../ir/build.js";
-import { BOOL, DYN, F64, STRING, type IrExpr, type IrStmt, type IrType } from "../../ir/ir.js";
+import {
+  BOOL,
+  DATE_T,
+  DYN,
+  F64,
+  STRING,
+  type IrExpr,
+  type IrStmt,
+  type IrType,
+} from "../../ir/ir.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { accessorCall, findMethodOn, type ClassInfo } from "./lower-classes.js";
 import { isClassCallback } from "./class-callbacks.js";
 import { isSafeToRepeat } from "./expressions/evaluation-safety.js";
+import { DATE_TIME_FIELD, dateRootOf } from "./builtins/date-classes.js";
+import { dateValueMethod } from "./builtins/dates.js";
 
 /** The ToPrimitive hint of a conversion: `String(x)` and template literals
  * take "string", `+` "default", `Number(x)` "number". */
@@ -13,9 +24,12 @@ export type StringConversionHint = "string" | "default";
 
 type ConversionMethod = "sym:toPrimitive" | "valueOf" | "toString";
 
-/** How an instance of one class converts: through one of its methods, or
- * through Object.prototype.toString ("[object Object]"). */
-type Plan = { method: ConversionMethod; ret: IrType } | { method: null };
+/** How an instance of one class converts: through one of its methods,
+ * through the Date.prototype method `date` of a class declared `extends
+ * Date`, or through Object.prototype.toString ("[object Object]"). */
+type Plan =
+  | { method: ConversionMethod; ret: IrType }
+  | { method: null; date?: "toString" | "valueOf" };
 
 const PRIMITIVE_KINDS = new Set(["f64", "string", "bool", "bigint", "undefinedT", "nullT"]);
 
@@ -138,6 +152,18 @@ function classConversion(
   }
   const convert = (cls: ClassInfo, object: IrExpr): IrExpr => {
     const plan = plans.get(cls)!;
+    if (plan.method === null && plan.date) {
+      const root = dateRootOf(cls)!;
+      const time: IrExpr = {
+        kind: "fieldGet",
+        obj: lowerer.upcastTo(object, root.def.name),
+        className: root.def.name,
+        field: DATE_TIME_FIELD,
+        type: DATE_T,
+        loc,
+      };
+      return finish(dateValueMethod(plan.date, time, loc)!);
+    }
     if (plan.method === null)
       return finish({ kind: "strLit", value: "[object Object]", type: STRING, loc });
     const args: IrExpr[] =
@@ -202,7 +228,10 @@ function depth(info: ClassInfo): number {
 }
 
 function samePlan(a: Plan, b: Plan): boolean {
-  return a.method === b.method;
+  return (
+    a.method === b.method &&
+    (a.method !== null || b.method !== null || a.date === (b as { date?: string }).date)
+  );
 }
 
 /** A conversion method the class declares or inherits (a field of that
@@ -227,11 +256,17 @@ function planOf(lowerer: Lowerer, info: ClassInfo, hint: ConversionHint, node: t
   // OrdinaryToPrimitive: "string" tries toString first, which every object
   // has (Object.prototype.toString answers a string); "default" and
   // "number" try valueOf first, whose Object.prototype version answers the
-  // object itself.
-  const order: ConversionMethod[] = hint === "string" ? ["toString"] : ["valueOf", "toString"];
+  // object itself. Date.prototype[Symbol.toPrimitive] takes "default" as
+  // "string", and Date.prototype answers both methods with primitives.
+  const date = dateRootOf(info) !== null;
+  const order: ConversionMethod[] =
+    hint === "string" || (date && hint === "default") ? ["toString"] : ["valueOf", "toString"];
   for (const method of order) {
     const found = declared(lowerer, info, method);
-    if (!found) continue;
+    if (!found) {
+      if (date && method !== "sym:toPrimitive") return { method: null, date: method };
+      continue;
+    }
     if (!primitive(lowerer, found.ret))
       refuse(lowerer, node, info, `a '${method}' method that can return an object`);
     return { method, ret: found.ret };

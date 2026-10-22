@@ -93,23 +93,19 @@ void inspectReadableStream;
 import { callbackify } from "node:util";
 const callbackified = callbackify(async (n: number) => n);
 void callbackified;
-/* Cipheriv values support update(), final(), setAAD(), setAutoPadding(),
- * getAuthTag(), and setAuthTag(); the stream.Transform members are fenced. */
-const cipherStream = createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
-cipherStream.on("data", () => {});
 /* ECDH on a curve Node knows but the runtime does not implement, and
  * computeSecret(view, encoding), which answers a Buffer where @types/node
  * declares a string. */
 import { createECDH } from "node:crypto";
 createECDH("sect163k1");
 createECDH("prime256v1").computeSecret(Buffer.alloc(65), "hex");
-/* WebCrypto beyond the HMAC slice: @types/node declares the whole
- * SubtleCrypto surface, and the methods outside importKey, sign, verify
- * and digest fence by name. */
-async function encryptWithWebCrypto(key: import("node:crypto").webcrypto.CryptoKey): Promise<void> {
-  await crypto.subtle.encrypt({ name: "AES-GCM", iv: new Uint8Array(12) }, key, new Uint8Array(1));
+/* WebCrypto beyond the secret-key slice: @types/node declares the whole
+ * SubtleCrypto surface, and the methods outside the slice, such as
+ * wrapKey, fence by name. */
+async function wrapWithWebCrypto(key: import("node:crypto").webcrypto.CryptoKey): Promise<void> {
+  await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
 }
-void encryptWithWebCrypto;
+void wrapWithWebCrypto;
 /* Node's navigator global: typeof navigator and navigator.userAgent
  * compile; the other members fence by name. */
 const cores = navigator.hardwareConcurrency;

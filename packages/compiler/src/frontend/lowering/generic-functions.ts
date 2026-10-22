@@ -131,6 +131,10 @@ export interface GenericInstance {
   tsBindings?: Map<ts.Symbol, ts.Type>;
   /** Rendered type arguments ("<number, string>") for diagnostics. */
   typeArgsText: string;
+  /** A factory returning one of its local classes through a declared
+   * constructor type: that type (by id) and the class value it maps to
+   * while the body lowers (Lowerer.instanceResultClass). */
+  resultClass?: { declared: number; value: IrType };
   /** Implicit instances only: param symbol → the call site's (widened)
    * checker type, consulted by the Lowerer's typeOf while this instance's
    * body lowers (the implicit twin of `bindings`). */
@@ -473,7 +477,8 @@ function localClassResultInstance(
   params: ParamShape[],
   retTs: ts.Type,
 ): GenericInstance | null {
-  if (!localClassOfResult(lowerer, info, retTs)) return null;
+  const resultClass = localClassOfResult(lowerer, info, retTs);
+  if (!resultClass) return null;
   const tsBindings = new Map<ts.Symbol, ts.Type>();
   const bindings = lowerer.inferTypeParamBindings(expr, info, rsig, tsBindings);
   const bindingKey = info.typeParams
@@ -488,12 +493,37 @@ function localClassResultInstance(
     tsBindings,
   });
   if (inst.returnType !== pending) return inst;
-  const returnType = withInstanceScope(lowerer, info, inst, () => lowerer.mapTypeOf(retTs));
+  // A result typed by a declared constructor type rather than the class
+  // (`Struct<S>`) is the class value of the local class the body returns.
+  const declaredResult = info.decl.type
+    ? lowerer.checker.getTypeFromTypeNode(info.decl.type)
+    : undefined;
+  const viaConstructorType = retTs.getSymbol()?.valueDeclaration !== resultClass;
+  const returnType = withInstanceScope(lowerer, info, inst, () => {
+    if (!viaConstructorType) return lowerer.mapTypeOf(retTs);
+    // The local class's own constructor type: a class expression's type is
+    // its constructor type, named or not (`return class { ... } as Struct<S>`).
+    const classSymbol =
+      !ts.isClassExpression(resultClass) && resultClass.name
+        ? lowerer.checker.getSymbolAtLocation(resultClass.name)
+        : undefined;
+    const classType = ts.isClassExpression(resultClass)
+      ? lowerer.checker.getTypeAtLocation(resultClass)
+      : classSymbol
+        ? lowerer.checker.getTypeOfSymbol(classSymbol)
+        : undefined;
+    return classType ? lowerer.mapTypeOf(classType) : null;
+  });
   if (!returnType) {
     fenceGenericSignatureResult(lowerer, expr, retTs);
     lowerer.badType(expr, retTs);
   }
   inst.returnType = returnType;
+  if (viaConstructorType && returnType.kind === "classval") {
+    if (declaredResult) inst.resultClass = { declared: declaredResult.id, value: returnType };
+    if (lowerer.typeParamBindings === null) lowerer.localClassValueTypes.set(retTs.id, returnType);
+    return inst;
+  }
   // Values of the class outside the factory (`const b = new B()`, `b.read()`)
   // carry the instantiated checker type; record which class it names. A
   // call inside another generic instance can have a type that depends on
@@ -568,12 +598,102 @@ function localClassOfResult(
   type: ts.Type,
 ): ts.ClassLikeDeclaration | null {
   const symbol = type.getSymbol();
-  if (!symbol || !(symbol.flags & ts.SymbolFlags.Class)) return null;
-  const decl = symbol.valueDeclaration;
-  if (!decl || !(ts.isClassExpression(decl) || ts.isClassDeclaration(decl))) return null;
-  for (let parent = decl.parent; parent && !ts.isSourceFile(parent); parent = parent.parent)
-    if (parent === info.decl) return decl;
-  return null;
+  const decl = symbol && symbol.flags & ts.SymbolFlags.Class ? symbol.valueDeclaration : undefined;
+  if (decl && (ts.isClassExpression(decl) || ts.isClassDeclaration(decl)))
+    return declaredInside(decl, info.decl) ? decl : null;
+  // A result typed by a constructor type (`Struct<S>`, `new () => S`) whose
+  // every return gives back the one local class, through parentheses and
+  // assertions (`return Base as Struct<S>`).
+  // A mixin (a class extending one of the function's parameters) keeps the
+  // mixin instantiation, which keys on the argument class.
+  if (lowerer.checker.getConstructSignatures(type).length === 0) return null;
+  const returned = returnedLocalClass(lowerer, info);
+  return returned && !extendsParameter(lowerer, returned, info) ? returned : null;
+}
+
+function extendsParameter(
+  lowerer: Lowerer,
+  decl: ts.ClassLikeDeclaration,
+  info: GenericFnInfo,
+): boolean {
+  const params = new Set<ts.Symbol>();
+  const fn = info.decl as { parameters?: { nodes: readonly ts.ParameterDeclaration[] } };
+  for (const param of fn.parameters?.nodes ?? []) {
+    const symbol = ts.isIdentifier(param.name)
+      ? lowerer.checker.getSymbolAtLocation(param.name)
+      : undefined;
+    if (symbol !== undefined) params.add(symbol);
+  }
+  for (const clause of decl.heritageClauses?.nodes ?? [])
+    for (const base of clause.types.nodes) {
+      const symbol = ts.isIdentifier(base.expression)
+        ? lowerer.checker.getSymbolAtLocation(base.expression)
+        : undefined;
+      if (symbol !== undefined && params.has(symbol)) return true;
+    }
+  return false;
+}
+
+function declaredInside(node: ts.Node, owner: ts.Node): boolean {
+  for (let parent = node.parent; parent && !ts.isSourceFile(parent); parent = parent.parent)
+    if (parent === owner) return true;
+  return false;
+}
+
+/** The local class every return of `info`'s body gives back, or null when a
+ * return gives anything else (or nothing). Nested functions and classes keep
+ * their own returns. */
+function returnedLocalClass(lowerer: Lowerer, info: GenericFnInfo): ts.ClassLikeDeclaration | null {
+  const fn = info.decl as ts.Node & { body?: ts.Node };
+  const body = fn.body;
+  if (!body) return null;
+  const classOf = (node: ts.Expression): ts.ClassLikeDeclaration | null => {
+    let expr = node;
+    while (
+      ts.isParenthesizedExpression(expr) ||
+      ts.isAsExpression(expr) ||
+      ts.isSatisfiesExpression(expr) ||
+      ts.isNonNullExpression(expr)
+    )
+      expr = expr.expression;
+    if (ts.isClassExpression(expr)) return declaredInside(expr, info.decl) ? expr : null;
+    if (!ts.isIdentifier(expr)) return null;
+    const declaration = lowerer.checker.getSymbolAtLocation(expr)?.valueDeclaration;
+    if (!declaration || !declaredInside(declaration, info.decl)) return null;
+    if (ts.isClassDeclaration(declaration)) return declaration;
+    // A `const` bound to a class expression (`const C = class { ... }; return C`).
+    if (
+      ts.isVariableDeclaration(declaration) &&
+      ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const &&
+      declaration.initializer
+    ) {
+      let init: ts.Expression = declaration.initializer;
+      while (ts.isParenthesizedExpression(init)) init = init.expression;
+      if (ts.isClassExpression(init)) return init;
+    }
+    return null;
+  };
+  if (!ts.isBlock(body)) return classOf(body as ts.Expression);
+  let found: ts.ClassLikeDeclaration | null = null;
+  let valid = true;
+  const visit = (node: ts.Node): void => {
+    if (
+      !valid ||
+      ts.isFunctionLike(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    )
+      return;
+    if (ts.isReturnStatement(node)) {
+      const returned = node.expression ? classOf(node.expression) : null;
+      if (!returned || (found !== null && found !== returned)) valid = false;
+      else found = returned;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(body, visit);
+  return valid ? found : null;
 }
 
 /** Runs `fn` under an instance's type bindings and local-class names, as
@@ -588,14 +708,17 @@ function withInstanceScope<T>(
   const prevTsBindings = lowerer.typeParamTsBindings;
   const previousPath = lowerer.genericInstantiationPath;
   const prevContext = lowerer.instantiationContext;
+  const prevResultClass = lowerer.instanceResultClass;
   lowerer.typeParamBindings = inst.bindings;
   lowerer.typeParamTsBindings = inst.tsBindings ?? null;
   lowerer.genericInstantiationPath = inst.path;
   lowerer.instantiationContext = `instantiating '${info.baseName}' with ${inst.typeArgsText}`;
+  lowerer.instanceResultClass = inst.resultClass ?? null;
   lowerer.localClassInstantiations.push({ owner: info.decl, name: inst.name });
   try {
     return fn();
   } finally {
+    lowerer.instanceResultClass = prevResultClass;
     lowerer.localClassInstantiations.pop();
     lowerer.typeParamBindings = prevBindings;
     lowerer.typeParamTsBindings = prevTsBindings;

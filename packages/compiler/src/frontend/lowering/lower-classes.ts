@@ -1,3 +1,11 @@
+import {
+  DATE_TIME_FIELD,
+  dateRootOf,
+  dateSuperCall,
+  isDatePrototypeMethod,
+  lowerDateSuperMethodCall,
+} from "./builtins/date-classes.js";
+import { lowerDateStaticCall } from "./builtins/dates.js";
 import { keyedHelperName } from "./stable-names.js";
 import { lowerValueReturningConstructorNew } from "./js-dynamic-objects.js";
 import { adaptPromiseExecutor } from "./promise-executor-adapter.js";
@@ -85,6 +93,7 @@ import {
 } from "./call-signatures.js";
 import { omittedArgFor } from "./call-arguments.js";
 import {
+  checkerTypeDescription,
   isGenericCallableMemberType,
   jsOpenObjectType,
   typeKey,
@@ -565,6 +574,11 @@ export interface ClassInfo {
    * lower-event-target.ts over any class rooted here. Subclass structs
    * embed the runtime prefix. */
   builtinEventTarget?: "target" | "event";
+  /** A class declared `extends Date` (builtins/date-classes.ts): its first
+   * field is the hidden `%time` value, super() sets it with the Date
+   * constructor's rules, and the Date methods it does not declare lower
+   * over that value. Subclasses inherit the field. */
+  extendsDate?: true;
   /** The synthetic LifetimeRegion class (@scriptc/experimental,
    * lifetime-regions.ts): its constructor is synthesized with the class,
    * and its methods lower at their call sites. */
@@ -1952,6 +1966,7 @@ export function collectClassShapeInner(
         : (computedBase?.classInfo ?? null);
     let genericBase: ts.ExpressionWithTypeArguments | undefined;
     let callableBase: ClassInfo["callableBase"];
+    let extendsDate = false;
     let factoryBaseExpression: ts.Expression | undefined;
     const adoptCallableBase = (expression: ts.Expression): boolean => {
       if (familyMode || inst || mixin) return false;
@@ -2151,6 +2166,11 @@ export function collectClassShapeInner(
       if (!t || !ts.isIdentifier(t.expression)) {
         if (t && adoptCallableBase(t.expression)) continue;
         lowerer.unsupported("SC1090", clause, "extending computed expressions");
+      }
+      if (!familyMode && !inst && !mixin && lowerer.isStdlibGlobal(t.expression, "Date")) {
+        if (t.typeArguments?.nodes) lowerer.unsupported("SC1090", t, "extending generic classes");
+        extendsDate = true;
+        continue;
       }
       const symbol = lowerer.resolveValueSymbol(t.expression);
       // Extending a REBINDABLE decorated class (analysis already ran —
@@ -2405,7 +2425,8 @@ export function collectClassShapeInner(
     for (const member of decl.members.nodes) {
       if (
         (functionLocalClass(decl) || checkedStatics) &&
-        isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
+        (isJsSourceFile(ts.getSourceFileOfNode(decl)) ||
+          (functionLocalClass(decl) && ts.isMethodDeclaration(member))) &&
         (ts.isClassStaticBlockDeclaration(member) ||
           ts
             .getModifiers(member)
@@ -4351,7 +4372,8 @@ export function collectClassShapeInner(
     const ctorParams: ParamShape[] =
       ctor && !mixinForwarding
         ? lowerer.paramShapes(ctor.parameters.nodes)
-        : (base?.ctorParams ?? (callableBase ? [{ type: DYN, mode: "dynRest" }] : []));
+        : (base?.ctorParams ??
+          (callableBase || extendsDate ? [{ type: DYN, mode: "dynRest" }] : []));
     if (
       ctor &&
       !mixinForwarding &&
@@ -4389,6 +4411,7 @@ export function collectClassShapeInner(
         // Redeclared INHERITED fields contribute no slot (their
         // initializers assign the prefix slot).
         fields: [
+          ...(extendsDate ? [{ name: DATE_TIME_FIELD, type: DATE_T }] : []),
           ...(base?.def.fields ?? []),
           ...fieldOrder
             .filter((f) => f.redeclared !== true)
@@ -4420,6 +4443,7 @@ export function collectClassShapeInner(
       base,
       ...(genericBase ? { genericBase } : {}),
       ...(callableBase ? { callableBase } : {}),
+      ...(extendsDate ? { extendsDate: true as const } : {}),
       ...(factoryBaseExpression ? { factoryBaseExpression } : {}),
       subclasses: [],
       throwingSetters,
@@ -4664,7 +4688,25 @@ export function genericClassInstanceType(
     );
   }
   const ordinal = gci.instances.size;
-  const name = keyedHelperName(lowerer, `${gci.family.def.name}%`, key, "");
+  // The name does not take the checker type ids of the key: a literal
+  // argument is named by its text, another checker type by its
+  // description. Two keys that still describe alike number the later one.
+  const nameKey =
+    mapped.map(typeKey).join(",") +
+    (gci.literalSensitive.size > 0
+      ? `@${gci.typeParams
+          .map((_, i) =>
+            sensitive(i)
+              ? (literalText(i) ?? checkerTypeDescription(tsArgs[i]!, lowerer.typeCtx))
+              : "*",
+          )
+          .join(",")}`
+      : "");
+  const prefix = `${gci.family.def.name}%`;
+  const taken = new Set([...gci.instances.values()].map((instance) => instance.name));
+  let name = keyedHelperName(lowerer, prefix, nameKey, "");
+  for (let n = 1; taken.has(name); n++)
+    name = keyedHelperName(lowerer, prefix, `${nameKey}#${n}`, "");
   const entry: { name: string; info: ClassInfo | null; poisoned?: boolean } = { name, info: null };
   gci.instances.set(key, entry);
   const bindings = new Map<ts.Symbol, IrType>();
@@ -5648,6 +5690,15 @@ export function lowerStaticFieldRead(
   if (info.classDecorators?.valueGlobalId !== undefined) return null;
   const loc = locOf(expr);
   const found = findStaticOn(lowerer, info, expr.name.text);
+  // A Date static read as a value through a class declared `extends Date`:
+  // the statics lower only as calls.
+  if (
+    !found &&
+    dateRootOf(info) &&
+    ["now", "parse", "UTC"].includes(expr.name.text) &&
+    !(ts.isCallExpression(expr.parent) && expr.parent.expression === expr)
+  )
+    lowerer.noLowering(`Date.${expr.name.text} read through a class that extends Date`, expr);
   if (hasRuntimeStatics(info) && !found?.field)
     return {
       kind: "dynKeyGet",
@@ -5873,9 +5924,10 @@ export function lowerClassExpressionInfo(
           decoratorNodesOf(member).length ||
           (!isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
             (ts.isClassStaticBlockDeclaration(member) ||
-              ts
-                .getModifiers(member)
-                ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword))) ||
+              (!ts.isMethodDeclaration(member) &&
+                ts
+                  .getModifiers(member)
+                  ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)))) ||
           (ts.isMethodDeclaration(member) && member.typeParameters?.nodes.length),
       ))
   ) {
@@ -6141,13 +6193,55 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
       loc,
     });
   }
-  return info.localClass
-    ? initializeRuntimeStatics(
-        lowerer,
-        info,
-        value.kind === "classRef" ? { ...value, captures: info.localClass.captureSources } : value,
-      )
-    : value;
+  if (!info.localClass) return value;
+  const classValue = initializeRuntimeStatics(
+    lowerer,
+    info,
+    value.kind === "classRef" ? { ...value, captures: info.localClass.captureSources } : value,
+  );
+  // The base resolves statically here, but Node still evaluates the
+  // heritage expression each time the class definition runs, first.
+  const heritage = heritageWithEffects(expr);
+  if (heritage === undefined) return classValue;
+  return {
+    kind: "seqExpr",
+    stmts: [lowerer.lowerExprStatement(heritage)],
+    result: classValue,
+    type: classValue.type,
+    loc: classValue.loc,
+  };
+}
+
+/** The `extends` expression of `decl` when evaluating it can have effects
+ * (a call, construction, assignment, update, delete, await or yield
+ * outside nested functions). */
+function heritageWithEffects(decl: ts.ClassLikeDeclaration): ts.Expression | undefined {
+  const heritage = decl.heritageClauses?.nodes.find(
+    (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+  )?.types?.nodes[0]?.expression;
+  if (heritage === undefined) return undefined;
+  const effects = (node: ts.Node): boolean => {
+    if (ts.isFunctionLike(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node))
+      return false;
+    if (
+      ts.isCallExpression(node) ||
+      ts.isNewExpression(node) ||
+      ts.isTaggedTemplateExpression(node) ||
+      ts.isDeleteExpression(node) ||
+      ts.isAwaitExpression(node) ||
+      ts.isYieldExpression(node) ||
+      (ts.isPrefixUnaryExpression(node) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken ||
+          node.operator === ts.SyntaxKind.MinusMinusToken)) ||
+      ts.isPostfixUnaryExpression(node) ||
+      (ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+    )
+      return true;
+    return ts.forEachChild(node, (child) => effects(child) || undefined) ?? false;
+  };
+  return effects(heritage) ? heritage : undefined;
 }
 
 /** The EXACT class a receiver expression is statically known to BE (not
@@ -6423,6 +6517,12 @@ function staticCallOn(
   const loc = locOf(call);
   const runtimeStatic = directRuntimeStaticCall(lowerer, call, access, info, throughValue);
   if (runtimeStatic) return runtimeStatic;
+  // Date's statics through a class declared `extends Date`
+  // (`Moment.UTC(...)`), which inherits them.
+  if (dateRootOf(info) && !findStaticOn(lowerer, info, access.name.text)) {
+    const date = lowerDateStaticCall(lowerer, call, access.name.text);
+    if (date) return date;
+  }
   if (
     (hasRuntimeStatics(info) && !findStaticOn(lowerer, info, access.name.text)?.field) ||
     (info.callableBase &&
@@ -7684,7 +7784,7 @@ function lowerClassCtorInner(lowerer: Lowerer, info: ClassInfo): IrFunction {
         lowerer.ctx.argumentsLocal = local;
       }
       body.push(...declared.prologue);
-      if (!ctorBase && !info.callableBase) {
+      if (!ctorBase && !info.callableBase && !info.extendsDate) {
         // Node's base-class order: field initializers run at the start
         // of construction, the parameter-property assignments open the
         // constructor body (probed — a field initializer reading a
@@ -7696,7 +7796,7 @@ function lowerClassCtorInner(lowerer: Lowerer, info: ClassInfo): IrFunction {
         body.push(...lowerer.lowerDerivedCtorBody(info, thisLocal));
       }
     } else {
-      if (ctorBase || info.callableBase) {
+      if (ctorBase || info.callableBase || info.extendsDate) {
         // Synthetic forwarding params (the inherited ABI signature).
         // Nothing references them by symbol — only the super call below,
         // which forwards the already-completed values UNCHANGED (defaults
@@ -8615,12 +8715,14 @@ export function lowerDerivedCtorBody(
         loc,
       },
     ];
-    if (info.callableBase) {
+    if (info.callableBase || info.extendsDate) {
       if (superCall.arguments.nodes.some(ts.isSpreadElement))
         lowerer.unsupported(
           "SC1090",
           superCall,
-          "spreading explicit super arguments into an ordinary constructor",
+          info.extendsDate
+            ? "spreading super arguments into the Date constructor"
+            : "spreading explicit super arguments into an ordinary constructor",
         );
       const pack: IrExpr = {
         kind: "dynArrLit",
@@ -8805,6 +8907,7 @@ export function superCallStmt(
     type: { kind: "object", className: info.def.name },
     loc,
   };
+  if (info.extendsDate) return dateSuperCall(thisRef, info, args[0]!, loc);
   if (info.callableBase)
     return {
       kind: "exprStmt",
@@ -8926,6 +9029,24 @@ export function lowerSuperMethodCall(
   access: ts.PropertyAccessExpression,
 ): IrExpr {
   const cls = lowerer.currentClass;
+  // `super.toISOString()` in a class declared `extends Date`.
+  if (cls?.extendsDate && !cls.base) {
+    const thisL = lowerer.resolveThis();
+    if (!thisL) lowerer.unsupported("SC1080", access);
+    const thisRef: IrExpr = {
+      kind: "varRef",
+      localId: thisL.id,
+      type: thisL.type,
+      loc: locOf(call),
+    };
+    const date = lowerDateSuperMethodCall(lowerer, call, access.name.text, cls, thisRef);
+    if (date) return date;
+    lowerer.unsupported(
+      "SC1090",
+      access,
+      `'super.${access.name.text}' (Date.prototype does not declare it)`,
+    );
+  }
   if (!cls?.base) {
     // tsc rejects super outside derived-class bodies first; defensive.
     lowerer.unsupported("SC1090", access, "'super' outside a derived class");
@@ -8970,6 +9091,17 @@ export function lowerSuperMethodCall(
     // `super.dispatchEvent(e)`, `super.preventDefault()`: the inherited
     // runtime members over this method's own `this` (subclasses cannot
     // override them, so the static answer is the runtime's).
+    if (dateRootOf(cls.base) && isDatePrototypeMethod(access.name.text)) {
+      const thisL = lowerer.resolveThis();
+      if (!thisL) lowerer.unsupported("SC1080", access);
+      const thisRef: IrExpr = {
+        kind: "varRef",
+        localId: thisL.id,
+        type: thisL.type,
+        loc: locOf(call),
+      };
+      return lowerDateSuperMethodCall(lowerer, call, access.name.text, cls.base, thisRef)!;
+    }
     if (eventTargetApiMethod(cls.base, access.name.text)) {
       const thisL = lowerer.resolveThis();
       if (!thisL) lowerer.unsupported("SC1080", access);

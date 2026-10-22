@@ -17,6 +17,10 @@ function addWrap(a: Int32Array, b: Int32Array, out: Int32Array): void {
   for (let i = 0; i < out.length; i++) out[i] = (a[i]! + b[i]!) | 0;
 }
 
+function brighten(src: Uint8ClampedArray, gain: number, out: Uint8ClampedArray): void {
+  for (let i = 0; i < out.length; i++) out[i] = src[i]! * gain + 8;
+}
+
 function gray(rgba: Uint8Array, out: Uint8Array): void {
   for (let i = 0; i < out.length; i++) {
     const j = i * 4;
@@ -38,6 +42,8 @@ const masked = new Uint8Array(n);
 const ia = new Int32Array(n);
 const ib = new Int32Array(n);
 const io = new Int32Array(n);
+const pixels = new Uint8ClampedArray(n);
+const bright = new Uint8ClampedArray(n);
 const rgba = new Uint8Array(n * 4);
 const luma = new Uint8Array(n);
 let state = 2463534242;
@@ -56,6 +62,7 @@ for (let i = 0; i < n; i++) {
   key[i] = next() & 255;
   ia[i] = next() | 0;
   ib[i] = next() | 0;
+  pixels[i] = next() & 255;
 }
 for (let i = 0; i < rgba.length; i++) rgba[i] = next() & 255;
 
@@ -64,6 +71,7 @@ let f64Sum = 0;
 let f32Sum = 0;
 let byteSum = 0;
 let intSum = 0;
+let brightSum = 0;
 let lumaSum = 0;
 for (let r = 0; r < rounds; r++) {
   // Change one input element per round so no round repeats the last.
@@ -72,21 +80,25 @@ for (let r = 0; r < rounds; r++) {
   fa[at] = r;
   data[at] = r & 255;
   ia[at] = r * 65537;
+  pixels[at] = r & 255;
   rgba[at * 4] = r & 255;
   axpy(1.5, x, y, d);
   blend((r & 15) / 16, fa, fb, fo);
   mask(data, key, masked);
   addWrap(ia, ib, io);
+  brighten(pixels, 0.75 + (r & 7) / 8, bright);
   gray(rgba, luma);
   const probe = (r * 104729) & (n - 1);
   f64Sum += d[probe]!;
   f32Sum += fo[probe]!;
   byteSum += masked[probe]!;
   intSum = (intSum + io[probe]!) | 0;
+  brightSum += bright[probe]!;
   lumaSum += luma[probe]!;
 }
 console.log(`float64 ${f64Sum.toFixed(3)}`);
 console.log(`float32 ${f32Sum.toFixed(3)}`);
 console.log(`uint8 ${byteSum}`);
 console.log(`int32 ${intSum}`);
+console.log(`clamped ${brightSum}`);
 console.log(`gray ${lumaSum}`);

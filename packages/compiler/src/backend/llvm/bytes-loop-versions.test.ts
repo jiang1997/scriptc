@@ -109,6 +109,8 @@ function match(
     ranges,
     initialized: findInitializedByteLoopBindings(f).get(loop) ?? new Set(),
     proven: new Set(),
+    workers: false,
+    owned: new Set(),
   });
 }
 
@@ -248,6 +250,79 @@ test("loops to a typed array's length version the other typed arrays they index"
   ]);
   expect(rebound).not.toContain("bytes.version.fast");
   expect(rebound).toContain("bytes.index.invalid");
+});
+
+test("worker programs test each receiver's shared storage once in the guard", () => {
+  // for (let i = 0; i < n; i++) out[i] = src[i] * 2, where either view may
+  // be shared.
+  const loop = counted([
+    set(ref("out", f64s), ref("i"), bin("*", get(ref("src", f64s), ref("i")), num(2))),
+  ]);
+  const kernel = fn([loop]);
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    workers: true,
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      kernel,
+    ],
+  };
+  const body = /^define internal [^\n]*@sc_bf_kernel[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  const guard = body.slice(0, body.search(/^bytes\.version\.(fast|slow)\d+:$/m));
+  expect(guard.match(/icmp eq ptr %\S+, null/g)).toHaveLength(2);
+  const fast = /^bytes\.version\.fast\d+:$[^]*?^bytes\.version\.done\d+:$/m.exec(body)![0];
+  expect(fast).not.toContain("bytes.shared");
+  expect(fast).not.toMatch(/(load|store) atomic double/);
+  // The checked copy keeps the shared-memory path for each access.
+  const slow = body.slice(body.search(/^bytes\.version\.slow\d+:$/m), body.indexOf(fast));
+  expect(slow).toContain("load atomic double");
+  expect(slow).toContain("store atomic double");
+});
+
+test("index temps of a version's counter are integers in the fast copy", () => {
+  // for (let i = 0; i < out.length; i++) { const j = i * 4; out[i] = src[j] + src[j + 1] }
+  const length: IrExpr = {
+    kind: "bytesIntrinsic",
+    method: "length",
+    receiver: ref("out", f64s),
+    args: [],
+    type: F64,
+    loc,
+  };
+  const loop = counted(
+    [
+      { kind: "varDecl", localId: "at", init: bin("*", ref("i"), num(4)), loc },
+      set(
+        ref("out", f64s),
+        ref("i"),
+        bin(
+          "+",
+          get(ref("src", f64s), ref("at")),
+          get(ref("src", f64s), bin("+", ref("at"), num(1))),
+        ),
+      ),
+    ],
+    length,
+  );
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      fn([loop], [local("at", F64)]),
+    ],
+  };
+  const body = /^define internal [^\n]*@sc_bf_kernel[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  const fast = /^bytes\.version\.fast\d+:$[^]*?^bytes\.version\.done\d+:$/m.exec(body)![0];
+  expect(body).toContain("alloca i64 ; integer at");
+  expect(fast).toMatch(/mul nsw i64 %\S+, 4/);
+  expect(fast).toMatch(/add nsw i64 %\S+, 1/);
+  expect(fast).not.toContain("fmul");
+  expect(fast).not.toContain("fptosi");
+  expect(fast).not.toContain("bytes.index");
 });
 
 test("Float16Array accesses version in elements and share the element tag", () => {
