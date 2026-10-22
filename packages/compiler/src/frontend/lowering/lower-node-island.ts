@@ -458,6 +458,17 @@ function islandBindingOf(lowerer: Lowerer, ident: ts.Identifier): IslandBinding 
     const name = decl.propertyName?.text ?? decl.name.text;
     binding = name === "default" ? "default" : { name };
   } else {
+    // `const { name } = require("pkg")`: a member of module.exports, read
+    // at each use (shortcut: not copied once at the declaration).
+    const property = requiredPropertyOf(decl);
+    if (property !== null) {
+      const spec = requireInitSpecOf(property.declaration);
+      if (spec === null) return null;
+      const file = ts.getSourceFileOfNode(decl).fileName;
+      const path = islandModuleFile(islands, file, spec, "require");
+      const module = path === null ? undefined : lowerer.islandModules.get(path);
+      return module === undefined ? null : { kind: "named", module, name: property.name };
+    }
     // `const x = require("pkg")` (a CommonJS module of a native package
     // requiring an island package): x is module.exports.
     const spec = requireSpecOf(decl);
@@ -1831,12 +1842,36 @@ function plainLiteral(node: ts.ObjectLiteralExpression | ts.ArrayLiteralExpressi
 /** The specifier of `x = require("spec")` (a variable declaration binding
  * an identifier to a literal require), or null. */
 function requireSpecOf(decl: ts.Node): string | null {
-  if (
-    !ts.isVariableDeclaration(decl) ||
-    !ts.isIdentifier(decl.name) ||
-    decl.initializer === undefined
-  )
-    return null;
+  if (!ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name)) return null;
+  return requireInitSpecOf(decl);
+}
+
+/** The property a destructured CommonJS require binds: `name` in
+ * `const { name } = require("spec")` or `const { name: local } = …`, with
+ * the declaration. Rest elements, defaults and nested patterns are null. */
+function requiredPropertyOf(
+  decl: ts.Node,
+): { name: string; declaration: ts.VariableDeclaration } | null {
+  if (!ts.isBindingElement(decl) || decl.dotDotDotToken || decl.initializer) return null;
+  if (!ts.isIdentifier(decl.name)) return null;
+  const pattern = decl.parent;
+  if (pattern === undefined || !ts.isObjectBindingPattern(pattern)) return null;
+  const declaration = pattern.parent;
+  if (declaration === undefined || !ts.isVariableDeclaration(declaration)) return null;
+  const key = decl.propertyName;
+  const name =
+    key === undefined
+      ? decl.name.text
+      : ts.isIdentifier(key) || ts.isStringLiteral(key)
+        ? key.text
+        : null;
+  return name === null ? null : { name, declaration };
+}
+
+/** The specifier of a variable declaration initialized with a literal
+ * `require("spec")`, whatever its binding name or pattern, or null. */
+function requireInitSpecOf(decl: ts.VariableDeclaration): string | null {
+  if (decl.initializer === undefined) return null;
   let init: ts.Expression = decl.initializer;
   while (ts.isParenthesizedExpression(init)) init = init.expression;
   if (
@@ -1861,7 +1896,9 @@ export function collectIslandRequires(lowerer: Lowerer, sf: ts.SourceFile): void
   for (const stmt of sf.statements.nodes) {
     if (!ts.isVariableStatement(stmt)) continue;
     for (const decl of stmt.declarationList.declarations.nodes) {
-      const spec = requireSpecOf(decl);
+      const spec = ts.isObjectBindingPattern(decl.name)
+        ? requireInitSpecOf(decl)
+        : requireSpecOf(decl);
       if (spec === null) continue;
       const path = islandModuleFile(islands, sf.fileName, spec, "require");
       if (path === null) continue;

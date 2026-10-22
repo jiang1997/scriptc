@@ -125,6 +125,11 @@ export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([
   // binding types as any and reached uses fence instead of passing unchecked
   2307,
   2792,
+  // a resolved JavaScript module without declarations (7016): Node loads
+  // it like any other module; deployment trees such as Next.js standalone
+  // output ship runtime files only, so the binding types as any and its
+  // uses take the dynamic paths, as for 2307
+  7016,
   // useUnknownInCatchVariables' annotation demand ("'e' is of type
   // 'unknown'", "Object is of type 'unknown'"): a JS catch clause CANNOT
   // annotate its variable, so the demand is unsatisfiable in source —
