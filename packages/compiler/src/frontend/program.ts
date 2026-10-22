@@ -68,14 +68,18 @@ import {
   isNpmStaticPackage,
   npmStaticActive,
   npmStaticFsShadow,
+  programBuiltinAliasSource,
+  clearProgramBuiltinAliasCache,
   npmStaticLexerVisibleNames,
   npmStaticLiveExportTable,
   npmStaticPackageOfPath,
   reportNpmStaticOffender,
   setNpmStaticDeclarationOverloads,
   setNpmStaticPackages,
+  setNpmStaticTypeExports,
 } from "./npm-static.js";
 import { isPrunedNpmReexport, planNpmStaticReexports } from "./npm-static-prune.js";
+import { npmStaticTypeExportPlan } from "./npm-static-type-exports-host.js";
 import { isNpmStaticSubclassArgument } from "./npm-static-subtyping.js";
 import {
   npmStaticDeclarationReexports,
@@ -89,6 +93,12 @@ import type {
   NpmStaticDeclarationProperties,
   NpmStaticOverloadSignature,
 } from "./npm-static-declaration-syntax.js";
+import {
+  configurePackageShims,
+  isPackageShimFile,
+  isPackageShimName,
+  isShimmedImport,
+} from "./package-shims.js";
 import { provenanceEntryFor, provenancePaths } from "./provenance-registry.js";
 import { cjsLexedExportsOfFile, cjsVisibleNames } from "./cjs-syntax.js";
 import {
@@ -348,6 +358,11 @@ export interface LoadResult {
    * at run time instead of refusing the whole program. Filled by
    * checkPreflight. */
   inlineRequireCycleCalls?: ReadonlySet<ts.Node>;
+  /** Every program file's module edges as preflight resolved them,
+   * require() edges included: the lowering orders the modules only a
+   * literal import(), fork() or Worker reaches with them. Filled by
+   * checkPreflight. */
+  moduleEdges?: ReadonlyMap<ts.SourceFile, readonly CycleEdge[]> | undefined;
   /** Node's startup refusal, when the graph carries an import edge Node
    * rejects before ANY module evaluates — a RESOLUTION refusal (a bare
    * specifier nothing installed resolves, an exports/imports map that
@@ -914,7 +929,13 @@ export function loadProgram(
     }
     externalTypes.set(specifier, declarationPath);
   }
-  const npmStaticPackages = [...new Set(opts?.npmStatic ?? [])];
+  // Packages scriptc implements itself or the project marks never loaded
+  // (package-shims.ts) never compile their published JavaScript, even when
+  // named.
+  configurePackageShims(entryPath);
+  const npmStaticPackages = [...new Set(opts?.npmStatic ?? [])].filter(
+    (name) => !isPackageShimName(name),
+  );
   // Resolve authored declaration entries before enabling the JS-only
   // package resolver. Safe overload metadata binds through the runtime
   // entry to one exact implementation file; it never contributes values
@@ -1013,6 +1034,10 @@ export function loadProgram(
   }
   setNpmStaticPackages(npmStaticPackages);
   setNpmStaticDeclarationOverloads(declarationOverloads, declarationProperties);
+  // Types only the packages' .d.ts declares keep their declarations
+  // (npm-static-type-exports.ts).
+  const typeExports = npmStaticTypeExportPlan(services, entryPath, npmStaticPackages);
+  setNpmStaticTypeExports(typeExports.copies, typeExports.typedefs);
   // Workspace-package registrations reset per load (same discipline as the
   // npm-static set), then the opted-in names are probed UP FRONT: a
   // workspace-linked opt-in resolves to files whose realpaths carry no
@@ -1037,8 +1062,10 @@ export function loadProgram(
   // the checker, so its resolution lands on the JS Node actually loads;
   // resolve.ts answers the same sibling for scriptc's own edges).
   const npmShadow = npmStaticFsShadow(services);
+  clearProgramBuiltinAliasCache();
   const fsShadow = {
-    readFile: (path: string) => npmShadow?.readFile(path),
+    readFile: (path: string) =>
+      npmShadow?.readFile(path) ?? programBuiltinAliasSource(services, path),
     hideFile: (path: string) =>
       (npmShadow?.hideFile(path) ?? false) || projectDtsRuntimeSibling(path) !== null,
   };
@@ -1088,10 +1115,12 @@ export function loadProgram(
  * preflight diagnostics. Preserve the caller's complete load shape when
  * mutating it, including its owned services and disposal callback. */
 export function checkPreflight<T extends LoadResult>(load: T): ScrDiagnostic[] {
-  const { diags, moduleOrder, startupCrash, inlineRequireCycleCalls } = preflight7(load);
+  const { diags, moduleOrder, startupCrash, inlineRequireCycleCalls, moduleEdges } =
+    preflight7(load);
   load.moduleOrder = moduleOrder;
   load.startupCrash = startupCrash;
   load.inlineRequireCycleCalls = inlineRequireCycleCalls;
+  load.moduleEdges = moduleEdges;
   return diags;
 }
 
@@ -2098,7 +2127,8 @@ function stableCreateRequireBindingReason7(
   decl: ts.VariableDeclaration,
 ): string | null {
   const cache = program.analysis.createRequireReasons;
-  if (cache.has(decl)) return cache.get(decl)!;
+  const cached = cache.get(decl);
+  if (cached !== undefined) return cached;
   const check = (): string | null => {
     const stmt = decl.parent?.parent;
     if (
@@ -3534,6 +3564,9 @@ export interface CycleEarlyBinding {
   /** Modules whose TOP-LEVEL code runs only after the declaration ran:
    * modules outside the cycle and cycle members evaluated later. */
   settled: ReadonlySet<ts.SourceFile>;
+  /** The local name each importing file gives the binding when it differs
+   * from the declared one, by file name: Node's ReferenceError names it. */
+  localNames?: ReadonlyMap<string, string>;
 }
 
 /** Every binding of the program's exactly-initialized cycles that can be
@@ -3654,6 +3687,7 @@ function computeCycleEarlyBindings7(
       end: number;
       reference: ts.Identifier | null;
       folded: ts.Identifier | null;
+      localNames: Map<string, string>;
     }
     const candidates = new Map<ts.Symbol, Candidate>();
     const names = new Set<string>();
@@ -3693,6 +3727,7 @@ function computeCycleEarlyBindings7(
             end: stmt.end,
             reference: null,
             folded: null,
+            localNames: new Map(),
           });
           names.add(name.text);
         }
@@ -3701,13 +3736,33 @@ function computeCycleEarlyBindings7(
     });
     if (candidates.size === 0) continue;
     const rankOf = new Map(evaluation.map((m, i) => [m, i] as const));
-    // References: every identifier spelled like a candidate, resolved
-    // through import aliases to the declaration's symbol.
+    // References: every identifier spelled like a candidate or like a
+    // local name the file imports one under (`import { x as y }`, a
+    // default import), resolved through import aliases to the
+    // declaration's symbol.
     for (const sf of order) {
+      const local = new Set<string>();
+      for (const stmt of sf.statements.nodes) {
+        if (!ts.isImportDeclaration(stmt) || stmt.importClause === undefined) continue;
+        const clause = stmt.importClause;
+        const bound: ts.Identifier[] = clause.name !== undefined ? [clause.name] : [];
+        if (clause.namedBindings !== undefined && ts.isNamedImports(clause.namedBindings))
+          for (const element of clause.namedBindings.elements.nodes) bound.push(element.name);
+        for (const name of bound) {
+          if (names.has(name.text)) continue;
+          const imported = checker.getSymbolAtLocation(name);
+          const candidate =
+            imported === undefined ? undefined : candidates.get(checker.getAliasedSymbol(imported));
+          if (candidate === undefined) continue;
+          local.add(name.text);
+          candidate.localNames.set(sf.fileName, name.text);
+        }
+      }
       const refs: ts.Identifier[] = [];
       ts.walkPreorder(sf, (node) => {
         if (ts.isImportDeclaration(node)) return "skip";
-        if (ts.isIdentifier(node) && names.has(node.text)) refs.push(node);
+        if (ts.isIdentifier(node) && (names.has(node.text) || local.has(node.text)))
+          refs.push(node);
         return undefined;
       });
       if (refs.length === 0) continue;
@@ -3759,6 +3814,7 @@ function computeCycleEarlyBindings7(
         reference: c.reference,
         ...(c.folded !== null ? { folded: c.folded } : {}),
         settled,
+        ...(c.localNames.size > 0 ? { localNames: c.localNames } : {}),
       });
     }
   }
@@ -4316,6 +4372,10 @@ function resolveNpmImport7(
   // its attested source compiles as program modules (resolveProjectModule
 
   if (provenanceEntryFor(specifier) !== null) return null;
+  // Shimmed and never-loaded packages (package-shims.ts) are not npm
+  // imports either: the shim compiles as a program module, and an unloaded
+  // package's require() is Node's MODULE_NOT_FOUND.
+  if (isShimmedImport(fromFileName, specifier)) return null;
   const resolved = resolveBareModule(fromFileName, specifier, undefined, resolutionKind);
   if (!resolved) return null;
   if (!isNodeModulesPath(resolved.typesFile)) {
@@ -4428,6 +4488,7 @@ function preflight7(load: LoadResult): {
   moduleOrder: ts.SourceFile[];
   startupCrash: StartupCrash | null;
   inlineRequireCycleCalls: ReadonlySet<ts.Node>;
+  moduleEdges?: ReadonlyMap<ts.SourceFile, readonly CycleEdge[]>;
 } {
   const { program, entry } = load;
   const diags: ScrDiagnostic[] = [...load.configDiags];
@@ -4564,6 +4625,25 @@ function preflight7(load: LoadResult): {
     return d.code === 2300 && commentDup.has(`${d.fileName}:${sf.text.slice(d.pos, d.end)}`);
   };
 
+  /* `typeof window` / `typeof self` in a JavaScript file: the operand of
+   * typeof may name a global nothing declares (Node answers "undefined"
+   * and never throws), the feature-detection idiom every isomorphic
+   * package uses, and the guarded uses of that name (`typeof window < "u"
+   * ? window : …`) are code Node never runs. A name the file feature-tests
+   * this way is therefore not a type error in JavaScript; a reached use
+   * still meets the lowering's located refusal. TypeScript files keep the
+   * error and its hint. */
+  const typeofTestedNameSuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
+    if (d.code !== 2304 && d.code !== 2552 && d.code !== 2584) return false;
+    if (d.fileName === undefined || !isJsSourceFileName(d.fileName)) return false;
+    if (d.pos === undefined || d.end === undefined) return false;
+    const sf = p.getSourceFile(d.fileName);
+    if (!sf) return false;
+    const name = sf.text.slice(d.pos, d.end);
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return false;
+    return new RegExp(`\\btypeof\\s*\\(?\\s*${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(sf.text);
+  };
+
   const workspaceImplicitAnySuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
     if (d.code !== 7016 || d.fileName === undefined || d.pos === undefined || d.end === undefined)
       return false;
@@ -4604,10 +4684,12 @@ function preflight7(load: LoadResult): {
         (!suppressedJsStrictness7(d) || enforcedInCheckedJs(p, d)) &&
         !npmStaticFileSuppressed(d) &&
         !nodeModulesJsSuppressed(d) &&
+        (d.fileName === undefined || !isPackageShimFile(d.fileName)) &&
         !namespaceCalleeSuppressed(p, d) &&
         !inferredJsDiagnosticSuppressed(p, d) &&
         !isNpmStaticSubclassArgument(p, d) &&
         !workspaceImplicitAnySuppressed(p, d) &&
+        !typeofTestedNameSuppressed(p, d) &&
         !jsdocTypeSuppressed(p, d, commentDup),
     );
   };
@@ -5523,6 +5605,7 @@ function preflight7(load: LoadResult): {
     moduleOrder: order,
     startupCrash: resolveCrash ?? linkCrash,
     inlineRequireCycleCalls,
+    moduleEdges: edges,
   };
 }
 

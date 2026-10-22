@@ -557,6 +557,14 @@ export class SemanticType {
         // this snapshot's type with the same panic instead of a new
         // request.
         if (e instanceof Error && e.message.startsWith("panic:")) {
+          // The widened union (the cloned empty tuple widens to a plain
+          // array type) is readable and describes the same values; answer
+          // with its members when typescript-go can serialize them.
+          const widened = this.widenedConstituents();
+          if (widened !== undefined) {
+            this.constituents = widened;
+            return widened;
+          }
           (e as { unreadableConstituents?: true }).unreadableConstituents = true;
           this.constituentsPanic = e;
         }
@@ -564,6 +572,20 @@ export class SemanticType {
       }
     }
     return this.constituents;
+  }
+  /** The members of this union's widened type, or undefined when widening
+   * changes nothing or its members are unreadable too. */
+  private widenedConstituents(): SemanticType[] | undefined {
+    try {
+      const data = this.project.request<TypeResponse | null>("getWidenedType", { type: this.id });
+      if (data === null || data.id === this.id) return undefined;
+      const widened = this.project.type(data);
+      if ((widened.flags & TypeFlags.Union) === 0) return [widened];
+      return this.project.fetchTypes(widened.id, "getTypesOfType");
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("panic:")) return undefined;
+      throw e;
+    }
   }
   dispose(): void {
     this.constituents = undefined;

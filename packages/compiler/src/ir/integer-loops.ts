@@ -83,6 +83,13 @@ function stableLoopValue(
         stableLoopValue(value.left, locals, body, invariant, counter, stableLength) &&
         stableLoopValue(value.right, locals, body, invariant, counter, stableLength)
       );
+    case "strIntrinsic":
+      // A string's length is fixed: stable while its binding is.
+      return (
+        value.method === "length" &&
+        value.receiver.kind === "varRef" &&
+        stableLoopValue(value.receiver, locals, body, invariant, counter)
+      );
     case "bytesIntrinsic":
     case "arrIntrinsic":
       return (

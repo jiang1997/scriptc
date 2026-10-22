@@ -61,12 +61,19 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_inspect.c", "inspect"],
   ["scr_console_native.c", "inspect"],
   ["scr_dyn_invoke.c", any("dynInvoke", "nativeFetch")],
+  // Buffer.prototype methods called on checked-dynamic values.
+  ["scr_bytes_dyn.c", all("dynBuffer", "dynInvoke")],
+  // Builtin functions read as values in JavaScript dependencies.
+  ["scr_builtin_values.c", "builtinValues"],
   ["scr_dc.c", "dc"],
   // The dynamic tier's jsval values (two-tier design I3): linked only into
   // programs whose IR has dynamic-tier operations.
   ["scr_js_value.c", "dynTier"],
+  ["scr_js_object.c", "dynTier"],
   ["scr_event_target.c", any("eventTarget", "nativeFetch")],
   ["scr_async_dyn.c", any("dynAsync", "dynInvoke", "dc", "fileHandle", "nativeFetch")],
+  // The crypto global's object extends scr_async_dyn.c's crypto object.
+  ["scr_webcrypto_object.c", all("webcrypto", "dynAsync")],
   // The performance timeline emits its buffer warning through scr_async_dyn.c.
   ["scr_perf.c", "dynAsync"],
   // perf_hooks event-loop metrics, only for programs that read them.
@@ -92,6 +99,8 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_util_compare.c", all("parseArgs", "symbol")],
   ["scr_util_style.c", all("parseArgs", "inspect", "dynAsync")],
   ["scr_util_callable.c", all("parseArgs", "inspect", "dynAsync", "dynInvoke", "regex")],
+  // util.promisify over an untyped function creates dyn promises and calls.
+  ["scr_util_promisify.c", all("utilPromisify", "dynAsync", "dynInvoke")],
   // Untyped EventEmitter and stream constructor values call listeners
   // through the dyn-invoke unit, inspect unhandled 'error' payloads and
   // create EventEmitter's private symbols.
@@ -116,6 +125,10 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_stream_ops.c", all("stream", "dynAsync")],
   // Checked-dynamic stream slots call JavaScript members through the dyn-invoke unit.
   ["scr_stream_dyn.c", "streamDyn"],
+  // Own properties JavaScript adds to children.
+  ["scr_dyn_handle_props.c", "handleProps"],
+  // for await over checked-dynamic values.
+  ["scr_dyn_for_await.c", "dynForAwait"],
   // fs.ReadStream / fs.WriteStream reference only the stream unit and base units.
   ["scr_fs_stream.c", "stream"],
   // FileHandle streams reference both the stream unit and FileHandle.
@@ -129,19 +142,30 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_dgram.c", "dgram"],
   // The dns promise forms run over the dgram unit's callback forms.
   ["scr_dns_promises.c", all("dgram", "dnsPromises")],
+  // Sockets as untyped values run over the dgram unit.
+  ["scr_dgram_dyn.c", all("dgram", "dgramDyn")],
   ["scr_watch.c", "watch"],
   ["scr_ffi_queue.c", "foreignFfi"],
   ["scr_test.c", "nodeTest"],
   ["scr_tls_ca.c", "tlsCaEffective"],
   ["scr_tls.c", "tlsEffective"],
   ["scr_cipher.c", "cipher"],
+  ["scr_ecdh.c", "ecdh"],
   ["scr_wasm.c", "wasm"],
   ["scr_webcrypto.c", "webcrypto"],
+  // WebCrypto's AES ciphers run over the cipher feature's mbedTLS archive.
+  ["scr_webcrypto_aes.c", all("cipher", "webcrypto")],
   ["scr_fetch.c", "nativeFetch"],
 ];
 
 export function variantsFor(source) {
   const variants = [{ id: "default", when: {}, defines: [] }];
+  // Programs with dynamic-tier code keep the tier's hidden classes current
+  // in checked objects (two-tier design S4); every other program links the
+  // ordinary object, byte for byte.
+  if (source === "scr_json.c") {
+    variants.push({ id: "dyn-tier", when: { dynTier: true }, defines: ["SCR_JS_TIER"] });
+  }
   if (source === "scr_bytes.c") {
     variants.push({
       id: "text-decoder-legacy",
@@ -192,7 +216,7 @@ export function createRuntimePackMatrix({
     { id: "quickjs", predicate: false },
     { id: "libregexp", predicate: "regex" },
     { id: "zlib", predicate: "zlibEffective" },
-    { id: "mbedtls", predicate: any("tlsEffective", "cipher") },
+    { id: "mbedtls", predicate: any("tlsEffective", "cipher", "ecdh") },
   ];
   const matrix = withLibraryRuntimeFlavors(
     withWorkerRuntimeVariants({

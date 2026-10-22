@@ -1,6 +1,8 @@
 /* instanceof and in, including private-name and runtime-key in. */
+import { dateRootOf } from "../builtins/date-classes.js";
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
-import { builtinClassInstanceOf, builtinClassKind } from "../builtins/builtin-class-dyn.js";
+import { builtinClassInstanceOfAny, builtinClassKind } from "../builtins/builtin-class-dyn.js";
 import {
   checkedPrivateIn,
   localPrivateBrandClass,
@@ -37,6 +39,7 @@ import { lowerReadlineInstanceof } from "../builtins/readline.js";
 import { lowerKeyObjectInstanceof } from "../builtins/key-object.js";
 import { lowerCryptoKeyInstanceof } from "../builtins/webcrypto.js";
 import { lowerNetAddressInstanceof } from "../builtins/net-address.js";
+import { typedArrayHasMember } from "../builtins/typed-array-members.js";
 import { fenceEarlyNsMemberRef, nsMemberIdentOf } from "../lower-namespaces.js";
 import { maybePromiseInstanceOf } from "../maybe-promise.js";
 import { isSafeToDiscard, isSafeToRepeat } from "./evaluation-safety.js";
@@ -264,7 +267,12 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         stmts: [{ kind: "exprStmt", expr: value, loc }],
         result: {
           kind: "boolLit",
-          value: value.type.kind === (date ? "date" : "url"),
+          value:
+            value.type.kind === (date ? "date" : "url") ||
+            // An instance of a class declared `extends Date`.
+            (date &&
+              value.type.kind === "object" &&
+              dateRootOf(lowerer.classes.get(value.type.className)) !== null),
           type: BOOL,
           loc,
         },
@@ -401,6 +409,16 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
       }
       const left = lowerer.lowerExpr(expr.left);
       if (left.type.kind === "dyn") {
+        // An untyped binding the checker narrowed to EventEmitter or a
+        // stream class (`ReleaseEmitter = EventEmitter` in JavaScript):
+        // the binding holds an untyped constructor, so the test is
+        // Function.prototype[Symbol.hasInstance] over it.
+        const builtinKind = targetInfo.def.runtime ? builtinClassKind(targetInfo.def.name) : null;
+        if (builtinKind !== null) {
+          const right = lowerer.lowerExpr(expr.right);
+          if (right.type.kind === "dyn")
+            return builtinClassInstanceOfAny(lowerer, left, builtinKind, targetInfo, loc, right);
+        }
         if (targetInfo.def.runtime) {
           lowerer.unsupported(
             "SC1090",
@@ -546,7 +564,33 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         loc,
       };
     };
-    const test = caughtInstanceOf(target);
+    let test = caughtInstanceOf(target);
+    // A thrown checked-dynamic object whose prototype chain reaches
+    // Error.prototype (an ES5 constructor function inheriting from it).
+    if (target.def.name === "%Error" && lowerer.errorPrototypeValues) {
+      const value = varRef(caughtLocal.id, CAUGHT, loc);
+      test = {
+        kind: "logical",
+        op: "||",
+        left: test,
+        right: {
+          kind: "logical",
+          op: "&&",
+          left: { kind: "caughtTest", value, test: "dynamic", type: BOOL, loc },
+          right: {
+            kind: "libCall",
+            fn: "dyn.inheritsErrorPrototype",
+            args: [{ kind: "caughtToDyn", value, type: DYN, loc }],
+            type: BOOL,
+            loc,
+          },
+          type: BOOL,
+          loc,
+        },
+        type: BOOL,
+        loc,
+      };
+    }
     return duplex
       ? { kind: "logical", op: "||", left: test, right: caughtInstanceOf(duplex), type: BOOL, loc }
       : test;
@@ -571,8 +615,34 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
   ) {
     return classInstanceOf(lowerer, left, target, loc);
   }
-  if (left.type.kind === "dyn" && target.def.name === "%Error") {
+  if (left.type.kind === "dyn" && target.def.name === "%Error" && !lowerer.errorPrototypeValues) {
     return { kind: "dynTest", test: "error", value: left, type: BOOL, loc };
+  }
+  // An object whose prototype chain reaches Error.prototype (an ES5
+  // constructor function inheriting from it) is an instance as well.
+  if (left.type.kind === "dyn" && target.def.name === "%Error") {
+    const local = lowerer.declareHiddenLocal("%instanceofValue", DYN);
+    const value = varRef(local.id, DYN, loc);
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "varDecl", localId: local.id, init: left, loc }],
+      result: {
+        kind: "logical",
+        op: "||",
+        left: { kind: "dynTest", test: "error", value, type: BOOL, loc },
+        right: {
+          kind: "libCall",
+          fn: "dyn.inheritsErrorPrototype",
+          args: [value],
+          type: BOOL,
+          loc,
+        },
+        type: BOOL,
+        loc,
+      },
+      type: BOOL,
+      loc,
+    };
   }
   // `u instanceof TypeError` (and the other BUILTIN error classes) on a
   // dyn value: the from_error cache holds the checked-dynamic tree↔error identity edge,
@@ -592,11 +662,11 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
   }
   // `u instanceof EventEmitter` (or a stream class): an untyped object
   // built by a constructor function inherits the untyped constructor's
-  // prototype (builtin-class-dyn.ts). Compiled emitters and streams have
-  // no untyped form, so the prototype chain answers for every value.
+  // prototype (builtin-class-dyn.ts), and a compiled emitter or stream
+  // boxes as a typed reference the class test answers for.
   const builtinKind = builtinClassKind(target.def.name);
   if (left.type.kind === "dyn" && builtinKind !== null) {
-    return builtinClassInstanceOf(left, builtinKind, loc);
+    return builtinClassInstanceOfAny(lowerer, left, builtinKind, target, loc);
   }
   if (left.type.kind === "dyn") {
     lowerer.unsupported(
@@ -628,7 +698,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
       const key = `instanceof.union:${unionId}:${target.def.name}`;
       let helper = lowerer.valueHelpers.get(key);
       if (!helper) {
-        helper = `%instanceof.union.${lowerer.valueHelpers.size}`;
+        helper = keyedHelperName(lowerer, "%instanceof.union", key);
         lowerer.valueHelpers.set(key, helper);
         const value: IrExpr = { kind: "varRef", localId: "value.0", type: left.type, loc };
         const body: IrStmt[] = [];
@@ -1379,6 +1449,24 @@ export function lowerInExpression(
   if (key === "code" && isExecExceptionType(lowerer, lowerer.typeOf(expr.right))) {
     refuseExecExceptionCode(lowerer, expr);
   }
+  // A literal key that names no declared member of an index-signature
+  // record (`"id" in match.groups`): the same keyed presence probe a
+  // runtime key takes — declared fields by name, then the overflow keys.
+  {
+    const recvT = lowerer.mapTypeOf(lowerer.typeOf(expr.right));
+    const shape = recvT?.kind === "record" ? lowerer.shapes.get(recvT.shapeId) : undefined;
+    if (
+      shape?.indexValue &&
+      !shape.tuple &&
+      !OBJECT_PROTOTYPE_KEYS.has(key) &&
+      !shape.fields.some(
+        (f) => f.name === key || f.name === `%get:${key}` || f.name === `%set:${key}`,
+      )
+    ) {
+      const probed = lowerRuntimeKeyIn(lowerer, expr, loc);
+      if (probed) return probed;
+    }
+  }
   let recv = lowerer.lowerExpr(expr.right);
   const classInfo =
     recv.type.kind === "classval" ? lowerer.classes.get(recv.type.className) : undefined;
@@ -1617,6 +1705,25 @@ export function lowerInExpression(
       );
     }
   }
+  // A literal member name over a typed array (`"BYTES_PER_ELEMENT" in a`):
+  // the answer is Node's prototype chain for the value's kind. Numeric keys
+  // (elements) and Buffer-only names on a Uint8Array depend on the value and
+  // keep the fence.
+  if (recv.type.kind === "bytes" && key !== "-0" && String(Number(key)) !== key) {
+    const has = typedArrayHasMember(key, recv.type.elem === "u8");
+    if (has !== null) {
+      const answer: IrExpr = { kind: "boolLit", value: has, type: BOOL, loc };
+      return isSafeToDiscard(recv)
+        ? answer
+        : {
+            kind: "seqExpr",
+            stmts: [{ kind: "exprStmt", expr: recv, loc }],
+            result: answer,
+            type: BOOL,
+            loc,
+          };
+    }
+  }
   if (recv.type.kind !== "record") {
     lowerer.unsupported(
       "SC1090",
@@ -1798,7 +1905,7 @@ function lowerRuntimeKeyIn(
   const hkey = `haskey:${recvT.shapeId}`;
   let helper = lowerer.valueHelpers.get(hkey);
   if (!helper) {
-    helper = `%rec.haskey.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%rec.haskey", hkey);
     lowerer.valueHelpers.set(hkey, helper);
     const recT: IrType = { kind: "record", shapeId: recvT.shapeId };
 

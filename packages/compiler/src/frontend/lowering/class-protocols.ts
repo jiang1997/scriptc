@@ -6,6 +6,8 @@ export class ClassProtocols {
   private implemented: Set<ts.Symbol> | null = null;
   private readonly methods = new Map<string, ts.ClassLikeDeclaration[]>();
   private readonly answers = new Map<ts.Type, boolean>();
+  /** The program classes each Pick or Omit view accepts (classesAcceptedBy). */
+  private readonly accepted = new Map<ts.Type, ts.Symbol[]>();
   /** What markIdentityFlows learned about the program, while it runs. */
   private facts: FlowFacts | null = null;
 
@@ -96,7 +98,11 @@ export class ClassProtocols {
    * could read a stale value. A view of readonly data that nothing
    * observes stays a native record. */
   private markIdentityFlows(protocols: Set<ts.Symbol>): void {
-    const sites: { source: ts.Expression; target: () => ts.Type | undefined }[] = [];
+    const sites: {
+      source: ts.Expression;
+      target: () => ts.Type | undefined;
+      assertion?: true;
+    }[] = [];
     /** Expressions whose values are observed as whole objects. */
     const observed: ts.Expression[] = [];
     /** Receivers whose type arguments or elements are observed (Set and Map
@@ -231,6 +237,7 @@ export class ClassProtocols {
         sites.push({
           source: node.expression,
           target: () => this.checker.getTypeFromTypeNode(typeNode),
+          assertion: true,
         });
       }
       if (ts.isArrowFunction(node) || ts.isFunctionExpression(node))
@@ -323,11 +330,29 @@ export class ClassProtocols {
     }
     this.facts = facts;
     const pending: { sourceType: ts.Type; target: () => ts.Type | undefined }[] = [];
+    /** Views a value of unknown origin is asserted to and that expose a
+     * method of a class the view accepts (see methodViewSources). */
+    const methodViews = new Set<ts.Symbol>();
     for (let i = 0; i < sites.length; i++) {
       const site = sites[i]!;
       const source = sourceNodes[i]!;
       const sourceType = attempt(() => this.checker.getTypeAtLocation(source));
-      if (sourceType !== undefined) pending.push({ sourceType, target: site.target });
+      if (sourceType === undefined) continue;
+      if (
+        site.assertion &&
+        (sourceType.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0 &&
+        this.methods.size > 0
+      ) {
+        const target = attempt(site.target);
+        if (target !== undefined)
+          for (const { classType, view } of attempt(() => this.methodViewSources(target)) ?? []) {
+            pending.push({ sourceType: classType, target: () => view });
+            const symbol = view.getSymbol();
+            if (symbol !== undefined) methodViews.add(symbol);
+          }
+        continue;
+      }
+      pending.push({ sourceType, target: site.target });
     }
     for (const { fn, index, name } of callbackParams) {
       attempt(() => {
@@ -370,7 +395,12 @@ export class ClassProtocols {
     // Keep the marks a copy would be told apart from, and the marks whose
     // values flow into a kept view or another live protocol.
     const added = [...marked].filter((symbol) => !before.has(symbol));
-    const kept = new Set(added.filter((symbol) => this.needsView(symbol, marked, facts)));
+    // A copy of an instance drops the methods its class defines, so a view
+    // that exposes one of them stays live wherever such an instance may
+    // arrive.
+    const kept = new Set(
+      added.filter((symbol) => methodViews.has(symbol) || this.needsView(symbol, marked, facts)),
+    );
     let grew = true;
     while (grew) {
       grew = false;
@@ -387,6 +417,33 @@ export class ClassProtocols {
     }
     for (const symbol of added) if (!kept.has(symbol)) marked.delete(symbol);
     this.facts = null;
+  }
+
+  /** The program classes a value asserted from `unknown` or `any` to
+   * `target` may be an instance of while `target` exposes one of their
+   * methods: for each structural part of `target` with a callable member,
+   * the instance type of every class that declares a method of that name
+   * and is assignable to the part. A record copy of such an instance would
+   * drop the method, which Node reads from the instance's prototype. */
+  private methodViewSources(target: ts.Type): { classType: ts.Type; view: ts.Type }[] {
+    const parts = target.isUnionType() ? ts.constituentTypes(target) : [target];
+    const out: { classType: ts.Type; view: ts.Type }[] = [];
+    for (const part of parts) {
+      if (!this.isStructuralTarget(part)) continue;
+      for (const property of this.checker.getPropertiesOfType(part)) {
+        const memberType = this.checker.getNonNullableType(this.checker.getTypeOfSymbol(property));
+        if (this.checker.getCallSignatures(memberType).length === 0) continue;
+        for (const declaration of this.methods.get(ts.symbolName(property)) ?? []) {
+          const classSymbol = declaration.name
+            ? this.checker.getSymbolAtLocation(declaration.name)
+            : undefined;
+          if (classSymbol === undefined) continue;
+          const classType = this.checker.getDeclaredTypeOfSymbol(classSymbol);
+          if (this.checker.isTypeAssignableTo(classType, part)) out.push({ classType, view: part });
+        }
+      }
+    }
+    return out;
   }
 
   /** The symbols of `type`'s object parts: union and intersection members,
@@ -414,6 +471,14 @@ export class ClassProtocols {
         for (const part of ts.constituentTypes(type)) add(part);
         return;
       }
+      // A Pick or Omit view's values are instances of the class it views,
+      // or of any other program class that has the view's members.
+      if (this.pickOfProgramClass(type)) {
+        add(type.getAliasTypeArguments()[0]!);
+        for (const other of this.classesAcceptedBy(type))
+          for (const related of this.classFamily(other, facts)) out.add(related);
+        return;
+      }
       const symbol = type.getSymbol();
       if (symbol === undefined) return;
       if (this.isProgramClassInstance(type)) {
@@ -427,6 +492,30 @@ export class ClassProtocols {
       if (element !== undefined) add(element);
     } else add(source);
     return out;
+  }
+
+  /** The program classes with methods whose instances are assignable to
+   * `type`. */
+  private classesAcceptedBy(type: ts.Type): ts.Symbol[] {
+    const known = this.accepted.get(type);
+    if (known !== undefined) return known;
+    this.index();
+    const found = new Set<ts.Symbol>();
+    for (const entries of this.methods.values())
+      for (const declaration of entries) {
+        const symbol = declaration.name
+          ? this.checker.getSymbolAtLocation(declaration.name)
+          : undefined;
+        if (
+          symbol !== undefined &&
+          !found.has(symbol) &&
+          this.checker.isTypeAssignableTo(this.checker.getDeclaredTypeOfSymbol(symbol), type)
+        )
+          found.add(symbol);
+      }
+    const result = [...found];
+    this.accepted.set(type, result);
+    return result;
   }
 
   /** A class symbol with its base classes and the program classes that
@@ -570,6 +659,20 @@ export class ClassProtocols {
     }
   }
 
+  /** `Pick<C, K>` or `Omit<C, K>` over a program class instance type: a
+   * view of the class's own members, spelled inline instead of as an
+   * interface. Like an interface the class matches, a view that exposes a
+   * method needs a live receiver (see protocol). */
+  private pickOfProgramClass(type: ts.Type): boolean {
+    const alias = type.getAliasSymbol();
+    if (alias === undefined || (ts.symbolName(alias) !== "Pick" && ts.symbolName(alias) !== "Omit"))
+      return false;
+    if (!alias.declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile))
+      return false;
+    const source = type.getAliasTypeArguments()[0];
+    return source !== undefined && this.isProgramClassInstance(source);
+  }
+
   private isProgramClassInstance(type: ts.Type): boolean {
     const symbol = type.getSymbol();
     return (
@@ -592,6 +695,8 @@ export class ClassProtocols {
       return element !== undefined && this.carriesIdentity(element, marked);
     }
     if (this.isProgramClassInstance(type)) return true;
+    // A live Pick or Omit view of a program class holds the instance itself.
+    if (this.pickOfProgramClass(type) && this.usesCheckedIdentity(type)) return true;
     const symbol = type.getSymbol();
     if (symbol === undefined) return false;
     if (marked.has(symbol)) return true;
@@ -704,12 +809,13 @@ export class ClassProtocols {
     const properties = this.checker.getPropertiesOfType(type);
     if (symbol && protocols.has(symbol)) return true;
     if (
-      !symbol ||
-      !symbol.declarations.some(
-        (declaration) =>
-          ts.isInterfaceDeclaration(declaration) &&
-          !ts.getSourceFileOfNode(declaration).isDeclarationFile,
-      )
+      !this.pickOfProgramClass(type) &&
+      (!symbol ||
+        !symbol.declarations.some(
+          (declaration) =>
+            ts.isInterfaceDeclaration(declaration) &&
+            !ts.getSourceFileOfNode(declaration).isDeclarationFile,
+        ))
     )
       return false;
     for (const property of properties) {

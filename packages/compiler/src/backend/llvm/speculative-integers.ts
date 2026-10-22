@@ -3,7 +3,7 @@ import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
 import { f64Lit } from "./common.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
-import { withinInt32 } from "../../ir/integer-ranges.js";
+import { type IntegerRange, withinInt32 } from "../../ir/integer-ranges.js";
 
 /** Speculative integer loops.
  *
@@ -410,6 +410,97 @@ export function planSpeculativeLoop(
   return { locals, writes: speculated, observerFree };
 }
 
+/** A proven integer loop. The bindings integer-ranges.ts bounds over a for
+ * loop (`loopRanges`) hold an integer on entry and at every write, so the
+ * loop keeps them in i64 shadow slots without a second copy or checks, and
+ * writes their doubles once, when it is left. */
+export interface ProvenLoopPlan {
+  /** Shadowed bindings and their loop ranges. */
+  locals: Map<string, IntegerRange>;
+  /** Statement-level writes computed as integers. */
+  writes: Set<IrStmt>;
+}
+
+/** Plan a proven integer loop. `cursors` are the loop's bounded bindings,
+ * `eligible` the locals a shadow may stand for, `integral` those the emitter
+ * already holds as integers and `proven` the expressions the range analysis
+ * proves integral. A shadowed binding's double is stale until the loop is
+ * left, so every exit has to pass the write-back: the caller plans only
+ * loops where an exception leaves the function, and a labeled jump (which
+ * may leave past the write-back) keeps the loop ordinary. */
+export function planProvenIntegerLoop(
+  loop: SpeculativeLoop,
+  cursors: ReadonlyMap<string, IntegerRange>,
+  eligible: (localId: string) => boolean,
+  integral: (localId: string) => boolean,
+  proven: (e: IrExpr) => boolean,
+): ProvenLoopPlan | null {
+  if (cursors.size === 0) return null;
+  const writes = new Map<string, IrStmt[]>();
+  const refused = new Set<string>();
+  let rejected = false;
+  const expr = (e: IrExpr): boolean => {
+    if (e.kind === "assignExpr" || e.kind === "incDec") refused.add(e.localId);
+    return everyExprChild(e, expr, nested);
+  };
+  const nested = (s: IrStmt): boolean => {
+    if (s.kind === "assign" || s.kind === "varDecl") refused.add(s.localId);
+    return everyStmtChild(s, expr, nested);
+  };
+  const stmt = (s: IrStmt): boolean => {
+    if (rejected) return false;
+    if (
+      !SIMPLE_STATEMENTS.has(s.kind) ||
+      ((s.kind === "break" || s.kind === "continue") && s.label !== undefined)
+    ) {
+      rejected = true;
+      return false;
+    }
+    const target = s.kind === "varDecl" ? null : speculativeWriteTarget(s);
+    if (target) {
+      if (target.value !== null && cursors.has(target.localId)) {
+        const list = writes.get(target.localId) ?? [];
+        list.push(s);
+        writes.set(target.localId, list);
+      } else refused.add(target.localId);
+      return target.value === null || expr(target.value);
+    }
+    if (s.kind === "varDecl") refused.add(s.localId);
+    return everyStmtChild(s, expr, stmt);
+  };
+  if (loop.cond) expr(loop.cond);
+  if (loop.kind === "for" && loop.update) nested(loop.update);
+  for (const s of loop.body) stmt(s);
+  if (rejected) return null;
+  const locals = new Map<string, IntegerRange>();
+  for (const [id, list] of writes) {
+    if (refused.has(id) || !eligible(id)) continue;
+    const exact = list.every((s) => {
+      const value = speculativeWriteTarget(s)!.value!;
+      return isSpeculableValue(value, false) && proven(value);
+    });
+    if (exact) locals.set(id, cursors.get(id)!);
+  }
+  // Every binding a shadowed write reads is shadowed, already an integer,
+  // or proven integral where it is read.
+  const grounded = (e: IrExpr): boolean =>
+    e.kind === "varRef"
+      ? locals.has(e.localId) || integral(e.localId) || proven(e)
+      : everyExprChild(e, grounded, () => false);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const id of [...locals.keys()])
+      if (!writes.get(id)!.every((s) => grounded(speculativeWriteTarget(s)!.value!))) {
+        locals.delete(id);
+        changed = true;
+      }
+  }
+  if (locals.size === 0) return null;
+  const planned = new Set<IrStmt>();
+  for (const id of locals.keys()) for (const s of writes.get(id)!) planned.add(s);
+  return { locals, writes: planned };
+}
+
 const SAFE = Number.MAX_SAFE_INTEGER;
 
 /** The range every speculative shadow holds. */
@@ -501,11 +592,14 @@ export function emitSpeculativeInteger(
   e: IrExpr,
   bail: (condition: string) => void,
   reads: ReadonlyMap<IrExpr, LlValue> = new Map(),
+  integral = false,
 ): string {
   const B = host.B;
   // A value the range analysis already proves takes the ordinary integer
-  // emission, which needs no checks.
-  const proven = e.kind === "bin" ? host.integerRanges.get(e) : undefined;
+  // emission, which needs no checks. A proven integer loop's write
+  // (`integral`) is proven throughout and computes its operands as integers
+  // instead: the ordinary emission of a sum past int32 is a double.
+  const proven = e.kind === "bin" && !integral ? host.integerRanges.get(e) : undefined;
   if (proven && proven.min >= -SAFE && proven.max <= SAFE && speculativeReads(e).length === 0)
     return speculativeLeaf(host, host.emitExpr(e), e, bail);
   switch (e.kind) {
@@ -533,8 +627,8 @@ export function emitSpeculativeInteger(
     }
     case "bin": {
       if (e.op !== "+" && e.op !== "-" && e.op !== "*" && e.op !== "%") break;
-      const a = emitSpeculativeInteger(host, e.left, bail, reads);
-      const b = emitSpeculativeInteger(host, e.right, bail, reads);
+      const a = emitSpeculativeInteger(host, e.left, bail, reads, integral);
+      const b = emitSpeculativeInteger(host, e.right, bail, reads, integral);
       const result = B.tmp();
       if (e.op === "+" || e.op === "-") {
         // With one operand's range known, the other is checked against the
@@ -590,7 +684,7 @@ export function emitSpeculativeInteger(
     }
     case "unary": {
       if (e.op !== "-") break;
-      const a = emitSpeculativeInteger(host, e.operand, bail, reads);
+      const a = emitSpeculativeInteger(host, e.operand, bail, reads, integral);
       const zero = B.tmp(),
         result = B.tmp();
       // -0 is not an integer result.

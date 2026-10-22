@@ -9,7 +9,9 @@
  * the runtime StringDecoder, which carries partial characters and base64
  * groups between calls as Node's does. chacha20-poly1305 follows OpenSSL's
  * construction, which also accepts AAD after data. Authentication tags are
- * compared in constant time. All arguments are borrowed. */
+ * compared in constant time. A cipher used as a stream reads and writes
+ * through its own native Transform, which the stream unit builds on first
+ * use, as Node's LazyTransform is. All arguments are borrowed. */
 #include "scr_runtime.h"
 
 #include <stdio.h>
@@ -103,6 +105,12 @@ typedef struct ScCipher {
   bool aad_open;     /* AAD was added since the last data or padding */
   ScrStr *decoder; /* the StringDecoder encoding once string output starts */
   double pending;  /* the decoder's carried bytes */
+  /* The Transform of a cipher used as a stream (+1) and its release
+   * (scr_stream.c). Its steps hold the cipher, so the cipher is a
+   * collector-headered object behind a traced handle, and the pair is
+   * reclaimed as a cycle. */
+  void *stream;
+  void (*stream_release)(void *);
 } ScCipher;
 
 static void *sc_retain(void *h) {
@@ -110,16 +118,38 @@ static void *sc_retain(void *h) {
   return h;
 }
 
-static void sc_release(void *h) {
+static void sc_trace(void *h, ScrTraceVisit visit, void *ctx) {
   ScCipher *c = h;
-  if (--c->rc) return;
+  if (c->stream) visit(c->stream, ctx);
+}
+
+/* The collector frees the stream itself; the rest is released here. */
+static void sc_gcfree(void *h) {
+  ScCipher *c = h;
   mbedtls_aes_free(&c->aes);
   mbedtls_gcm_free(&c->gcm);
   mbedtls_chacha20_free(&c->chacha);
   mbedtls_poly1305_free(&c->poly);
   scr_str_release(c->decoder);
   mbedtls_platform_zeroize(c, sizeof *c);
-  free(c);
+  scr_obj_free_note();
+  scr_cyc_free(c);
+}
+
+static void sc_destroy(void *h) {
+  ScCipher *c = h;
+  void *stream = c->stream;
+  c->stream = NULL;
+  if (stream) c->stream_release(stream);
+  sc_gcfree(c);
+}
+
+static void sc_release(void *h) {
+  ScCipher *c = h;
+  if (--c->rc == 0) {
+    scr_cyc_dead(c);
+    scr_rc_destroy(c, sc_destroy);
+  } else scr_cyc_released(c);
 }
 
 /* ── errors ───────────────────────────────────────────────────────────── */
@@ -532,9 +562,10 @@ static ScrDyn *sc_cipher_new(bool decrypt, ScrDyn *cipher, ScrDyn *key, ScrDyn *
     sc_throw(SCR_ERR_RANGE, "ERR_CRYPTO_INVALID_KEYLEN", "Invalid key length");
     goto done;
   }
-  ScCipher *c = calloc(1, sizeof *c);
-  if (!c) scr_trap("scriptc: out of memory\n");
+  static ScrCycType cyc_type = {&sc_trace, &sc_gcfree, SCR_CYC_KIND_NONE, 0};
+  ScCipher *c = scr_cyc_alloc(sizeof *c, &cyc_type);
   c->rc = 1;
+  scr_obj_alloc_note();
   c->mode = spec->mode;
   c->decrypt = decrypt;
   c->active = true;
@@ -883,7 +914,8 @@ static bool sc_aead(const ScCipher *c) {
   return c->mode == SC_GCM || c->mode == SC_CHACHA;
 }
 
-static ScrDyn *sc_final(ScCipher *c, ScrDyn *output_encoding) {
+/* final()'s output bytes (+1 Buffer), or NULL with the error thrown. */
+static ScrBytes *sc_final_bytes(ScCipher *c) {
   if (!c->active) {
     sc_throw(SCR_ERR_ERROR, "ERR_CRYPTO_INVALID_STATE", "Invalid state");
     return NULL;
@@ -953,7 +985,12 @@ static ScrDyn *sc_final(ScCipher *c, ScrDyn *output_encoding) {
     sc_throw(SCR_ERR_ERROR, NULL, "Unsupported state or unable to authenticate data");
     return NULL;
   }
-  return sc_output(c, out, output_encoding, true);
+  return out;
+}
+
+static ScrDyn *sc_final(ScCipher *c, ScrDyn *output_encoding) {
+  ScrBytes *out = sc_final_bytes(c);
+  return out ? sc_output(c, out, output_encoding, true) : NULL;
 }
 
 static ScrDyn *sc_set_aad(ScCipher *c, ScrDyn *self, ScrDyn *buffer, ScrDyn *options) {
@@ -1055,6 +1092,49 @@ static ScrDyn *sc_set_auth_tag(ScCipher *c, ScrDyn *self, ScrDyn *buffer, ScrDyn
   return scr_dyn_retain(self);
 }
 
+/* ── Cipheriv and Decipheriv as streams ───────────────────────────────
+ * The stream unit builds a cipher's Transform from these operations
+ * (ScrDynHandleTransform): each chunk goes through the handle's update(),
+ * and the end pushes final() or reports its error, as Node's cipher.js
+ * _transform and _flush do. */
+
+static void *sc_stream_get(void *h) {
+  return ((ScCipher *)h)->stream;
+}
+
+static void sc_stream_set(void *h, void *stream, void (*release)(void *)) {
+  ScCipher *c = h;
+  c->stream = stream;
+  c->stream_release = release;
+}
+
+/* The handle's update(): it throws out of the write, as in Node, once
+ * the cipher has finished. */
+static ScrBytes *sc_stream_update(void *h, ScrBytes *chunk) {
+  ScCipher *c = h;
+  if (!c->active) {
+    sc_throw(SCR_ERR_ERROR, NULL, "Trying to add data in unsupported state");
+    return NULL;
+  }
+  SCR_BYTES_SNAPSHOT(chunk);
+  return sc_transform(c, chunk->data, chunk->len * scr_bytes_elem_size(chunk->elem));
+}
+
+static ScrBytes *sc_stream_final(void *h) {
+  return sc_final_bytes(h);
+}
+
+static const ScrDynHandleTransform sc_transform_ops = {
+  sc_stream_get, sc_stream_set, sc_stream_update, sc_stream_final, sc_trace,
+};
+
+static ScrDynHandleOps sc_ops_cipher;
+static ScrDynHandleOps sc_ops_decipher;
+
+static const ScrDynHandleOps *sc_ops_of(const ScCipher *c) {
+  return c->decrypt ? &sc_ops_decipher : &sc_ops_cipher;
+}
+
 static bool sc_name_is(const char *method, const char *name) {
   return strcmp(method, name) == 0;
 }
@@ -1076,8 +1156,12 @@ static bool sc_stream_member(const char *name) {
 
 static void sc_stream_fence(void) {
   static const char message[] =
-    "Cipheriv and Decipheriv stream members have no lowering; call update() and final()";
-  scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+    "This Cipheriv and Decipheriv stream member has no lowering when called through an untyped value";
+  static const char streamless[] =
+    "Cipheriv and Decipheriv stream members called through an untyped value have no lowering in a "
+    "program that uses no streams";
+  if (scr_handle_stream_hooks) scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+  else scr_throw_error_msg_code(SCR_ERR_ERROR, streamless, sizeof streamless - 1, "SC2020");
 }
 
 static ScrDyn *sc_dispatch(ScCipher *c, ScrDyn *self, const char *method, ScrDyn *const *args, size_t argc,
@@ -1091,6 +1175,12 @@ static ScrDyn *sc_dispatch(ScCipher *c, ScrDyn *self, const char *method, ScrDyn
   if (c->decrypt && sc_name_is(method, "setAuthTag"))
     return sc_set_auth_tag(c, self, sc_arg(args, argc, 0), sc_arg(args, argc, 1));
   if (sc_stream_member(method)) {
+    /* The members a native stream answers to checked-dynamic calls run
+     * on the cipher's Transform; the others have no lowering. */
+    ScrDyn *result = NULL;
+    if (scr_handle_stream_hooks &&
+        scr_handle_stream_hooks->call(sc_ops_of(c), c, self, method, args, argc, &result))
+      return result;
     sc_stream_fence();
     return NULL;
   }
@@ -1117,11 +1207,19 @@ done:
 }
 
 static ScrDyn *sc_get(void *h, const char *key, size_t key_len) {
-  (void)h; (void)key; (void)key_len;
+  /* The stream properties read the cipher's Transform. */
+  if (scr_handle_stream_hooks) {
+    ScrDyn *value = scr_handle_stream_hooks->get(sc_ops_of(h), h, key, key_len);
+    if (value || scr_exc_pending()) return value;
+  }
   static const char message[] =
-    "Cipheriv and Decipheriv property reads have no lowering; call update(), final(), setAAD(), "
-    "setAutoPadding(), getAuthTag() or setAuthTag()";
-  scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+    "Cipheriv and Decipheriv property reads have no lowering other than the stream properties; call "
+    "update(), final(), setAAD(), setAutoPadding(), getAuthTag() or setAuthTag()";
+  static const char streamless[] =
+    "Cipheriv and Decipheriv property reads through an untyped value have no lowering in a program "
+    "that uses no streams";
+  if (scr_handle_stream_hooks) scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+  else scr_throw_error_msg_code(SCR_ERR_ERROR, streamless, sizeof streamless - 1, "SC2020");
   return NULL;
 }
 
@@ -1132,5 +1230,7 @@ static bool sc_set(void *h, const char *key, size_t key_len, const ScrDyn *value
   return true;
 }
 
-static ScrDynHandleOps sc_ops_cipher = {"Cipheriv", sc_retain, sc_release, sc_invoke, sc_get, sc_set, NULL, NULL, NULL};
-static ScrDynHandleOps sc_ops_decipher = {"Decipheriv", sc_retain, sc_release, sc_invoke, sc_get, sc_set, NULL, NULL, NULL};
+static ScrDynHandleOps sc_ops_cipher = {"Cipheriv", sc_retain, sc_release, sc_invoke, sc_get, sc_set, NULL, NULL, NULL,
+                                       .transform = &sc_transform_ops};
+static ScrDynHandleOps sc_ops_decipher = {"Decipheriv", sc_retain, sc_release, sc_invoke, sc_get, sc_set, NULL, NULL, NULL,
+                                         .transform = &sc_transform_ops};

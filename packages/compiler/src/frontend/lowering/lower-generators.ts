@@ -26,7 +26,11 @@ import {
 import { locOf } from "../program.js";
 import { genResultRecord } from "../type-mapper.js";
 import { forOfVarTarget, lowerDestructuringAssign } from "./lower-stmts.js";
-import { lowerBuiltinDelegation, lowerCheckedDelegation } from "./generator-delegation.js";
+import {
+  lowerAsyncDelegation,
+  lowerBuiltinDelegation,
+  lowerCheckedDelegation,
+} from "./generator-delegation.js";
 
 export type GenType = IrType & { kind: "generator" };
 
@@ -818,14 +822,21 @@ export function lowerYieldStarStatement(lowerer: Lowerer, expr: ts.Expression): 
 function lowerYieldStar(lowerer: Lowerer, expr: ts.YieldExpression): IrExpr {
   const gen = lowerer.ctx.generator;
   if (!gen) lowerer.unsupported("SC1071", expr);
+  if (!expr.expression) lowerer.unsupported("SC1071", expr, "'yield*' with no operand");
+  // An async generator delegates through the async iterator protocol: a
+  // compiled async generator operand crosses as its checked capsule.
   if (lowerer.ctx.isAsync) {
+    const source = lowerer.lowerExpr(expr.expression);
+    const delegate =
+      source.kind === "dynCheck" && source.value.type.kind === "dyn" ? source.value : source;
+    if (delegate.type.kind === "dyn" || lowerer.dynConvertible(delegate.type))
+      return lowerAsyncDelegation(lowerer, expr, lowerer.coerceToExpected(delegate, DYN));
     lowerer.unsupported(
       "SC1071",
       expr,
-      "'yield*' in async generators (use 'for await' and yield each value explicitly)",
+      "'yield*' in async generators over this operand (use 'for await' and yield each value explicitly)",
     );
   }
-  if (!expr.expression) lowerer.unsupported("SC1071", expr, "'yield*' with no operand");
   const loc = locOf(expr);
   // An array literal operand builds as its own array type: the yield*
   // context would otherwise type it by the generator.

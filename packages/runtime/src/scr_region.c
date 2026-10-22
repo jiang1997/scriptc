@@ -666,11 +666,11 @@ static void scr_rgn_queue(ScrRgnWalk *w, size_t entry, void *p, int kind, void (
  * region counted as explained. RC-audit builds still enter it, and stop if
  * the walk reaches it twice. */
 static void scr_rgn_enter(ScrRgnWalk *w, void *p, int kind, void (*walk)(void *, ScrRgnWalk *)) {
-  if (!p || *(size_t *)p == SIZE_MAX) return; /* immortal: never freed, not walked */
+  if (!p || SCR_RC_COUNT(p) == SCR_RC_IMMORTAL) return; /* immortal: never freed, not walked */
 #ifdef SCR_RGN_DEBUG
-  bool single = w->src == 0 && *(size_t *)p == 1 && !w->debug;
+  bool single = w->src == 0 && SCR_RC_COUNT(p) == 1 && !w->debug;
 #else
-  bool single = w->src == 0 && *(size_t *)p == 1;
+  bool single = w->src == 0 && SCR_RC_COUNT(p) == 1;
 #endif
 #ifndef SCR_RC_AUDIT
   if (single) {
@@ -803,16 +803,17 @@ static void *scr_rgn_slot_ptr(uint64_t slot) {
 static void scr_rgn_walk_arr(ScrRgnWalk *w, ScrArr *a) {
   if (a->elem != SCR_ELEM_REF && a->elem != SCR_ELEM_ARR) return;
   ScrRgnSlotKind k = a->elem == SCR_ELEM_ARR ? (ScrRgnSlotKind){SCR_RGN_W_ARR, NULL}
-                                             : scr_rgn_slot_kind(a->ops ? a->ops->release : NULL);
+                                             : scr_rgn_slot_kind(scr_arr_ops(a) ? scr_arr_ops(a)->release : NULL);
   size_t dense = a->len < a->cap ? a->len : a->cap;
+  const uint8_t *states = scr_arr_states_end(a);
   for (size_t i = 0; i < dense; i++)
-    if (!a->present || a->present[i] == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->data[i]), k);
-  if (!a->ext) return;
-  for (size_t i = 0; i < a->ext->sparse_len; i++)
-    if (a->ext->sparse[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->ext->sparse[i].slot), k);
-  for (size_t i = 0; i < a->ext->prop_len; i++)
-    if (a->ext->props[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->ext->props[i].slot), k);
-  scr_rgn_enter(w, a->ext->metadata, SCR_RGN_W_DYN, NULL);
+    if (!states || *scr_arr_state_in(states, i) == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->data[i]), k);
+  if (!scr_arr_ext_of(a)) return;
+  for (size_t i = 0; i < scr_arr_ext_of(a)->sparse_len; i++)
+    if (scr_arr_ext_of(a)->sparse[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(scr_arr_ext_of(a)->sparse[i].slot), k);
+  for (size_t i = 0; i < scr_arr_ext_of(a)->prop_len; i++)
+    if (scr_arr_ext_of(a)->props[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(scr_arr_ext_of(a)->props[i].slot), k);
+  scr_rgn_enter(w, scr_arr_ext_of(a)->metadata, SCR_RGN_W_DYN, NULL);
 }
 
 static void scr_rgn_walk_map(ScrRgnWalk *w, ScrMap *m) {
@@ -826,8 +827,8 @@ static void scr_rgn_walk_map(ScrRgnWalk *w, ScrMap *m) {
                              : (ScrRgnSlotKind){SCR_RGN_S_NONE, NULL};
   ScrRgnSlotKind vk = valref ? scr_rgn_slot_kind(m->ops->val_release) : (ScrRgnSlotKind){SCR_RGN_S_NONE, NULL};
   for (size_t i = 0; i < m->nentries; i++) {
-    const ScrMapEntry *e = &m->entries[i];
-    if (!e->hash) continue; /* tombstone */
+    if (!scr_map_entry_live(m, i)) continue; /* tombstone */
+    const ScrMapEntry *e = scr_map_entry_at(m, i);
     scr_rgn_slot_as(w, scr_rgn_slot_ptr(e->key), kk);
     scr_rgn_slot_as(w, scr_rgn_slot_ptr(e->val), vk);
   }
@@ -922,7 +923,7 @@ static int64_t scr_rgn_settle(ScrRgnWalk *w, size_t *black_out) {
   size_t top = 0;
   for (size_t i = 0; i < n; i++) {
     ScrRgnEntry *x = &w->ents[i];
-    if (*(size_t *)x->obj != (size_t)x->found) {
+    if (SCR_RC_COUNT(x->obj) != (ScrRcCount)x->found) {
       x->black = true;
       stack[top++] = i;
     }
@@ -1041,7 +1042,7 @@ static void scr_rgn_report(const ScrRegion *r, const ScrRgnWalk *w, int64_t unex
   }
   for (size_t i = 0; i < w->nents; i++) {
     const ScrRgnEntry *x = &w->ents[i];
-    if (*(size_t *)x->obj == (size_t)x->found) continue; /* not referenced from outside itself */
+    if (SCR_RC_COUNT(x->obj) == (ScrRcCount)x->found) continue; /* not referenced from outside itself */
     if (printed == lines) {
       more++;
       continue;
@@ -1055,7 +1056,7 @@ static void scr_rgn_report(const ScrRegion *r, const ScrRgnWalk *w, int64_t unex
     }
     const ScrRgnFrom *f = &w->from[at];
     fprintf(stderr, " held by %s.%s, with %zu references, %lld of them from what the region owns\n",
-            f->cls ? f->cls->name : "?", f->cls ? scr_rgn_field_name(f->cls, f->field) : "?", *(size_t *)x->obj,
+            f->cls ? f->cls->name : "?", f->cls ? scr_rgn_field_name(f->cls, f->field) : "?", (size_t)SCR_RC_COUNT(x->obj),
             (long long)x->found);
   }
   if (more) fprintf(stderr, "  %zu more\n", more);
@@ -1111,7 +1112,7 @@ static bool scr_rgn_try_free(ScrRgnThread *t, ScrRegion *r, bool tentative) {
   for (ScrRgnChunk *c = r->chunks; c; c = c->next) c->found = 0;
   size_t objects = 0;
   SCR_RGN_EACH(r, s, o) {
-    if (*(size_t *)o == SIZE_MAX) {
+    if (SCR_RC_COUNT(o) == SCR_RC_IMMORTAL) {
       /* Published: other threads may hold it, uncounted. */
       r->state = SCR_RGN_PINNED;
       t->stats.pinned++;
@@ -1361,6 +1362,18 @@ static void scr_rgn_thread_exit(void) {
     ScrRegion *r = i < t->nregions ? t->regions[i] : all[0];
     if (!r) continue;
     scr_rgn_spare_drop(r);
+#if defined(SCR_WORKERS) && SCR_RGN_MMAP && !defined(SCR_RGN_POISON)
+    /* Nothing is carved here after a script thread exits: the pages faulted
+     * in ahead of each chunk's bump go back while the program goes on, and
+     * its objects stay. */
+    if (!scr_context_is_main())
+      for (ScrRgnChunk *c = r->chunks; c; c = c->next) {
+        /* 64 KiB steps cover every page size, as in scr_rgn_chunk_retire. */
+        char *from = (char *)(((uintptr_t)c->bump + 0xffff) & ~(uintptr_t)0xffff);
+        if (c->touched > from) scr_mem_release_ahead(from, c->touched);
+        c->touched = c->bump;
+      }
+#endif
     for (ScrRgnSeg *s = r->segs, *next; s; s = next) {
       next = s->next;
       free(s);

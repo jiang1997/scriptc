@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { numLit, strLit, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
@@ -219,7 +220,7 @@ export function lowerOsCpusCall(lowerer: Lowerer, call: ts.CallExpression, loc: 
   const key = `os.cpus:${typeKey(result)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%os.cpus.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%os.cpus", key);
     lowerer.valueHelpers.set(key, helper);
     const index = varRef("i.0", F64, loc);
     const field = (k: number): IrExpr => ({
@@ -346,7 +347,7 @@ export function lowerPathParseCall(
   const key = `${fn}:${typeKey(result)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%path.parse.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%path.parse", key);
     lowerer.valueHelpers.set(key, helper);
     const parts = varRef("parts.0", arrayOf(STRING), loc);
     lowerer.liftedFns.push({
@@ -448,7 +449,7 @@ export function lowerPathFormatCall(
   const key = `${fn}:${typeKey(recordT)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%path.format.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%path.format", key);
     lowerer.valueHelpers.set(key, helper);
     const object = varRef("object.0", recordT, loc);
     const read = (name: string): IrExpr => {

@@ -999,6 +999,20 @@ static const ScrChar1 scr_ascii1[128] = {
   SCR_A8(64),  SCR_A8(72),  SCR_A8(80),  SCR_A8(88),
   SCR_A8(96),  SCR_A8(104), SCR_A8(112), SCR_A8(120),
 };
+/* "10" through "99": converting a small integer to a string returns one of
+ * these (or a digit from scr_ascii1) without allocating. */
+typedef struct { size_t rc; size_t len; size_t cap; char data[3]; } ScrChar2;
+#define SCR_D2_WORD(t, u) (((uint64_t)(t) << 16) | ((uint64_t)(u) << 8) | (uint64_t)(u))
+#define SCR_D2(t, u) \
+  {SIZE_MAX, 2, SCR_STR_CAP_WORD(2, SCR_KEY_HASH32_SHORT(2, SCR_D2_WORD(t, u)), 1), {(char)(t), (char)(u), 0}}
+#define SCR_D2_ROW(t) \
+  SCR_D2(t, '0'), SCR_D2(t, '1'), SCR_D2(t, '2'), SCR_D2(t, '3'), SCR_D2(t, '4'), \
+  SCR_D2(t, '5'), SCR_D2(t, '6'), SCR_D2(t, '7'), SCR_D2(t, '8'), SCR_D2(t, '9')
+static const ScrChar2 scr_digits2[90] = {
+  SCR_D2_ROW('1'), SCR_D2_ROW('2'), SCR_D2_ROW('3'), SCR_D2_ROW('4'), SCR_D2_ROW('5'),
+  SCR_D2_ROW('6'), SCR_D2_ROW('7'), SCR_D2_ROW('8'), SCR_D2_ROW('9'),
+};
+
 static const struct { size_t rc; size_t len; size_t cap; char data[1]; }
     scr_lit_empty = {SIZE_MAX, 0, SCR_STR_CAP_WORD(0, SCR_KEY_HASH32_SHORT(0, 0), 1), ""};
 
@@ -1745,20 +1759,19 @@ static __attribute__((noinline)) size_t scr_byte_to_u16_walk(const ScrStr *s, Sc
 }
 
 /* ECMA-262 ToIntegerOrInfinity for a double already known to be a Number:
- * NaN → +0, otherwise truncate toward zero, ±Infinity preserved. */
-static double scr_to_integer_or_infinity(double x) {
-  if (isnan(x)) return 0.0;
-  return trunc(x);
+ * NaN → +0, otherwise truncate toward zero, ±Infinity preserved. Inside
+ * (-2^63, 2^63) the integer conversion truncates, without the libm trunc
+ * call baseline x86-64 needs; a fraction above -1 gives +0, as the spec's
+ * mathematical result does. Every double outside that range is already an
+ * integer or infinite, and NaN fails both comparisons. */
+static inline double scr_to_integer_or_infinity(double x) {
+  if (x > -9223372036854775808.0 && x < 9223372036854775808.0) return (double)(int64_t)x;
+  return isnan(x) ? 0.0 : x;
 }
 
-/* Byte substring search (needle and hay are both canonical WTF-8,
- * so any byte-level match starts on a char boundary — UTF-8 is
- * self-synchronizing). Empty needle matches at hay. */
-static const char *scr_byte_find(const char *hay, size_t hay_len,
-                                  const char *nee, size_t nee_len) {
-  if (nee_len == 0) return hay;
-  if (nee_len > hay_len) return NULL;
-  if (nee_len == 1) return memchr(hay, (unsigned char)nee[0], hay_len);
+/* scr_byte_find for a needle of at least two bytes, no longer than hay. */
+static __attribute__((noinline)) const char *scr_byte_find_long(const char *hay, size_t hay_len,
+                                                                const char *nee, size_t nee_len) {
   const unsigned char first = (unsigned char)nee[0];
   const unsigned char second = (unsigned char)nee[1];
   /* The last possible match start. */
@@ -1808,6 +1821,18 @@ static const char *scr_byte_find(const char *hay, size_t hay_len,
   return NULL;
 }
 
+/* Byte substring search (needle and hay are both canonical WTF-8,
+ * so any byte-level match starts on a char boundary — UTF-8 is
+ * self-synchronizing). Empty needle matches at hay. The one-byte case,
+ * every split on a separator character, goes to memchr without a frame. */
+static inline const char *scr_byte_find(const char *hay, size_t hay_len,
+                                        const char *nee, size_t nee_len) {
+  if (nee_len == 0) return hay;
+  if (nee_len > hay_len) return NULL;
+  if (nee_len == 1) return memchr(hay, (unsigned char)nee[0], hay_len);
+  return scr_byte_find_long(hay, hay_len, nee, nee_len);
+}
+
 /* ── searches for a needle that can match half of a surrogate pair ─────
  * Canonical storage makes byte matches exact for every needle except one
  * that starts with a lone low surrogate or ends with a lone high one: JS
@@ -1846,9 +1871,10 @@ static uint16_t *scr_str_units(const ScrStr *s, size_t *n) {
  * UTF-16 units to bytes through the cursor and checkpoints. Once its
  * reads would have paid for converting it (one read per 16 bytes), a
  * receiver up to SCR_SIDX_UNITS_MAX units keeps its code units in its
- * entry and reads become loads. The array is freed with the entry, and an
- * append drops it (scr_sidx_concat_append). */
-#define SCR_SIDX_UNITS_MAX ((size_t)1 << 20)
+ * entry and reads become loads. The bound admits source texts of several
+ * megabytes, which scanners read in full. The array is freed with the
+ * entry, and an append drops it (scr_sidx_concat_append). */
+#define SCR_SIDX_UNITS_MAX ((size_t)1 << 24)
 static bool scr_sidx_units(const ScrStr *s, ScrSidx *e) {
   if (!e->units) {
     if (++e->reads < 32 || e->reads * 16 < s->len || s->len > SCR_SIDX_UNITS_MAX) return false;
@@ -2001,6 +2027,13 @@ double scr_str_char_code_at(ScrStr *s, double i) {
 }
 
 double scr_str_index_of(ScrStr *s, ScrStr *needle, double fromIndex) {
+  /* A search from the start of a proven-ASCII receiver: byte offsets are
+   * UTF-16 indexes, and a needle with other bytes is never found. A start
+   * index that is not positive (NaN, -0 or negative) clamps to 0. */
+  if (s->ascii && !(fromIndex > 0)) {
+    const char *found = scr_byte_find(s->data, s->len, needle->data, needle->len);
+    return found ? (double)(found - s->data) : -1.0;
+  }
   double pos = scr_to_integer_or_infinity(fromIndex);
   if (needle->len > s->len) return -1.0;
   ScrSidx *e = scr_sidx_for(s);
@@ -2123,6 +2156,12 @@ static size_t scr_slice_boundary(double v, size_t len16) {
 }
 
 ScrStr *scr_str_slice(ScrStr *s, double start, double end) {
+  /* A proven-ASCII receiver needs no index map (scr_str_slice_units). */
+  if (s->ascii) {
+    size_t from = scr_slice_boundary(scr_to_integer_or_infinity(start), s->len);
+    size_t to = scr_slice_boundary(scr_to_integer_or_infinity(end), s->len);
+    return scr_str_slice_units(s, NULL, from, to);
+  }
   ScrSidx *e = scr_sidx_for(s);
   size_t len16 = scr_sidx_len(s, e);
   size_t from = scr_slice_boundary(scr_to_integer_or_infinity(start), len16);
@@ -2388,8 +2427,10 @@ void scr_str_split_cursor_init(ScrSplitCursor *cursor, uint32_t limit) {
   cursor->pending_unit = 0;
 }
 
-static ScrStr *scr_str_split_piece(const char *bytes, size_t len, ScrStr **scratch) {
-  if (!scratch || len <= 4) return scr_str_from_span(bytes, len);
+/* `ascii`: the bytes are a span of a proven-ASCII string. */
+static ScrStr *scr_str_split_piece(const char *bytes, size_t len, ScrStr **scratch, bool ascii) {
+  if (!scratch || len <= 4) return ascii ? scr_str_from_span_ascii(bytes, len)
+                                         : scr_str_from_span(bytes, len);
   ScrStr *piece = *scratch;
   if (piece && piece->rc == 1 && piece->cap >= len) {
     /* The scratch owner is the only remaining reference. Invalidate all
@@ -2400,10 +2441,12 @@ static ScrStr *scr_str_split_piece(const char *bytes, size_t len, ScrStr **scrat
     memcpy(piece->data, bytes, len);
     piece->len = len;
     piece->data[len] = '\0';
+    piece->ascii = ascii;
   } else {
     ScrStr *fresh = scr_str_alloc_raw(len, len < 64 ? 64 : len);
     memcpy(fresh->data, bytes, len);
     fresh->data[len] = '\0';
+    fresh->ascii = ascii;
     *scratch = fresh;
     scr_str_release(piece);
     piece = fresh;
@@ -2461,7 +2504,7 @@ const char *scr_str_split_cursor_span(ScrStr *s, ScrStr *sep, ScrSplitCursor *cu
 }
 
 ScrStr *scr_str_split_materialize(const char *bytes, size_t length, ScrStr **scratch) {
-  return scr_str_split_piece(bytes, length, scratch);
+  return scr_str_split_piece(bytes, length, scratch, false);
 }
 
 ScrStr *scr_str_split_cursor_next(ScrStr *s, ScrStr *sep, ScrSplitCursor *cursor,
@@ -2469,7 +2512,7 @@ ScrStr *scr_str_split_cursor_next(ScrStr *s, ScrStr *sep, ScrSplitCursor *cursor
   size_t len;
   const char *bytes = scr_str_split_span(s, sep, cursor, sep->len == 0, &len);
   if (!bytes) return NULL;
-  return scr_str_split_piece(bytes, len, scratch);
+  return scr_str_split_piece(bytes, len, scratch, s->ascii);
 }
 
 /* Move a bounded batch of pieces into array storage in one operation.
@@ -2494,7 +2537,8 @@ static void scr_str_split_fill(ScrArr *out, ScrStr *s, ScrStr *sep,
     size_t count = 0, len;
     const char *bytes;
     while (count < 64 && (bytes = scr_str_split_span(s, sep, cursor, units, &len))) {
-      ScrStr *piece = scr_str_from_span(bytes, len);
+      ScrStr *piece =
+          s->ascii ? scr_str_from_span_ascii(bytes, len) : scr_str_from_span(bytes, len);
       slots[count++] = (uint64_t)(uintptr_t)piece;
     }
     if (count) scr_arr_push_many(out, count, slots);
@@ -2503,18 +2547,43 @@ static void scr_str_split_fill(ScrArr *out, ScrStr *s, ScrStr *sep,
 }
 
 ScrArr *scr_str_split_limit(ScrStr *s, ScrStr *sep, double limit_num) {
-  uint32_t limit = scr_to_uint32(limit_num);
+  /* split(sep) passes the default limit, 2^32 - 1. */
+  uint32_t limit = limit_num == 4294967295.0 ? UINT32_MAX : scr_to_uint32(limit_num);
   /* An empty separator yields one piece per UTF-16 unit: size it once. */
   size_t pieces = 0;
   if (sep->len == 0) {
     pieces = s->ascii ? s->len : scr_sidx_len(s, scr_sidx(s));
     if (pieces > limit) pieces = limit;
   }
-  ScrArr *out = scr_arr_new(SCR_ELEM_STR, pieces);
   ScrSplitCursor cursor;
   scr_str_split_cursor_init(&cursor, limit);
-  if (sep->len == 0) scr_str_split_fill(out, s, sep, &cursor, true);
-  else scr_str_split_fill(out, s, sep, &cursor, false);
+  if (sep->len == 0) {
+    ScrArr *out = scr_arr_new(SCR_ELEM_STR, pieces);
+    scr_str_split_fill(out, s, sep, &cursor, true);
+    return out;
+  }
+  /* Most splits fit one batch: its count sizes the result, whose slots then
+   * share the header's block (scr_arr_new_inline). A longer split appends
+   * the rest batch by batch. */
+  uint64_t slots[64];
+  size_t count = 0, len;
+  const char *bytes;
+  while (count < 64 && (bytes = scr_str_split_span(s, sep, &cursor, false, &len)))
+    slots[count++] = (uint64_t)(uintptr_t)(s->ascii ? scr_str_from_span_ascii(bytes, len)
+                                                    : scr_str_from_span(bytes, len));
+  ScrArr *out = scr_arr_new_inline(SCR_ELEM_STR, count);
+  if (count) {
+    /* A fresh inline array of exactly `count` slots: store the pieces and
+     * their states directly. */
+    uint8_t *states = scr_arr_states_end(out);
+    for (size_t k = 0; k < count; k++) {
+      out->data[k] = slots[k];
+      *scr_arr_state_in(states, k) = SCR_ARR_VALUE;
+    }
+    out->len = (uint32_t)count;
+    out->filled = (uint32_t)count;
+  }
+  if (count == 64) scr_str_split_fill(out, s, sep, &cursor, false);
   return out;
 }
 
@@ -2622,90 +2691,198 @@ ScrStr *scr_str_replace_bytes(ScrStr *s, const char *pat, size_t plen, ScrStr *r
   return out;
 }
 
-/* The first byte at or after `i` that is one of the replaced characters
- * (`which` maps them to k + 1), or len. Up to eight characters are tested
- * eight bytes at a time. */
-static size_t scr_replace_chars_next(const char *p, size_t i, size_t len, const uint8_t *which,
-                                     const char *chars, size_t n) {
-  if (n <= 8) {
-    const uint64_t ones = UINT64_C(0x0101010101010101);
-    const uint64_t highs = UINT64_C(0x8080808080808080);
-    for (; len - i >= 8; i += 8) {
-      uint64_t w;
-      memcpy(&w, p + i, 8);
-      uint64_t hit = 0;
-      for (size_t k = 0; k < n; k++) {
-        uint64_t x = w ^ (ones * (unsigned char)chars[k]);
-        hit |= (x - ones) & ~x & highs;
-      }
-      if (hit) break;
-    }
+/* replaceAll of single characters (scr_str_replace_chars): a mask of the
+ * bytes in one block of SCR_RC_LANES that equal a replaced character, with
+ * SCR_RC_BITS bits per byte, lowest byte first. Every flagged byte is
+ * confirmed against the character table, so the SWAR form may flag extra
+ * bytes above a true match (its zero-byte test has no false negatives).
+ * Without a vector unit or a little-endian word, the byte loop alone. */
+#if defined(__SSE2__)
+#define SCR_RC_LANES 16
+#define SCR_RC_BITS 1
+typedef __m128i ScrRcWant;
+static inline ScrRcWant scr_rc_want(unsigned char c) { return _mm_set1_epi8((char)c); }
+static inline uint64_t scr_rc_mask(const char *p, const ScrRcWant *want, size_t n) {
+  __m128i v = _mm_loadu_si128((const __m128i *)p);
+  __m128i eq = _mm_cmpeq_epi8(v, want[0]);
+  for (size_t k = 1; k < n; k++) eq = _mm_or_si128(eq, _mm_cmpeq_epi8(v, want[k]));
+  return (uint64_t)(uint32_t)_mm_movemask_epi8(eq);
+}
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#define SCR_RC_LANES 16
+#define SCR_RC_BITS 4
+typedef uint8x16_t ScrRcWant;
+static inline ScrRcWant scr_rc_want(unsigned char c) { return vdupq_n_u8(c); }
+static inline uint64_t scr_rc_mask(const char *p, const ScrRcWant *want, size_t n) {
+  uint8x16_t v = vld1q_u8((const uint8_t *)p);
+  uint8x16_t eq = vceqq_u8(v, want[0]);
+  for (size_t k = 1; k < n; k++) eq = vorrq_u8(eq, vceqq_u8(v, want[k]));
+  /* Narrowing each 16-bit pair by 4 leaves one nibble per byte. */
+  return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(eq), 4)), 0);
+}
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define SCR_RC_LANES 8
+#define SCR_RC_BITS 8
+typedef uint64_t ScrRcWant;
+static inline ScrRcWant scr_rc_want(unsigned char c) { return UINT64_C(0x0101010101010101) * c; }
+static inline uint64_t scr_rc_mask(const char *p, const ScrRcWant *want, size_t n) {
+  const uint64_t ones = UINT64_C(0x0101010101010101);
+  const uint64_t highs = UINT64_C(0x8080808080808080);
+  uint64_t w, hit = 0;
+  memcpy(&w, p, 8);
+  for (size_t k = 0; k < n; k++) {
+    uint64_t x = w ^ want[k];
+    hit |= (x - ones) & ~x & highs;
   }
-  for (; i < len; i++) {
-    unsigned char c = (unsigned char)p[i];
-    if (c < 0x80 && which[c]) return i;
+  return hit;
+}
+#else
+#define SCR_RC_LANES 0
+#endif
+
+/* The result being built: `from` is where the copied subject resumes. */
+typedef struct {
+  ScrStr *out;
+  size_t cap, used, from;
+  bool joins;
+} ScrRcOut;
+
+/* Copy the subject up to `i`, then `text` in place of the character at
+ * `i` (or nothing at the end, when i == len). */
+static inline __attribute__((always_inline)) void scr_rc_put(ScrRcOut *o, const char *p,
+                                                              size_t len, size_t i,
+                                                              const char *text, size_t text_len) {
+  size_t gap = i - o->from;
+  size_t need = gap + text_len;
+  if (need > o->cap - o->used) {
+    if (need > SCR_STR_MAX_CAP - o->used) scr_oom();
+    size_t rest = o->used + need + (len - o->from);
+    size_t want = o->cap * 2 < rest ? rest : o->cap * 2;
+    if (want > SCR_STR_MAX_CAP) want = SCR_STR_MAX_CAP;
+    o->out->len = o->used;
+    o->out = scr_str_regrow(o->out, want);
+    o->cap = want;
   }
-  return len;
+  scr_copy_bytes(o->out->data + o->used, p + o->from, gap);
+  o->used += gap;
+  if (i == len) return;
+  /* As in scr_str_replace_bytes: a seam can complete a surrogate pair. */
+  if (text_len) o->joins |= scr_wtf8_joins(o->out->data, o->used, text, text_len);
+  scr_copy_bytes(o->out->data + o->used, text, text_len);
+  o->used += text_len;
+  o->from = i + 1;
+  o->joins |= (unsigned char)p[o->from] == 0xED;
+}
+
+/* The characters (at most SCR_RC_MAX), their replacements and the tables
+ * that find them. */
+#define SCR_RC_MAX 16
+typedef struct {
+  const ScrStr *chars, *texts; /* the immortal operands it was built for, or NULL */
+  size_t n;
+  size_t grow; /* the longest replacement's growth, less one */
+  bool ascii;  /* every replacement is ASCII */
+  uint8_t which[128];
+  const char *text[SCR_RC_MAX];
+  size_t text_len[SCR_RC_MAX];
+#if SCR_RC_LANES
+  ScrRcWant want[SCR_RC_MAX];
+#endif
+} ScrRcTable;
+
+/* The compiler passes a chain's characters and replacements as immortal
+ * literals, so the last chain's table is kept for the next call with the
+ * same operands. */
+static SCR_TL ScrRcTable scr_rc_last;
+
+static const ScrRcTable *scr_rc_table(const ScrStr *chars, const ScrStr *texts,
+                                      ScrRcTable *local) {
+  bool keep = chars->rc == SIZE_MAX && texts->rc == SIZE_MAX;
+  if (keep && scr_rc_last.chars == chars && scr_rc_last.texts == texts) return &scr_rc_last;
+  ScrRcTable *table = keep ? &scr_rc_last : local;
+  table->chars = table->texts = NULL;
+  size_t n = chars->len < SCR_RC_MAX ? chars->len : SCR_RC_MAX;
+  size_t grow = 0;
+  bool ascii = true;
+  memset(table->which, 0, sizeof table->which);
+  const char *t = texts->data, *t_end = texts->data + texts->len;
+  for (size_t k = 0; k < n; k++) {
+    /* The replacements are short: find each terminator, and whether the
+     * replacement is ASCII, in one pass. */
+    const char *stop = t;
+    unsigned high = 0;
+    while (stop < t_end && *stop) high |= (unsigned char)*stop++;
+    table->text[k] = t;
+    table->text_len[k] = (size_t)(stop - t);
+    if (table->text_len[k] > grow) grow = table->text_len[k];
+    if (high & 0x80) ascii = false;
+    table->which[(unsigned char)chars->data[k] & 0x7F] = (uint8_t)(k + 1);
+#if SCR_RC_LANES
+    table->want[k] = scr_rc_want((unsigned char)chars->data[k]);
+#endif
+    t = stop < t_end ? stop + 1 : t_end;
+  }
+  table->n = n;
+  table->grow = grow > 1 ? grow - 1 : 0;
+  table->ascii = ascii;
+  if (keep) {
+    table->chars = chars;
+    table->texts = texts;
+  }
+  return table;
 }
 
 ScrStr *scr_str_replace_chars(ScrStr *s, ScrStr *chars, ScrStr *texts) {
-  enum { MAX = 16 };
-  size_t n = chars->len < MAX ? chars->len : MAX;
-  uint8_t which[128] = { 0 };
-  const char *text[MAX];
-  size_t text_len[MAX];
-  size_t grow = 0;
-  bool ascii = s->ascii;
-  const char *t = texts->data, *t_end = texts->data + texts->len;
-  for (size_t k = 0; k < n; k++) {
-    const char *stop = memchr(t, '\0', (size_t)(t_end - t));
-    if (!stop) stop = t_end;
-    text[k] = t;
-    text_len[k] = (size_t)(stop - t);
-    if (text_len[k] > grow) grow = text_len[k];
-    if (ascii && !scr_bytes_all_ascii(t, text_len[k])) ascii = false;
-    which[(unsigned char)chars->data[k] & 0x7F] = (uint8_t)(k + 1);
-    t = stop < t_end ? stop + 1 : t_end;
-  }
+  ScrRcTable local;
+  const ScrRcTable *table = scr_rc_table(chars, texts, &local);
+  size_t n = table->n, grow = table->grow;
+  const uint8_t *which = table->which;
+  const char *const *text = table->text;
+  const size_t *text_len = table->text_len;
+#if SCR_RC_LANES
+  const ScrRcWant *want = table->want;
+#endif
+  bool ascii = s->ascii && table->ascii;
   const char *p = s->data;
   size_t len = s->len;
-  size_t i = scr_replace_chars_next(p, 0, len, which, chars->data, n);
-  if (i == len) return scr_str_retain(s);
-  grow = grow > 1 ? grow - 1 : 0;
-  size_t cap = len + (grow < 64 ? 4 * grow : grow) + 16;
-  if (cap > SCR_STR_MAX_CAP) cap = SCR_STR_MAX_CAP;
-  ScrStr *out = scr_str_alloc_raw(0, cap);
-  cap = out->cap;
-  size_t used = 0, from = 0;
-  /* As in scr_str_replace_bytes: a seam can complete a surrogate pair. */
-  bool joins = false;
-  for (;;) {
-    size_t gap = i - from;
-    size_t k = i < len ? (size_t)which[(unsigned char)p[i]] - 1 : 0;
-    size_t need = gap + (i < len ? text_len[k] : 0);
-    if (need > cap - used) {
-      if (need > SCR_STR_MAX_CAP - used) scr_oom();
-      size_t want = cap * 2 < used + need + (len - from) ? used + need + (len - from) : cap * 2;
-      if (want > SCR_STR_MAX_CAP) want = SCR_STR_MAX_CAP;
-      out->len = used;
-      out = scr_str_regrow(out, want);
-      cap = want;
+  ScrRcOut o = { NULL, 0, 0, 0, false };
+  size_t i = 0;
+#define SCR_RC_HIT(at)                                                            \
+  do {                                                                            \
+    unsigned char c_ = (unsigned char)p[at];                                      \
+    if (c_ < 0x80 && which[c_]) {                                                 \
+      if (!o.out) {                                                               \
+        size_t cap_ = len + (grow < 64 ? 4 * grow : grow) + 16;                   \
+        if (cap_ > SCR_STR_MAX_CAP) cap_ = SCR_STR_MAX_CAP;                       \
+        o.out = scr_str_alloc_raw(0, cap_);                                       \
+        o.cap = o.out->cap;                                                       \
+      }                                                                           \
+      size_t k_ = (size_t)which[c_] - 1;                                          \
+      scr_rc_put(&o, p, len, (at), text[k_], text_len[k_]);                       \
+    }                                                                             \
+  } while (0)
+#if SCR_RC_LANES
+  /* Every match of a block is replaced before the next block is read. */
+  for (; len - i >= SCR_RC_LANES; i += SCR_RC_LANES) {
+    uint64_t mask = scr_rc_mask(p + i, want, n);
+    while (mask) {
+      size_t lane = (size_t)__builtin_ctzll(mask) / SCR_RC_BITS;
+      mask &= ~((((uint64_t)1 << SCR_RC_BITS) - 1) << (lane * SCR_RC_BITS));
+      SCR_RC_HIT(i + lane);
     }
-    scr_copy_bytes(out->data + used, p + from, gap);
-    used += gap;
-    if (i == len) break;
-    if (text_len[k]) joins |= scr_wtf8_joins(out->data, used, text[k], text_len[k]);
-    scr_copy_bytes(out->data + used, text[k], text_len[k]);
-    used += text_len[k];
-    from = i + 1;
-    joins |= (unsigned char)p[from] == 0xED;
-    i = scr_replace_chars_next(p, from, len, which, chars->data, n);
   }
+#endif
+  for (; i < len; i++) SCR_RC_HIT(i);
+#undef SCR_RC_HIT
+  if (!o.out) return scr_str_retain(s);
+  scr_rc_put(&o, p, len, len, NULL, 0);
+  ScrStr *out = o.out;
+  size_t used = o.used, cap = o.cap;
   out->len = used;
   if (cap - used > used / 4 + 64) out = scr_str_regrow(out, used);
   out->data[used] = '\0';
   scr_str_hash_forget(out);
-  if (joins && scr_wtf8_any()) scr_str_fuse_surrogates(out);
+  if (o.joins && scr_wtf8_any()) scr_str_fuse_surrogates(out);
   else if (ascii) scr_str_note_ascii(out);
   return out;
 }
@@ -3085,7 +3262,7 @@ double scr_string_to_number(ScrStr *s) {
   return scr_bytes_to_number(s->data, s->len);
 }
 
-double scr_bytes_to_number(const char *p, size_t len) {
+static __attribute__((noinline)) double scr_bytes_to_number_any(const char *p, size_t len) {
   size_t b = 0, e = len;
   while (b < e) {
     unsigned char c = (unsigned char)p[b];
@@ -3145,7 +3322,33 @@ double scr_bytes_to_number(const char *p, size_t len) {
   return r;
 }
 
+/* An optional sign and 1 to 15 decimal digits, the common shape of a
+ * parsed field, is an exact integer below 2^53 with no whitespace to trim
+ * and no other grammar to apply ("-0" is -0, leading zeros are decimal).
+ * Everything else takes the full grammar. */
+double scr_bytes_to_number(const char *p, size_t len) {
+  if (len - 1 < 16) {
+    size_t i = p[0] == '-' || p[0] == '+';
+    if (i < len && len - i <= 15) {
+      int64_t m = 0;
+      size_t k = i;
+      for (; k < len; k++) {
+        unsigned d = (unsigned)(unsigned char)p[k] - '0';
+        if (d > 9) break;
+        m = m * 10 + d;
+      }
+      if (k == len) return p[0] == '-' ? -(double)m : (double)m;
+    }
+  }
+  return scr_bytes_to_number_any(p, len);
+}
+
 ScrStr *scr_f64_to_scrstr(double x) {
+  if (x >= 0 && x < 100) { /* -0 prints "0" as well */
+    unsigned v = (unsigned)x;
+    if ((double)v == x)
+      return v < 10 ? (ScrStr *)&scr_ascii1['0' + v] : (ScrStr *)&scr_digits2[v - 10];
+  }
   char buf[32];
   size_t len = scr_f64_to_str(x, buf);
   return scr_str_new_ascii(buf, len); /* number text is always ASCII */

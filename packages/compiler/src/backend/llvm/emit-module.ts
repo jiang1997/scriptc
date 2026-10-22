@@ -1,6 +1,8 @@
 /* LlEmitter's module-level output: module parts, helper definitions, library declarations and FFI callback definitions. */
+import { relieveHeapPressure } from "../../heap-pressure.js";
 import { emitWasmModules } from "./wasm-modules.js";
 import { type LlEmitter, ffiCallbackDummyLl, llStrBytes } from "./emitter.js";
+import { JS_IC_WORDS } from "./js-ic.js";
 import {
   mangleAsyncSpawn,
   mangleClassObj,
@@ -28,12 +30,13 @@ import {
   vAdapters,
 } from "./shapes.js";
 import { emitLlvmLayouts } from "./layouts.js";
-import { moduleRuntimeFeatures } from "../../ir/runtime-features.js";
 import { emitArraySearchHelpers } from "./array-search.js";
 import { emitClassMembershipHelper } from "./classes.js";
 import { type RegexMatcherCode, compileRegexMatcher } from "./regex-matchers.js";
 import {
   MAP_ITER_DECL,
+  MAP_ITER_NUM_DECL,
+  SCR_MAP_NUM_DEAD,
   NUMBER_MAP_ENTRY_DECL,
   STRING_MAP_ENTRY_DECL,
 } from "./map-number-lookup.js";
@@ -64,6 +67,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     const def = emitter.emitFunction(fn);
     fnDefs.push(def);
     emitter.fnDefText.set(fn.name, def);
+    relieveHeapPressure();
   }
   emitter.selectStacklessAsync(fnDefs);
   const errorViews: string[] = [];
@@ -135,7 +139,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
   // outlive the RC audit — release it with the globals (the runtime ABI’s
   // sc_release_globals tail). Only when the dispatch unit is even
   // linked (defineProps is the only writer).
-  const runtimeFeatures = moduleRuntimeFeatures(emitter.mod);
+  const runtimeFeatures = emitter.runtimeFeatures;
   const fnValueProps = [...emitter.fnValues];
   if (fnValueProps.length > 0) emitter.declare(`declare void @scr_box_release(ptr)`);
   if (emitter.classObjs.size > 0)
@@ -436,37 +440,44 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     `%ScrClosure = type { ${emitter.sizeType}, ptr, ${emitter.sizeType}, ptr, i32, i32, ptr, ptr }`,
     `%ScrFfiTable = type { ptr, ${emitter.sizeType}, ${emitter.sizeType}, ptr, i8, ptr, ptr, ${emitter.sizeType}, ${emitter.sizeType}, ${emitter.sizeType}, ptr, ptr }`,
     `%ScrRegex = type { ${emitter.sizeType}, ptr, ptr, ptr, double, ptr, ptr, ptr }`,
-    // ScrArr mirrors scr_runtime.h field-for-field: { rc, len, cap, elem,
-    // cyc, spare, filled, ops, data, present, ext } (field numbers in
-    // SCR_ARR_FIELD), where filled bounds the hole-free prefix, ops points at the element type's constant RC descriptor
-    // (%ScrArrOps, SCR_ELEM_REF only) and ext at the out-of-line sparse,
-    // property and metadata storage (NULL until first used). Live dynamic
-    // stream commits swap its dense, presence and out-of-line storage while
+    // ScrArr mirrors scr_runtime.h field-for-field: { rc, len (i32), cap
+    // (i32), elem, cyc, spare, filled, data } (field numbers in
+    // SCR_ARR_FIELD), where the dense states follow the cap value slots at
+    // data, filled bounds the hole-free prefix, and spare holds the storage
+    // flags and the registry id of the element type's RC descriptor
+    // (%ScrArrOps, SCR_ELEM_REF only; the runtime assigns ids). An array
+    // with out-of-line sparse, property or metadata storage keeps a pointer
+    // to it in the word before its dense allocation. Live dynamic stream
+    // commits swap its dense, presence and out-of-line storage while
     // preserving the target object's identity.
-    `%ScrArr = type { ${emitter.sizeType}, ${emitter.sizeType}, ${emitter.sizeType}, i8, i8, i16, i32, ptr, ptr, ptr, ptr }`,
-    `%ScrArrOps = type { ptr, ptr, ptr }`,
+    `%ScrArr = type { ${emitter.sizeType}, i32, i32, i8, i8, i16, i32, ptr }`,
+    `%ScrArrOps = type { ptr, ptr, ptr, i32 }`,
     // The ScrMap prefix { rc, key_kind, val_kind, traced } — the inline
     // RC fast paths test the traced byte (shapes.ts).
     ...(emitter.rcHelpers === null ? [] : [`%ScrMapRc = type { ${emitter.sizeType}, i8, i8, i8 }`]),
-    // The complete ScrMap and its { key, val, hash } entry, read by the
-    // inline number-key lookup (sc_map_entry_f64) and the inline
-    // iteration steps (sc_map_iter_entry): field 8 is the i32 entry
+    // The complete ScrMap and its entries, read by the inline number-key
+    // lookup (sc_map_entry_f64) and the inline iteration steps
+    // (sc_map_iter_entry, sc_map_iter_entry_num): field 8 is the i32 entry
     // count, field 10 the i64 absent-key filter, entries is field 11,
     // nbuckets and buckets fields 13 and 14, the direct index and its i32
     // length fields 15 and 16.
     ...(emitter.decls.has(NUMBER_MAP_ENTRY_DECL) ||
     emitter.decls.has(STRING_MAP_ENTRY_DECL) ||
-    emitter.decls.has(MAP_ITER_DECL)
+    emitter.decls.has(MAP_ITER_DECL) ||
+    emitter.decls.has(MAP_ITER_NUM_DECL)
       ? [
           `%ScrMapIx = type { ${emitter.sizeType}, i8, i8, i8, i8, i32, ptr, ptr, i32, i32, i64, ptr, i32, i32, ptr, ptr, i32, i32 }`,
         ]
       : []),
-    // String-keyed reference reads load the value slot of the entry
-    // scr_map_entry_str returns (map-number-lookup.ts).
+    // The { key, val, hash } entry of every map but a number-key one, whose
+    // entry is { key, val } (scr_map.h ScrMapNumEntry). String-keyed
+    // reference reads load the value slot of the entry scr_map_entry_str
+    // returns (map-number-lookup.ts).
     ...(emitter.decls.has(NUMBER_MAP_ENTRY_DECL) ||
     emitter.decls.has(STRING_MAP_ENTRY_DECL) ||
-    emitter.decls.has(MAP_ITER_DECL)
-      ? [`%ScrMapEntry = type { i64, i64, i64 }`]
+    emitter.decls.has(MAP_ITER_DECL) ||
+    emitter.decls.has(MAP_ITER_NUM_DECL)
+      ? [`%ScrMapEntry = type { i64, i64, i64 }`, `%ScrMapNumEntry = type { i64, i64 }`]
       : []),
     // The runtime error prefix { rc, vt, name, message, code, cause } and the
     // class-object shape { rc, pre, post, ctor, name } — field reads on
@@ -534,6 +545,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ``,
     `@scr_error_vts = external ${tl}global [${RUNTIME_ERROR_CLASSES.size} x %ScrVt]`,
     `declare void @scr_init()`,
+    ...(emitter.usesCompactRefs ? [`declare void @scr_plr_init()`] : []),
     `declare void @scr_lib_init(i32, ptr)`,
     ...(emitter.mod.workers ? [`declare void @scr_runtime_workers_v8()`] : []),
     ...(emitter.stackChecks?.size ? [`declare void @scr_stack_guard_init()`] : []),
@@ -558,6 +570,8 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
       out.push(
         `@sc_dyn_read_ic_${site} = internal ${tl}global { ptr, ${emitter.sizeType}, ${emitter.sizeType}, ptr } zeroinitializer`,
       );
+    for (let site = 0; site < emitter.jsIcSiteCount; site++)
+      out.push(`@sc_js_ic_${site} = internal ${tl}global [${JS_IC_WORDS} x i64] zeroinitializer`);
   }
   for (const table of emitter.constantNumericTables.values()) {
     const n = table.values.length;
@@ -684,17 +698,23 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
   if (emitter.regexInstances.size > 0) out.push(``);
   for (const code of regexMatchers.values()) out.push(...code.lines, ``);
   for (const [, inst] of emitter.templateStringsInstances) {
-    // One immortal ScrArr per tagged-template site: a [N x ptr] data
-    // global of interned cooked-string literals, and the ScrArr header
-    // over it (rc == SIZE_MAX, len == cap == filled, SCR_ELEM_STR = 2,
-    // no REF entry points). Every dense slot is present; reads retain
-    // immortal strings — a no-op.
+    // One immortal ScrArr per tagged-template site: a data global of
+    // interned cooked-string literals followed by their states (the
+    // runtime finds them before data + cap * 9), and the ScrArr header over
+    // it (rc == SIZE_MAX, len == cap == filled, SCR_ELEM_STR = 2, no REF
+    // entry points). Every dense slot is present; reads retain immortal
+    // strings — a no-op. Slots are 8 bytes on every target: on 32-bit
+    // targets each holds the pointer in its low half and zero in its high
+    // half, so the states start where the runtime looks for them.
     const n = inst.slots.length;
     const present = n === 0 ? "zeroinitializer" : `[ ${inst.slots.map(() => "i8 1").join(", ")} ]`;
+    const wide = emitter.sizeType === "i64";
+    const slot = wide ? "ptr" : "<{ ptr, i32 }>";
+    const slotValue = (s: string): string =>
+      wide ? `ptr ${s}` : `<{ ptr, i32 }> <{ ptr ${s}, i32 0 }>`;
     out.push(
-      `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-      `@${inst.sym}_present = internal constant [${n} x i8] ${present}`,
-      `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, ${emitter.sizeType} ${n}, ${emitter.sizeType} ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null }`,
+      `@${inst.sym}_data = internal constant <{ [${n} x ${slot}], [${n} x i8] }> <{ [${n} x ${slot}] [ ${inst.slots.map(slotValue).join(", ")} ], [${n} x i8] ${present} }>, align 8`,
+      `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, i32 ${n}, i32 ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr @${inst.sym}_data }`,
     );
   }
   if (emitter.templateStringsInstances.size > 0) out.push(``);
@@ -818,6 +838,9 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ...(emitter.runtimeAbiMarker ? [`  call void @${RUNTIME_ABI_MARKER}()`] : []),
     ...(emitter.mod.workers ? [`  call void @scr_runtime_workers_v8()`] : []),
     `  call void @scr_init()`,
+    // Compressed fields hold addresses in the program-lifetime region, which
+    // is reserved below 32 GiB before compiled code runs.
+    ...(emitter.usesCompactRefs ? [`  call void @scr_plr_init()`] : []),
     // Each context (the main thread, every worker) installs its stack
     // guard before running compiled code that checks it.
     ...(emitter.stackChecks?.size ? [`  call void @scr_stack_guard_init()`] : []),
@@ -1076,7 +1099,7 @@ export function helperDefs(emitter: LlEmitter): string[] {
       sz === "i32" ? `  %e = add i32 %e32, 0` : `  %e = zext i32 %e32 to ${sz}`,
       `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11`,
       `  %entries = load ptr, ptr %ep`,
-      `  %found = getelementptr inbounds %ScrMapEntry, ptr %entries, ${sz} %e`,
+      `  %found = getelementptr inbounds %ScrMapNumEntry, ptr %entries, ${sz} %e`,
       `  ret ptr %found`,
       `miss:`,
       `  ret ptr null`,
@@ -1128,7 +1151,8 @@ export function helperDefs(emitter: LlEmitter): string[] {
       `  %ents = load ptr, ptr %eps`,
       `  %linear = icmp eq ${sz} %nb, 0`,
       `  br i1 %linear, label %scan, label %buckets`,
-      // Small maps keep no bucket table: scan the cached entry hashes.
+      // Small maps keep no bucket table: scan the entries' keys. A number-key
+      // entry has no cached hash; a dead entry's key matches no key.
       `scan:`,
       `  %nep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 8`,
       ...(sz === "i64"
@@ -1140,14 +1164,10 @@ export function helperDefs(emitter: LlEmitter): string[] {
       `  %sdone = icmp eq ${sz} %si, %ne`,
       `  br i1 %sdone, label %miss, label %scan.entry`,
       `scan.entry:`,
-      `  %se = getelementptr inbounds %ScrMapEntry, ptr %ents, ${sz} %si`,
-      `  %seh = getelementptr inbounds %ScrMapEntry, ptr %se, i32 0, i32 2`,
-      `  %sh = load i64, ptr %seh`,
+      `  %se = getelementptr inbounds %ScrMapNumEntry, ptr %ents, ${sz} %si`,
       `  %sk = load i64, ptr %se`,
-      `  %shq = icmp eq i64 %sh, %h`,
       `  %skq = icmp eq i64 %sk, %kb`,
-      `  %sq = and i1 %shq, %skq`,
-      `  br i1 %sq, label %scan.found, label %scan.next`,
+      `  br i1 %skq, label %scan.found, label %scan.next`,
       `scan.found:`,
       `  ret ptr %se`,
       `scan.next:`,
@@ -1182,14 +1202,10 @@ export function helperDefs(emitter: LlEmitter): string[] {
       `  %bix = and i32 %b, 16777215`,
       `  %bix1 = sub i32 %bix, 1`,
       sz === "i32" ? `  %bi = add i32 %bix1, 0` : `  %bi = zext i32 %bix1 to ${sz}`,
-      `  %pe = getelementptr inbounds %ScrMapEntry, ptr %ents, ${sz} %bi`,
-      `  %peh = getelementptr inbounds %ScrMapEntry, ptr %pe, i32 0, i32 2`,
-      `  %ph = load i64, ptr %peh`,
+      `  %pe = getelementptr inbounds %ScrMapNumEntry, ptr %ents, ${sz} %bi`,
       `  %pk = load i64, ptr %pe`,
-      `  %phq = icmp eq i64 %ph, %h`,
       `  %pkq = icmp eq i64 %pk, %kb`,
-      `  %pq = and i1 %phq, %pkq`,
-      `  br i1 %pq, label %probe.found, label %probe.next`,
+      `  br i1 %pkq, label %probe.found, label %probe.next`,
       `probe.found:`,
       `  ret ptr %pe`,
       `probe.next:`,
@@ -1207,36 +1223,66 @@ export function helperDefs(emitter: LlEmitter): string[] {
   }
   // Map/Set iteration steps read the entries array inline: an index is
   // live when it is below the entry count and its entry's cached hash is
-  // nonzero (a tombstone's is zero), as scr_map_iter_live decides. The
-  // entry count is read again at every step, so entries appended during
-  // the iteration are visited.
-  if (emitter.decls.has(MAP_ITER_DECL)) {
+  // nonzero (a tombstone's is zero), as scr_map_iter_live decides, or for
+  // a number-key map when its key is not SCR_MAP_NUM_DEAD. The entry count
+  // is read again at every step, so entries appended during the iteration
+  // are visited.
+  if (emitter.decls.has(MAP_ITER_DECL) || emitter.decls.has(MAP_ITER_NUM_DECL)) {
     const sz = emitter.sizeType;
+    if (emitter.decls.has(MAP_ITER_DECL))
+      defs.push(
+        `define internal ptr @sc_map_iter_entry(ptr %m, double %i) ${FN_ATTRS} {`,
+        `entry:`,
+        `  %np = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 8`,
+        `  %n = load i32, ptr %np`,
+        `  %nf = uitofp i32 %n to double`,
+        `  %lo = fcmp oge double %i, 0.0`,
+        `  %hi = fcmp olt double %i, %nf`,
+        `  %in = and i1 %lo, %hi`,
+        `  br i1 %in, label %load, label %none`,
+        `load:`,
+        `  %ix = fptoui double %i to ${sz}`,
+        `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11`,
+        `  %entries = load ptr, ptr %ep`,
+        `  %e = getelementptr inbounds %ScrMapEntry, ptr %entries, ${sz} %ix`,
+        `  %hp = getelementptr inbounds %ScrMapEntry, ptr %e, i32 0, i32 2`,
+        `  %h = load i64, ptr %hp`,
+        `  %live = icmp ne i64 %h, 0`,
+        `  br i1 %live, label %yes, label %none`,
+        `yes:`,
+        `  ret ptr %e`,
+        `none:`,
+        `  ret ptr null`,
+        `}`,
+        ``,
+      );
+    if (emitter.decls.has(MAP_ITER_NUM_DECL))
+      defs.push(
+        `define internal ptr @sc_map_iter_entry_num(ptr %m, double %i) ${FN_ATTRS} {`,
+        `entry:`,
+        `  %np = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 8`,
+        `  %n = load i32, ptr %np`,
+        `  %nf = uitofp i32 %n to double`,
+        `  %lo = fcmp oge double %i, 0.0`,
+        `  %hi = fcmp olt double %i, %nf`,
+        `  %in = and i1 %lo, %hi`,
+        `  br i1 %in, label %load, label %none`,
+        `load:`,
+        `  %ix = fptoui double %i to ${sz}`,
+        `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11`,
+        `  %entries = load ptr, ptr %ep`,
+        `  %e = getelementptr inbounds %ScrMapNumEntry, ptr %entries, ${sz} %ix`,
+        `  %key = load i64, ptr %e`,
+        `  %live = icmp ne i64 %key, ${SCR_MAP_NUM_DEAD}`,
+        `  br i1 %live, label %yes, label %none`,
+        `yes:`,
+        `  ret ptr %e`,
+        `none:`,
+        `  ret ptr null`,
+        `}`,
+        ``,
+      );
     defs.push(
-      `define internal ptr @sc_map_iter_entry(ptr %m, double %i) ${FN_ATTRS} {`,
-      `entry:`,
-      `  %np = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 8`,
-      `  %n = load i32, ptr %np`,
-      `  %nf = uitofp i32 %n to double`,
-      `  %lo = fcmp oge double %i, 0.0`,
-      `  %hi = fcmp olt double %i, %nf`,
-      `  %in = and i1 %lo, %hi`,
-      `  br i1 %in, label %load, label %none`,
-      `load:`,
-      `  %ix = fptoui double %i to ${sz}`,
-      `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11`,
-      `  %entries = load ptr, ptr %ep`,
-      `  %e = getelementptr inbounds %ScrMapEntry, ptr %entries, ${sz} %ix`,
-      `  %hp = getelementptr inbounds %ScrMapEntry, ptr %e, i32 0, i32 2`,
-      `  %h = load i64, ptr %hp`,
-      `  %live = icmp ne i64 %h, 0`,
-      `  br i1 %live, label %yes, label %none`,
-      `yes:`,
-      `  ret ptr %e`,
-      `none:`,
-      `  ret ptr null`,
-      `}`,
-      ``,
       `define internal double @sc_map_iter_count(ptr %m) ${FN_ATTRS} {`,
       `entry:`,
       `  %np = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 8`,
@@ -1333,14 +1379,17 @@ export function helperDefs(emitter: LlEmitter): string[] {
   // of the capacity word (SCR_STR_ASCII_BIT, the low half's sign bit on
   // little-endian targets) makes UTF-16 units bytes. Unproven strings and
   // anything but an in-range index take the runtime's UTF-16 mapping.
-  // A scan's receiver reads inline too where runtime state is ordinary
-  // global storage (ScrStrScan; SCR_TL makes it thread-local otherwise).
-  const scanInline = emitter.mod.workers !== true && emitter.mod.lib?.threadInstances !== true;
+  // A scan's receiver reads inline too (ScrStrScan): from ordinary global
+  // storage, or, in worker executables, from the thread's static TLS block,
+  // one thread-pointer-relative load (see executableTls).
+  const scanInline =
+    emitter.executableTls ||
+    (emitter.mod.workers !== true && emitter.mod.lib?.threadInstances !== true);
   let scanDeclared = false;
   for (const helper of STRING_READ_HELPERS) {
     if (!emitter.decls.has(helper.decl)) continue;
     if (scanInline && !scanDeclared) {
-      defs.push(stringScanDecl(emitter.sizeType), ``);
+      defs.push(stringScanDecl(emitter.sizeType, emitter.executableTls), ``);
       scanDeclared = true;
     }
     defs.push(...helper.define(emitter.sizeType, FN_ATTRS, scanInline), ``);

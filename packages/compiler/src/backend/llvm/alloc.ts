@@ -244,9 +244,12 @@ export function cycleAppendHelper(): string[] {
 }
 
 /** A collector header to install: the object type's constant ScrCycType
- * descriptor (its trace and teardown; see cycTypeDescriptor). */
+ * descriptor (its trace and teardown; see cycTypeDescriptor). `acyclic`:
+ * the descriptor's trace is scr_cyc_no_children, and `buf` starts out
+ * SCR_CYC_ACYCLIC (scr_cyc_alloc does the same on its path). */
 export interface CycHeader {
   type: string;
+  acyclic?: boolean;
 }
 
 /** The first collector statistics index of an emitted ScrCycType
@@ -269,8 +272,9 @@ export function cycTypeDescriptor(name: string, trace: string, free: string, kin
  * expression) in `%o`, aborting on OOM, with the RC-audit allocation note
  * on the out-of-line path. With `cyc`, the object carries a collector
  * header (scr_cyc_alloc's contract). `stored` is the number of leading
- * object bytes the caller stores unconditionally right after (at least the
- * refcount word), which a recycled block need not clear. Labels use the
+ * object bytes the caller stores unconditionally right after (the refcount
+ * word, or the 4-byte header of a compact class instance), which a recycled
+ * block need not clear; it is a multiple of 4 and at most `size`. Labels use the
  * `sa.` prefix; the lines end in an open block.
  */
 export function emitObjectAlloc(
@@ -350,7 +354,7 @@ function allocLines(
     `  store ptr %sa.next, ptr %sa.fp`,
     `  %sa.z = getelementptr inbounds i8, ptr %sa.b, i64 ${keep}`,
     `  %sa.zn = sub i64 %sa.n, ${keep}`,
-    `  call void @llvm.memset.p0.i64(ptr align 8 %sa.z, i8 0, i64 %sa.zn, i1 false)`,
+    `  call void @llvm.memset.p0.i64(ptr align ${keep % 8 === 0 ? 8 : 4} %sa.z, i8 0, i64 %sa.zn, i1 false)`,
     `  br label %sa.fast`,
     `sa.bump: ; fresh reservation memory is already zero`,
     `  %sa.c1 = add i64 %sa.c, 1`,
@@ -390,7 +394,9 @@ function allocLines(
       `  %sa.cgp = getelementptr inbounds i8, ptr %sa.blk, i64 2`,
       `  store i16 0, ptr %sa.cgp ; ScrCycHdr.color, gen`,
       `  %sa.bufp = getelementptr inbounds i8, ptr %sa.blk, i64 ${CYC_BUF}`,
-      `  store i32 0, ptr %sa.bufp ; ScrCycHdr.buf`,
+      cyc.acyclic === true
+        ? `  store i32 -1, ptr %sa.bufp ; ScrCycHdr.buf = SCR_CYC_ACYCLIC`
+        : `  store i32 0, ptr %sa.bufp ; ScrCycHdr.buf`,
       `  %sa.live = load i64, ptr @scr_cyc_live`,
       `  %sa.live1 = add i64 %sa.live, 1`,
       `  store i64 %sa.live1, ptr @scr_cyc_live`,

@@ -90,3 +90,22 @@ function tailCode(text) {
   return [rest.codePointAt(0), rest.substr(1), rest.toUpperCase(), rest.slice(1)].join(",");
 }
 console.log(tailCode("axé😀"), tailCode("abc"));
+
+// The arguments convert after all of them evaluate: a toString or valueOf
+// that assigns a variable leaves an argument already read from it as it was.
+let later = "a";
+const shout = {
+  toString() {
+    later = "b";
+    return "o";
+  },
+};
+console.log("s".concat(shout, later), later);
+let at = 1;
+const move = {
+  valueOf() {
+    at = 3;
+    return 0;
+  },
+};
+console.log("abcdef".substr(move, at), at);

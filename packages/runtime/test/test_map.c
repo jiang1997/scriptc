@@ -636,7 +636,7 @@ static void test_value_keys_and_copies(void) {
 }
 
 #ifdef SCR_RC_AUDIT
-static const ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
+static ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
 
 static void test_identity_cycles(void) {
   scr_collect_cycles();
@@ -685,9 +685,19 @@ static uint64_t filter_bits(uint64_t hash) {
   return (UINT64_C(1) << (hash >> 44 & 63)) | (UINT64_C(1) << (hash >> 50 & 63));
 }
 
+/* A live entry's hash: cached, or for a number-key entry (no hash field)
+ * the key word's mix, as scr_map.c computes it. */
+static uint64_t entry_hash(const ScrMap *m, size_t e) {
+  if (!scr_map_entry_live(m, e)) return 0;
+  const ScrMapEntry *entry = scr_map_entry_at(m, e);
+  if (m->key_kind != SCR_MAP_KEY_F64) return entry->hash;
+  uint64_t h = scr_key_mix(entry->key);
+  return h ? h : 1;
+}
+
 static bool filter_covers_live(const ScrMap *m) {
   for (size_t e = 0; e < m->nentries; e++) {
-    uint64_t h = m->entries[e].hash;
+    uint64_t h = entry_hash(m, e);
     if (h && (m->filter & filter_bits(h)) != filter_bits(h)) return false;
   }
   return true;

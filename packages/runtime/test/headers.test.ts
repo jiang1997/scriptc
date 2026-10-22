@@ -74,6 +74,6 @@ test("only dynamic-tier units include scr_js.h", () => {
   const includers = readdirSync(srcDir)
     .filter((name) => /\.(c|h)$/.test(name))
     .filter((name) => /^#include "scr_js\.h"/m.test(readFileSync(join(srcDir, name), "utf8")));
-  expect(includers.filter((name) => !/^scr_js_\w+\.c$/.test(name))).toEqual([]);
+  expect(includers.filter((name) => !/^scr_js_\w+(\.test)?\.c$/.test(name))).toEqual([]);
   expect(includers).toContain("scr_js_value.c");
 });

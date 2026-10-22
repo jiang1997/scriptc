@@ -2106,6 +2106,7 @@ test("runtime comparator sort validates a recognized comparator's key order", ()
     mod.functions.push(
       fn("cmp", [elem, elem], F64),
       fn("key", [row], F64),
+      fn("keys", [row, F64], F64),
       fn("text", [row], STRING),
     );
     return mod;
@@ -2115,12 +2116,25 @@ test("runtime comparator sort validates a recognized comparator's key order", ()
     keyedModule(F64, [order(-1)], true),
     keyedModule(row, [order(1), closure("key", [row])]),
     keyedModule(row, [order(-1), closure("key", [row])], true),
+    // Two keys, the second descending.
+    keyedModule(row, [order(2 | (1 << 9)), closure("keys", [row, F64])]),
   ]) {
     expect(validateModule(mod)).toEqual([]);
     expect(deserializeModule(serializeModule(mod))).toEqual(mod);
   }
   for (const [mod, message] of [
-    [keyedModule(F64, [order(2)]), "key order must be the literal 1 or -1"],
+    [keyedModule(F64, [order(0.5)]), "key order must be 1, -1 or a key-chain order"],
+    [keyedModule(row, [order(9), closure("keys", [row, F64])]), "key-chain order"],
+    [keyedModule(row, [order(2 | (1 << 10)), closure("keys", [row, F64])]), "key-chain order"],
+    [keyedModule(F64, [order(2)]), "key order on f64"],
+    [
+      keyedModule(row, [order(2), closure("key", [row])]),
+      "key reader must be (elem, number) => number",
+    ],
+    [
+      keyedModule(row, [order(1), closure("keys", [row, F64])]),
+      "key reader must be (elem) => number",
+    ],
     [keyedModule(F64, [order(1), closure("key", [row])]), "key order on f64"],
     [keyedModule(STRING, [order(1)], true), "key order on string"],
     [keyedModule(row, [order(1)]), "key reader must be (elem) => number"],

@@ -1,5 +1,11 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
+import { staticCondition, staticallySelected } from "./static-typeof.js";
+
+function unparenthesized(e: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return e;
+}
 import { UNSUPPORTED } from "../../diagnostics/diagnostic.js";
 import {
   BOOL,
@@ -1565,6 +1571,9 @@ export const BUILTIN_MODULE_FNS: Record<
     // Decipheriv handle (lowerCryptoModuleCall).
     createCipheriv: { fn: "crypto.cipherNew", params: [BOOL, DYN, DYN, DYN, DYN], result: DYN },
     createDecipheriv: { fn: "crypto.cipherNew", params: [BOOL, DYN, DYN, DYN, DYN], result: DYN },
+    // A checked-dynamic curve name; the result is a native ECDH handle
+    // (lowerCreateEcdh).
+    createECDH: { fn: "crypto.ecdhNew", params: [DYN], result: DYN },
   },
   zlib: {
     // The default-options convenience family is special-cased in
@@ -2068,6 +2077,9 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<
     readdirSync: ["fs.readdirTypesSync"],
     // The { throwIfNoEntry } probe form.
     statSync: ["fs.statProbeSync"],
+    // realpathSync and realpathSync.native read as function values.
+    realpathSync: ["fs.realpathValue"],
+    "realpathSync.native": ["fs.realpathValue"],
     lstatSync: ["fs.lstatProbeSync"],
     globSync: ["fs.globTypesSync"],
     // The JS-source validation-ladder variant (lowerFsLadderCall): the
@@ -2092,6 +2104,8 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<
     glob: ["fsp.globTypes"],
     // The Uint8Array/Buffer-data form.
     appendFile: ["fsp.appendFileBytes"],
+    // The options forms.
+    rm: ["fsp.rmOpts", "fsp.rmRetry"],
   },
   crypto: {
     // The composed randomBytes(n).toString(enc) chain keeps its one-libCall
@@ -2196,15 +2210,26 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     id: "stdlib.webcrypto.subtle",
     kind: "stdlib",
     name: "globalThis.crypto.subtle",
-    fns: ["webcrypto.importKey", "webcrypto.sign", "webcrypto.verify", "webcrypto.digest"],
-    note: "importKey('raw') for HMAC keys, HMAC sign and verify, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused",
+    fns: [
+      "webcrypto.importKey",
+      "webcrypto.generateKey",
+      "webcrypto.exportKey",
+      "webcrypto.encrypt",
+      "webcrypto.decrypt",
+      "webcrypto.deriveBits",
+      "webcrypto.deriveKey",
+      "webcrypto.sign",
+      "webcrypto.verify",
+      "webcrypto.digest",
+    ],
+    note: "importKey, generateKey and exportKey (raw and jwk) for HMAC and AES keys, importKey for PBKDF2 and HKDF keys, AES-GCM, AES-CBC and AES-CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign and verify, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused",
   },
   {
     id: "stdlib.webcrypto.CryptoKey",
     kind: "stdlib",
     name: "CryptoKey",
     fns: ["webcrypto.isCryptoKey"],
-    note: "secret HMAC keys with type, extractable, algorithm and usages, and instanceof CryptoKey",
+    note: "secret HMAC, AES, PBKDF2 and HKDF keys with type, extractable, algorithm and usages, and instanceof CryptoKey",
   },
   {
     id: "stdlib.atomics",
@@ -2248,6 +2273,8 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
       "date.newLocal",
       "date.nativeNewFields",
       "date.nativeNewValue",
+      "date.argumentsTime",
+      "date.classOperation",
     ],
     note: "zero arguments, one milliseconds/date-string argument, or local-time year/month fields; values are the read-only TimeClip scalar slice",
   },
@@ -3052,7 +3079,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
         "createDiffieHellman",
         "createDiffieHellmanGroup",
         "getDiffieHellman",
-        "createECDH",
         "diffieHellman",
         "publicEncrypt",
         "publicDecrypt",
@@ -3075,9 +3101,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
     setFips:
       "a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) " +
       "in a non-FIPS build — getFips() answers 0 here",
-    webcrypto:
-      "the WebCrypto object has no lowering — the lowered crypto surface is randomUUID, " +
-      "randomBytes, and the createHash chain",
   },
   zlib: {
     brotliCompressSync: BROTLI_HINT,
@@ -3159,8 +3182,8 @@ export function stdlibMemberFence(lowerer: Lowerer, access: ts.PropertyAccessExp
       "radix-free conversion is a template literal away: `${x}`; toString(radix) is unsupported";
   } else if (container === "Math" && (member === "min" || member === "max")) {
     hint =
-      `Math.${member} lowers with any number of plain arguments or ONE number[] spread — ` +
-      `mixed spread/positional lists don't: spread a single array (Math.${member}(...xs))`;
+      `Math.${member} lowers with number arguments and spreads of number[] values ` +
+      `(Math.${member}(...xs, y))`;
   } else if (
     recvIr?.kind === "array" &&
     member === "index" &&
@@ -3343,6 +3366,14 @@ export function isStdlibSymbol(lowerer: Lowerer, symbol: ts.Symbol | undefined):
  *     builtinClassAliasOf). */
 export function stdlibGlobalNameOf(lowerer: Lowerer, expr: ts.Expression): string | null {
   if (ts.isParenthesizedExpression(expr)) return stdlibGlobalNameOf(lowerer, expr.expression);
+  // The global-object detection chain (`typeof global < "u" ? global :
+  // typeof window < "u" ? window : {}`): a condition with static typeof
+  // answers selects one arm, and only that arm ever evaluates.
+  if (ts.isConditionalExpression(expr)) {
+    const taken = staticCondition(lowerer, expr.condition);
+    if (taken === null) return null;
+    return stdlibGlobalNameOf(lowerer, taken ? expr.whenTrue : expr.whenFalse);
+  }
   if (ts.isIdentifier(expr)) {
     const symbol = lowerer.checker.getSymbolAtLocation(expr);
     // `globalThis` itself: a reserved intrinsic — tsc rejects user
@@ -3393,7 +3424,14 @@ export function stdlibGlobalNameOf(lowerer: Lowerer, expr: ts.Expression): strin
   }
   if (ts.isPropertyAccessExpression(expr) && !expr.questionDotToken) {
     if (stdlibGlobalNameOf(lowerer, expr.expression) !== "globalThis") return null;
-    const symbol = lowerer.checker.getSymbolAtLocation(expr.name);
+    // Through a detection chain the checker types the receiver as the
+    // union of every arm; the selected arm (the global object) owns the
+    // member.
+    const selected = staticallySelected(lowerer, expr.expression);
+    const symbol =
+      selected === expr.expression || ts.isIdentifier(unparenthesized(expr.expression))
+        ? lowerer.checker.getSymbolAtLocation(expr.name)
+        : lowerer.checker.getPropertyOfType(lowerer.typeOf(selected), expr.name.text);
     if (!symbol || !lowerer.isStdlibSymbol(symbol)) return null;
     return ts.symbolName(symbol) === "global" ? "globalThis" : ts.symbolName(symbol);
   }

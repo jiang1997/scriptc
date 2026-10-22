@@ -1,6 +1,8 @@
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, own } from "../lowerer.js";
 import { locOf } from "../../program.js";
+import { tryLowerExpression } from "../expressions/try-lower-expression.js";
+import { programDeclaresDateClass } from "./date-classes.js";
 import {
   BOOL,
   F64,
@@ -9,6 +11,7 @@ import {
   type IrStmt,
   type IrType,
   NULL_T,
+  type SrcLoc,
   STRING,
   typeKey,
 } from "../../../ir/ir.js";
@@ -39,7 +42,7 @@ const DATE_TEXT_FNS: ReadonlyMap<string, IrLibFn> = new Map([
   ["toTimeString", "date.toTimeString"],
 ]);
 
-const DATE_METHOD_HINT =
+export const DATE_METHOD_HINT =
   "getTime(), valueOf(), toISOString(), toUTCString(), toJSON(), toString(), toDateString(), toTimeString(), the local/UTC calendar getters, and getTimezoneOffset() are supported; Date setters and locale formatters have no lowering";
 
 /** The Date slice: statics plus read-only Date values backed by one
@@ -52,7 +55,52 @@ export function lowerDateCall(
 ): IrExpr | null {
   if (call.questionDotToken || access.questionDotToken) return null;
   const loc = locOf(call);
-  if (lowerer.stdlibGlobalMember(access, "Date") === "now") {
+  const member = lowerer.stdlibGlobalMember(access, "Date");
+  if (member === "now" || member === "parse" || member === "UTC")
+    return lowerDateStaticCall(lowerer, call, member);
+  if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "date") return null;
+  if (!lowerer.isStdlibMember(access)) return null;
+  const name = access.name.text;
+  // A Date a JavaScript file constructs is a mutable object; setTime on
+  // it takes the dynamic method call. So does every Date method on a
+  // checked-dynamic receiver when the program declares a class that extends
+  // Date: the value can be an instance, whose class may declare the method.
+  if (
+    (name === "setTime" || programDeclaresDateClass(lowerer)) &&
+    tryLowerExpression(lowerer, access.expression)?.type.kind === "dyn"
+  )
+    return null;
+  if (name === "toJSON") return lowerDateToJson(lowerer, call, access);
+  if (call.arguments.nodes.length !== 0) {
+    lowerer.noLowering(`Date.prototype.${name} with arguments`, call, DATE_METHOD_HINT);
+  }
+  const raw = lowerer.lowerExpr(access.expression);
+  const receiver: IrExpr =
+    raw.type.kind === "dyn"
+      ? { kind: "libCall", fn: "date.checkedValue", args: [raw], type: { kind: "date" }, loc }
+      : raw;
+  if (receiver.type.kind !== "date")
+    lowerer.badType(access.expression, lowerer.typeOf(access.expression));
+  const result = dateValueMethod(name, receiver, loc);
+  if (result) return result;
+  lowerer.noLowering(
+    `Date.prototype.${name}`,
+    call,
+    DATE_METHOD_HINT,
+    lowerer.checker.getSymbolAtLocation(access.name),
+  );
+}
+
+/** Date.now(), Date.parse(text) and Date.UTC(...), also called through a
+ * class declared `extends Date`, which inherits them. Null for other
+ * names. */
+export function lowerDateStaticCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  name: string,
+): IrExpr | null {
+  const loc = locOf(call);
+  if (name === "now") {
     if (call.arguments.nodes.length !== 0) {
       lowerer.noLowering(`Date.now with ${call.arguments.nodes.length} arguments`, call);
     }
@@ -60,7 +108,7 @@ export function lowerDateCall(
   }
   // Date.parse uses the same date-string parser as new Date(dateString)
   // (V8's grammar in the runtime), so their NaN and TimeClip behavior agree.
-  if (lowerer.stdlibGlobalMember(access, "Date") === "parse") {
+  if (name === "parse") {
     if (call.arguments.nodes.length !== 1 || ts.isSpreadElement(call.arguments.nodes[0]!)) {
       lowerer.noLowering(`Date.parse with ${call.arguments.nodes.length} arguments`, call);
     }
@@ -72,7 +120,7 @@ export function lowerDateCall(
   // TimeClip. Omitted trailing arguments complete with the spec's
   // defaults (month 0, date 1, time parts 0); tsc pins every present
   // argument to number, so the seven-f64 ABI is exact.
-  if (lowerer.stdlibGlobalMember(access, "Date") === "UTC") {
+  if (name === "UTC") {
     if (
       call.arguments.nodes.length < 1 ||
       call.arguments.nodes.length > 7 ||
@@ -92,49 +140,38 @@ export function lowerDateCall(
     }
     return { kind: "libCall", fn: "date.utc", args, type: F64, loc };
   }
-  if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "date") return null;
-  if (!lowerer.isStdlibMember(access)) return null;
-  const name = access.name.text;
-  if (name === "toJSON") return lowerDateToJson(lowerer, call, access);
-  if (call.arguments.nodes.length !== 0) {
-    lowerer.noLowering(`Date.prototype.${name} with arguments`, call, DATE_METHOD_HINT);
-  }
-  const raw = lowerer.lowerExpr(access.expression);
-  const receiver: IrExpr =
-    raw.type.kind === "dyn"
-      ? { kind: "libCall", fn: "date.checkedValue", args: [raw], type: { kind: "date" }, loc }
-      : raw;
-  if (receiver.type.kind !== "date")
-    lowerer.badType(access.expression, lowerer.typeOf(access.expression));
+  return null;
+}
+
+/** The Date methods without arguments that have a lowering, applied to the
+ * time value `value` (a `date`): getTime, valueOf, toISOString,
+ * toUTCString, the calendar getters and the text forms. Null for other
+ * names. */
+export function dateValueMethod(name: string, value: IrExpr, loc: SrcLoc): IrExpr | null {
   if (name === "getTime" || name === "valueOf") {
     return {
       kind: "libCall",
       fn: name === "getTime" ? "date.getTime" : "date.valueOf",
-      args: [receiver],
+      args: [value],
       type: F64,
       loc,
     };
   }
   if (name === "toISOString") {
-    return { kind: "libCall", fn: "date.toISOStringValue", args: [receiver], type: STRING, loc };
+    return { kind: "libCall", fn: "date.toISOStringValue", args: [value], type: STRING, loc };
   }
   if (name === "toUTCString") {
-    return { kind: "libCall", fn: "date.toUTCString", args: [receiver], type: STRING, loc };
+    return { kind: "libCall", fn: "date.toUTCString", args: [value], type: STRING, loc };
   }
   const fn = own(DATE_GETTER_FNS, name);
   if (fn !== undefined) {
-    return { kind: "libCall", fn, args: [receiver], type: F64, loc };
+    return { kind: "libCall", fn, args: [value], type: F64, loc };
   }
   const textFn = DATE_TEXT_FNS.get(name);
   if (textFn !== undefined) {
-    return { kind: "libCall", fn: textFn, args: [receiver], type: STRING, loc };
+    return { kind: "libCall", fn: textFn, args: [value], type: STRING, loc };
   }
-  lowerer.noLowering(
-    `Date.prototype.${name}`,
-    call,
-    DATE_METHOD_HINT,
-    lowerer.checker.getSymbolAtLocation(access.name),
-  );
+  return null;
 }
 
 /** `d.toJSON(key?)`: Node answers null for an invalid date and the

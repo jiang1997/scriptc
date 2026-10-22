@@ -39,7 +39,7 @@ WebAssembly code generation differs from LLVM's default pipeline in two ways tha
 
 `--cache-dir <dir>` names a private directory the caller owns for one helper build. Simplified partitions are stored under the hash of their exact source and objects under the hash of the exact module after importing, each with a trailing digest and published by rename, so a rebuild recompiles only the partitions an edit can affect.
 
-Unsanitized `speed` program builds, and unsanitized `release` builds of programs small enough for one partition, pass `--import-bitcode <unit.bc>` once per runtime-pack unit the program links that ships bitcode. Small runtime functions reachable from the program's runtime calls are imported as `available_externally` so LLVM can inline them; the runtime objects remain the only definitions. The helper never runs a sanitizer pass, so with import it also drops the emitter's inert `sanitize_address` attributes, which would otherwise block that inlining. Without `--import-bitcode` the module is optimized exactly as emitted.
+`--import-bitcode <unit.bc>`, given once per runtime-pack unit that ships bitcode, imports runtime functions for inlining; scriptc's program builds do not pass it. Small runtime functions reachable from the program's runtime calls are imported as `available_externally` so LLVM can inline them; the runtime objects remain the only definitions. The helper never runs a sanitizer pass, so with import it also drops the emitter's inert `sanitize_address` attributes, which would otherwise block that inlining. Without `--import-bitcode` the module is optimized exactly as emitted.
 
 Runtime-pack builds emit each unit of the executable `speed` flavor through the helper:
 

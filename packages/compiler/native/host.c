@@ -44,3 +44,15 @@ uint8_t scriptc_native_private_directory(const uint8_t *bytes, size_t size, uint
   return ok;
 #endif
 }
+
+/* The runtime's full sweep after a phase's data died (scr_rc.h). */
+void scr_collect_cycles_phase(void);
+
+/* Reclaims the cycles a finished compiler phase leaves behind. The
+ * frontend's syntax trees and program state refer to each other, so
+ * reference counting frees almost none of them when the frontend is
+ * disposed, and the collector's schedule alone may not run a full pass
+ * before the build ends. */
+void scriptc_native_collect_cycles(void) {
+  scr_collect_cycles_phase();
+}

@@ -6,8 +6,8 @@
  * exact source lists). */
 #include "scr_runtime.h"
 
-static const ScrArrOps scr_bytes_io_str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
-static const ScrArrOps scr_bytes_io_bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
+static ScrArrOps scr_bytes_io_str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
+static ScrArrOps scr_bytes_io_bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
 
 #include <errno.h>
 #include <math.h>
@@ -1299,8 +1299,48 @@ ScrBytes *scr_buffer_concat_len_dyn(const ScrDyn *list, double total) {
   return scr_buffer_concat_dyn_impl(list, total, true);
 }
 
+/* Buffer.from(arrayBuffer, byteOffset) over a checked ArrayBuffer or
+ * SharedArrayBuffer, as Node's fromArrayBuffer: a Buffer from the offset to
+ * the end of the buffer that shares its memory. The offset converts with
+ * ToNumber, where a missing offset (NULL) or undefined and NaN are 0; an
+ * offset past the end throws ERR_BUFFER_OUT_OF_BOUNDS, and one at or below
+ * -1 V8's start-offset RangeError. NULL with the exception pending. */
+static ScrBytes *scr_buffer_from_storage(const ScrDyn *storage, const ScrDyn *offset_value) {
+  double offset = 0;
+  if (offset_value && offset_value->kind != SCR_DYN_UNDEF) {
+    if (!scr_dyn_number_coerce_js(offset_value, &offset)) return NULL;
+    if (isnan(offset)) offset = 0;
+  }
+  ScrBytes *bytes = storage->v.handle.ptr;
+  ScrBytes *owner = bytes->backing ? bytes->backing : bytes;
+  if ((double)scr_bytes_byte_len(owner) - offset < 0) {
+    static const char msg[] = "\"offset\" is outside of buffer bounds";
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1, "ERR_BUFFER_OUT_OF_BOUNDS");
+    return NULL;
+  }
+  double start = trunc(offset);
+  if (start < 0) {
+    /* The offset as JavaScript prints it (-1.5, -1e+21, -Infinity). */
+    ScrStr *parts[3] = {
+        scr_str_new("Start offset ", 13),
+        scr_f64_to_scrstr(offset),
+        scr_str_new(" is outside the bounds of the buffer", 36),
+    };
+    ScrStr *message = scr_str_concat_parts(parts, 3);
+    for (size_t i = 0; i < 3; i++) scr_str_release(parts[i]);
+    scr_throw_error(SCR_ERR_RANGE, message);
+    return NULL;
+  }
+  ScrBytes *out = scr_bytes_buffer_view(bytes, SCR_BYTES_U8, start, false, 0);
+  if (out) out->is_buffer = true;
+  return out;
+}
+
 ScrBytes *scr_buffer_from_dyn(const ScrDyn *value, const ScrStr *encoding) {
   if (value->kind == SCR_DYN_STR) return scr_bytes_from_str(value->v.str, encoding);
+  /* The second argument here is an encoding name, which as a byte offset
+   * converts to NaN: offset 0. */
+  if (scr_buffer_storage_is(value)) return scr_buffer_from_storage(value, NULL);
   if (value->kind == SCR_DYN_BYTES) return scr_bytes_convert(SCR_BYTES_U8, value->v.bytes);
   if (value->kind == SCR_DYN_ARR) {
     return scr_buffer_from_array_like(value, (double)value->v.arr.len);
@@ -1344,70 +1384,45 @@ ScrBytes *scr_buffer_from_dyn_pooled(const ScrDyn *value, const ScrStr *encoding
   if (value->kind == SCR_DYN_STR) return scr_buffer_from_str(value->v.str, encoding);
   if (value->kind == SCR_DYN_BYTES && !value->v.bytes->is_data_view)
     return scr_buffer_from_bytes(value->v.bytes);
+  /* A view of an ArrayBuffer shares its memory, so it never comes from the
+   * pool. The second argument here is an encoding name: offset 0. */
+  if (scr_buffer_storage_is(value)) return scr_buffer_from_storage(value, NULL);
   ScrBytes *out = scr_buffer_from_dyn(value, encoding);
   if (!out) return NULL;
   out->is_buffer = true;
   return scr_buffer_pool_adopt(out);
 }
 
-/* ── the checked-dynamic Buffer compare/equals validators ──────────────
- * Node's argument ladders for buf.equals / buf.compare / Buffer.compare
- * over dyn-boxed arguments (the invalid-input probes: string needles,
- * '0' offsets, null/object range args). A well-typed dyn still computes
- * the real answer — validation, not a constant fence. */
-
-/* A bytes payload or the API's own ERR_INVALID_ARG_TYPE (borrowed). */
-static ScrBytes *scr_bytes_chk_u8(const ScrDyn *d, const char *argname) {
-  if (!scr_dyn_bytes_is(d, SCR_BYTES_U8)) {
-    scr_dyn_arg_type_fail(argname, "an instance of Buffer or Uint8Array", d);
-    return NULL;
+/* scr_buffer_from_dyn_pooled for values that can be a typed array crossing
+ * an untyped slot by reference (a number[] passed to an untyped parameter,
+ * as yazl's Buffer.from(something, encoding) receives it): the array copies
+ * like the array it is. Used by the runtime-encoding Buffer.from forms. */
+ScrBytes *scr_buffer_from_dyn_ref_pooled(const ScrDyn *value, const ScrStr *encoding) {
+  if (value->kind == SCR_DYN_TYPED_REF && scr_dyn_typed_ref_array_ops(value) != NULL) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(value);
+    if (scr_exc_pending()) {
+      scr_dyn_release(materialized);
+      return NULL;
+    }
+    ScrBytes *out = scr_buffer_from_dyn_pooled(materialized, encoding);
+    scr_dyn_release(materialized);
+    return out;
   }
-  return d->v.bytes;
+  return scr_buffer_from_dyn_pooled(value, encoding);
 }
 
-double scr_buffer_compare_chk(const ScrDyn *a, const ScrDyn *b) {
-  ScrBytes *b1 = scr_bytes_chk_u8(a, "buf1");
-  if (!b1) return 0;
-  ScrBytes *b2 = scr_bytes_chk_u8(b, "buf2");
-  if (!b2) return 0;
-  return scr_bytes_compare(b1, b2, 0, 0, 0, 0, 0);
-}
-
-bool scr_bytes_equals_chk(const ScrBytes *recv, const ScrDyn *other) {
-  ScrBytes *o = scr_bytes_chk_u8(other, "otherBuffer");
-  if (!o) return false;
-  return scr_bytes_equals(recv, o);
-}
-
-/* One offset slot: undefined takes the Node default, non-numbers throw
- * ERR_INVALID_ARG_TYPE "of type number", numbers run validateOffset. */
-static bool scr_bytes_chk_off(const ScrDyn *d, const char *name, double max,
-                              double dflt, double *out) {
-  if (d->kind == SCR_DYN_UNDEF) {
-    *out = dflt;
-    return true;
+/* Buffer.from(value, second) over checked values whose second argument is
+ * not a literal encoding name: an ArrayBuffer or SharedArrayBuffer takes it
+ * as the byte offset (scr_buffer_from_storage); other values convert as
+ * scr_buffer_from_dyn_ref_pooled with utf8. */
+ScrBytes *scr_buffer_from_dyn_offset_pooled(const ScrDyn *value, const ScrDyn *second) {
+  if (!scr_buffer_storage_is(value)) {
+    ScrStr *utf8 = scr_str_new("utf8", 4);
+    ScrBytes *out = scr_buffer_from_dyn_ref_pooled(value, utf8);
+    scr_str_release(utf8);
+    return out;
   }
-  if (d->kind != SCR_DYN_NUM) {
-    scr_dyn_arg_type_fail(name, "of type number", d);
-    return false;
-  }
-  *out = d->v.num;
-  return scr_bytes_validate_off(name, *out, max);
-}
-
-double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
-                             const ScrDyn *ts, const ScrDyn *te,
-                             const ScrDyn *ss, const ScrDyn *se) {
-  ScrBytes *t = scr_bytes_chk_u8(target, "target");
-  if (!t) return 0;
-  double tsv, tev, ssv, sev;
-  if (!scr_bytes_chk_off(ts, "targetStart", 9007199254740991.0, 0, &tsv)) return 0;
-  if (!scr_bytes_chk_off(te, "targetEnd", (double)t->len, (double)t->len, &tev)) return 0;
-  if (!scr_bytes_chk_off(ss, "sourceStart", 9007199254740991.0, 0, &ssv)) return 0;
-  if (!scr_bytes_chk_off(se, "sourceEnd", (double)src->len, (double)src->len, &sev)) return 0;
-  /* Every slot validated or defaulted above; nargs 4 revalidates the
-   * now-known-good numbers (a no-op) and keeps one comparison core. */
-  return scr_bytes_compare(src, t, 4, tsv, tev, ssv, sev);
+  return scr_buffer_from_storage(value, second);
 }
 
 /* new Buffer(number, encoding) — the deprecated ctor's string arm with a

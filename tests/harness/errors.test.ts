@@ -855,6 +855,69 @@ try {
   });
 });
 
+// A curve Node lists in crypto.getCurves() but the runtime does not
+// implement throws a coded SC2020 error naming the curve when the name is
+// computed; literal names are refused at compile time (node-types-fenced).
+describe("unimplemented ECDH curves", () => {
+  test("a computed curve name throws SC2020 naming the curve", async () => {
+    const r = await compileAndRun(
+      "ecdh-computed-curve",
+      `import { createECDH, ECDH } from "node:crypto";
+const size = ["1", "6", "3"].join("");
+function report(error: unknown): void {
+  const e = error as Error & { code?: string };
+  console.log(e.name, e.code, e.message);
+}
+try {
+  createECDH("sect" + size + "k1");
+} catch (error) {
+  report(error);
+}
+try {
+  ECDH.convertKey(Buffer.from([0]), "sect" + size + "k1");
+} catch (error) {
+  report(error);
+}
+try {
+  createECDH("sect" + size + "x1");
+} catch (error) {
+  report(error);
+}
+`,
+    );
+    expect(r.exitCode).toBe(0);
+    const supported =
+      "has no native implementation; the supported curves are prime192v1, secp224r1, prime256v1, " +
+      "secp384r1, secp521r1, secp192k1, secp224k1, secp256k1, brainpoolP256r1, brainpoolP384r1 and " +
+      "brainpoolP512r1";
+    expect(r.stdout).toBe(
+      `Error SC2020 The curve 'sect163k1' ${supported}\n` +
+        `Error SC2020 The curve 'sect163k1' ${supported}\n` +
+        "TypeError ERR_CRYPTO_INVALID_CURVE Invalid EC curve name\n",
+    );
+    expect(r.stderr).toBe("");
+  });
+
+  test("ECDH property reads and writes throw SC2020", async () => {
+    const r = await compileAndRun(
+      "ecdh-properties",
+      `const crypto = require("node:crypto");
+const ecdh = crypto.createECDH("prime256v1");
+for (const run of [() => ecdh.getPublicKey.name, () => { ecdh.custom = 1; }]) {
+  try {
+    run();
+  } catch (e) {
+    console.log(e.name, e.code);
+  }
+}
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("Error SC2020\nError SC2020\n");
+  });
+});
+
 // Node formats an unknown output encoding with %s, which prints a
 // function's source text and calls a toString the encoding's class
 // defines. The cipher runtime has neither, so both throw a coded SC2020
@@ -1514,7 +1577,6 @@ describe("builtin constructor values (JS lane)", () => {
       ["Date.prototype", "Date.prototype"],
       ["RegExp.prototype", "RegExp.prototype"],
       ["Set.prototype", "Set.prototype"],
-      ["Promise.prototype", "Promise.prototype"],
       ["WeakMap.prototype", "WeakMap.prototype"],
       ["WeakSet.prototype", "WeakSet.prototype"],
       ["Date.prototype.getYear", "Date.prototype.getYear"],
@@ -1547,6 +1609,8 @@ function report(label, e) {
 ${reads.map(([label, read]) => `try { const value = ${read}; console.log(${JSON.stringify(label)}, "read", typeof value); } catch (e) { report(${JSON.stringify(label)}, e); }`).join("\n")}
 console.log(Date.length, RegExp.length, Promise.length, Object.length, Map.length, Set.length);
 console.log(Date.name, Map.name, Map.constructor === Function, Object.constructor === Function);
+const promisePrototype = Promise.prototype;
+console.log(typeof promisePrototype, typeof promisePrototype.then, promisePrototype.constructor === Promise);
 `;
     const r = await compileAndRun("builtin-constructor-members", source, "cjs");
     expect(r.stderr).toBe("");
@@ -1561,18 +1625,23 @@ console.log(Date.name, Map.name, Map.constructor === Function, Object.constructo
         ),
       ),
     );
-    expect(lines.slice(reads.length)).toEqual(["7 2 1 1 0 0", "Date Map true true"]);
+    // Promise.prototype reads as an object holding the runtime's methods.
+    expect(lines.slice(reads.length)).toEqual([
+      "7 2 1 1 0 0",
+      "Date Map true true",
+      "object function true",
+    ]);
   });
 });
 
-// WebCrypto's native slice is HMAC importKey('raw'), sign and verify, and
-// the SHA-1/SHA-2 digests. Algorithms Node recognizes outside that slice
-// reject with a coded SC2020 Error instead of a Node-shaped success, and a
-// JavaScript call with the 'jwk' format meets its named fence when it runs.
+// WebCrypto's native slice is crypto.subtle's secret-key methods.
+// Algorithms Node recognizes outside that slice reject with a coded SC2020
+// Error instead of a Node-shaped success, and a JavaScript call of a
+// method outside it meets its named fence when it runs.
 // Node's own rejections (unknown names, bad usages) are corpus-pinned
 // (6292, 6294); these refusals have no Node twin, so they live here.
 describe("WebCrypto refusals (JS lane)", () => {
-  test("recognized algorithms outside the HMAC slice reject with SC2020", async () => {
+  test("recognized algorithms outside the secret-key slice reject with SC2020", async () => {
     const r = await compileAndRun(
       "webcrypto-unsupported-algorithms",
       `const bytes = new TextEncoder().encode("secret");
@@ -1593,10 +1662,10 @@ await attempt("sha3", () => crypto.subtle.digest("SHA3-256", bytes));
 await attempt("sha3 hmac", () =>
   crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA3-256" }, false, ["sign"]),
 );
-const format = JSON.parse('"jwk"');
-await attempt("computed jwk", () =>
-  crypto.subtle.importKey(format, { kty: "oct", k: "c2VjcmV0" }, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]),
-);
+await attempt("ed25519 key", () => crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign"]));
+const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 128 }, false, ["encrypt"]);
+await attempt("aes-ocb", () => crypto.subtle.encrypt({ name: "AES-OCB", iv: new Uint8Array(12) }, aes, bytes));
+await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key, 256));
 `,
       "mjs",
     );
@@ -1607,22 +1676,107 @@ await attempt("computed jwk", () =>
         "ecdsa Error SC2020 crypto.subtle.sign with the ECDSA algorithm is not supported yet\n" +
         "sha3 Error SC2020 crypto.subtle.digest with the SHA3-256 algorithm is not supported yet\n" +
         "sha3 hmac Error SC2020 crypto.subtle.importKey with the SHA3-256 algorithm is not supported yet\n" +
-        "computed jwk Error SC2020 crypto.subtle.importKey with the 'jwk' key format is not supported yet\n",
+        "ed25519 key Error SC2020 crypto.subtle.generateKey with the Ed25519 algorithm is not supported yet\n" +
+        "aes-ocb Error SC2020 crypto.subtle.encrypt with the AES-OCB algorithm is not supported yet\n" +
+        "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n",
     );
   });
 
-  test("a literal 'jwk' import is a named fence where it runs", async () => {
+  test("a method outside the slice is a named fence where it runs", async () => {
     const r = await compileAndRun(
-      "webcrypto-jwk-literal",
+      "webcrypto-wrap-key",
       `console.log("before");
-await crypto.subtle.importKey("jwk", { kty: "oct", k: "c2VjcmV0" }, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+const key = await crypto.subtle.generateKey({ name: "AES-KW", length: 128 }, true, ["wrapKey"]);
+await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
 `,
       "mjs",
     );
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
-      /^Uncaught Error: 'crypto\.subtle\.importKey with the 'jwk' key format' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+      /^Uncaught Error: 'crypto\.subtle\.wrapKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+    );
+  });
+});
+
+describe("inspecting error subclasses with properties created at run time (JS lane)", () => {
+  test("an instance whose constructor created a property is a named fence", async () => {
+    // Node prints `[Conditional [Error]: m] { extra: 'x' }`. The property
+    // lives in the instance's property bag, which the error rendering does
+    // not read, so the instance refuses instead of printing a partial
+    // object. One without such a property prints as Node prints it.
+    const r = await compileAndRun(
+      "error-subclass-runtime-properties",
+      `import * as util from "node:util";
+class Conditional extends Error {
+  constructor(message, extra) {
+    super(message);
+    if (extra) this.extra = extra;
+  }
+}
+const plain = new Conditional("plain");
+plain.stack = "";
+console.log(util.inspect(plain));
+const extra = new Conditional("extra", "x");
+extra.stack = "";
+console.log(util.inspect(extra));
+`,
+      "mjs",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("[Conditional [Error]: plain]\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: inspecting a 'Conditional' error with properties created at run time is not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+  });
+});
+
+describe("elements on Array.prototype", () => {
+  // Holes of native arrays read undefined without consulting
+  // Array.prototype, so storing an element there refuses instead of
+  // letting later hole reads diverge from Node. Named members stay
+  // writable.
+  test("an index write is a named fence (TS lane)", async () => {
+    const r = await compileAndRun(
+      "array-prototype-element-ts",
+      `const proto = Array.prototype as unknown as Record<string, unknown>;
+proto.label = "named";
+console.log(proto.label);
+(Array.prototype as unknown as Record<number, unknown>)[1] = "proto";
+console.log("unreachable");
+`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("named\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+  });
+
+  test("an index write and a mutating method are named fences (JS lane)", async () => {
+    const write = await compileAndRun(
+      "array-prototype-element-js",
+      `Array.prototype[0] = "proto";
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(write.exitCode).toBe(1);
+    expect(write.stdout).toBe("");
+    expect(write.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+    const push = await compileAndRun(
+      "array-prototype-push-js",
+      `Array.prototype.push("proto");
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(push.exitCode).toBe(1);
+    expect(push.stdout).toBe("");
+    expect(push.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
     );
   });
 });

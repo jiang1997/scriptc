@@ -13,6 +13,7 @@ import {
 import { TIER_MODES, type TierMode } from "../frontend/tier-analysis.js";
 import { buildEnvelope } from "../diagnostics/envelope.js";
 import { renderWarnings } from "../diagnostics/render.js";
+import { isPerformanceCode, renderPerformanceWarnings } from "../diagnostics/dynamic-tier.js";
 import { isNativeOptimization } from "../backend/optimization.js";
 import { setProvenanceSources } from "../frontend/provenance-registry.js";
 import type { CliHost, NativeCacheWarmProfile } from "./host.js";
@@ -95,6 +96,9 @@ async function main(args: string[], host: CliHost): Promise<number> {
       values.strip ||
       values["windows-subsystem"] !== undefined ||
       values["detached-exit"] ||
+      values["profile-generate"] !== undefined ||
+      values["profile-use"] !== undefined ||
+      values.sparse ||
       (values["npm-static"] ?? []).length > 0 ||
       values["provenance-sources"] ||
       externalTypeArgs.length > 0 ||
@@ -135,6 +139,50 @@ async function main(args: string[], host: CliHost): Promise<number> {
     }
     return 0;
   }
+  if (command === "merge-profiles") {
+    const inputs = positionals.slice(1);
+    const others =
+      values.lib ||
+      values.backend !== undefined ||
+      values.emit !== undefined ||
+      values.print !== undefined ||
+      values["fail-on"] !== undefined ||
+      values.optimization !== undefined ||
+      values.ffi !== undefined ||
+      values.profile !== undefined ||
+      values.strip ||
+      values.sanitize ||
+      values["windows-subsystem"] !== undefined ||
+      values["detached-exit"] ||
+      values["profile-generate"] !== undefined ||
+      values["profile-use"] !== undefined ||
+      (values["npm-static"] ?? []).length > 0 ||
+      values["provenance-sources"] ||
+      externalTypeArgs.length > 0 ||
+      (values.wasm ?? []).length > 0 ||
+      values["emit-ir"] ||
+      values.tier !== undefined ||
+      values["explain-dynamic"] !== undefined ||
+      !values["keep-llvm"];
+    if (values.out === undefined || inputs.length === 0 || others) {
+      fail(
+        `scriptc merge-profiles takes -o <out.profdata>, optionally --sparse, and one or more profiles\n\n${USAGE}`,
+      );
+    }
+    const outputPath = resolve(values.out);
+    try {
+      await host.mergeProfiles(
+        outputPath,
+        inputs.map((input) => resolve(input)),
+        values.sparse,
+      );
+    } catch (error) {
+      fail(`scriptc: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    process.stdout.write(`${outputPath}\n`);
+    return 0;
+  }
+  if (values.sparse) fail(`--sparse is a merge-profiles option\n\n${USAGE}`);
   if (command !== "build" && command !== "run" && command !== "coverage") {
     fail(`unknown command "${command}"\n\n${USAGE}`);
   }
@@ -162,13 +210,15 @@ async function main(args: string[], host: CliHost): Promise<number> {
       values.ffi !== undefined ||
       values["windows-subsystem"] !== undefined ||
       values["detached-exit"] ||
+      values["profile-generate"] !== undefined ||
+      values["profile-use"] !== undefined ||
       (values["npm-static"] ?? []).length > 0 ||
       externalTypeArgs.length > 0 ||
       values.tier !== undefined ||
       values["explain-dynamic"] !== undefined
     ) {
       fail(
-        "scriptc build --lib takes no --backend/--emit/--print/--optimization/--strip/--windows-subsystem/--detached-exit/--npm-static/--ffi/--external-types/--tier/--explain-dynamic: the profile pins the emission and optimization, npm imports are judged automatically, outbound FFI belongs to executable builds, external type mappings belong to coverage, and library artifacts are static-tier only",
+        "scriptc build --lib takes no --backend/--emit/--print/--optimization/--strip/--windows-subsystem/--detached-exit/--profile-generate/--profile-use/--npm-static/--ffi/--external-types/--tier/--explain-dynamic: the profile pins the emission and optimization, npm imports are judged automatically, outbound FFI belongs to executable builds, external type mappings belong to coverage, and library artifacts are static-tier only",
       );
     }
     const profilePath = resolve(profileArg);
@@ -214,6 +264,12 @@ async function main(args: string[], host: CliHost): Promise<number> {
   if (command === "coverage" && values["detached-exit"]) {
     fail(`--detached-exit is a build/run option\n\n${USAGE}`);
   }
+  if (command === "coverage" && values["profile-generate"] !== undefined) {
+    fail(`--profile-generate is a build/run option\n\n${USAGE}`);
+  }
+  if (command === "coverage" && values["profile-use"] !== undefined) {
+    fail(`--profile-use is a build/run option\n\n${USAGE}`);
+  }
   if (
     values.print !== undefined &&
     values.print !== "native-link-info" &&
@@ -229,8 +285,20 @@ async function main(args: string[], host: CliHost): Promise<number> {
     fail(`--print=diagnostics is a build/coverage option\n\n${USAGE}`);
   }
   const failOnRaw = values["fail-on"];
-  if (failOnRaw !== undefined && failOnRaw !== "blockers" && failOnRaw !== "divergences") {
-    fail(`unknown --fail-on value "${failOnRaw}" (supported: blockers, divergences)\n\n${USAGE}`);
+  if (
+    failOnRaw !== undefined &&
+    failOnRaw !== "blockers" &&
+    failOnRaw !== "divergences" &&
+    failOnRaw !== "dynamic"
+  ) {
+    fail(
+      `unknown --fail-on value "${failOnRaw}" (supported: blockers, divergences, dynamic)\n\n${USAGE}`,
+    );
+  }
+  // --no-dynamic-tier-warning leaves out SC6101 (diagnostics/dynamic-tier.ts).
+  const dynamicTierWarning = values["dynamic-tier-warning"] !== false;
+  if (failOnRaw === "dynamic" && !dynamicTierWarning) {
+    fail(`--fail-on=dynamic checks the warning --no-dynamic-tier-warning leaves out\n\n${USAGE}`);
   }
   if (failOnRaw !== undefined && command !== "coverage") {
     fail(`--fail-on is a coverage option (a build already fails on blockers)\n\n${USAGE}`);
@@ -323,6 +391,10 @@ async function main(args: string[], host: CliHost): Promise<number> {
           ...(values.optimization === undefined ? {} : { optimization: values.optimization }),
           strip: values.strip,
           detachedExit: values["detached-exit"],
+          ...(values["profile-generate"] === undefined
+            ? {}
+            : { profileGenerate: values["profile-generate"] }),
+          ...(values["profile-use"] === undefined ? {} : { profileUse: values["profile-use"] }),
           ...(windowsSubsystem === undefined ? {} : { windowsSubsystem }),
           ...(values.ffi === undefined ? {} : { ffi: values.ffi }),
         });
@@ -371,6 +443,7 @@ async function main(args: string[], host: CliHost): Promise<number> {
       ...(explainDynamic !== undefined ? { explainDynamic: true } : {}),
       ...(wasmFiles.length > 0 ? { wasm: wasmFiles } : {}),
     });
+    if (!dynamicTierWarning) delete coverage.performance;
     if (printDiagnostics) {
       // Keep stdout pure JSON for tooling.
       const envelope = coverageEnvelope(coverage, {
@@ -425,6 +498,14 @@ async function main(args: string[], host: CliHost): Promise<number> {
       ...(values.strip ? { strip: true } : {}),
       ...(windowsSubsystem !== undefined ? { windowsSubsystem } : {}),
       ...(values["detached-exit"] ? { detachedExit: true } : {}),
+      // The instrumented program resolves a relative pattern against its own
+      // working directory; resolve it here, where the user wrote it.
+      ...(values["profile-generate"] === undefined
+        ? {}
+        : { profileGenerate: resolve(values["profile-generate"]) }),
+      ...(values["profile-use"] === undefined
+        ? {}
+        : { profileUse: resolve(values["profile-use"]) }),
       ...(npmStatic !== undefined ? { npmStatic } : {}),
       ...(ffiProfilePath !== undefined ? { ffiProfilePath } : {}),
       ...(printNativeLinkInfo ? { nativeLinkInfo: true } : {}),
@@ -450,7 +531,9 @@ async function main(args: string[], host: CliHost): Promise<number> {
       process.stderr.write(`\n${n} error${n === 1 ? "" : "s"}.\n`);
       throw new CliExit(1);
     }
-    const warnings = result.warnings ?? [];
+    const warnings = (result.warnings ?? []).filter(
+      (d) => dynamicTierWarning || !isPerformanceCode(d.code),
+    );
     if (printDiagnostics) {
       diagnosticsEnvelope = buildEnvelope({
         compilerVersion: host.version(),
@@ -463,12 +546,20 @@ async function main(args: string[], host: CliHost): Promise<number> {
       });
     } else if (warnings.length > 0 && command === "build") {
       // Divergence warnings never fail a build; they explain where the
-      // native program can behave differently from Node. `run` keeps
-      // stderr for the program's own output.
+      // native program can behave differently from Node. The performance
+      // warning names likely-hot functions that use untyped values. `run`
+      // keeps stderr for the program's own output.
       const color = process.stderr.isTTY ?? false;
-      process.stderr.write(
-        renderWarnings(warnings, result.sourceTexts ?? new Map(), { color }) + "\n",
-      );
+      const divergences = warnings.filter((d) => !isPerformanceCode(d.code));
+      const performance = warnings.filter((d) => isPerformanceCode(d.code));
+      if (divergences.length > 0)
+        process.stderr.write(
+          renderWarnings(divergences, result.sourceTexts ?? new Map(), { color }) + "\n",
+        );
+      if (performance.length > 0) {
+        if (divergences.length > 0) process.stderr.write("\n");
+        process.stderr.write(renderPerformanceWarnings(performance) + "\n");
+      }
     }
     if (result.artifact.kind === "exe") {
       if (!values["keep-llvm"]) rmSync(result.artifact.translationUnitPath, { force: true });

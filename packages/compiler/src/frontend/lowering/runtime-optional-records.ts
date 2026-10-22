@@ -81,7 +81,9 @@ export class RecordFlowClasses {
   /** Identifiers by name; symbols resolve only for the names of slots and
    * functions, so the scan asks the checker about few nodes. */
   private readonly names = new Map<string, ts.Identifier[]>();
-  private readonly references = new Map<ts.Symbol, ts.Identifier[]>();
+  /** The identifiers of each name grouped by the symbol they resolve to,
+   * built on the first reference query for that name. */
+  private readonly references = new Map<string, Map<ts.Symbol, ts.Identifier[]>>();
   /** Names written as shorthand properties (`{ p }`): the checker resolves
    * those to the property, so a binding of that name stays open. */
   private readonly shorthandNames = new Set<string>();
@@ -349,14 +351,20 @@ export class RecordFlowClasses {
 
   /** The identifiers that name `symbol`, its declaration included. */
   private referencesOf(symbol: ts.Symbol): readonly ts.Identifier[] {
-    let list = this.references.get(symbol);
-    if (!list) {
-      list = (this.names.get(ts.symbolName(symbol)) ?? []).filter(
-        (node) => this.host.symbolOf(node) === symbol,
-      );
-      this.references.set(symbol, list);
+    const name = ts.symbolName(symbol);
+    let bySymbol = this.references.get(name);
+    if (!bySymbol) {
+      bySymbol = new Map();
+      for (const node of this.names.get(name) ?? []) {
+        const resolved = this.host.symbolOf(node);
+        if (!resolved) continue;
+        const list = bySymbol.get(resolved);
+        if (list) list.push(node);
+        else bySymbol.set(resolved, [node]);
+      }
+      this.references.set(name, bySymbol);
     }
-    return list;
+    return bySymbol.get(symbol) ?? [];
   }
 
   private collectFunctions(): void {

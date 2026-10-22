@@ -5,6 +5,7 @@
  * spirit of process.memoryUsage(): approximate values, not V8 heap
  * figures (a compiled binary embeds no V8 engine). Every other member
  * fences at its use with the by-design reason (builtinFenceHintOf). */
+import { keyedHelperName } from "../stable-names.js";
 import { numLit } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
@@ -55,7 +56,7 @@ export function lowerV8HeapStatisticsCall(
   const key = `v8.getHeapStatistics:${t.shapeId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%v8.getHeapStatistics.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%v8.getHeapStatistics", key);
     lowerer.valueHelpers.set(key, helper);
     const sample = (index: number): IrExpr => ({
       kind: "libCall",

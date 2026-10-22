@@ -140,9 +140,11 @@ static void *bcs_capsule_retain(void *p) { return scr_stream_retain(p); }
 /* Also the capsule's tag. */
 static void bcs_capsule_release(void *p) { scr_stream_release(p); }
 
-static bool bcs_stream_vt(const ScrVt *vt) {
-  return (vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
-         (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post);
+/* Whether `stream`, boxed as an "object:" typed ref, is a runtime stream. */
+static bool bcs_stream_vt(const ScrStream *stream) {
+  const ScrVt *vt = scr_stream_vt_of(stream);
+  return vt != NULL && ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
+                        (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post));
 }
 
 static void bcs_rec_release(void *p);
@@ -154,7 +156,7 @@ static ScrStream *bcs_of(const ScrDyn *value) {
   if (value != NULL && value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
       memcmp(value->v.typed_ref.type_key, "object:", 7) == 0) {
     ScrStream *stream = value->v.typed_ref.ptr;
-    return bcs_stream_vt(stream->vt) && scr_stream_native(stream, bcs_rec_release) ? stream : NULL;
+    return bcs_stream_vt(stream) && scr_stream_native(stream, bcs_rec_release) ? stream : NULL;
   }
   if (value == NULL || value->kind != SCR_DYN_OBJ || value->symbol_properties == NULL) return NULL;
   ScrDyn *capsule = scr_dyn_obj_get(value->symbol_properties, bcs_hidden_key, BCS_HIDDEN_LEN);
@@ -184,7 +186,7 @@ static ScrStream *bcs_native_of(const ScrDyn *value) {
       memcmp(value->v.typed_ref.type_key, "object:", 7) != 0)
     return NULL;
   ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-  if (bcs_stream_vt(stream->vt)) return stream;
+  if (bcs_stream_vt(stream)) return stream;
   value->v.typed_ref.release(stream);
   return NULL;
 }
@@ -1671,6 +1673,31 @@ ScrStream *scr_dyn_builtin_stream_check(const ScrDyn *value, double kind) {
   default: break;
   }
   return ok ? scr_stream_retain(s) : NULL;
+}
+
+/* stream.dynNative (checked-dynamic stream slots, scr_stream_dyn.c) in
+ * programs that link this unit: a constructor-function stream with the
+ * requested side (1 readable, 2 writable) answers its runtime stream (+1),
+ * so a pipe into it, and an unpipe of it, are the runtime's own, unless it
+ * overrides write() or end(), which the runtime's pipe would bypass: that
+ * one is NULL and pipes through its JavaScript members. Other values take
+ * scr_stream_dyn_native. Never throws. */
+ScrStream *scr_dyn_builtin_stream_dyn_native(const ScrDyn *value, double side) {
+  ScrStream *s = value->kind == SCR_DYN_OBJ ? bcs_of(value) : NULL;
+  if (s) {
+    const ScrVt *vt = s->vt;
+    bool readable = vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post;
+    bool writable = vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post;
+    bool duplex = vt->pre >= scr_duplex_vt.pre && vt->pre <= scr_duplex_vt.post;
+    if (!(duplex || (side == 1 ? readable : writable))) return NULL;
+    ScrDyn *object = (ScrDyn *)value;
+    if (side == 2 && (bcs_overrides(object, "write") || bcs_overrides(object, "end"))) {
+      if (scr_exc_pending()) scr_exc_clear();
+      return NULL;
+    }
+    return scr_stream_retain(s);
+  }
+  return scr_stream_dyn_native(value, side);
 }
 
 /* stream.unboxDyn (an untyped pipe destination or pipeline stage) in

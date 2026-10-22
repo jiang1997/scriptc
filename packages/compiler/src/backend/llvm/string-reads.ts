@@ -13,11 +13,13 @@
  * With `scan`, a string that is not proven ASCII is first compared with
  * the runtime's published scan receiver (ScrStrScan, scr_runtime.h): the
  * string an indexed scan converted to UTF-16 units, whose length and units
- * then read inline. Only targets whose runtime state is not thread-local
- * publish it to emitted code.
+ * then read inline. Where the runtime keeps it per thread, the declaration
+ * is thread-local.
  */
 
 import { exactIndexLines, sizeToDouble } from "./common.js";
+import { wtf8Bytes } from "../literals.js";
+import { literalCapWord, literalCapWord32 } from "./string-key-hash.js";
 
 export const STRING_UTF16_LEN_DECL = "declare double @scr_str_utf16_len(ptr)";
 export const STRING_CHAR_CODE_AT_DECL = "declare double @scr_str_char_code_at(ptr, double)";
@@ -31,6 +33,9 @@ const READ_CALL_ATTRS = "cold nocallback nounwind willreturn";
 /** Requests the integer-index helper below; an LLVM comment line among the
  * declarations, so it never declares anything itself. */
 export const STRING_CHAR_CODE_AT_INT_MARKER = "; uses @sc_str_char_code_at_int";
+export const STRING_CHAR_AT_DECL = "declare ptr @scr_str_char_at(ptr, double)";
+/** Requests the integer-index charAt helper, as the marker above does. */
+export const STRING_CHAR_AT_INT_MARKER = "; uses @sc_str_char_at_int";
 
 /** Load the proven-ASCII flag of `%s` into `%ascii`. */
 function asciiTest(): string[] {
@@ -53,8 +58,8 @@ export function stringScanType(sz: string): string {
   return `{ ptr, ptr, ${sz} }`;
 }
 
-export function stringScanDecl(sz: string): string {
-  return `@scr_str_scan = external global ${stringScanType(sz)}`;
+export function stringScanDecl(sz: string, threadLocal: boolean): string {
+  return `@scr_str_scan = external ${threadLocal ? "thread_local " : ""}global ${stringScanType(sz)}`;
 }
 
 /** The scan receiver test of `%s`: branches to `hit` with `%scan.n` (its
@@ -82,6 +87,34 @@ function scanRead(): string[] {
     `  %scan.unit = load i16, ptr %scan.p`,
     `  %scan.d = uitofp i16 %scan.unit to double`,
     `  ret double %scan.d`,
+  ];
+}
+
+/** The one-character strings of the ASCII range as immortal literals
+ * ({ rc = SIZE_MAX, len = 1, capacity word, char, NUL }), indexed by
+ * character code: the inline charAt result. Their bytes, capacity words
+ * and key hashes equal those of the runtime's single-character statics, so
+ * they are interchangeable with the strings the runtime returns. */
+function asciiCharTable(sz: string): string[] {
+  const type = `{ ${sz}, ${sz}, ${sz}, [2 x i8] }`;
+  const entries: string[] = [];
+  for (let c = 0; c < 128; c++) {
+    const bytes = wtf8Bytes(String.fromCharCode(c));
+    const word = sz === "i64" ? literalCapWord(bytes) : literalCapWord32(bytes);
+    entries.push(`${type} { ${sz} -1, ${sz} 1, ${sz} ${word}, [2 x i8] [i8 ${c}, i8 0] }`);
+  }
+  return [`@sc_ascii_chars = internal constant [128 x ${type}] [${entries.join(", ")}]`];
+}
+
+/** The table entry for byte `%byte` of a proven-ASCII string. */
+function asciiCharRead(sz: string): string[] {
+  return [
+    `  %data = getelementptr inbounds %ScrStr, ptr %s, i32 1`,
+    `  %p = getelementptr inbounds i8, ptr %data, i64 %k`,
+    `  %byte = load i8, ptr %p`,
+    `  %code = zext i8 %byte to i64`,
+    `  %char = getelementptr inbounds [128 x { ${sz}, ${sz}, ${sz}, [2 x i8] }], ptr @sc_ascii_chars, i64 0, i64 %code`,
+    `  ret ptr %char`,
   ];
 }
 
@@ -197,6 +230,59 @@ export const STRING_READ_HELPERS: readonly StringReadHelper[] = [
       `  %d = sitofp i64 %i to double`,
       `  %r = call double @scr_str_char_code_at(ptr %s, double %d) ${READ_CALL_ATTRS}`,
       `  ret double %r`,
+      `}`,
+    ],
+  },
+  {
+    // charAt of a proven-ASCII string at an exact in-range index is the
+    // table entry for its byte; every other case calls the runtime, which
+    // keeps the complete semantics. The table is defined with the helper.
+    decl: STRING_CHAR_AT_DECL,
+    define: (sz, attrs) => {
+      let n = 0;
+      const exactIndex = exactIndexLines("%i", "%len", sz, () => `%ix${n++}`);
+      return [
+        ...asciiCharTable(sz),
+        ``,
+        `define internal ptr @sc_str_char_at(ptr %s, double %i) ${attrs} {`,
+        `entry:`,
+        ...asciiTest(),
+        `  br i1 %ascii, label %bounds, label %slow`,
+        `bounds:`,
+        ...loadLength(sz),
+        ...exactIndex.lines.map((line) => `  ${line}`),
+        `  br i1 ${exactIndex.ok}, label %read, label %slow`,
+        `read:`,
+        `  %k = add i64 ${exactIndex.wide}, 0`,
+        ...asciiCharRead(sz),
+        `slow:`,
+        `  %r = call ptr @scr_str_char_at(ptr %s, double %i) ${READ_CALL_ATTRS}`,
+        `  ret ptr %r`,
+        `}`,
+      ];
+    },
+  },
+  {
+    // An exact integer index, as for sc_str_char_code_at_int. Requested
+    // together with STRING_CHAR_AT_DECL, which defines the table.
+    decl: STRING_CHAR_AT_INT_MARKER,
+    define: (sz, attrs) => [
+      `define internal ptr @sc_str_char_at_int(ptr %s, i64 %i) ${attrs} {`,
+      `entry:`,
+      ...asciiTest(),
+      `  br i1 %ascii, label %bounds, label %slow`,
+      `bounds:`,
+      ...loadLength(sz),
+      ...(sz === "i64" ? [] : [`  %len64 = zext ${sz} %len to i64`]),
+      `  %ok = icmp ult i64 %i, ${sz === "i64" ? "%len" : "%len64"}`,
+      `  br i1 %ok, label %read, label %slow`,
+      `read:`,
+      `  %k = add i64 %i, 0`,
+      ...asciiCharRead(sz),
+      `slow:`,
+      `  %d = sitofp i64 %i to double`,
+      `  %r = call ptr @scr_str_char_at(ptr %s, double %d) ${READ_CALL_ATTRS}`,
+      `  ret ptr %r`,
       `}`,
     ],
   },

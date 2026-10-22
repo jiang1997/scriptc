@@ -50,6 +50,7 @@ const featureCalls: readonly [string, IrLibFn][] = [
   ["bigint", "bigint.parse"],
   ["searchParams", "sp.new"],
   ["qs", "qs.parse"],
+  ["utilPromisify", "util.promisifyDyn"],
   ["dynBuiltinClass", "dyn.builtinClass"],
   ["dynBuiltinStream", "dyn.builtinStreamClass"],
   ["parseArgs", "util.parseArgs"],

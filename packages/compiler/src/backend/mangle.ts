@@ -109,6 +109,13 @@ export function mangleVtStruct(rootClassName: string): string {
 export function mangleVtInstance(className: string): string {
   return `sc_vtable_${sanitize(className)}`;
 }
+/** The per-HIERARCHY array of the vtables of its classes in preorder, for
+ * hierarchies whose instances keep their class id in the rc word
+ * (classes.ts LlClassMeta.idInRc). `sc_vta_` differs from `sc_vtable_` and
+ * `sc_vtt_` before any user-controlled text. */
+export function mangleVtArray(rootClassName: string): string {
+  return `sc_vta_${sanitize(rootClassName)}`;
+}
 /** A virtual slot's member name inside the vtable struct. Sibling
  * branches of one hierarchy can each declare a slot for the SAME method
  * name (root-most in their own subtree, overridden below — mixin layers
@@ -187,6 +194,11 @@ export function mangleAsyncAdoptCall(fnName: string): string {
  * coroutine takes the await's turn itself. */
 export function mangleAsyncInlineAwaitCall(fnName: string): string {
   return `sc_ai_${sanitize(fnName)}`;
+}
+/** A stackless coroutine body's `await f(...)` of a stackless async f: the
+ * spawn of f's fiber record, which keeps its promise inside (direct await). */
+export function mangleAsyncDirectSpawn(fnName: string): string {
+  return `sc_dw_${sanitize(fnName)}`;
 }
 export function mangleTrampoline(fnName: string): string {
   return `sc_tr_${sanitize(fnName)}`;

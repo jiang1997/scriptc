@@ -10,7 +10,13 @@ import { isGenericCallableMemberType } from "../type-mapper.js";
  * Sound file-locally for module-scope bindings because ESM import
  * bindings are read-only — no other file can write one. Cached per
  * symbol (the scan walks the whole file once). */
-export function bindingNeverReassigned(lowerer: Lowerer, sym: ts.Symbol, decl: ts.Node): boolean {
+export function bindingNeverReassigned(
+  lowerer: Lowerer,
+  sym: ts.Symbol,
+  decl: ts.Node,
+  resolve: (ident: ts.Identifier) => ts.Symbol | null | undefined = (ident) =>
+    lowerer.resolveValueSymbol(ident),
+): boolean {
   const cached = lowerer.neverReassignedCache.get(sym);
   if (cached !== undefined) return cached;
   let written = false;
@@ -18,7 +24,7 @@ export function bindingNeverReassigned(lowerer: Lowerer, sym: ts.Symbol, decl: t
   // identifiers pay a symbol resolution.
   const symText = ts.symbolName(sym);
   const namesSym = (e: ts.Node): boolean =>
-    ts.isIdentifier(e) && e.text === symText && lowerer.resolveValueSymbol(e) === sym;
+    ts.isIdentifier(e) && e.text === symText && resolve(e) === sym;
   const scanTarget = (t: ts.Expression): void => {
     let e: ts.Expression = t;
     while (ts.isParenthesizedExpression(e)) e = e.expression;

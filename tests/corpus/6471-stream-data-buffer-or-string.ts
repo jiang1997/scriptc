@@ -32,9 +32,12 @@ fs.writeFileSync(file, "file contents\n");
 const stream = fs.createReadStream(file);
 const release = (): void => console.log("released");
 stream.on("data", (chunk: Buffer | string) => describe("file", chunk));
-stream.on("close", release);
 stream.on("error", release);
-stream.on("end", () => {
+// The second read starts once the first stream has closed its file, so the
+// order of its 'close' and the second stream's data does not depend on
+// which file operation finishes first.
+stream.on("close", () => {
+  release();
   const encoded = fs.createReadStream(file, { encoding: "utf8" });
   encoded.on("data", (chunk: Buffer | string) => describe("file utf8", chunk));
   encoded.on("close", () => {

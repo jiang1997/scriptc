@@ -228,3 +228,140 @@ test("files without __esm initializers and ES-module bundles are left alone", ()
     lower(`${helpers}var init_a = __esm({ "a.ts"() {} });\ninit_a();\nexport {};\n`),
   ).toBeNull();
 });
+
+test("a class an initializer defines into a module binding becomes a class declaration", () => {
+  const lowered = expectSameBehavior(`"use strict";
+${helpers}var import_stream, Shout, Loud, Plain;
+var init_shout = __esm({
+  "src/shout.ts"() {
+    "use strict";
+    import_stream = require("stream");
+    console.log("shout init");
+    Shout = class extends import_stream.Transform {
+      _transform(chunk, encoding, callback) {
+        callback(null, String(chunk).toUpperCase());
+      }
+    };
+    Loud = class Loud extends Shout {
+      static of() { return new Loud(); }
+    }, Plain = class {
+      label() { return "plain"; }
+    };
+    console.log("after", typeof Shout, Loud.name, new Plain().label());
+  }
+});
+function main() {
+  init_shout();
+  const s = Loud.of();
+  s.on("data", (c) => console.log("data", String(c)));
+  s.end("hi");
+}
+console.log("start");
+main();
+`);
+  expect(lowered).toContain('class Shout extends require("stream").Transform');
+  expect(lowered).toContain("class Loud extends Shout");
+  expect(lowered).toContain("class Plain ");
+  // The bindings' declarators are gone with the interop binding's.
+  expect(lowered).not.toMatch(/var [^;=]*\b(?:import_stream|Shout|Loud|Plain)\b/);
+});
+
+test("classes whose definition or binding is observable stay assignments", () => {
+  const lowered = expectSameBehavior(`${helpers}var A, B, C, D;
+var init_m = __esm({
+  "src/m.ts"() {
+    A = class { static made = console.log("static field runs at definition") };
+    B = class extends globalThis.Array {};
+    console.log(typeof D);
+    D = class {};
+    C = class {};
+  }
+});
+console.log(typeof C);
+init_m();
+console.log(typeof A, typeof B, typeof C, typeof D);
+`);
+  expect(lowered).toContain("A = class");
+  expect(lowered).toContain("B = class");
+  expect(lowered).toContain("C = class");
+  expect(lowered).toContain("D = class");
+});
+
+test("an interop binding a new expression constructs through stays the callee", () => {
+  const lowered = expectSameBehavior(`${helpers}function make() {
+  return new import_events.EventEmitter();
+}
+var import_events;
+var init_m = __esm({
+  "src/m.ts"() {
+    import_events = require("events");
+  }
+});
+init_m();
+console.log(typeof make().on);
+`);
+  expect(lowered).toContain('new (require("events")).EventEmitter()');
+});
+
+test("a hoisted class may extend a global constructor, past esbuild's export annotation", () => {
+  const lowered = expectSameBehavior(`${helpers}var AppError;
+var init_errors = __esm({
+  "src/errors.ts"() {
+    AppError = class extends Error {
+      code;
+      constructor(message, code) {
+        super(message);
+        this.code = code;
+      }
+    };
+  }
+});
+function fail() {
+  init_errors();
+  throw new AppError("failed", "E1");
+}
+function main() {
+  try {
+    fail();
+  } catch (err) {
+    console.log(err instanceof AppError, err instanceof Error, err.code, err.message);
+  }
+}
+main();
+0 && (module.exports = { AppError });
+`);
+  expect(lowered).toContain("class AppError extends Error");
+});
+
+test("an initializer declared last in a shared var statement still hoists its classes", () => {
+  const lowered = expectSameBehavior(`"use strict";
+${helpers}var BuildError, hints, init_errors = __esm({
+  "src/errors.ts"() {
+    "use strict";
+    BuildError = class extends Error {
+      constructor(code) {
+        super("failed: " + code);
+        this.code = code;
+      }
+    }, hints = { retry: "try again" };
+  }
+});
+function run() {
+  init_errors();
+  try {
+    throw new BuildError("E2");
+  } catch (err) {
+    console.log(err instanceof BuildError, err.code, err.message, hints.retry);
+  }
+}
+run();
+`);
+  expect(lowered).toContain("class BuildError extends Error");
+});
+
+test("a minified initializer that ends with its class still hoists it", () => {
+  const lowered = expectSameBehavior(
+    `${helpers}var Counter,init_counter=__esm({"src/counter.ts"(){console.log("counter init"),Counter=class{n=0;next(){return++this.n}}}});function run(){init_counter();const c=new Counter;c.next();console.log(c.next())}run();`,
+  );
+  expect(lowered).toContain("class Counter{");
+});

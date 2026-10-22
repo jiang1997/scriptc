@@ -678,6 +678,7 @@ void scr_net_server_release(ScrNetServer *s) {
 #ifdef SCR_RC_AUDIT
     scr_net_live--;
 #endif
+    scr_weak_dispose_inline(s); /* weak collections keyed by this socket or server */
     free(s);
   }
 }
@@ -724,6 +725,7 @@ void scr_net_sock_release(ScrNetSocket *s) {
 #ifdef SCR_RC_AUDIT
     scr_net_live--;
 #endif
+    scr_weak_dispose_inline(s); /* weak collections keyed by this socket or server */
     free(s);
   }
 }
@@ -2894,6 +2896,81 @@ ScrNetSocket *scr_net_connect_lookup(double port, ScrStr *host /*borrowed*/,
   return s;
 }
 
+/* The callback a checked-dynamic lookup function receives (Node's own
+ * shape, `(err, address, family)`): with `all: true` the address is a list
+ * of { address, family } records, otherwise one address string. caps[0]
+ * boxes the socket, as for the typed answer closure. */
+static ScrDyn *scr_net_lookup_dyn_thunk(ScrClosure *clo, ScrDyn *const *args, size_t argc) {
+  const ScrDyn *err = argc > 0 ? args[0] : scr_dyn_undefined();
+  const ScrDyn *addr = argc > 1 ? args[1] : scr_dyn_undefined();
+  ScrStr *msg = NULL;
+  ScrArr *ips = NULL;
+  bool failed = scr_dyn_truthy(err);
+  if (failed) {
+    const ScrDyn *m = err->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(err, "message", 7) : NULL;
+    msg = m != NULL && m->kind == SCR_DYN_STR ? scr_str_retain(m->v.str) : scr_dyn_string_coerce_js(err);
+  } else {
+    ScrDyn *view = addr->kind == SCR_DYN_TYPED_REF ? scr_dyn_typed_ref_materialize(addr) : NULL;
+    const ScrDyn *list = view != NULL ? view : addr;
+    ips = scr_arr_new(SCR_ELEM_STR, 0);
+    if (list->kind == SCR_DYN_STR) {
+      scr_arr_push_ref(ips, scr_str_retain(list->v.str));
+    } else if (list->kind == SCR_DYN_ARR) {
+      for (size_t i = 0; i < list->v.arr.len; i++) {
+        const ScrDyn *entry = list->v.arr.items[i];
+        ScrDyn *ev = entry->kind == SCR_DYN_TYPED_REF ? scr_dyn_typed_ref_materialize(entry) : NULL;
+        const ScrDyn *rec = ev != NULL ? ev : entry;
+        const ScrDyn *a = rec->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(rec, "address", 7) : NULL;
+        if (a != NULL && a->kind == SCR_DYN_STR) scr_arr_push_ref(ips, scr_str_retain(a->v.str));
+        scr_dyn_release(ev);
+      }
+    }
+    scr_dyn_release(view);
+  }
+  scr_net_lookup_answer(clo, failed, msg, ips);
+  scr_str_release(msg);
+  if (ips != NULL) scr_arr_release(ips);
+  return scr_dyn_retain(scr_dyn_undefined());
+}
+
+/* net.connect({ host, port, lookup }) with a lookup of Node's own type
+ * (`(hostname, options, callback)` whose callback takes a string or an
+ * address list), held as a checked-dynamic function: the runtime calls it
+ * as Node's autoSelectFamily dial does, with { hints, all: true }, and dials
+ * the answered addresses in order. NULL with the exception pending. */
+ScrNetSocket *scr_net_connect_lookup_dyn(double port, ScrStr *host /*borrowed*/,
+                                          const ScrDyn *lookup /*borrowed*/) {
+  if (!scr_net_host_chk(host)) return NULL;
+  ScrNetSocket *s = scr_net_sock_new();
+  s->peer_port = (int)port;
+  snprintf(s->peer_ip, sizeof s->peer_ip, "%.*s",
+           (int)(host->len < 63 ? host->len : 63), host->data);
+  if (!scr_net_poller_init()) {
+    fputs("scriptc: event poller init failed\n", stderr);
+    abort();
+  }
+  s->connecting = true;
+  s->lookup_wait = true;
+  scr_net_sock_register(s);
+  ScrClosure *ans = scr_closure_new((void *)&scr_net_lookup_dyn_thunk, 1);
+  ScrBox *box = scr_box_new_obj(&scr_net_sock_retain_v, &scr_net_sock_release_v, NULL);
+  scr_box_set_ref(box, scr_net_sock_retain(s));
+  ans->caps[0] = box;
+  ScrDyn *callback = scr_dyn_new_func(ans, &scr_net_lookup_dyn_thunk, 3, "(err, address, family)", "callback");
+  ScrDyn *options = scr_dyn_new_obj();
+#ifndef _WIN32
+  scr_dyn_obj_set(options, "hints", 5, scr_dyn_new_num((double)AI_ADDRCONFIG));
+#endif
+  scr_dyn_obj_set(options, "all", 3, scr_dyn_new_bool(true));
+  ScrDyn *name = scr_dyn_new_str(host);
+  ScrDyn *args[3] = { name, options, callback };
+  scr_dyn_release(scr_dyn_call(lookup, args, 3, "lookup"));
+  scr_dyn_release(name);
+  scr_dyn_release(options);
+  scr_dyn_release(callback);
+  return s;
+}
+
 /* The answer closure's runtime half (its fn is the emitted per-shape
  * thunk; caps[0] boxes the socket). msg/ips are borrowed (nullable). */
 void scr_net_lookup_answer(ScrClosure *self, bool has_err, ScrStr *msg /*borrowed, nullable*/,
@@ -4254,7 +4331,7 @@ ScrDyn *scr_net_block_list_private_ranges(void) {
                                          "::1/128", "169.254.0.0/16", "fe80::/10", "fc00::/7" };
     ScrDyn *arr = scr_dyn_new_arr();
     for (size_t i = 0; i < sizeof cidrs / sizeof cidrs[0]; i++) scr_dyn_arr_push(arr, scr_net_dyn_str(cidrs[i]));
-    ranges = scr_dyn_freeze(arr); /* +1 on the same array */
+    ranges = scr_dyn_freeze_data(arr); /* +1 on the same array */
     scr_dyn_release(arr);
     scr_net_private_ranges = ranges;
     scr_atexit(scr_net_private_ranges_cleanup);
@@ -5271,17 +5348,30 @@ static int scr_net_pollfd(void) {
   return scr_net_poller != NULL ? scrp_poller_fd(scr_net_poller) : -1;
 }
 
+bool scr_loop_io_take(void);
+bool scr_loop_io_more(void);
+void scr_loop_io_reopen(void);
+
 static void scr_net_dispatch(void) {
   if (!scr_net_servers && !scr_net_socks &&
       !scr_net_proto_pending()) {
     return;
   }
+  /* One poller drain per loop iteration (scr_loop_io_take); a full batch
+   * keeps draining within the phase's batch budget (scr_loop_io_more), like
+   * libuv's poll phase. Deferred emits (the sweep) still run on every
+   * call. */
+  bool may_drain = scr_loop_io_take();
   for (;;) {
     scr_net_sweep();
     if (scr_exc_pending()) return;
     if (scr_net_poller == NULL) return;
     ScrPollerEvent evs[64];
-    int n = scrp_drain(scr_net_poller, evs, 64);
+    int n = 0;
+    if (may_drain) {
+      n = scrp_drain(scr_net_poller, evs, 64);
+      may_drain = n == 64 && scr_loop_io_more();
+    }
     for (int i = 0; i < n; i++) {
       void *udata = evs[i].udata;
       if (!udata) continue;
@@ -5355,8 +5445,13 @@ static void scr_net_dispatch(void) {
       }
       if (scr_exc_pending()) return;
     }
-    if (!scr_net_flags_pending()) return;
-    if (scr_loop_has_ready()) return; /* microtasks interleave first */
+    if (!scr_net_flags_pending() && !may_drain) return;
+    if (scr_loop_has_ready()) {
+      /* microtasks interleave first; a full batch's rest drains on the
+       * next call, still within this poll phase */
+      if (may_drain) scr_loop_io_reopen();
+      return;
+    }
   }
 }
 

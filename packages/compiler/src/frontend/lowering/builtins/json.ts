@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { isDateJsonSource } from "./dates.js";
 import { dynUndefinedExpr, varRef } from "../../../ir/build.js";
 import { InternalCompilerError } from "../../../errors.js";
@@ -253,7 +254,7 @@ function lowerOptionalStringifyRoot(
   const key = `json.optionalString:${value.type.unionId}:${JSON.stringify(indent)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%json.optionalString.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%json.optionalString", key);
     lowerer.valueHelpers.set(key, helper);
     const input = varRef("value.0", value.type, loc);
     const serialized: IrExpr = {
@@ -646,6 +647,58 @@ export function lowerJsonProperty(
         loc,
       },
       fnName: "stringify",
+      type: DYN,
+      loc,
+    };
+  }
+  if (member === "parse") {
+    // JSON.parse as a value: ToString of the text, then the reviver form
+    // (a reviver that is not a function is ignored, as in Node).
+    const loc = locOf(expr);
+    const name = "%builtin.JSON.parse";
+    if (!lowerer.builtinCallableValueFns.has(name)) {
+      lowerer.builtinCallableValueFns.set(name, name);
+      const params = ["text", "reviver"].map((name) => ({ localId: name, name, type: DYN }));
+      lowerer.liftedFns.push({
+        name,
+        params,
+        returnType: DYN,
+        locals: params.map((p) => ({ id: p.localId, name: p.name, type: DYN, mutable: false })),
+        loc,
+        body: [
+          {
+            kind: "return",
+            value: {
+              kind: "libCall",
+              fn: "json.parseReviver",
+              args: [
+                {
+                  kind: "libCall",
+                  fn: "dyn.toStringCoerce",
+                  args: [varRef("text", DYN, loc)],
+                  type: STRING,
+                  loc,
+                },
+                varRef("reviver", DYN, loc),
+              ],
+              type: DYN,
+              loc,
+            },
+            loc,
+          },
+        ],
+      });
+    }
+    return {
+      kind: "dynFrom",
+      value: {
+        kind: "closure",
+        fnName: name,
+        captures: [],
+        type: { kind: "func", params: [DYN, DYN], ret: DYN },
+        loc,
+      },
+      fnName: "parse",
       type: DYN,
       loc,
     };

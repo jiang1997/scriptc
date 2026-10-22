@@ -22,6 +22,9 @@ const fixturesRoot = join(repoRoot, "tests/fixtures");
 const pilotRoot = join(fixturesRoot, "npm-static");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
+/* Sanitized builds of the published Effect pilots alone take 290 to 330 s on a 16-vCPU host, most of it in
+ * the sanitized native link: near or past the suite's 300 s default. */
+const effectBuildTimeout = sanitize ? 900_000 : undefined;
 // Measured milliseconds per test on a CI runner (scripts/ci-test-costs.mjs).
 const testCosts = (
   JSON.parse(readFileSync(new URL("./npm-static-costs.json", import.meta.url), "utf8")) as {
@@ -76,7 +79,7 @@ async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise
     ...globSync(
       join(fixturesRoot, "npm/node_modules/cryptozoo/**/*.{js,mjs,cjs,json,d.ts}"),
     ).sort(),
-    // the bundler-emitted-CJS mini packages (cases 2465-2469, 2556-2567, 2571, 2580-2584)
+    // the bundler-emitted-CJS mini packages (cases 2465-2469, 2556-2567, 2571, 2580-2590, 2595)
     ...globSync(join(fixturesRoot, "npm/node_modules/gt*/**/*.{js,cjs,json}")).sort(),
     ...globSync(join(fixturesRoot, "npm/store/gt*/**/*.{js,cjs,json}")).sort(),
   ];
@@ -1135,34 +1138,74 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 180_000);
 
-  test("the published Effect generator logs and completes statically", async () => {
-    const entry = join(pilotRoot, "effect-gen-cli.ts");
-    const binary = await buildStatic(entry, ["effect"]);
+  test(
+    "the published Effect generator logs and completes statically",
+    async () => {
+      const entry = join(pilotRoot, "effect-gen-cli.ts");
+      const binary = await buildStatic(entry, ["effect"]);
+      const [reference, native] = await Promise.all([
+        runBinary(process.execPath, [entry]),
+        runBinary(binary, []),
+      ]);
+      const log =
+        /^timestamp=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z level=INFO fiber=#0 message="Hello, world!"\n$/;
+      expect(reference.stdout.toString()).toMatch(log);
+      expect(native.stdout.toString()).toMatch(log);
+      expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
+      expect(native.exitCode).toBe(reference.exitCode);
+      expect(native.exitCode).toBe(0);
+    },
+    effectBuildTimeout,
+  );
+
+  test(
+    "the published Effect generator has deterministic native results",
+    async () => {
+      const entry = join(pilotRoot, "effect-gen-result-cli.ts");
+      const binary = await buildStatic(entry, ["effect"]);
+      const [reference, native] = await Promise.all([
+        runBinary(process.execPath, [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(reference.stdout.toString()).toBe("Hello, world!\n42\n");
+      expect(native.stdout).toEqual(reference.stdout);
+      expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
+      expect(native.exitCode).toBe(reference.exitCode);
+    },
+    effectBuildTimeout,
+  );
+
+  test("the published js-yaml loads, dumps and reports errors statically and matches Node", async () => {
+    const entry = join(pilotRoot, "js-yaml-cli.mjs");
+    const { coverage } = analyze(entry, { npmStatic: ["js-yaml"] });
+    expect(coverage.npmStatic).toEqual([{ package: "js-yaml", status: "static" }]);
+    expect(coverage.diagnostics).toHaveLength(0);
+    const binary = await buildStatic(entry, ["js-yaml"]);
     const [reference, native] = await Promise.all([
       runBinary(process.execPath, [entry]),
       runBinary(binary, []),
     ]);
-    const log =
-      /^timestamp=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z level=INFO fiber=#0 message="Hello, world!"\n$/;
-    expect(reference.stdout.toString()).toMatch(log);
-    expect(native.stdout.toString()).toMatch(log);
+    expect(native.stdout.toString()).toBe(reference.stdout.toString());
     expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
     expect(native.exitCode).toBe(reference.exitCode);
     expect(native.exitCode).toBe(0);
-  });
+  }, 300_000);
 
-  test("the published Effect generator has deterministic native results", async () => {
-    const entry = join(pilotRoot, "effect-gen-result-cli.ts");
-    const binary = await buildStatic(entry, ["effect"]);
+  test("the published smol-toml parses and stringifies statically and matches Node", async () => {
+    const entry = join(pilotRoot, "smol-toml-cli.mjs");
+    const { coverage } = analyze(entry, { npmStatic: ["smol-toml"] });
+    expect(coverage.npmStatic).toEqual([{ package: "smol-toml", status: "static" }]);
+    expect(coverage.diagnostics).toHaveLength(0);
+    const binary = await buildStatic(entry, ["smol-toml"]);
     const [reference, native] = await Promise.all([
       runBinary(process.execPath, [entry]),
       runBinary(binary, []),
     ]);
-    expect(reference.stdout.toString()).toBe("Hello, world!\n42\n");
-    expect(native.stdout).toEqual(reference.stdout);
+    expect(native.stdout.toString()).toBe(reference.stdout.toString());
     expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
     expect(native.exitCode).toBe(reference.exitCode);
-  });
+    expect(native.exitCode).toBe(0);
+  }, 300_000);
 
   test("inferred variadic factories preserve checked callable results", async () => {
     const entry = join(pilotRoot, "variadic-factory-cli.ts");
@@ -1438,6 +1481,15 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     ]);
   }, 180_000);
 
+  // 2595: a minified chunk whose top-level var statement mixes require
+  // bindings with a class extending the events binding; the bindings own no
+  // storage, so the constructor reaches the modules through them.
+  test("bundled chunk 2595-bundled-chunk-emitter builds its emitters through require bindings", async () => {
+    await expectNodeParity(join(fixturesRoot, "npm/cases/2595-bundled-chunk-emitter/main.ts"), [
+      "gtchunkee",
+    ]);
+  }, 180_000);
+
   // A whitespace/syntax-minified bundle whose helpers keep their names is
   // judged by the recognizers, not refused up front as minified.
   test("--npm-static=auto opts a minified bundle with named helpers in", () => {
@@ -1554,6 +1606,78 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       ) as string,
     });
   }, 120_000);
+
+  /* 2585-2587: polyfill packages whose module IS a Node builtin on Node 24
+   * compile as the builtins (builtin-package-aliases.ts), installed
+   * (2585, 2586) and bundled as versioned __commonJS chunks (2587).
+   * readable-stream compiles as its own READABLE_STREAM=disable behavior,
+   * so the Node side runs with that variable; util-deprecate's warning
+   * reaches stderr on both sides (Node's carries its pid). */
+  async function expectAliasParity(
+    entry: string,
+    packages: string[],
+    env: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    const { coverage } = analyze(entry, { npmStatic: packages });
+    expect(coverage.npmStatic).toEqual(packages.map((pkg) => ({ package: pkg, status: "static" })));
+    expect(coverage.diagnostics).toHaveLength(0);
+    const binary = await buildStatic(entry, packages);
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry], env),
+      runBinary(binary, [], env),
+    ]);
+    expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+    const warnings = (stderr: Buffer) =>
+      comparableStderr(stderr)
+        .toString("utf8")
+        .split("\n")
+        .filter((line) => line.includes("DeprecationWarning"))
+        .map((line) => line.replace(/^\(node:\d+\) /, ""));
+    expect(warnings(nativeRes.stderr)).toEqual(warnings(nodeRes.stderr));
+    expect(nativeRes.exitCode).toBe(0);
+    expect(nodeRes.exitCode).toBe(0);
+  }
+  const disabled = { ...process.env, READABLE_STREAM: "disable" };
+
+  test("installed polyfill packages 2585-builtin-polyfill-aliases compile as the Node builtins", async () => {
+    const entry = join(fixturesRoot, "npm/cases/2585-builtin-polyfill-aliases/main.ts");
+    await expectAliasParity(entry, ["gtpolyfills"], process.env);
+  }, 180_000);
+
+  test("readable-stream 2.x and 4.x 2586-readable-stream-builtin compile as node:stream", async () => {
+    const entry = join(fixturesRoot, "npm/cases/2586-readable-stream-builtin/main.ts");
+    await expectAliasParity(entry, ["gtrs2", "gtrs4"], disabled);
+  }, 180_000);
+
+  test("bundled polyfill chunks 2587-bundled-polyfill-aliases compile as the Node builtins", async () => {
+    const entry = join(fixturesRoot, "npm/cases/2587-bundled-polyfill-aliases/main.ts");
+    await expectAliasParity(entry, ["gtpolybundle"], disabled);
+  }, 180_000);
+
+  // 2588: classes a bundled ES module defines inside its lazy initializer,
+  // over stream.Readable and over each other, compile as declarations.
+  test("bundled ES module classes 2588-bundled-esm-classes compile statically and byte-match Node", async () => {
+    await expectNodeParity(join(fixturesRoot, "npm/cases/2588-bundled-esm-classes/main.ts"), [
+      "gtesmclass",
+    ]);
+  }, 180_000);
+
+  // 2589: a program class over an error class a bundled package defines
+  // inside a lazy initializer (build-utils' NowBuildError shape), with new
+  // and instanceof against both.
+  test("a program subclass 2589-bundled-error-subclass of a bundled error class byte-matches Node", async () => {
+    await expectNodeParity(join(fixturesRoot, "npm/cases/2589-bundled-error-subclass/main.ts"), [
+      "gtesmerror",
+    ]);
+  }, 180_000);
+
+  // 2590: a bundle that embeds fs-extra 9 (build-utils' shape): its
+  // fs-extra chunk compiles as the built-in package.
+  test("a bundled fs-extra copy 2590-bundled-fs-extra compiles as the built-in package", async () => {
+    await expectNodeParity(join(fixturesRoot, "npm/cases/2590-bundled-fs-extra/main.ts"), [
+      "gtfsxbundle",
+    ]);
+  }, 180_000);
 
   // 2562: a file with unverifiable interop that no compiled code can load
   // (the program imports a leaf data module and only a type from the

@@ -98,7 +98,11 @@ export function isRequireMainFilename(lowerer: Lowerer, expr: ts.Expression): bo
 export function isOptionalChainTail(lowerer: Lowerer, expr: ts.Expression): boolean {
   const tail = chainTailDot(lowerer, expr);
   if (!tail) return false;
-  const recvT = lowerer.mapTypeOf(lowerer.typeOf(tail.expression));
+  const recvTs = lowerer.typeOf(tail.expression);
+  // An `any` receiver short-circuits the whole tail too: `a?.b.c` reads
+  // `.c` normally once `a` is present.
+  if (recvTs.flags & ts.TypeFlags.Any) return true;
+  const recvT = lowerer.mapTypeOf(recvTs);
   if (recvT?.kind === "dyn") return true;
   if (recvT?.kind === "union") {
     const def = lowerer.unions.get(recvT.unionId);
@@ -119,7 +123,7 @@ export function isOptionalChainTail(lowerer: Lowerer, expr: ts.Expression): bool
  * throwing. Walks the receiver spine only; the argument of the access
  * itself is not part of the guard. Parentheses end the chain
  * (`(a?.b).c` reads `.c` from undefined); `!` does not. */
-export function hasOptionalChainGuard(expr: ts.Expression): boolean {
+export function hasOptionalChainGuard(expr: ts.Expression, lowerer?: Lowerer): boolean {
   let cur: ts.Expression = expr;
   for (;;) {
     if (ts.isNonNullExpression(cur)) {
@@ -131,7 +135,11 @@ export function hasOptionalChainGuard(expr: ts.Expression): boolean {
       ts.isElementAccessExpression(cur) ||
       ts.isCallExpression(cur)
     ) {
-      if (cur.questionDotToken) return true;
+      // Inside an optional chain's guarded body (dynamic reads pass the
+      // lowerer), the enclosing optChain already short-circuits on the
+      // consumed token, so the steps above it read normally: `a?.b.c`
+      // throws when `a.b` is undefined.
+      if (cur.questionDotToken) return lowerer === undefined || !lowerer.chainHandled.has(cur);
       cur = cur.expression;
       continue;
     }
@@ -232,7 +240,7 @@ export function lowerOptionalChain(
   const receiver = lowerer.runtimeOptionalSourceValue(recvNode, loweredReceiver) ?? loweredReceiver;
   if (receiver.type.kind === "dyn") {
     if (dotNode === expr && ts.isCallExpression(expr)) {
-      const id = `chain.${lowerer.chainCounter++}`;
+      const id = lowerer.closureName(loc, "", "chain");
       const callee: IrExpr = { kind: "chainRecv", id, type: DYN, loc };
       const stmts: IrStmt[] = [];
       let guarded = receiver;
@@ -290,7 +298,7 @@ export function lowerOptionalChain(
       );
     }
     if (dotNode === expr && ts.isElementAccessExpression(expr)) {
-      const id = `chain.${lowerer.chainCounter++}`;
+      const id = lowerer.closureName(loc, "", "chain");
       const reference: IrExpr = { kind: "chainRecv", id, type: DYN, loc };
       lowerer.chainRecvByNode.set(recvNode, reference);
       lowerer.chainHandled.add(dotNode);
@@ -323,7 +331,7 @@ export function lowerOptionalChain(
       dotNode === expr.expression
     ) {
       const m = dotNode.name.text;
-      const id = `chain.${lowerer.chainCounter++}`;
+      const id = lowerer.closureName(loc, "", "chain");
       const recvRef: IrExpr = { kind: "chainRecv", id, type: DYN, loc: locOf(recvNode) };
       lowerer.chainRecvByNode.set(recvNode, recvRef);
       lowerer.chainHandled.add(dotNode);
@@ -350,7 +358,7 @@ export function lowerOptionalChain(
       }
       return { kind: "optChain", id, receiver, body, type: DYN, loc };
     }
-    const id = `chain.${lowerer.chainCounter++}`;
+    const id = lowerer.closureName(loc, "", "chain");
     const reference: IrExpr = { kind: "chainRecv", id, type: DYN, loc };
     lowerer.chainRecvByNode.set(recvNode, reference);
     lowerer.chainHandled.add(dotNode);
@@ -412,7 +420,7 @@ export function lowerOptionalChain(
     rest.length === 1
       ? rest[0]!
       : { kind: "union" as const, unionId: lowerer.unions.transform(def, rest) };
-  const id = `chain.${lowerer.chainCounter++}`;
+  const id = lowerer.closureName(loc, "", "chain");
   // A single present arm binds its payload. Multiple present arms bind
   // the original tagged value, then retag inside the guarded body. The
   // nullish arms never enter that body, and each record keeps its identity.

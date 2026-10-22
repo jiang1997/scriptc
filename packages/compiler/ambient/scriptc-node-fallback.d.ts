@@ -544,12 +544,15 @@ declare var DOMException: {
   readonly prototype: DOMException;
 };
 
-/* WebCrypto's HMAC slice (scr_webcrypto.c): crypto.subtle's importKey for
- * raw HMAC keys, HMAC sign/verify and the SHA-1/SHA-2 digests, typed as
+/* WebCrypto's secret-key slice (scr_webcrypto.c): crypto.subtle's
+ * importKey, generateKey and exportKey for HMAC and AES keys (importKey
+ * also for PBKDF2 and HKDF keys), AES-GCM/CBC/CTR encrypt and decrypt,
+ * PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign/verify and the SHA-1/SHA-2 digests, typed as
  * exactly that surface (the declarations mirror @types/node's webcrypto
- * shapes). Every other SubtleCrypto method and crypto member is absent,
- * so a use is an honest type error. CryptoKey values are native handles
- * whose four members read through the handle. */
+ * shapes), plus the global's randomUUID and getRandomValues. Every other
+ * SubtleCrypto method and crypto member is absent, so a use is an honest
+ * type error. CryptoKey values are native handles whose four members read
+ * through the handle. */
 declare var crypto: Crypto;
 /* The Crypto and SubtleCrypto constructors (feature probes only) stay
  * `unknown`; the values keep this declaration order. */
@@ -582,8 +585,43 @@ interface HmacImportParams extends Algorithm {
   hash: HashAlgorithmIdentifier;
   length?: number;
 }
+interface HmacKeyGenParams extends Algorithm {
+  hash: HashAlgorithmIdentifier;
+  length?: number;
+}
+interface AesKeyGenParams extends Algorithm {
+  length: number;
+}
+interface AesGcmParams extends Algorithm {
+  additionalData?: BufferSource;
+  iv: BufferSource;
+  tagLength?: number;
+}
+interface AesCbcParams extends Algorithm {
+  iv: BufferSource;
+}
+interface AesCtrParams extends Algorithm {
+  counter: BufferSource;
+  length: number;
+}
+interface Pbkdf2Params extends Algorithm {
+  hash: HashAlgorithmIdentifier;
+  iterations: number;
+  salt: BufferSource;
+}
+interface HkdfParams extends Algorithm {
+  hash: HashAlgorithmIdentifier;
+  info: BufferSource;
+  salt: BufferSource;
+}
+interface AesDerivedKeyParams extends Algorithm {
+  length: number;
+}
 interface KeyAlgorithm {
   name: string;
+}
+interface AesKeyAlgorithm extends KeyAlgorithm {
+  length: number;
 }
 interface HmacKeyAlgorithm extends KeyAlgorithm {
   hash: KeyAlgorithm;
@@ -623,10 +661,37 @@ interface JsonWebKey {
   x?: string;
   y?: string;
 }
-/* The 'jwk' form type-checks like @types/node's; the compiler refuses it
- * (the JsonWebKey import is not implemented). */
 interface SubtleCrypto {
+  decrypt(
+    algorithm: AesGcmParams | AesCbcParams | AesCtrParams,
+    key: CryptoKey,
+    data: BufferSource,
+  ): Promise<ArrayBuffer>;
+  deriveBits(
+    algorithm: Pbkdf2Params | HkdfParams,
+    baseKey: CryptoKey,
+    length?: number | null,
+  ): Promise<ArrayBuffer>;
+  deriveKey(
+    algorithm: Pbkdf2Params | HkdfParams,
+    baseKey: CryptoKey,
+    derivedKeyType: AlgorithmIdentifier | AesDerivedKeyParams | HmacImportParams,
+    extractable: boolean,
+    keyUsages: readonly KeyUsage[],
+  ): Promise<CryptoKey>;
   digest(algorithm: AlgorithmIdentifier, data: BufferSource): Promise<ArrayBuffer>;
+  encrypt(
+    algorithm: AesGcmParams | AesCbcParams | AesCtrParams,
+    key: CryptoKey,
+    data: BufferSource,
+  ): Promise<ArrayBuffer>;
+  exportKey(format: "jwk", key: CryptoKey): Promise<JsonWebKey>;
+  exportKey(format: Exclude<KeyFormat, "jwk">, key: CryptoKey): Promise<ArrayBuffer>;
+  generateKey(
+    algorithm: AesKeyGenParams | HmacKeyGenParams,
+    extractable: boolean,
+    keyUsages: readonly KeyUsage[],
+  ): Promise<CryptoKey>;
   importKey(
     format: "jwk",
     keyData: JsonWebKey,
@@ -651,6 +716,21 @@ interface SubtleCrypto {
 }
 interface Crypto {
   readonly subtle: SubtleCrypto;
+  getRandomValues<
+    T extends
+      | Int8Array
+      | Uint8Array
+      | Uint8ClampedArray
+      | Int16Array
+      | Uint16Array
+      | Int32Array
+      | Uint32Array
+      | BigInt64Array
+      | BigUint64Array,
+  >(
+    typedArray: T,
+  ): T;
+  randomUUID(): `${string}-${string}-${string}-${string}-${string}`;
 }
 
 /* Capability-gated globals harness code probes behind feature guards
@@ -1379,13 +1459,13 @@ interface ImportMeta {
  * `recursive`); empty directories go through `rmdirSync`. */
 declare module "node:fs" {
   import { Readable, Writable } from "stream";
-  export function readFileSync(path: string | number, encoding: BufferEncoding): string;
+  export function readFileSync(path: string | number | URL, encoding: BufferEncoding): string;
   export function readFileSync(
-    path: string | number,
+    path: string | number | URL,
     options: { encoding: BufferEncoding },
   ): string;
-  export function readFileSync(path: string | number): Buffer;
-  export function readFileSync(path: string, options: unknown): string | Buffer;
+  export function readFileSync(path: string | number | URL): Buffer;
+  export function readFileSync(path: string | URL, options: unknown): string | Buffer;
   /* Error-first callbacks select string or Buffer data from their encoding.
    * Unknown options retain that union until the caller validates the value. */
   export function readFile(
@@ -1397,7 +1477,7 @@ declare module "node:fs" {
    * Node — an existing file keeps its permissions) and/or the utf8
    * encoding spelling. */
   export function writeFileSync(
-    path: string,
+    path: string | URL,
     data: string,
     /* The options-record stance (see http.RequestOptions): flag fences
      * by name at the call site; undocumented keys drop like Node. */
@@ -1409,14 +1489,17 @@ declare module "node:fs" {
     },
   ): void;
   /* The bare-encoding spelling — the options record's encoding key alone. */
-  export function writeFileSync(path: string, data: string, encoding: "utf8" | "utf-8"): void;
-  export function writeFileSync(path: string, data: string | Uint8Array): void;
-  export function appendFileSync(path: string, data: string | Uint8Array): void;
+  export function writeFileSync(path: string | URL, data: string, encoding: "utf8" | "utf-8"): void;
+  export function writeFileSync(path: string | URL, data: string | Uint8Array): void;
+  export function appendFileSync(path: string | URL, data: string | Uint8Array): void;
   export function existsSync(path: string): boolean;
-  export function mkdirSync(path: string): void;
-  export function mkdirSync(path: string, options: { recursive?: boolean; mode?: number }): void;
-  export function unlinkSync(path: string): void;
-  export function chmodSync(path: string, mode: number): void;
+  export function mkdirSync(path: string | URL): void;
+  export function mkdirSync(
+    path: string | URL,
+    options: { recursive?: boolean; mode?: number },
+  ): void;
+  export function unlinkSync(path: string | URL): void;
+  export function chmodSync(path: string | URL, mode: number): void;
   export function fchmodSync(fd: number, mode: number): void;
   export function fsyncSync(fd: number): void;
   export function linkSync(
@@ -1514,29 +1597,29 @@ declare module "node:fs" {
     path: string | Uint8Array | URL,
     options: string | { encoding?: string | null } | null,
   ): string | Buffer;
-  export function chownSync(path: string, uid: number, gid: number): void;
-  export function lchownSync(path: string, uid: number, gid: number): void;
+  export function chownSync(path: string | URL, uid: number, gid: number): void;
+  export function lchownSync(path: string | URL, uid: number, gid: number): void;
   export function fchownSync(fd: number, uid: number, gid: number): void;
-  export function truncateSync(path: string, len?: number): void;
+  export function truncateSync(path: string | URL, len?: number): void;
   /* The 2-argument form only (Node's mode flags have no lowering). The
    * destination is created or truncated carrying the SOURCE's mode. */
-  export function copyFileSync(src: string, dest: string): void;
+  export function copyFileSync(src: string | URL, dest: string | URL): void;
   export function rename(
     oldPath: string,
     newPath: string,
     callback: (err: NodeJS.ErrnoException | null) => void,
   ): void;
-  export function renameSync(oldPath: string, newPath: string): void;
-  export function rmSync(path: string): void;
+  export function renameSync(oldPath: string | URL, newPath: string | URL): void;
+  export function rmSync(path: string | URL): void;
   /* maxRetries/retryDelay are accepted no-ops (Node retries around
    * EBUSY-class races; the synchronous lowering has no re-entrancy that
    * needs them). */
   export function rmSync(
-    path: string,
+    path: string | URL,
     options: { recursive?: boolean; force?: boolean; maxRetries?: number; retryDelay?: number },
   ): void;
-  export function rmdirSync(path: string): void;
-  export function readdirSync(path: string): string[];
+  export function rmdirSync(path: string | URL): void;
+  export function readdirSync(path: string | URL): string[];
   /* The withFileTypes form: Dirent rows (name + parentPath + the type
    * probes — the honest subset of Node's Dirent surface). The type is
    * interned explicitly in type-mapper.ts (the record's hidden %dtype field
@@ -1550,7 +1633,7 @@ declare module "node:fs" {
     isSymbolicLink(): boolean;
   }
   export function readdirSync(
-    path: string,
+    path: string | URL,
     /* The options-record stance (see http.RequestOptions): recursive
      * fences by name at the call site; undocumented keys drop like Node. */
     options: { withFileTypes: true; recursive?: boolean; [option: string]: unknown },
@@ -1599,7 +1682,7 @@ declare module "node:fs" {
     encoding?: "utf8" | "utf-8";
     bufferSize?: number;
   }
-  export function opendirSync(path: string, options?: OpenDirOptions): Dir;
+  export function opendirSync(path: string | URL, options?: OpenDirOptions): Dir;
   /* fs.ReadStream / fs.WriteStream: runtime Readable and Writable streams
    * over a file (scr_fs_stream.c). The options are checked at runtime
    * with Node's rules; flags and mode are checked when the file opens, so
@@ -1641,8 +1724,8 @@ declare module "node:fs" {
     path: string | Buffer | URL,
     options?: BufferEncoding | WriteStreamOptions,
   ): WriteStream;
-  export function accessSync(path: string, mode?: number): void;
-  export function mkdtempSync(prefix: string): string;
+  export function accessSync(path: string | URL, mode?: number): void;
+  export function mkdtempSync(prefix: string | URL): string;
   export const constants: {
     readonly F_OK: number;
     readonly R_OK: number;
@@ -1745,34 +1828,34 @@ declare module "node:fs" {
     bigint?: boolean;
     throwIfNoEntry?: boolean;
   }
-  export function statSync(path: string, options?: undefined): Stats;
+  export function statSync(path: string | URL, options?: undefined): Stats;
   export function statSync(
-    path: string,
+    path: string | URL,
     options: StatSyncOptions & { bigint?: false; throwIfNoEntry: false },
   ): Stats | undefined;
   export function statSync(
-    path: string,
+    path: string | URL,
     options: StatSyncOptions & { bigint?: false; throwIfNoEntry?: true },
   ): Stats;
   /* bigint: true type-checks so the lowering can name it as unsupported. */
-  export function statSync(path: string, options: StatSyncOptions & { bigint: true }): Stats;
-  export function statSync(path: string, options: StatSyncOptions): Stats | undefined;
-  export function lstatSync(path: string, options?: undefined): Stats;
+  export function statSync(path: string | URL, options: StatSyncOptions & { bigint: true }): Stats;
+  export function statSync(path: string | URL, options: StatSyncOptions): Stats | undefined;
+  export function lstatSync(path: string | URL, options?: undefined): Stats;
   export function lstatSync(
-    path: string,
+    path: string | URL,
     options: StatSyncOptions & { bigint?: false; throwIfNoEntry: false },
   ): Stats | undefined;
   export function lstatSync(
-    path: string,
+    path: string | URL,
     options: StatSyncOptions & { bigint?: false; throwIfNoEntry?: true },
   ): Stats;
   /* bigint: true type-checks so the lowering can name it as unsupported. */
-  export function lstatSync(path: string, options: StatSyncOptions & { bigint: true }): Stats;
-  export function lstatSync(path: string, options: StatSyncOptions): Stats | undefined;
+  export function lstatSync(path: string | URL, options: StatSyncOptions & { bigint: true }): Stats;
+  export function lstatSync(path: string | URL, options: StatSyncOptions): Stats | undefined;
   /* The fd pair behind spawn's fd-stdio form: openSync(path, flags) →
    * the raw fd. Numeric flags use an inline OR of the O_* constants. */
-  export function openSync(path: string, flags: string): number;
-  export function openSync(path: string, flags: number, mode?: number): number;
+  export function openSync(path: string | URL, flags: string): number;
+  export function openSync(path: string | URL, flags: number, mode?: number): number;
   export function closeSync(fd: number): void;
   export function fdatasyncSync(fd: number): void;
   export function ftruncateSync(fd: number, len?: number): void;
@@ -1853,9 +1936,9 @@ declare module "node:fs" {
   export function fstatSync(fd: number): Stats;
   /* realpath(3) — resolves symlinks, `.`/`..`, throwing Node's fs error
    * shapes for missing paths. */
-  export function realpathSync(path: string): string;
+  export function realpathSync(path: string | URL): string;
   export namespace realpathSync {
-    function native(path: string): string;
+    function native(path: string | URL): string;
   }
   /* statfs(2)/statvfs(3) — the filesystem-capacity snapshot (the fields
    * Node's statfsSync reports; bavail × bsize is the free-space probe). */
@@ -2128,6 +2211,10 @@ declare module "fs/promises" {
     options: import("node:fs").GlobOptionsWithFileTypes,
   ): AsyncIterableIterator<import("node:fs").Dirent>;
   export function rm(path: string): Promise<void>;
+  export function rm(
+    path: string,
+    options: { recursive?: boolean; force?: boolean; maxRetries?: number; retryDelay?: number },
+  ): Promise<void>;
   export function stat(path: string): Promise<import("node:fs").Stats>;
   export function statfs(
     path: string | Uint8Array | URL,
@@ -2777,8 +2864,7 @@ declare module "crypto" {
     b: ArrayBufferView | ArrayBufferLike,
   ): boolean;
   /* WebCrypto's getRandomValues (also the webcrypto object's): integer
-   * typed arrays, filled in place and returned. The crypto GLOBAL stays
-   * unknown in fallback builds. */
+   * typed arrays, filled in place and returned. */
   type RandomValuesArray =
     | Int8Array
     | Uint8Array
@@ -2790,9 +2876,9 @@ declare module "crypto" {
     | BigInt64Array
     | BigUint64Array;
   export function getRandomValues<T extends RandomValuesArray>(typedArray: T): T;
-  export const webcrypto: {
-    getRandomValues<T extends RandomValuesArray>(typedArray: T): T;
-  };
+  /* The WebCrypto global's object and its SubtleCrypto. */
+  export const webcrypto: Crypto;
+  export const subtle: SubtleCrypto;
   export function randomFillSync<T extends ArrayBufferView | ArrayBufferLike>(
     buffer: T,
     offset?: number,
@@ -2845,7 +2931,8 @@ declare module "crypto" {
   ): void;
   export type BinaryLike = string | ArrayBuffer | ArrayBufferView;
   /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, and gcm modes and
-   * chacha20-poly1305. The stream.Transform members are not declared. */
+   * chacha20-poly1305. Both are Transforms: written chunks go through
+   * update(), and the end pushes final(). */
   export type CipherGCMTypes = "aes-128-gcm" | "aes-192-gcm" | "aes-256-gcm";
   export type CipherChaCha20Poly1305Types = "chacha20-poly1305";
   export type CipherKey = BinaryLike | KeyObject;
@@ -2855,7 +2942,7 @@ declare module "crypto" {
   export interface CipherChaCha20Poly1305Options {
     authTagLength?: number;
   }
-  export interface Cipheriv {
+  export interface Cipheriv extends Transform {
     update(data: string | ArrayBufferView): Buffer;
     update(data: string, inputEncoding: BufferEncoding): Buffer;
     update(data: ArrayBufferView, inputEncoding: undefined, outputEncoding: BufferEncoding): string;
@@ -2876,7 +2963,7 @@ declare module "crypto" {
     setAAD(buffer: ArrayBufferView, options?: { plaintextLength: number }): this;
     getAuthTag(): Buffer;
   }
-  export interface Decipheriv {
+  export interface Decipheriv extends Transform {
     update(data: ArrayBufferView): Buffer;
     update(data: string, inputEncoding: BufferEncoding): Buffer;
     update(data: ArrayBufferView, inputEncoding: undefined, outputEncoding: BufferEncoding): string;
@@ -2933,6 +3020,34 @@ declare module "crypto" {
     iv: BinaryLike | null,
     options?: { authTagLength?: number },
   ): Decipheriv;
+  export type ECDHKeyFormat = "compressed" | "uncompressed" | "hybrid";
+  export class ECDH {
+    private constructor();
+    static convertKey(
+      key: BinaryLike,
+      curve: string,
+      inputEncoding?: BinaryToTextEncoding,
+      outputEncoding?: "latin1" | "hex" | "base64" | "base64url",
+      format?: ECDHKeyFormat,
+    ): Buffer | string;
+    generateKeys(): Buffer;
+    generateKeys(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
+    computeSecret(otherPublicKey: ArrayBufferView): Buffer;
+    computeSecret(otherPublicKey: string, inputEncoding: BinaryToTextEncoding): Buffer;
+    computeSecret(otherPublicKey: ArrayBufferView, outputEncoding: BinaryToTextEncoding): string;
+    computeSecret(
+      otherPublicKey: string,
+      inputEncoding: BinaryToTextEncoding,
+      outputEncoding: BinaryToTextEncoding,
+    ): string;
+    getPrivateKey(): Buffer;
+    getPrivateKey(encoding: BinaryToTextEncoding): string;
+    getPublicKey(encoding?: null, format?: ECDHKeyFormat): Buffer;
+    getPublicKey(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
+    setPrivateKey(privateKey: ArrayBufferView): void;
+    setPrivateKey(privateKey: string, encoding: BinaryToTextEncoding): void;
+  }
+  export function createECDH(curveName: string): ECDH;
   export interface ScryptOptions {
     N?: number;
     r?: number;
@@ -4940,15 +5055,17 @@ declare module "net" {
     host?: string,
     connectListener?: () => void,
   ): Socket;
-  /* The caller-resolver dial (@types/node's net.LookupFunction, narrowed
-   * to the lowered shape): the runtime invokes it as Node does and dials
-   * the answered addresses in order under autoSelectFamily: true. */
+  /* The caller-resolver dial (@types/node's net.LookupFunction): the
+   * runtime invokes it as Node's autoSelectFamily dial does (options
+   * { hints, all: true }, so the callback answers an address list) and
+   * dials the answered addresses in order. */
   export type LookupFunction = (
     hostname: string,
-    options: unknown,
+    options: import("node:dns").LookupOptions,
     callback: (
       err: NodeJS.ErrnoException | null,
-      addresses: { address: string; family: number }[],
+      address: string | import("node:dns").LookupAddress[],
+      family?: number,
     ) => void,
   ) => void;
   export function connect(

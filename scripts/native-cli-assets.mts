@@ -74,6 +74,10 @@ export function stageNativeCliAssets(options: {
   for (const name of ["scriptc.d.ts", "scriptc-overrides.d.ts", "scriptc-node-fallback.d.ts"]) {
     cpSync(join(repository, "packages/compiler/ambient", name), join(declarations, name));
   }
+  // Package shims (packageShimRoot): the built-in npm package implementations.
+  cpSync(join(repository, "packages/compiler/shims"), join(declarations, "shims"), {
+    recursive: true,
+  });
   // This optional Node host runs the built WASI module, never the compiler.
   const wasi = join(lib, "wasi");
   mkdirSync(join(wasi, "cli"), { recursive: true });

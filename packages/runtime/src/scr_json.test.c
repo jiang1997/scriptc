@@ -520,7 +520,7 @@ static void test_item_release(void *ptr) {
 
 static ScrArr *test_tags_new(size_t cap) { return scr_arr_new(SCR_ELEM_STR, cap); }
 static ScrArr *test_list_new(size_t cap) {
-  static const ScrArrOps item_ops = { test_item_retain, test_item_release, NULL };
+  static ScrArrOps item_ops = { test_item_retain, test_item_release, NULL };
   return scr_arr_new_ops(&item_ops, cap);
 }
 static void test_arr_release(void *ptr) { scr_arr_release(ptr); }

@@ -19,7 +19,7 @@
 #include <string.h>
 
 /* Sparse entries live in the array's out-of-line storage. */
-static size_t arr_sparse_len(const ScrArr *a) { return a->ext ? a->ext->sparse_len : 0; }
+static size_t arr_sparse_len(const ScrArr *a) { return scr_arr_ext_of(a) ? scr_arr_ext_of(a)->sparse_len : 0; }
 
 #ifdef SCR_RC_AUDIT
 long scr_str_live_count(void); /* provided by scr_string.c */
@@ -396,8 +396,10 @@ static MockRec *mock_cyc_new(int value) {
   return r;
 }
 
-static const ScrArrOps mock_ops = { &mock_retain, &mock_release, NULL };
-static const ScrArrOps mock_cyc_ops = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
+static ScrArrOps mock_ops = { &mock_retain, &mock_release, NULL };
+static ScrArrOps mock_cyc_ops = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
+/* First used after test_ops_overflow fills the registry: its arrays keep the ops in their ext. */
+static ScrArrOps mock_cyc_ops_late = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
 
 static void test_ref_elements(void) {
 #ifdef SCR_RC_AUDIT
@@ -444,6 +446,58 @@ static void test_ref_elements(void) {
 #endif
 }
 
+/* Element ops past the registry's capacity: every descriptor still finds its
+ * own retain and release, and the first ones keep their registry ids. */
+static void test_ops_overflow(void) {
+  enum { N = SCR_ARR_OPS_OVERFLOW + 8 };
+  static ScrArrOps many[N];
+  static ScrArr *arrays[N];
+  for (int i = 0; i < N; i++) many[i] = (ScrArrOps){ &mock_retain, &mock_release, NULL, 0 };
+  for (int i = 0; i < N; i++) {
+    arrays[i] = scr_arr_new_ops(&many[i], 0);
+    scr_arr_push_ref(arrays[i], mock_new(i));
+  }
+  check(scr_arr_ops(arrays[0]) == &many[0], "a registered descriptor answers by id");
+  check(scr_arr_ops(arrays[N - 1]) == &many[N - 1], "an overflow descriptor answers through the array");
+  check(many[N - 1].id == SCR_ARR_OPS_OVERFLOW, "descriptors past the table get the overflow id");
+  MockRec *r = (MockRec *)scr_arr_get_ref(arrays[N - 1], 0);
+  check(r->rc == 2 && r->value == N - 1, "an overflow array retains through its own ops");
+  mock_release(r);
+  for (int i = 0; i < N; i++) scr_arr_release(arrays[i]);
+  check(mock_live == 0, "overflow arrays release their elements");
+}
+
+/* An array with out-of-line storage keeps it through every change of its
+ * dense allocation: growth, head room, unshift into new room, sorting
+ * (which rebuilds the storage) and a sparse tail. */
+static void test_ext_through_storage_changes(void) {
+  ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
+  scr_arr_set_f64(a, -1, 7); /* a noncanonical property: out-of-line storage */
+  check(scr_arr_ext_of(a) != NULL, "a numeric property creates out-of-line storage");
+  for (int i = 0; i < 100; i++) scr_arr_push_f64(a, 100 - i);
+  check_f64(scr_arr_get_f64(a, -1), 7, "the property survives growth");
+  for (int i = 0; i < 40; i++) scr_arr_shift_f64(a);
+  check_f64(scr_arr_get_f64(a, -1), 7, "the property survives head room");
+  for (int i = 0; i < 60; i++) scr_arr_unshift_f64(a, 1000 + i);
+  check_f64(scr_arr_len(a), 120, "unshift after shifts keeps the length");
+  check_f64(scr_arr_get_f64(a, -1), 7, "the property survives new head room");
+  ScrArr *same = scr_arr_sort_primitive(a, false);
+  check(same == a, "an in-place sort returns the array");
+  check_f64(scr_arr_get_f64(a, 0), 1, "sorting reorders the values");
+  check_f64(scr_arr_get_f64(a, -1), 7, "the property survives a sort");
+  scr_arr_set_f64(a, 5000000, 9); /* a sparse tail entry */
+  check(arr_sparse_len(a) == 1 && scr_arr_get_f64(a, 5000000) == 9, "a sparse entry joins the out-of-line storage");
+  scr_arr_release(same); /* the sort's result reference */
+  scr_arr_release(a);
+
+  ScrArr *empty = scr_arr_new(SCR_ELEM_F64, 0);
+  scr_arr_set_f64(empty, 0.5, 3);
+  check_f64(scr_arr_get_f64(empty, 0.5), 3, "an array without elements keeps a property");
+  scr_arr_push_f64(empty, 1);
+  check_f64(scr_arr_get_f64(empty, 0.5), 3, "the property survives the first element");
+  scr_arr_release(empty);
+}
+
 static void test_ref_cycle(void) {
 #ifdef SCR_RC_AUDIT
   long arrays0 = scr_arr_live_count();
@@ -459,6 +513,38 @@ static void test_ref_cycle(void) {
   check(mock_live == 0, "cycle collected through the array element");
 #ifdef SCR_RC_AUDIT
   check(scr_arr_live_count() == arrays0, "cycle: no arrays leaked");
+#endif
+}
+
+static void test_ref_known_count_cycle(ScrArrOps *ops) {
+#ifdef SCR_RC_AUDIT
+  long arrays0 = scr_arr_live_count();
+#endif
+  /* A known-count construction of cycle-capable elements keeps its slots
+   * after the collector header: the collector traces them, and both the
+   * collected array and one released by its count free the one block. */
+  ScrArr *arr = scr_arr_new_ops(ops, 2);
+  bool in_block = arr->data == (uint64_t *)((char *)arr + ((sizeof(ScrArr) + 7) & ~(size_t)7));
+  /* Ops past the registry (once test_ops_overflow has filled it) live in
+   * the ext, which moves the slots to their own allocation. */
+  bool overflow = (arr->spare >> SCR_ARR_OPS_SHIFT) == SCR_ARR_OPS_OVERFLOW;
+  check(arr->cap >= 2 && in_block == !overflow && scr_arr_ops(arr) == ops,
+        "known-count cycle-capable construction is inline unless its ops need the ext");
+  MockRec *first = mock_cyc_new(1);
+  first->owner = (ScrArr *)scr_arr_retain(arr);
+  scr_arr_push_ref(arr, first);
+  scr_arr_push_ref(arr, mock_cyc_new(2));
+  scr_arr_release(arr);
+  scr_collect_cycles();
+  check(mock_live == 0, "cycle through an inline array collected");
+  ScrArr *plain = scr_arr_new_ops(ops, 3);
+  for (int i = 0; i < 4; i++) scr_arr_push_ref(plain, mock_cyc_new(i));
+  check(scr_arr_len(plain) == 4, "a cycle-capable inline array grows out of its block");
+  scr_arr_release(plain);
+  scr_collect_cycles();
+  check(mock_live == 0, "released inline cycle-capable array frees its elements");
+#ifdef SCR_RC_AUDIT
+  check(scr_arr_live_count() == arrays0, "known-count cycle: no arrays leaked");
 #endif
 }
 
@@ -1283,7 +1369,7 @@ static void test_exact_construction(void) {
 static bool filled_ok(const ScrArr *a) {
   if (a->filled > a->len || a->filled > a->cap) return false;
   for (size_t i = 0; i < a->filled; i++)
-    if (a->present[i] != SCR_ARR_VALUE) return false;
+    if (*scr_arr_state_ptr(a, i) != SCR_ARR_VALUE) return false;
   return true;
 }
 
@@ -1358,7 +1444,7 @@ static void test_filled_prefix(void) {
   scr_arr_release(scr_arr_sort_primitive(b, false));
   check(filled_ok(b), "sorting moves holes past the bound");
   for (size_t i = 0; i < b->len; i++) {
-    if (i < b->cap && b->present[i] != SCR_ARR_VALUE) break;
+    if (i < b->cap && *scr_arr_state_ptr(b, i) != SCR_ARR_VALUE) break;
     check(i < b->filled, "sorted values form the bound");
   }
   while (scr_arr_len(b) > 0) {
@@ -1378,11 +1464,11 @@ static void test_filled_prefix(void) {
 }
 
 /* Boolean arrays store one byte per dense element, followed by the states in
- * the same allocation. Growth moves the states past the larger value area,
+ * the same allocation. Growth moves the states to the end of the larger area,
  * densifying absorbs sparse entries into bytes, and every moving and copying
  * operation keeps values, holes and present undefined in place. */
 static bool bool_layout_ok(const ScrArr *a) {
-  return a->cap == 0 || a->present == (const uint8_t *)a->data + a->cap;
+  return a->cap == 0 || scr_arr_states_end(a) == (const uint8_t *)a->data + 2 * (size_t)a->cap;
 }
 
 static bool bool_states(const ScrArr *a, const char *want) {
@@ -1491,11 +1577,36 @@ static void test_inline_slots(void) {
   long strings0 = scr_str_live_count();
   long arrays0 = scr_arr_live_count();
 #endif
-  ScrArr *plain = scr_arr_new(SCR_ELEM_F64, 4);
-  check(!inline_slots(plain), "plain constructions keep separate storage");
+  ScrArr *plain = scr_arr_new(SCR_ELEM_F64, 0);
+  check(!inline_slots(plain) && plain->data == NULL, "empty plain constructions allocate no slots");
   scr_arr_release(plain);
+  /* A construction with a known count up to 16 slots keeps them in its own
+   * block; growth past them moves them out like any inline array. */
+  ScrArr *known = scr_arr_new(SCR_ELEM_F64, 4);
+  check(inline_slots(known) && known->cap >= 4 && known->len == 0 && !scr_arr_has(known, 0) &&
+            scr_arr_states_end(known) == (uint8_t *)(known->data + known->cap) + known->cap,
+        "a known-count construction places its slots in the array block");
+  size_t known_cap = known->cap;
+  for (size_t i = 0; i <= known_cap; i++) scr_arr_push_f64(known, (double)i);
+  check(!inline_slots(known) && scr_arr_len(known) == known_cap + 1 && scr_arr_get_f64(known, 0) == 0 &&
+            scr_arr_get_f64(known, (double)known_cap) == (double)known_cap,
+        "growth past a known-count construction moves the slots out");
+  scr_arr_release(known);
+  ScrArr *sixteen = scr_arr_new(SCR_ELEM_STR, 16);
+  for (int i = 0; i < 16; i++) scr_arr_push_ref(sixteen, scr_str_new("s", 1));
+  check(inline_slots(sixteen) && scr_arr_len(sixteen) == 16, "sixteen known slots stay inline");
+  scr_arr_release(sixteen);
+  ScrArr *large = scr_arr_new(SCR_ELEM_F64, 17);
+  check(!inline_slots(large) && large->cap >= 17, "larger known counts keep separate storage");
+  scr_arr_release(large);
+  ScrArr *known_flags = scr_arr_new(SCR_ELEM_BOOL, 5);
+  scr_arr_push_bool(known_flags, true);
+  check(inline_slots(known_flags) && known_flags->cap >= 5 && scr_arr_get_bool(known_flags, 0),
+        "known-count boolean constructions are inline too");
+  scr_arr_release(known_flags);
   ScrArr *a = scr_arr_new_small(SCR_ELEM_F64);
-  check(inline_slots(a) && a->cap >= 4 && a->len == 0 && a->present == (uint8_t *)(a->data + a->cap),
+  check(inline_slots(a) && a->cap >= 4 && a->len == 0 &&
+            scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
         "small construction places slots and states in the array block");
   size_t inline_cap = a->cap;
   for (size_t i = 0; i < inline_cap; i++) scr_arr_push_f64(a, (double)i);
@@ -1503,12 +1614,13 @@ static void test_inline_slots(void) {
   scr_arr_push_f64(a, 100);
   check(!inline_slots(a) && a->cap > inline_cap && scr_arr_get_f64(a, 0) == 0 &&
             scr_arr_get_f64(a, (double)inline_cap - 1) == (double)inline_cap - 1 &&
-            scr_arr_get_f64(a, (double)inline_cap) == 100 && a->present == (uint8_t *)(a->data + a->cap),
+            scr_arr_get_f64(a, (double)inline_cap) == 100 &&
+            scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
         "growth moves inline slots to their own allocation");
   scr_arr_release(a);
 
   ScrArr *flags = scr_arr_new_small(SCR_ELEM_BOOL);
-  check(inline_slots(flags) && flags->present == (uint8_t *)flags->data + flags->cap,
+  check(inline_slots(flags) && scr_arr_states_end(flags) == (uint8_t *)flags->data + 2 * (size_t)flags->cap,
         "boolean inline slots are one byte each");
   scr_arr_push_bool(flags, true);
   scr_arr_set_bool(flags, 3, true);
@@ -1520,7 +1632,11 @@ static void test_inline_slots(void) {
   scr_arr_push_ref(words, scr_str_new("a", 1));
   scr_arr_push_ref(words, scr_str_new("b", 1));
   scr_arr_set_ref(words, 3000000, scr_str_new("far", 3));
-  check(inline_slots(words) && arr_sparse_len(words) == 1, "a far index leaves inline slots in place");
+  /* A sparse entry needs out-of-line storage, whose pointer lives before the
+   * dense allocation: the inline slots move out of line with their values. */
+  check(!inline_slots(words) && arr_sparse_len(words) == 1 &&
+            strcmp(((ScrStr *)scr_arr_peek_ref(words, 1))->data, "b") == 0,
+        "a far index moves the inline slots out of line");
   scr_arr_unshift_ref(words, scr_str_new("z", 1));
   check(!inline_slots(words) && scr_arr_len(words) == 3000002 &&
             strcmp(((ScrStr *)scr_arr_peek_ref(words, 0))->data, "z") == 0 &&
@@ -1718,6 +1834,94 @@ static void test_keyed_sort(void) {
   check(mock_live == live0, "keyed record sorts balance every key read");
 }
 
+/* Multi-key sorts: a record's value v has keys v / 100 (major), v / 10 % 10
+ * (middle) and v % 10 (minor). Value -1 reads key 1 as -0 and value -2 reads
+ * it as NaN; the comparators treat both as the comparator expressions do. */
+static double multi_key_of(int value, uint32_t j) {
+  if (j == 1 && value == -1) return -0.0;
+  if (j == 1 && value == -2) return NAN;
+  if (value < 0) value = 0;
+  return j == 0 ? value / 100 : j == 1 ? value / 10 % 10 : value % 10;
+}
+
+static double multi_term(double d) { return d != d ? 0 : d; }
+
+/* `a.major - b.major || b.middle - a.middle` */
+static double multi_two(ScrClosure *self, void *a, void *b) {
+  (void)self;
+  sort_calls++;
+  int x = ((MockRec *)a)->value, y = ((MockRec *)b)->value;
+  mock_release(a);
+  mock_release(b);
+  double d = multi_term(multi_key_of(x, 0) - multi_key_of(y, 0));
+  return d != 0 ? d : multi_key_of(y, 1) - multi_key_of(x, 1);
+}
+
+/* `b.major - a.major || a.middle - b.middle || b.minor - a.minor` */
+static double multi_three(ScrClosure *self, void *a, void *b) {
+  (void)self;
+  sort_calls++;
+  int x = ((MockRec *)a)->value, y = ((MockRec *)b)->value;
+  mock_release(a);
+  mock_release(b);
+  double d = multi_term(multi_key_of(y, 0) - multi_key_of(x, 0));
+  if (d == 0) d = multi_term(multi_key_of(x, 1) - multi_key_of(y, 1));
+  return d != 0 ? d : multi_key_of(y, 2) - multi_key_of(x, 2);
+}
+
+static double multi_key(ScrClosure *self, void *a, double j) {
+  (void)self;
+  key_reads++;
+  int value = ((MockRec *)a)->value;
+  mock_release(a);
+  return multi_key_of(value, (uint32_t)j);
+}
+
+static void test_multi_key_sort(void) {
+  ScrClosure two = {SIZE_MAX, (void *)multi_two, 0, NULL, 0};
+  ScrClosure three = {SIZE_MAX, (void *)multi_three, 0, NULL, 0};
+  ScrClosure key = {SIZE_MAX, (void *)multi_key, 0, NULL, 0};
+  /* Two keys with the second descending; three with the first and third. */
+  const int32_t two_order = 2 | 1 << 9, three_order = 3 | 1 << 8 | 1 << 10;
+  const size_t sizes[] = {2, 5, 40, 49, 1000, 70000, 140000};
+  long live0 = mock_live;
+  bool identical = true, direct = true, fallback = true;
+  for (size_t s = 0; s < sizeof(sizes) / sizeof(*sizes); s++) {
+    for (int variant = 0; variant < 6; variant++) {
+      /* Two or three keys; then no special key, a -0 or a NaN in key 1. */
+      bool use_three = variant & 1;
+      int special = variant / 2;
+      size_t n = sizes[s];
+      ScrArr *expected = scr_arr_new_ops(&mock_ops, 0);
+      ScrArr *actual = scr_arr_new_ops(&mock_ops, 0);
+      for (size_t i = 0; i < n; i++) {
+        int value = (int)(keyed_random() % (n < 100 ? 300 : 3000));
+        if (special && i == n / 2) value = -special;
+        MockRec *r = mock_new(value);
+        scr_arr_push_ref(expected, r);
+        scr_arr_push_ref(actual, mock_retain(r));
+      }
+      ScrClosure *cmp = use_three ? &three : &two;
+      int32_t order = use_three ? three_order : two_order;
+      scr_arr_sort_values(expected, (double)n, cmp, 2, 0, NULL);
+      sort_calls = 0;
+      key_reads = 0;
+      if (s % 2) scr_arr_sort_values(actual, (double)n, cmp, 2, order, &key);
+      else scr_arr_sort_dense(actual, cmp, 2, s % 4 == 2, order, &key);
+      for (size_t i = 0; i < n; i++)
+        identical &= scr_arr_peek_ref(expected, (double)i) == scr_arr_peek_ref(actual, (double)i);
+      if (special) fallback &= sort_calls > 0;
+      else direct &= sort_calls == 0 && key_reads == (long)n * (use_three ? 3 : 2);
+      scr_arr_release(expected);
+      scr_arr_release(actual);
+    }
+  }
+  check(identical, "multi-key record sorts keep the comparator sort's stable permutation");
+  check(direct, "multi-key record sorts read each key once and call no comparator");
+  check(fallback, "a -0 or NaN in a later key sorts through the comparator");
+  check(mock_live == live0, "multi-key record sorts balance every key read");
+}
+
 /* Typed-array sorts: the default numeric order and recognized comparator
  * orders against the comparator sort, which follows Node's merge schedule. */
 static double typed_mod_ascending(ScrClosure *self, double a, double b) {
@@ -1887,6 +2091,10 @@ static void test_dense_slots(void) {
 /* shift and splice(0, n) advance dense storage into head room instead of
  * moving the tail; unshift reuses that room, growth gives it back, and a
  * drained array starts over at the front of its allocation. */
+/* SCR_ARR_HEAD_ROOM (scr_array.c): the array has vacated slots in front of
+ * `data`, and the slot just before `data` holds their count. */
+static bool head_room(const ScrArr *a) { return (a->spare & 2u) != 0; }
+
 static void test_head_room(void) {
 #ifdef SCR_RC_AUDIT
   long strings0 = scr_str_live_count();
@@ -1899,7 +2107,8 @@ static void test_head_room(void) {
   check_f64(scr_arr_shift_f64(q), 0, "shift answers the first element");
   check(q->data == block + 1 && q->cap == cap - 1 && q->len == 63,
         "shift advances the storage instead of moving the tail");
-  check(q->present == (uint8_t *)(block + cap) + 1, "states keep following the whole value area");
+  check(scr_arr_states_end(q) == (uint8_t *)(block + cap) + cap - 1 && head_room(q) && q->data[-1] == 1,
+        "the remaining states stay at the end of the allocation");
   check(q->filled == 63, "shift keeps the hole-free prefix");
   for (int i = 1; i < 40; i++) scr_arr_shift_f64(q);
   check(q->data == block + 40 && q->len == 24 && scr_arr_get_f64(q, 0) == 40 &&
@@ -1974,7 +2183,7 @@ static void test_head_room(void) {
   bool ordered = rev->len == 1000;
   for (int i = 0; i < 1000 && ordered; i++) ordered = scr_arr_get_f64(rev, i) == 999 - i;
   check(ordered, "unshift run keeps reverse order");
-  size_t room = (size_t)(rev->present - (uint8_t *)(rev->data + rev->cap));
+  size_t room = head_room(rev) ? (size_t)rev->data[-1] : 0;
   check(room >= 4 && rev->cap >= rev->len, "an unshift run reserves head room");
   uint64_t *rblock = rev->data;
   scr_arr_unshift_f64(rev, -1);
@@ -1986,7 +2195,7 @@ static void test_head_room(void) {
   check(rev->data == rblock - 4 && scr_arr_get_f64(rev, 3) == -1, "unshift many order");
   /* Storage swaps (typed views) first drop the head room. */
   scr_arr_outline(rev);
-  check(rev->present == (uint8_t *)(rev->data + rev->cap) && scr_arr_get_f64(rev, 0) == 7 &&
+  check(!head_room(rev) && scr_arr_get_f64(rev, 0) == 7 &&
             scr_arr_get_f64(rev, 1003) == 0,
         "outline moves the elements to the front of their allocation");
   scr_arr_release(rev);
@@ -1996,7 +2205,7 @@ static void test_head_room(void) {
   for (int i = 0; i < 40; i++) scr_arr_push_f64(once, i);
   size_t once_cap = once->cap;
   scr_arr_unshift_f64(once, -1);
-  check(once->cap == once_cap && once->present == (uint8_t *)(once->data + once->cap),
+  check(once->cap == once_cap && !head_room(once),
         "a one-off unshift keeps the allocation");
   scr_arr_release(once);
 
@@ -2039,6 +2248,7 @@ int main(int argc, char **argv) {
   test_primitive_sort();
   test_comparator_sort();
   test_keyed_sort();
+  test_multi_key_sort();
   test_dense_slots();
   test_typed_sort();
   test_dense_comparator_sort();
@@ -2053,6 +2263,10 @@ int main(int argc, char **argv) {
   test_nested_rc();
   test_index_of_includes();
   test_ref_elements();
+  test_ref_known_count_cycle(&mock_cyc_ops);
+  test_ops_overflow();
+  test_ref_known_count_cycle(&mock_cyc_ops_late);
+  test_ext_through_storage_changes();
   test_ref_cycle();
   test_ref_truncate_cycle();
   test_ref_trace_storage_boundaries();

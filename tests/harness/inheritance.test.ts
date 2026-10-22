@@ -100,7 +100,7 @@ console.log(a.id(), a.speak(), b.speak());
     // base-typed call site dispatches through it: both classes are
     // constructed, so the loaded slot selects a direct call of each.
     expect(llvm).toMatch(/%sc_vtt_Animal = type \{ %ScrVt, ptr \}/);
-    expect(llvm).toMatch(/@sc_vtable_Dog = [^\n]*ptr @sc_b?f__x25_Dog_speak\b/);
+    expect(llvm).toMatch(/%sc_vtt_Animal \{[^\n]*ptr @sc_b?f__x25_Dog_speak\b[^\n]*; class Dog\n/);
     expect(llvm).toMatch(
       /getelementptr inbounds %sc_vtt_Animal, ptr %\w+, i64 0, i32 1[\s\S]*icmp eq ptr %\w+, @sc_b?f__x25_(?:Animal|Dog)_speak\n/,
     );
@@ -168,7 +168,9 @@ console.log(c.v, c.label, plain.label);
     );
     // The overridden getter dispatches through its slot...
     expect(llvm).toMatch(/%sc_vtt_Cell = type \{ %ScrVt, ptr \}/);
-    expect(llvm).toMatch(/@sc_vtable_UpperCell = [^\n]*ptr @sc_b?f__x25_UpperCell_get_x3a_label\b/);
+    expect(llvm).toMatch(
+      /%sc_vtt_Cell \{[^\n]*ptr @sc_b?f__x25_UpperCell_get_x3a_label\b[^\n]*; class UpperCell\n/,
+    );
     expect(llvm).toMatch(
       /getelementptr inbounds %sc_vtt_Cell, ptr %\w+, i64 0, i32 1[\s\S]*icmp eq ptr %\w+, @sc_b?f__x25_(?:Cell|UpperCell)_get_x3a_label\n/,
     );
@@ -265,7 +267,7 @@ console.log(b.v, plain.v);
     // dispatch dynamically here.
     expect(llvm).toMatch(/%sc_vtt_Box = type \{ %ScrVt, ptr, ptr \}/);
     expect(llvm).toMatch(
-      /@sc_vtable_SealedBox = [^\n]*ptr @sc_b?f__x25_SealedBox_get_x3a_v(\.virtual)?, ptr @sc_b?f__x25_SealedBox_set_x3a_v\b/,
+      /%sc_vtt_Box \{[^\n]*ptr @sc_b?f__x25_SealedBox_get_x3a_v(\.virtual)?, ptr @sc_b?f__x25_SealedBox_set_x3a_v\b[^\n]*; class SealedBox\n/,
     );
     expect(llvm).toMatch(/getelementptr inbounds %sc_vtt_Box, ptr %\w+, i64 0, i32 2/);
     expect(llvm).toMatch(/sc_f__x25_SealedBox_set_x3a_v/);

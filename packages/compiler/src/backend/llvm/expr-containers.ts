@@ -17,7 +17,7 @@ import {
   vAdapters,
 } from "./shapes.js";
 import type { LlvmEmitterContext, LlValue } from "./expr-context.js";
-import { F64_INF, f64Lit, sizeToDouble } from "./common.js";
+import { F64_INF, f64Lit, loadArrCount, sizeToDouble } from "./common.js";
 import { MUTATING_COLLECTION_METHODS } from "../publication.js";
 import { borrowsStringInputs, emitStringInputs } from "./string-lifetimes.js";
 import {
@@ -31,6 +31,7 @@ import {
   emitMapIterCount,
   emitMapIterEntry,
   emitMapIterSlot,
+  mapEntryLayout,
   emitMapIterStart,
   emitNumberMapGetRef,
   emitNumberMapGetScalar,
@@ -44,6 +45,8 @@ import { emitBorrowedInput } from "./borrowed-inputs.js";
 import { emitFusedMapSet, rememberMapEntry } from "./map-entry-fusion.js";
 import { emitScratchStringSlice, emitStringSliceRead } from "./string-slices.js";
 import {
+  STRING_CHAR_AT_DECL,
+  STRING_CHAR_AT_INT_MARKER,
   STRING_CHAR_CODE_AT_DECL,
   STRING_CHAR_CODE_AT_INT_MARKER,
   STRING_UTF16_LEN_DECL,
@@ -324,14 +327,21 @@ export function emitStrIntrinsic(
       B.line(`${t} = call double @sc_str_char_code_at(ptr ${r.name}, double ${args[0]!.name})`);
       return { name: t, type: e.type };
     }
-    case "charAt":
-      return call(
-        "scr_str_char_at",
-        "ptr (ptr, double)",
-        `ptr ${r.name}, double ${args[0]!.name}`,
-        "ptr",
-        true,
-      );
+    case "charAt": {
+      // sc_str_char_at (string-reads.ts) answers proven-ASCII strings inline.
+      host.declare(STRING_CHAR_AT_DECL);
+      const t = B.tmp();
+      const index = e.args[0] ? exactInteger(host, args[0]!, e.args[0]) : null;
+      if (index) {
+        host.declare(STRING_CHAR_AT_INT_MARKER);
+        const wide = widenInteger(host, index);
+        B.line(`${t} = call ptr @sc_str_char_at_int(ptr ${r.name}, i64 ${wide})`);
+      } else {
+        const at = args[0]?.name ?? f64Lit(0);
+        B.line(`${t} = call ptr @sc_str_char_at(ptr ${r.name}, double ${at})`);
+      }
+      return host.own({ name: t, type: e.type });
+    }
     case "indexOf":
       return call(
         "scr_str_index_of",
@@ -564,9 +574,7 @@ export function emitArrIntrinsic(
         t = B.tmp();
       B.line(`${p} = getelementptr inbounds %ScrArr, ptr ${r.name}, i32 0, i32 1`);
       host.markMemoryPointer(p, "array:header");
-      B.line(
-        `${len} = load ${host.sizeType}, ptr ${p}${host.fieldAliasAttachment(p)}${host.arrayLengthRange}`,
-      );
+      loadArrCount(host, len, p, host.fieldAliasAttachment(p));
       B.line(`${t} = ${sizeToDouble(host.sizeType)} ${host.sizeType} ${len} to double`);
       return { name: t, type: e.type };
     }
@@ -639,10 +647,12 @@ export function emitArrIntrinsic(
       return { name: t, type: e.type };
     }
     case "concatSpread": {
+      // Appends to concat's fresh result: its storage grows to exactly
+      // the combined length (scr_arr_concat_copy_exact).
       const src = emitBorrowedInput(host, e.args[0]!);
-      host.declare(`declare double @scr_arr_concat_copy(ptr, ptr)`);
+      host.declare(`declare double @scr_arr_concat_copy_exact(ptr, ptr)`);
       const t = B.tmp();
-      B.line(`${t} = call double @scr_arr_concat_copy(ptr ${r.name}, ptr ${src.name})`);
+      B.line(`${t} = call double @scr_arr_concat_copy_exact(ptr ${r.name}, ptr ${src.name})`);
       return { name: t, type: e.type };
     }
     case "unshift": {
@@ -1432,7 +1442,7 @@ export function emitMapLikeIntrinsic(
       return { name: emitMapIterStart(host, r.name), type: e.type };
     case "iterLive": {
       const i = host.emitExpr(e.args[0]!);
-      const entry = emitMapIterEntry(host, r.name, i.name);
+      const entry = emitMapIterEntry(host, r.name, i.name, mapEntryLayout(key));
       const t = B.tmp();
       B.line(`${t} = icmp ne ptr ${entry}, null`);
       return { name: t, type: e.type };
@@ -1443,10 +1453,16 @@ export function emitMapLikeIntrinsic(
       if (kAcc !== "ref") {
         const retTy = kAcc === "f64" ? "double" : kAcc === "bool" ? "zeroext i1" : "ptr";
         const symbol = `scr_map_iter_key_${kAcc}`;
-        const t = emitMapIterSlot(host, r.name, i.name, 0, kAcc === "str" ? "ref" : kAcc, key, {
-          decl: `declare ${retTy} @${symbol}(ptr, double)`,
-          symbol,
-        });
+        const t = emitMapIterSlot(
+          host,
+          r.name,
+          i.name,
+          0,
+          kAcc === "str" ? "ref" : kAcc,
+          key,
+          { decl: `declare ${retTy} @${symbol}(ptr, double)`, symbol },
+          mapEntryLayout(key),
+        );
         return host.own({ name: t, type: e.type });
       }
       const retTy = "ptr";
@@ -1461,10 +1477,19 @@ export function emitMapLikeIntrinsic(
       const i = host.emitExpr(e.args[0]!);
       const retTy = vAcc === "f64" ? "double" : vAcc === "bool" ? "i1" : "ptr";
       const symbol = `scr_map_iter_val_${vAcc}`;
-      const t = emitMapIterSlot(host, r.name, i.name, 1, vAcc, receiverType.value, {
-        decl: `declare ${vAcc === "bool" ? "zeroext i1" : retTy} @${symbol}(ptr, double)`,
-        symbol,
-      });
+      const t = emitMapIterSlot(
+        host,
+        r.name,
+        i.name,
+        1,
+        vAcc,
+        receiverType.value,
+        {
+          decl: `declare ${vAcc === "bool" ? "zeroext i1" : retTy} @${symbol}(ptr, double)`,
+          symbol,
+        },
+        mapEntryLayout(key),
+      );
       return host.own({ name: t, type: e.type });
     }
     case "iterEnter":

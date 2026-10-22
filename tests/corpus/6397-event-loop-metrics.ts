@@ -15,6 +15,10 @@ let ticks = 0;
 // until the third sample.
 const keepAlive = setTimeout(() => console.log("never"), 10_000);
 const interval = setInterval(() => {
+  // A delta needs two samples after a reset. A loop that wakes late can run
+  // only one sample per window; that window is skipped without a reset, so
+  // the next one records.
+  if (histogram.count === 0) return;
   const now = performance.eventLoopUtilization();
   const delta = performance.eventLoopUtilization(now, last);
   last = now;
@@ -33,7 +37,14 @@ const interval = setInterval(() => {
     histogram.count > 0,
   );
   histogram.reset();
-  console.log("after reset", histogram.count, histogram.max, histogram.min, Number.isNaN(histogram.mean));
+  console.log(
+    "after reset",
+    histogram.count,
+    histogram.max,
+    histogram.min,
+    Number.isNaN(histogram.mean),
+    histogram.percentile(50),
+  );
   if (ticks === 3) {
     clearInterval(interval);
     clearTimeout(keepAlive);

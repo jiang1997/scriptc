@@ -16,6 +16,8 @@ CI (`.github/workflows/release.yml`) compares the version in `packages/cli/packa
 
 The release job builds each pinned LLVM helper, precompiled runtime pack, and native CLI on its matching host. The native CLI bundles its TypeScript checker, LLVM helper, runtime pack, declarations, and comptime evaluator. npm postinstall installs the matching native executable; Node is needed for npm installation but not native compilation or execution. The user's toolchain performs the final platform link. Sanitized builds also use it to instrument program LLVM and compile the C runtime. Platform packages publish ahead of `@scriptc/compiler` and `scriptc`. The GitHub release attaches standalone compiler archives, their SHA-256 checksums, and the surface manifest after npm publication succeeds.
 
+Release builds of the native CLI optimize the compiler with the committed profile `packages/compiler/native/cli.profdata` on every platform. Code the profile does not describe, or describes from older compiler sources, is optimized as without a profile. Refresh the profile on a quiet Linux x64 host when compiler code has changed substantially since the last refresh: `node scripts/refresh-cli-profile.mjs --tsc-ts <tsc-ts checkout>` builds an instrumented compiler, runs it on tsc-ts, a slice of the corpus, and the runtime benchmark workloads, and writes the merged sparse profile. Commit the new profile on its own.
+
 Publishing uses npm trusted publishing (OIDC) — there is no npm token secret.
 Each published package must have a GitHub Actions trusted publisher for
 `release.yml` and the `Release` environment. A missing configuration fails

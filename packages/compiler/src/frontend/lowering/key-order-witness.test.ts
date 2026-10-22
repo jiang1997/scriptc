@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { F64, type IrExpr, type IrFunction, type IrStmt, type IrType } from "../../ir/ir.js";
+import { observeRecordLiteralRebuilds, transformExpr } from "../../ir/traverse.js";
 import { ShapeRegistry } from "../type-mapper.js";
 import {
   applyKeyOrderWitnesses,
@@ -156,7 +157,24 @@ test("a synthesized construction pins today's table", () => {
   expect(f.order(ab)).toEqual(["a", "b"]);
 });
 
-test("a checked conversion pins today's table", () => {
+test("a checked conversion alone pins today's table", () => {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", OPT],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const parsed: IrExpr = { kind: "dynCheck", value: ref("j", { kind: "dyn" }), type: ab, loc };
+  // A late write to `a` would move it after `b`; values only a checked
+  // conversion builds keep today's table, so parsed values in that order
+  // need no source view.
+  f.run([decl("p", parsed), set(ref("p", ab), "a"), observe(ref("p", ab))]);
+  expect(f.order(ab)).toEqual(["a", "b"]);
+});
+
+test("a shape literals and a checked conversion both build takes the literals' order", () => {
   const f = fixture();
   const ab = f.record(
     [
@@ -166,8 +184,33 @@ test("a checked conversion pins today's table", () => {
     ["a", "b"],
   );
   const parsed: IrExpr = { kind: "dynCheck", value: ref("j", { kind: "dyn" }), type: ab, loc };
+  // The literal's values can enumerate in no other order; parsed values in
+  // another order keep a record-source view.
   f.run([observe(f.literal(ab, ["b", "a"])), observe(parsed)]);
-  expect(f.order(ab)).toEqual(["a", "b"]);
+  expect(f.order(ab)).toEqual(["b", "a"]);
+});
+
+test("a literal an IR rewrite rebuilds keeps its witness", () => {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const identity = { expr: (e: IrExpr): IrExpr => e, stmt: (st: IrStmt): IrStmt => st };
+  const original = f.literal(ab, ["b", "a"]);
+  observeRecordLiteralRebuilds((from, to) => f.notes.follow(from, to));
+  let rebuilt: IrExpr;
+  try {
+    rebuilt = transformExpr(original, identity);
+  } finally {
+    observeRecordLiteralRebuilds(null);
+  }
+  expect(rebuilt).not.toBe(original);
+  f.run([observe(rebuilt)]);
+  expect(f.order(ab)).toEqual(["b", "a"]);
 });
 
 test("a spread contributes its source's order, and an override keeps its position", () => {

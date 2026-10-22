@@ -254,6 +254,13 @@ void scr_child_ref(ScrChild *c);
  * programs call this only when the child_process surface is present. */
 void scr_child_dyn_install(void);
 void scr_child_on_dyn(ScrChild *child, ScrStr *event, ScrDyn *listener); /* borrowed */
+/* Own properties JavaScript adds to a child (scr_dyn_handle_props.c,
+ * linked only by programs that add them). */
+void scr_dyn_handle_props_install(void);
+ScrDyn *scr_dyn_define_property_hp(ScrDyn *target, ScrDyn *key, ScrDyn *descriptor);
+ScrDyn *scr_dyn_get_own_property_descriptor_hp(ScrDyn *target, ScrDyn *key);
+ScrPromise *scr_dyn_promise_resolve_hp(ScrDyn *value, ScrDyn *reader);
+void scr_child_on_dyn_hp(ScrChild *child, ScrStr *event, ScrDyn *listener);
 /* Optional native-stream bridge. The table avoids a stream dependency
  * in programs that only use the child-process surface. */
 /* readable/writable take the stream's class name (the constructor name

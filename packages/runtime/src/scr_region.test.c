@@ -61,7 +61,7 @@ static void node_release(void *o) {
   if (c) c->count--;
 }
 
-static const ScrArrOps node_ops = {node_retain, node_release, NULL};
+static ScrArrOps node_ops = {node_retain, node_release, NULL};
 
 /* ── the "emitted" ordinary class (acyclic, plain heap block) ────────── */
 

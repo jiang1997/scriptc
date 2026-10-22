@@ -311,7 +311,8 @@ const methodCases: {
   // enters through the double ABI.
   { method: "charCodeAt", args: [num(1)], result: F64, target: "char_code_at_int", inline: true },
   { method: "charCodeAt", args: [num(1.5)], result: F64, target: "char_code_at", inline: true },
-  { method: "charAt", args: [num(1)], result: STRING, target: "char_at" },
+  { method: "charAt", args: [num(1)], result: STRING, target: "char_at_int", inline: true },
+  { method: "charAt", args: [num(1.5)], result: STRING, target: "char_at", inline: true },
   { method: "indexOf", args: [ref("argument"), num(1)], result: F64, target: "index_of" },
   { method: "includes", args: [ref("argument")], result: BOOL, target: "includes" },
   {

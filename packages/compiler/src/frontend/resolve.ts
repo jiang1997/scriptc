@@ -22,6 +22,11 @@ import {
   npmStaticPackageOfPath,
   npmStaticTransformPkgJson,
 } from "./npm-static.js";
+import {
+  clearPackageShimCaches,
+  packageShimFor,
+  throughBundledShimForwarder,
+} from "./package-shims.js";
 import { provenanceEntryFor } from "./provenance-registry.js";
 import {
   trackedAccessibleEntries,
@@ -609,6 +614,10 @@ export function resolveProjectImport(fromFile: string, specifier: string): strin
   if (provenance !== null) return normalizeResolvedPath(provenance);
   const viaPaths = resolveViaProjectPaths(specifier);
   if (viaPaths !== null) return normalizeResolvedPath(viaPaths);
+  // A package scriptc implements itself (package-shims.ts): the installed
+  // version's shim module compiles in the package's place.
+  const shim = packageShimFor(fromFile, specifier);
+  if (shim !== null) return normalizeResolvedPath(shim);
   const pkgDir = nearestPkgDir(dirname(resolve(fromFile)));
   if (pkgDir === null) return null;
   const pkg = pkgJsonOf(pkgDir);
@@ -662,6 +671,11 @@ export function resolveProjectImport(fromFile: string, specifier: string): strin
  * answer null for their dedicated callers. */
 export function resolveProjectModule(fromFile: string, specifier: string): string | null {
   if (isRelativeSpecifier(specifier) || isAbsolute(specifier)) {
+    // A bundled copy's forwarder (a virtual declaration module) answers
+    // the shim it forwards to.
+    const forwarder = join(dirname(resolve(fromFile)), `${specifier}.d.ts`);
+    const forwarded = throughBundledShimForwarder(forwarder);
+    if (forwarded !== forwarder) return forwarded;
     return resolveRelativeModule(fromFile, specifier);
   }
   if (specifier.startsWith("node:")) return null;
@@ -1051,6 +1065,7 @@ export function resolveTypeDirective(name: string, fromFile: string): string | n
 /** Resolver metadata and the active project realm are shared within one
  * compile, never across compiles in a long-lived process. */
 export function clearResolveCaches(): void {
+  clearPackageShimCaches();
   pkgJsonCache.clear();
   workspaceMembersCache.clear();
   projectRealmPkgJson = null;

@@ -106,6 +106,7 @@ export function analyzeWithFrontend(
         diagnostics: [...preflight, ...lowered.diagnostics],
         ...(lowered.runtimeFences.length > 0 ? { runtimeFences: lowered.runtimeFences } : {}),
         ...(lowered.divergences !== undefined ? { divergences: lowered.divergences } : {}),
+        ...(lowered.performance !== undefined ? { performance: lowered.performance } : {}),
         ...(lowered.unreached ? { unreached: lowered.unreached } : {}),
         ...(fe.npmStatic.length > 0 ? { npmStatic: fe.npmStatic } : {}),
         // --provenance-sources: the per-package attribution inputs (the

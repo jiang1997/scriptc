@@ -60,7 +60,7 @@ import { DYN_CLASS_PROPERTIES, callSiteReturnType, classValueConstructor } from 
 import { unionWideningTags } from "./analysis.js";
 import { alwaysReturns } from "./control-flow.js";
 import { dynamicOperationOf, functionTier } from "./tiers.js";
-import { LIB_FN_SIGS } from "./builtin-signatures.js";
+import { LIB_FN_SIGS, pipelinePumpedRuns } from "./builtin-signatures.js";
 
 /** The promisified crypto calls' value kinds besides checked-dynamic. */
 const CRYPTO_PROMISE_VALUES: Readonly<Record<string, "buffer" | "view" | "number" | "dyn">> = {
@@ -1117,7 +1117,7 @@ function validateFunction(
   // helpers. They are not source-level types and never return as values.
   if (fn.returnType.kind === "caught") err("return type is caught", fn.loc);
   for (const p of fn.params) {
-    if (p.type.kind === "caught" && fn.name !== "%caught.dynamicValue")
+    if (p.type.kind === "caught" && !fn.name.startsWith("%caught."))
       err(`param "${p.name}" is caught-typed`, fn.loc);
     if (!locals.has(p.localId)) {
       err(`param "${p.name}" has no local entry "${p.localId}"`, fn.loc);
@@ -1622,10 +1622,10 @@ function validateFunction(
           "while",
         ]);
         if (e.generatorDelegate) {
-          if (!fn.generator || fn.async)
-            err("delegation sequence outside a synchronous generator", e.loc);
+          if (!fn.generator) err("delegation sequence outside a generator", e.loc);
           allowed.add("return");
           allowed.add("throw");
+          allowed.add("rethrow");
           allowed.add("runtimeFence");
           allowed.add("tryCatch");
         }
@@ -2388,27 +2388,46 @@ function validateFunction(
           if (e.method === "sortDense" && e.args[1]?.kind !== "boolLit")
             err("arrIntrinsic sortDense owned flag must be a boolean literal", e.loc);
           // A recognized comparator's key order: [order] for numbers,
-          // [order, key reader] for record and class elements.
+          // [order, key reader] for record and class elements. An order
+          // from 2 carries several keys (sortKeysOrder): the key count
+          // (2..8) in the low byte, a descending bit per key from bit 8, and
+          // a reader that also takes the key's index.
           const order = e.args[2];
           if (order) {
-            if (order.kind !== "numLit" || (order.value !== 1 && order.value !== -1))
-              err(`arrIntrinsic ${e.method} key order must be the literal 1 or -1`, e.loc);
+            const count = order.kind === "numLit" && order.value >= 2 ? order.value & 0xff : 1;
+            if (
+              order.kind !== "numLit" ||
+              (order.value !== 1 &&
+                order.value !== -1 &&
+                !(
+                  Number.isInteger(order.value) &&
+                  count >= 2 &&
+                  count <= 8 &&
+                  (order.value >> 8) >> count === 0
+                ))
+            )
+              err(`arrIntrinsic ${e.method} key order must be 1, -1 or a key-chain order`, e.loc);
             const key = e.args[3]?.type;
             if (
               elem.kind === "f64"
-                ? key !== undefined
+                ? key !== undefined || count > 1
                 : elem.kind !== "record" && elem.kind !== "object"
             )
               err(`arrIntrinsic ${e.method} key order on ${elem.kind} elements`, e.loc);
+            const params = count > 1 ? 2 : 1;
             if (
               elem.kind !== "f64" &&
               (!key ||
                 key.kind !== "func" ||
-                key.params.length !== 1 ||
+                key.params.length !== params ||
                 !typeEquals(key.params[0]!, elem) ||
+                (params === 2 && key.params[1]!.kind !== "f64") ||
                 key.ret.kind !== "f64")
             )
-              err(`arrIntrinsic ${e.method} key reader must be (elem) => number`, e.loc);
+              err(
+                `arrIntrinsic ${e.method} key reader must be (elem${params === 2 ? ", number" : ""}) => number`,
+                e.loc,
+              );
           }
         }
         if (e.method === "getNumber" && elem.kind !== "f64") {
@@ -4061,6 +4080,8 @@ function validateFunction(
     const variadic =
       e.fn === "emitter.emit" ||
       e.fn === "emitter.emitFlex" ||
+      e.fn === "emitter.emitAny" ||
+      e.fn === "emitter.emitMixed" ||
       e.fn === "readable.new" ||
       e.fn === "writable.new" ||
       e.fn === "duplex.new" ||
@@ -4239,6 +4260,12 @@ function validateFunction(
         field("0")?.kind === "string" &&
         field("1")?.kind === "dyn";
       if (!ok) err(`libCall dyn.objEntryPairs must return a [string, any] tuple array`, e.loc);
+      return true;
+    }
+    if (e.fn === "array.namedKeys" || e.fn === "array.hasNamedKey") {
+      if (e.args[0]?.type.kind !== "array") {
+        err(`libCall ${e.fn} arg 0: expected an array, got ${e.args[0]?.type.kind}`, e.loc);
+      }
       return true;
     }
     if (e.fn === "fetch.streamFrom") {
@@ -5233,7 +5260,7 @@ function validateFunction(
       }
       return true;
     }
-    if (e.fn === "stream.dynNative") {
+    if (e.fn === "stream.dynNative" || e.fn === "stream.dynNativePipe") {
       const def = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
       const side = e.args[1];
       const className =
@@ -5587,23 +5614,34 @@ function validateFunction(
         e.fn === "stream.pipelineStagesDyn" ||
         e.fn === "sp.pipelineStages"
       ) {
-        // (n, at, k, flags, mask, s1..sn, stage1..stagek, (next, read,
-        // return)?, box?, (signal, abort)?[, cb]): flags bit 0 a source
-        // function, bits 1-2 the destination, bits 3/4/5 the groups.
-        const [n, at, k, flags] = e.args
+        // (n, k, positions, flags, mask, s1..sn, stage1..stagek,
+        // helpers..., box?, (signal, abort)?[, cb]): positions bit j marks
+        // stage j a function, flags bits 1-2 the destination, bit 5 the
+        // signal group; helpers are three per function run a stream
+        // follows.
+        const [n, k, positions, flags] = e.args
           .slice(0, 4)
           .map((a) => (a?.kind === "numLit" ? a.value : -1));
-        const source = (flags! & 1) !== 0;
+        const total = n! + k!;
         const destKind = (flags! >> 1) & 3;
-        const groups = (flags! & 8 ? 3 : 0) + (flags! & 16 ? 1 : 0) + (flags! & 32 ? 2 : 0);
+        let functions = 0;
+        for (let j = 0; j < total && j < 53; j++) {
+          if (Math.floor(positions! / 2 ** j) % 2 === 1) functions++;
+        }
+        const lastIsFunction = Math.floor(positions! / 2 ** (total - 1)) % 2 === 1;
+        const helperCount = 3 * pipelinePumpedRuns(total, positions!);
+        const groups = helperCount + (destKind === 2 ? 1 : 0) + (flags! & 32 ? 2 : 0);
         const cbArgs = e.fn === "sp.pipelineStages" ? 0 : 1;
         if (
           flags! < 0 ||
           n! < 0 ||
           k! < 1 ||
-          (source ? at !== 0 : at! < 1) ||
-          (destKind === 0 ? at! + 0 >= n! : at! !== n!) ||
-          n! + k! < 2 ||
+          positions! < 1 ||
+          total > 52 ||
+          positions! >= 2 ** total ||
+          functions !== k ||
+          (destKind === 2) !== lastIsFunction ||
+          total < 2 ||
           e.args.length !== 5 + n! + k! + groups + cbArgs
         ) {
           err(`libCall ${e.fn} count/arity mismatch`, e.loc);
@@ -5620,7 +5658,7 @@ function validateFunction(
             err(`libCall ${e.fn} stage function ${i} must be a func`, e.loc);
         }
         at2 += k!;
-        const helpers = (flags! & 8 ? 3 : 0) + (flags! & 16 ? 1 : 0);
+        const helpers = helperCount + (destKind === 2 ? 1 : 0);
         for (let i = at2; i < at2 + helpers; i++) {
           if (e.args[i]?.type.kind !== "func")
             err(`libCall ${e.fn} helper ${i} must be a func`, e.loc);
@@ -5828,6 +5866,7 @@ function validateFunction(
         e.fn === "emitter.off" ||
         e.fn === "emitter.onDyn" ||
         e.fn === "emitter.onFlex" ||
+        e.fn === "emitter.onAny" ||
         e.fn === "stream.onDyn" ||
         e.fn === "emitter.offDyn" ||
         e.fn === "emitter.onData" ||
@@ -5882,14 +5921,27 @@ function validateFunction(
         if (!ok) err(`libCall emitter.listeners must return a func array`, e.loc);
         return true;
       }
-      if (e.fn === "emitter.emitFlex") {
+      if (e.fn === "emitter.emitFlex" || e.fn === "emitter.emitAny") {
         if (e.args.slice(2).some((arg) => arg.type.kind !== "dyn")) {
-          err("libCall emitter.emitFlex payloads must be checked-dynamic", e.loc);
+          err(`libCall ${e.fn} payloads must be checked-dynamic`, e.loc);
+        }
+      }
+      if (e.fn === "emitter.emitMixed") {
+        const count = e.args[2];
+        const k = count?.kind === "numLit" ? count.value : -1;
+        if (!Number.isInteger(k) || k < 0 || e.args.length < 3 + k) {
+          err("libCall emitter.emitMixed needs a literal argument count", e.loc);
+        } else if (e.args.slice(3, 3 + k).some((arg) => arg.type.kind !== "dyn")) {
+          err("libCall emitter.emitMixed untyped arguments must be checked-dynamic", e.loc);
         }
       }
       if (
         e.fn === "emitter.emit" ||
         e.fn === "emitter.emitFlex" ||
+        e.fn === "emitter.emitAny" ||
+        e.fn === "emitter.emitMixed" ||
+        e.fn === "emitter.hasTyped" ||
+        e.fn === "emitter.listenersDyn" ||
         e.fn === "emitter.count" ||
         e.fn === "emitter.getMax" ||
         e.fn === "emitter.ctor" ||

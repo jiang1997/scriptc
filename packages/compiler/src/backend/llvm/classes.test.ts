@@ -1,12 +1,21 @@
 import { expect, test } from "vitest";
 import { DYN, F64, STRING, VOID, type IrModule } from "../../ir/ir.js";
-import { buildClassGraph, classMembershipIntervals, emitClassMembershipHelper } from "./classes.js";
-import { emitLlvmModule } from "./emitter.js";
+import {
+  assignCompactLayouts,
+  buildClassGraph,
+  classFieldIndex,
+  classIdLoadLines,
+  classMembershipIntervals,
+  emitClassMembershipHelper,
+  type LlClassMeta,
+} from "./classes.js";
+import { emitLlvmModule, lowRegionTarget } from "./emitter.js";
 import {
   mangleClassNew,
   mangleClassReleaseDirect,
   mangleClassRelease,
   mangleClassRetain,
+  mangleClassStruct,
   mangleClassTrace,
   mangleRecordRelease,
 } from "../mangle.js";
@@ -75,17 +84,25 @@ test("releases split into an inlinable fast path and an out-of-line remainder", 
   const llvm = emitLlvmModule(mod, { pointerBits: 64 });
   const body = (name: string): string =>
     new RegExp(`^define internal void @${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(llvm)?.[0] ?? "";
-  // A hierarchy rooted in the program: a surviving release decrements and
-  // takes the possible-root step without loading the vtable.
+  // A hierarchy rooted in the program: a surviving release decrements the
+  // count (the low half of the rc word, which keeps the class id in its high
+  // half) and takes the possible-root step without loading the vtable.
   const fast = body(mangleClassRelease("Node"));
-  expect(fast).toContain("%shared = icmp ult i64 %rcm2, -3");
+  expect(fast).toContain("%shared = icmp ult i32 %rcm2, -3");
   expect(fast).toContain("load i32, ptr %bufp");
   expect(fast).toContain(`call void @${mangleClassRelease("Node")}_slow(ptr %o)`);
   expect(fast).not.toContain("%ScrVt");
   // Only the last reference dispatches, from a noinline remainder.
   const slow = body(`${mangleClassRelease("Node")}_slow`);
   expect(slow).toMatch(/noinline/);
+  // The class id indexes the hierarchy's vtable array.
+  expect(slow).toContain("%vt.id = load i32, ptr %vt.idp");
+  expect(slow).toContain("ptr @sc_vta_Node, i64 0, i64 %vt.ix64");
   expect(slow).toContain("getelementptr inbounds %ScrVt, ptr %vt, i64 0, i32 2");
+  // 32-bit targets keep the vtable word.
+  const wasm = emitLlvmModule(mod, { pointerBits: 32 });
+  expect(wasm).toContain("; class Node (vt at 1)");
+  expect(wasm).not.toContain("@sc_vta_Node");
 });
 
 test("ProgramLifetime hierarchies are never freed and take no reference counts", () => {
@@ -121,22 +138,238 @@ test("ProgramLifetime hierarchies are never freed and take no reference counts",
     expect(body(mangleClassRetain(cls)), cls).toMatch(/entry:\n {2}ret ptr %o\n}/);
     expect(body(mangleClassRelease(cls)), cls).toMatch(/entry:\n {2}ret void\n}/);
     // new: no collector header (no descriptor, no scr_cyc_alloc) and the
-    // program-lifetime count 2^63, not SIZE_MAX (which means published).
+    // 32-bit header: the tag 0x70000000 and the class id (Node's preorder
+    // number 0 + 1, Leaf's 1 + 1), without a count.
     const nw = body(mangleClassNew(cls));
-    expect(nw, cls).toContain("store i64 -9223372036854775808, ptr %o");
-    expect(nw, cls).not.toContain("store i64 -1, ptr %o");
+    const id = cls === "Node" ? 1 : 2;
+    expect(nw, cls).toContain(`store i32 ${0x70000000 + id}, ptr %o.vt`);
+    expect(nw, cls).not.toContain("store i64");
     expect(nw, cls).not.toContain("scr_cyc_alloc");
     expect(llvm, cls).not.toContain(`@${mangleClassTrace(cls)}.cyctype`);
     // The RC audit (sanitize builds) learns that the program keeps
     // program-lifetime objects; other builds emit nothing for it.
     expect(nw, cls).toContain("call void @scr_obj_lifetime_note(ptr %o)");
   }
+  expect(llvm).toContain(`%${mangleClassStruct("Leaf")} = type { i32, ptr }`);
   const plain = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false });
   expect(plain).not.toContain("scr_obj_lifetime_note");
   // The mortal Owner keeps its header, counts and possible-root step.
   expect(body(mangleClassNew("Owner"))).toContain("store i64 1, ptr %o");
   expect(body(mangleClassNew("Owner"))).toContain("scr_cyc_alloc");
   expect(body(mangleClassRelease("Owner"))).toContain("load i32, ptr %bufp");
+});
+
+test("classes whose trace visits nothing start acyclic in a traced hierarchy", () => {
+  const mapper = { kind: "object" as const, className: "Mapper" };
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
+    classes: [
+      { name: "Mapper", fields: [], methods: [], loc },
+      // A dyn field can reach anything: the hierarchy carries collector headers.
+      {
+        name: "Linked",
+        base: "Mapper",
+        fields: [
+          { name: "next", type: mapper },
+          { name: "hook", type: DYN },
+        ],
+        methods: [],
+        loc,
+      },
+      { name: "Simple", base: "Mapper", fields: [{ name: "value", type: F64 }], methods: [], loc },
+    ],
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  const body = (name: string): string =>
+    new RegExp(`^define internal [a-z]+ @${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(llvm)?.[0] ?? "";
+  const descriptor = (cls: string): string =>
+    llvm.split("\n").find((line) => line.startsWith(`@${mangleClassTrace(cls)}.cyctype = `)) ?? "";
+  expect(descriptor("Simple")).toContain("{ ptr @scr_cyc_no_children, ");
+  expect(body(mangleClassNew("Simple"))).toContain("store i32 -1, ptr %sa.bufp");
+  expect(descriptor("Linked")).toContain(`{ ptr @${mangleClassTrace("Linked")}, `);
+  expect(body(mangleClassNew("Linked"))).toContain("store i32 0, ptr %sa.bufp");
+  // Releases share the hierarchy's possible-root step, which skips the
+  // call for SCR_CYC_ACYCLIC, and a death unbuffers only below -1.
+  expect(body(mangleClassRelease("Simple"))).toContain("icmp slt i32 %buf, 0");
+  expect(body(mangleClassReleaseDirect("Simple"))).toContain("icmp slt i32 %dbuf, -1");
+});
+
+test("ProgramLifetime classes pack their fields after a 32-bit header", () => {
+  const BOOL = { kind: "bool" as const };
+  const nodeFields = [
+    { name: "parent", type: STRING },
+    { name: "flag", type: BOOL },
+    { name: "weight", type: F64 },
+  ];
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
+    classes: [
+      { name: "Node", fields: nodeFields, methods: [], loc },
+      {
+        name: "Leaf",
+        base: "Node",
+        fields: [...nodeFields, { name: "next", type: STRING }, { name: "mark", type: BOOL }],
+        methods: [],
+        loc,
+      },
+    ],
+    contracts: { programLifetime: ["Node"] },
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  // Fields go widest first, each at the first offset that fits it. Node's
+  // weight (an int32 slot: nothing stores a fraction) takes the word the
+  // header shares (24 bytes, not 32); Leaf keeps Node's offsets and puts its
+  // bool next to Node's (32 bytes, not 48).
+  expect(llvm).toContain(`%${mangleClassStruct("Node")} = type { i32, i32, ptr, i8 }`);
+  expect(llvm).toContain(`%${mangleClassStruct("Leaf")} = type { i32, i32, ptr, i8, i8, ptr }`);
+  // Without the contract, the layout is the declared one.
+  const mortal = emitLlvmModule({ ...mod, contracts: {} }, { pointerBits: 64 });
+  expect(mortal).toContain(`%${mangleClassStruct("Leaf")} = type { i64, ptr, i8, i32, ptr, i8 }`);
+});
+
+test("references between ProgramLifetime instances are 32-bit indexes into their region", () => {
+  const node = { kind: "object" as const, className: "Node" };
+  const leaf = { kind: "object" as const, className: "Leaf" };
+  const root = { localId: "root", name: "root", type: leaf };
+  const nodeFields = [{ name: "parent", type: node }];
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [
+      {
+        name: "main",
+        params: [root],
+        returnType: VOID,
+        locals: [{ id: "root", name: "root", type: leaf, mutable: false }],
+        body: [
+          {
+            kind: "fieldSet",
+            obj: { kind: "varRef", localId: "root", type: leaf, loc },
+            className: "Leaf",
+            field: "parent",
+            value: {
+              kind: "fieldGet",
+              obj: { kind: "varRef", localId: "root", type: leaf, loc },
+              className: "Leaf",
+              field: "next",
+              type: leaf,
+              loc,
+            },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+    classes: [
+      { name: "Node", fields: nodeFields, methods: [], loc },
+      {
+        name: "Leaf",
+        base: "Node",
+        fields: [...nodeFields, { name: "next", type: leaf }, { name: "label", type: STRING }],
+        methods: [],
+        loc,
+      },
+    ],
+    contracts: { programLifetime: ["Node"] },
+  };
+  // Linux executables without sanitizers (lowRegionTarget).
+  const llvm = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false, lowRegion: true });
+  // parent and next take 4 bytes each; the string keeps its pointer.
+  expect(llvm).toContain(`%${mangleClassStruct("Node")} = type { i32, i32 }`);
+  expect(llvm).toContain(`%${mangleClassStruct("Leaf")} = type { i32, i32, ptr, i32 }`);
+  // Instances come from the region, reserved below 32 GiB before compiled
+  // code runs: a bump of the thread's chunk, and the runtime when it is used
+  // up.
+  const nw =
+    new RegExp(`^define internal ptr @${mangleClassNew("Leaf")}\\([^]*?^}`, "m").exec(llvm)?.[0] ??
+    "";
+  expect(nw).toContain("%plr.end = getelementptr i8, ptr %plr.next");
+  expect(nw).toContain("store ptr %plr.end, ptr %plr.c");
+  expect(nw).toMatch(/%plr.o = call ptr @scr_plr_alloc\(i64 /);
+  expect(llvm).toMatch(/call void @scr_init\(\)\n {2}call void @scr_plr_init\(\)/);
+  // A reference is the instance's address over 8 (0 is NULL): a read
+  // shifts the loaded word, a write shifts the pointer.
+  const main = llvm.split(/^define /m).find((fn) => fn.includes("; main\n")) ?? "";
+  expect(main).toMatch(/= load i32, ptr %\S+, !tbaa/);
+  expect(main).toMatch(/= shl nuw nsw i64 %\S+, 3\n\s+%\S+ = inttoptr i64 %\S+ to ptr/);
+  expect(main).toMatch(/= ptrtoint ptr %\S+ to i64\n\s+%\S+ = lshr i64 %\S+, 3/);
+  expect(main).toMatch(/store i32 %\S+, ptr %\S+/);
+  expect(main).not.toContain("select");
+  expect(lowRegionTarget("linux", false)).toBe(true);
+  expect(lowRegionTarget("linux", true)).toBe(false);
+  expect(lowRegionTarget("darwin", false)).toBe(false);
+  expect(lowRegionTarget("win32", false)).toBe(false);
+  // Other targets, 32-bit targets and mortal classes keep pointers.
+  const elsewhere = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false });
+  expect(elsewhere).toContain(`%${mangleClassStruct("Leaf")} = type { i32, ptr, ptr, ptr }`);
+  expect(elsewhere).not.toContain("scr_plr");
+  const llvm32 = emitLlvmModule(mod, { pointerBits: 32, lowRegion: true });
+  expect(llvm32).not.toContain("scr_plr");
+  const mortal = emitLlvmModule({ ...mod, contracts: {} }, { pointerBits: 64, lowRegion: true });
+  expect(mortal).not.toContain("scr_plr");
+  // Field accessors that read the storage as a pointer are refused.
+  const metas = buildClassGraph(mod, new Map());
+  assignCompactLayouts(
+    metas,
+    () => true,
+    (cls) => cls.fields.map(() => "ptr"),
+    (cls, i, isCompact) => {
+      const t = cls.fields[i]!.type;
+      return t.kind === "object" && isCompact(t.className);
+    },
+  );
+  const leafMeta = metas.get("Leaf")!;
+  expect(() => classFieldIndex(leafMeta, "next")).toThrow(/holds a 32-bit reference/);
+  expect(classFieldIndex(leafMeta, "next", "compressed").compressed).toBe(true);
+  expect(classFieldIndex(leafMeta, "label").compressed).toBe(false);
+});
+
+test("a recycled block is cleared from the end of a ProgramLifetime instance's 32-bit header", () => {
+  const BOOL = { kind: "bool" as const };
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
+    classes: [
+      { name: "Marker", fields: [], methods: [], loc },
+      { name: "Toggle", fields: [{ name: "on", type: BOOL }], methods: [], loc },
+    ],
+    contracts: { programLifetime: ["Marker", "Toggle"] },
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  for (const name of ["Marker", "Toggle"]) {
+    const start = llvm.indexOf(`define internal ptr @${mangleClassNew(name)}(`);
+    const body = llvm.slice(start, llvm.indexOf("\n}\n", start));
+    // The constructor stores the 4-byte header itself; a 4-byte instance
+    // (Marker) clears nothing, and Toggle's field at offset 4 is cleared.
+    expect(body).toContain("%sa.z = getelementptr inbounds i8, ptr %sa.b, i64 4");
+    expect(body).toContain("%sa.zn = sub i64 %sa.n, 4");
+    expect(body).toContain("call void @llvm.memset.p0.i64(ptr align 4 %sa.z,");
+  }
+});
+
+test("invariant class id reads of compact instances leave out the published bit", () => {
+  const group = ", !invariant.group !{}";
+  const compact = (post: number) => ({ compact: true, root: { post } }) as unknown as LlClassMeta;
+  // Publication sets the header word's top bit; ids below 2^16 are read
+  // from the low 16 bits, which never change after construction.
+  expect(classIdLoadLines(compact(40), "%o", "%id", group)).toEqual([
+    "  %id.h = load i16, ptr %o, !invariant.group !{}",
+    "  %id = zext i16 %id.h to i32",
+  ]);
+  // Wider ids, and reads without the metadata, mask the whole word.
+  const masked = ["  %id.w = load i32, ptr %o", "  %id = and i32 %id.w, 268435455"];
+  expect(classIdLoadLines(compact(0xffff), "%o", "%id", group)).toEqual(masked);
+  expect(classIdLoadLines(compact(40), "%o", "%id", "")).toEqual(masked);
 });
 
 test("published ProgramLifetime instances use the published mark every other object uses", () => {
@@ -202,17 +435,25 @@ test("published ProgramLifetime instances use the published mark every other obj
     contracts: { programLifetime: ["Node"] },
   };
   const llvm = emitLlvmModule(mod, { pointerBits: 64 });
-  // The walker marks each instance like a mortal object (SIZE_MAX, logged so
-  // a refusal restores the program-lifetime count); untraced, so it never
-  // leaves a collector buffer.
+  // The walker marks each instance by the top bit of its 32-bit header,
+  // logging the word so a refusal restores it; untraced, so it never leaves
+  // a collector buffer.
   expect(llvm).toContain("call void @scr_publish(ptr");
-  expect(llvm).toMatch(/@scr_pub_mark\(ptr %ctx, ptr %o, i1 false, i32 4\)/);
-  // The frozen-object guard of the store tests the count against SIZE_MAX:
-  // an unpublished instance (2^63) stays writable.
+  // Kind 4 (an object) | 0x200 (the 32-bit header: the mark sets its top
+  // bit).
+  expect(llvm).toMatch(/@scr_pub_mark\(ptr %ctx, ptr %o, i1 false, i32 516\)/);
+  const plain = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false });
+  expect(plain).toContain("%mpub = or i32 %mrc, -2147483648");
+  // Pushing a reference skips one published before: a set top bit.
+  expect(llvm).toMatch(/%immortal0 = icmp slt i32 %rc0, 0/);
+  // The walker dispatches on the class id in the header's low 28 bits.
+  expect(llvm).toContain("%id = and i32 %idw, 268435455");
+  // The frozen-object guard of the store tests the top bit: an unpublished
+  // instance stays writable.
   const store =
     llvm.split(/^define /m).find((fn) => fn.includes("call void @scr_throw_published_field(")) ??
     "";
-  expect(store).toMatch(/icmp eq i64 %\S+, -1/);
+  expect(store).toMatch(/icmp slt i32 %\S+, 0/);
   expect(store).toContain("call void @scr_publish(ptr");
   // 32-bit targets use 2^31.
   const llvm32 = emitLlvmModule(mod, { pointerBits: 32 });

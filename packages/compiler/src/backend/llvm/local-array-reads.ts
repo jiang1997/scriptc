@@ -12,7 +12,7 @@ import { everyStmtList } from "../../ir/traverse.js";
 import { analyzeCallLifetimes, type CallLifetimes } from "./call-lifetimes.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { ReferenceEffects } from "./reference-effects.js";
-import { SCR_ARR_FIELD, exactIndexLines } from "./common.js";
+import { SCR_ARR_FIELD, exactIndexLines, loadArrCount, scrArrStateAt } from "./common.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 import { READ_FALLBACK } from "./dense-array-access.js";
 
@@ -457,12 +457,14 @@ export function emitProjectedArrayRead(host: LlvmEmitterContext, read: LocalArra
 
 /** Share the checked dense lookup between optional stack boxes and strict
  * borrowed reads. Capacity, length, and presence guards precede every load;
- * sparse and noncanonical indices keep their runtime lookup semantics. */
+ * sparse and noncanonical indices keep their runtime lookup semantics.
+ * `induction` says `integerIndex` is a loop's induction variable. */
 function emitDenseReferenceArrayRead(
   host: LlvmEmitterContext,
   array: LlValue,
   index: LlValue,
   integerIndex: string | null,
+  induction: boolean,
   present: (value: string) => void,
   no: string,
   slow: string,
@@ -476,9 +478,11 @@ function emitDenseReferenceArrayRead(
   // noncanonical numeric properties retain the runtime lookup semantics.
   const capPtr = B.tmp(),
     cap = B.tmp();
-  B.line(`${capPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 2`);
+  B.line(
+    `${capPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.cap}`,
+  );
   host.markMemoryPointer(capPtr, "array:header");
-  B.line(`${cap} = load ${host.sizeType}, ptr ${capPtr}${host.fieldAliasAttachment(capPtr)}`);
+  loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
   let offset: string, inRange: string;
   if (integerIndex) {
     offset = integerIndex;
@@ -499,6 +503,15 @@ function emitDenseReferenceArrayRead(
   B.startBlock(range);
   B.br(dense);
   B.startBlock(dense);
+  // The state and value paths below both index from `data`: one load here
+  // serves both.
+  const dataPtr = B.tmp(),
+    data = B.tmp();
+  B.line(
+    `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
+  );
+  host.markMemoryPointer(dataPtr, "array:header");
+  B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
   // Below the hole-free prefix bound every state is a present value.
   const filledPtr = B.tmp(),
     filled = B.tmp(),
@@ -516,45 +529,38 @@ function emitDenseReferenceArrayRead(
   }
   B.line(`${belowFilled} = icmp ult ${host.sizeType} ${offset}, ${filledSized}`);
   const valueLabel = B.newLabel("local.array.value");
-  B.condBr(belowFilled, valueLabel, lenLabel);
-  B.startBlock(lenLabel);
-  const lenPtr = B.tmp(),
-    len = B.tmp(),
-    belowLen = B.tmp();
-  B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 1`);
-  host.markMemoryPointer(lenPtr, "array:header");
-  B.line(
-    `${len} = load ${host.sizeType}, ptr ${lenPtr}${host.fieldAliasAttachment(lenPtr)}${host.arrayLengthRange}`,
-  );
-  B.line(`${belowLen} = icmp ult ${host.sizeType} ${offset}, ${len}`);
-  const stateLabel = B.newLabel("local.array.state");
-  B.condBr(belowLen, stateLabel, no);
-  B.startBlock(stateLabel);
-  const statesPtr = B.tmp(),
-    states = B.tmp(),
-    statePtr = B.tmp(),
-    denseState = B.tmp(),
-    densePresent = B.tmp();
-  B.line(
-    `${statesPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.present}`,
-  );
-  host.markMemoryPointer(statesPtr, "array:header");
-  B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);
-  B.line(`${statePtr} = getelementptr inbounds i8, ptr ${states}, ${host.sizeType} ${offset}`);
-  host.markMemoryPointer(statePtr, "array:present");
-  B.line(`${denseState} = load i8, ptr ${statePtr}${host.fieldAliasAttachment(statePtr)}`);
-  B.line(`${densePresent} = icmp eq i8 ${denseState}, 1`);
-  B.condBr(densePresent, valueLabel, no);
+  if (induction) {
+    // The state of slot i is at data + cap * (width + 1) - 1 - i, and an
+    // inline state check makes LLVM keep -1 - i as a second induction
+    // variable in the loop; above the prefix the runtime reads the slot.
+    B.condBr(belowFilled, valueLabel, slow);
+  } else {
+    B.condBr(belowFilled, valueLabel, lenLabel);
+    B.startBlock(lenLabel);
+    const lenPtr = B.tmp(),
+      len = B.tmp(),
+      belowLen = B.tmp();
+    B.line(
+      `${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.len}`,
+    );
+    host.markMemoryPointer(lenPtr, "array:header");
+    loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
+    B.line(`${belowLen} = icmp ult ${host.sizeType} ${offset}, ${len}`);
+    const stateLabel = B.newLabel("local.array.state");
+    B.condBr(belowLen, stateLabel, no);
+    B.startBlock(stateLabel);
+    const statePtr = B.tmp(),
+      denseState = B.tmp(),
+      densePresent = B.tmp();
+    scrArrStateAt(host, statePtr, data, cap, loadType === "i8" ? 1 : 8, offset);
+    host.markMemoryPointer(statePtr, "array:present");
+    B.line(`${denseState} = load i8, ptr ${statePtr}${host.fieldAliasAttachment(statePtr)}`);
+    B.line(`${densePresent} = icmp eq i8 ${denseState}, 1`);
+    B.condBr(densePresent, valueLabel, no);
+  }
   B.startBlock(valueLabel);
-  const dataPtr = B.tmp(),
-    data = B.tmp(),
-    valuePtr = B.tmp(),
+  const valuePtr = B.tmp(),
     raw = B.tmp();
-  B.line(
-    `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
-  );
-  host.markMemoryPointer(dataPtr, "array:header");
-  B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
   // Boolean arrays store one byte per element; every other kind an 8-byte slot.
   const slotType = loadType === "i8" ? "i8" : "i64";
   B.line(
@@ -590,6 +596,7 @@ export function emitBorrowedArrayRead(
     array,
     index,
     integerIndex,
+    loopIndex !== null,
     (value) => B.line(`store ptr ${value}, ptr ${slot}`),
     slow,
     slow,
@@ -632,7 +639,18 @@ export function emitLocalArrayRead(
       B.line(`store ptr ${read.borrow ? value : host.retainFrame(value, owned)}, ptr ${localSlot}`);
     };
     if (inline)
-      emitDenseReferenceArrayRead(host, array, index, integerIndex, store, no, slow, join, "ptr");
+      emitDenseReferenceArrayRead(
+        host,
+        array,
+        index,
+        integerIndex,
+        integerIndex !== null,
+        store,
+        no,
+        slow,
+        join,
+        "ptr",
+      );
     else B.br(slow);
     B.startBlock(slow);
     const present = B.newLabel("local.array.slow.value");
@@ -687,6 +705,7 @@ export function emitLocalArrayRead(
       array,
       index,
       integerIndex,
+      integerIndex !== null,
       storeValue,
       no,
       slow,

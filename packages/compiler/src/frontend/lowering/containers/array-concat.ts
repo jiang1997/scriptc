@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { identityPreservingWidening } from "../coercions/identity.js";
 import { countedFor, numLit, varRef } from "../../../ir/build.js";
 import {
@@ -28,7 +29,7 @@ export function arrayConcatHelper(
   const key = `concat:${typeKey(elem)}:${shape.map((type) => (type ? `a:${typeKey(type)}` : "e")).join(";")}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.concat.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%arr.concat", key);
   const arrT = arrayOf(elem);
   const params = [
     { localId: "a.0", name: "a", type: arrT },

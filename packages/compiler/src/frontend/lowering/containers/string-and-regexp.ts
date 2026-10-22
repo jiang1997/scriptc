@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { matchAllRowsReadByElements } from "./match-row-uses.js";
 import {
   boolLit,
@@ -27,6 +28,7 @@ import { locOf } from "../../program.js";
 import type { Lowerer } from "../lowerer.js";
 import { own } from "../lowerer.js";
 import { isRequireMainFilename } from "../expressions/optional-chains.js";
+import { isSafeToDiscard } from "../expressions/evaluation-safety.js";
 import { STRING_INDEX_METHODS, STRING_REPLACE_METHODS, STR_METHODS } from "../surfaces.js";
 import { execResultCaptureMask } from "./exec-result-uses.js";
 import { lowerStringReplacement } from "./string-replacement.js";
@@ -158,7 +160,7 @@ export function lowerStringSplitCall(
   const key = `str.split:${receiver.type.kind === "union" ? typeKey(receiver.type) : receiver.type.kind}:${typeKey(separator.type)}:${typeKey(limit.type)}:${absent}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%str.split.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%str.split", key);
     const values = [receiver, separator, limit];
     const params = values.map((value, index) => ({
       localId: `arg.${index}`,
@@ -394,7 +396,7 @@ function stringIndexHelperCall(
   const key = `str.index:${method}:${typeKey(receiver.type)}:${typeKey(index.type)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%str.index.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%str.index", key);
     lowerer.valueHelpers.set(key, helper);
     const rawReceiver = varRef("arg.0", receiver.type, loc);
     const rawIndex = varRef("arg.1", index.type, loc);
@@ -672,7 +674,7 @@ export function lowerStringPaddingCall(
   const key = `str.pad:${method}:${values.map((value) => typeKey(value.type)).join(":")}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%str.pad.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%str.pad", key);
     const params = values.map((value, index) => ({
       localId: `arg.${index}`,
       name: `arg${index}`,
@@ -918,12 +920,12 @@ export function lowerRegexMethodCall(
     })();
   if ((receiverKind === "string" || nullableStringRecv) && name === "match") {
     const arg0 = call.arguments.nodes[0];
-    if (!arg0 || lowerer.mapTypeOf(lowerer.typeOf(arg0))?.kind !== "regex") return null; // string-pattern match: the SC2020 fence
+    if (!arg0 || !isRegexPatternArgument(lowerer, arg0)) return null; // string-pattern match: the SC2020 fence
     if (call.arguments.nodes.length !== 1) return null;
     const receiver = nullableStringRecv
       ? lowerMethodReceiver(lowerer, access.expression, STRING, access.name.text)
       : lowerReceiver();
-    const re = lowerer.lowerExprExpecting(arg0, { kind: "regex" });
+    const re = lowerRegexPatternArgument(lowerer, arg0);
     // RegExpMatchArray | null maps to the string[] | null union by
     // itself; intern it directly when the checker's spelling doesn't —
     // or when it maps to something WIDER (an optional-chain call node
@@ -981,10 +983,10 @@ export function lowerRegexMethodCall(
   // 0, exactly Node. Never throws.
   if (receiverKind === "string" && name === "search") {
     const arg0 = call.arguments.nodes[0];
-    if (!arg0 || lowerer.mapTypeOf(lowerer.typeOf(arg0))?.kind !== "regex") return null; // string-pattern form: the SC2020 fence
+    if (!arg0 || !isRegexPatternArgument(lowerer, arg0)) return null; // string-pattern form: the SC2020 fence
     if (call.arguments.nodes.length !== 1) return null;
     const receiver = lowerReceiver();
-    const re = lowerer.lowerExprExpecting(arg0, { kind: "regex" });
+    const re = lowerRegexPatternArgument(lowerer, arg0);
     return { kind: "regexIntrinsic", method: "search", receiver, args: [re], type: F64, loc };
   }
   if (receiverKind === "string" && (name === "replace" || name === "replaceAll")) {
@@ -1308,7 +1310,7 @@ export function lowerStringMethodCall(
     const key = `str.positions:${entry.method}:${typeKey(needle.type)}:${typeKey(position.type)}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%str.positions.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%str.positions", key);
       const params = [receiver, needle, position].map((arg, index) => ({
         localId: `arg.${index}`,
         name: `arg${index}`,
@@ -1410,7 +1412,7 @@ export function lowerStringMethodCall(
     const key = `str.positions:${entry.method}:${args.map((arg) => typeKey(arg.type)).join(":")}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%str.positions.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%str.positions", key);
       const params = [receiver, ...args].map((arg, index) => ({
         localId: `arg.${index}`,
         name: `arg${index}`,
@@ -1504,6 +1506,7 @@ function lowerLocaleCompareCall(
 /** String.prototype members (Annex B included) whose typed-receiver
  * lowering lives here. */
 export const EXTRA_STRING_METHODS: ReadonlySet<string> = new Set([
+  "concat",
   "substr",
   "toLocaleLowerCase",
   "toLocaleUpperCase",
@@ -1565,10 +1568,17 @@ export function isDynPrimitiveKindMethod(name: string): boolean {
   return DYN_STRING_KIND_METHODS.has(name) || DYN_NUMBER_KIND_METHODS.has(name);
 }
 
-/** Evaluate `value` once into a hidden local (effect-free reads stay). */
-function hoist(lowerer: Lowerer, value: IrExpr, stmts: IrStmt[], name: string): IrExpr {
+/** Evaluate `value` once into a hidden local (effect-free reads stay,
+ * unless `snapshot` asks for the value a variable holds now). */
+function hoist(
+  lowerer: Lowerer,
+  value: IrExpr,
+  stmts: IrStmt[],
+  name: string,
+  snapshot = false,
+): IrExpr {
   if (
-    value.kind === "varRef" ||
+    (value.kind === "varRef" && !snapshot) ||
     value.kind === "numLit" ||
     value.kind === "strLit" ||
     value.kind === "boolLit" ||
@@ -1647,6 +1657,13 @@ function buildStringMethod(
 ): IrExpr | null {
   const loc = locOf(call);
   const node = (i: number): ts.Expression => call.arguments.nodes[i] ?? call;
+  // concat(...values): each argument's ToString, in order, after all of
+  // them evaluated.
+  if (name === "concat") {
+    return args
+      .map((arg, i) => stringArg(lowerer, arg, node(i)))
+      .reduce((left, right) => ({ kind: "strConcat", left, right, type: STRING, loc }), s);
+  }
   if (name === "substr") {
     const start = args[0]
       ? positionNumber(lowerer, args[0], numLit(0, loc), node(0), "substr start")
@@ -1767,21 +1784,39 @@ function buildNumberMethod(
   return { kind: "ternary", cond: digits.has, then: fixed, else_: shortest, type: STRING, loc };
 }
 
-/** Evaluate the call's arguments, in order, into hidden locals. */
-function evaluatedArgs(
+/** Operand kinds whose string and number conversions run no program code. */
+const PLAIN_CONVERSION_KINDS: ReadonlySet<IrType["kind"]> = new Set([
+  "f64",
+  "bigint",
+  "string",
+  "bool",
+  "symbol",
+  "nullT",
+  "undefinedT",
+]);
+
+/** Evaluate the receiver (when given) and the call's arguments, in order,
+ * into hidden locals. A variable read stays a read unless a later operand
+ * can assign the variable, or an argument's conversion can run program
+ * code: the methods convert their arguments after evaluating all of them
+ * (an object's toString or valueOf). */
+function evaluatedOperands(
   lowerer: Lowerer,
   call: ts.CallExpression,
   stmts: IrStmt[],
   expected: IrType | undefined,
-): IrExpr[] {
-  return call.arguments.nodes.map((arg) =>
-    hoist(
-      lowerer,
-      expected ? lowerer.lowerExprExpecting(arg, expected) : lowerer.lowerExpr(arg),
-      stmts,
-      "%methodArg",
-    ),
+  receiver?: { value: IrExpr; name: string },
+): { receiver: IrExpr | undefined; args: IrExpr[] } {
+  const args = call.arguments.nodes.map((arg) =>
+    expected ? lowerer.lowerExprExpecting(arg, expected) : lowerer.lowerExpr(arg),
   );
+  const conversionsRunCode = args.some((arg) => !PLAIN_CONVERSION_KINDS.has(arg.type.kind));
+  const mayChange = (from: number): boolean =>
+    conversionsRunCode || !args.slice(from).every(isSafeToDiscard);
+  return {
+    receiver: receiver && hoist(lowerer, receiver.value, stmts, receiver.name, mayChange(0)),
+    args: args.map((arg, i) => hoist(lowerer, arg, stmts, "%methodArg", mayChange(i + 1))),
+  };
 }
 
 /** A typed STRING receiver calling one of EXTRA_STRING_METHODS: receiver,
@@ -1795,9 +1830,12 @@ export function lowerExtraStringMethodCall(
 ): IrExpr | null {
   if (call.arguments.nodes.some(ts.isSpreadElement)) return null;
   const stmts: IrStmt[] = [];
-  const s = hoist(lowerer, receiver, stmts, "%stringReceiver");
-  const args = evaluatedArgs(lowerer, call, stmts, undefined);
-  const result = buildStringMethod(lowerer, call, name, s, args, receiverNode, stmts);
+  const operands = evaluatedOperands(lowerer, call, stmts, undefined, {
+    value: receiver,
+    name: "%stringReceiver",
+  });
+  const s = operands.receiver!;
+  const result = buildStringMethod(lowerer, call, name, s, operands.args, receiverNode, stmts);
   return result ? seq(stmts, result) : null;
 }
 
@@ -1812,9 +1850,12 @@ export function lowerExtraNumberMethodCall(
   if (name !== "toPrecision" && !(name === "toExponential" && call.arguments.nodes.length === 1))
     return null;
   const stmts: IrStmt[] = [];
-  const x = hoist(lowerer, receiver, stmts, "%numberReceiver");
-  const args = evaluatedArgs(lowerer, call, stmts, undefined);
-  const result = buildNumberMethod(lowerer, call, name, x, args, stmts);
+  const operands = evaluatedOperands(lowerer, call, stmts, undefined, {
+    value: receiver,
+    name: "%numberReceiver",
+  });
+  const x = operands.receiver!;
+  const result = buildNumberMethod(lowerer, call, name, x, operands.args, stmts);
   return result ? seq(stmts, result) : null;
 }
 
@@ -1838,7 +1879,7 @@ export function lowerDynPrimitiveMethodCall(
   const local = lowerer.declareHiddenLocal("%primitiveReceiver", DYN);
   stmts.push({ kind: "varDecl", localId: local.id, init: recv, loc });
   const r = varRef(local.id, DYN, loc);
-  const args = evaluatedArgs(lowerer, call, stmts, DYN);
+  const { args } = evaluatedOperands(lowerer, call, stmts, DYN);
   let result: IrExpr = {
     kind: "dynInvoke",
     recv: r,
@@ -1879,4 +1920,32 @@ export function lowerDynPrimitiveMethodCall(
       buildStringMethod(lowerer, call, name, s, args, call.expression, branchStmts),
     );
   return seq(stmts, result);
+}
+
+/** Whether the pattern of `match` or `search` is a RegExp, or a RegExp that
+ * may be undefined (`s.match(patterns[i])` under noUncheckedIndexedAccess). */
+function isRegexPatternArgument(lowerer: Lowerer, node: ts.Expression): boolean {
+  const t = lowerer.mapTypeOf(lowerer.typeOf(node));
+  if (t?.kind === "regex") return true;
+  if (t?.kind !== "union") return false;
+  const arms = lowerer.unions.get(t.unionId)?.arms ?? [];
+  return (
+    arms.length === 2 &&
+    arms.some((arm) => arm.kind === "regex") &&
+    arms.some((arm) => arm.kind === "undefinedT")
+  );
+}
+
+/** The pattern of `match` or `search` as a RegExp: an undefined pattern is
+ * `new RegExp(undefined)`, the empty pattern, as in Node. */
+function lowerRegexPatternArgument(lowerer: Lowerer, node: ts.Expression): IrExpr {
+  const regex: IrType = { kind: "regex" };
+  const empty: IrExpr = {
+    kind: "regexLit",
+    pattern: "(?:)",
+    flags: "",
+    type: regex,
+    loc: locOf(node),
+  };
+  return lowerOptionalArgument(lowerer, node, regex, empty);
 }

@@ -262,7 +262,8 @@ test("dynamic stores disqualify the field names they can reach", () => {
   expect([readOnly.isField("C", "a"), readOnly.isField("C", "b")]).toEqual([true, true]);
   // Reflection that only reads the view (Object.keys/values/entries, for-in,
   // own-key lists, typeof, toString and inspection) stores nothing, nor does
-  // creating an object from a prototype or reading a prototype.
+  // creating an object from a prototype, reading a prototype or naming a
+  // class prototype for inspection.
   for (const reader of [
     "dyn.objKeys",
     "dyn.objKeyStrings",
@@ -282,6 +283,7 @@ test("dynamic stores disqualify the field names they can reach", () => {
     "insp.dynS",
     "dyn.objCreate",
     "dyn.getPrototype",
+    "dyn.nameClassPrototype",
     // Registering or removing a process event listener stores nothing either.
     "process.onSignal",
     "process.offSignal",

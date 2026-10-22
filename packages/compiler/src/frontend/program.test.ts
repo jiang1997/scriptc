@@ -351,7 +351,7 @@ test("repeated cycle edges reuse a file's binding index", () => {
       [peer, peerImports.map((stmt) => ({ dep: main, stmt }))],
     ]);
     const admit = makeCycleAdmission(load.program, (file) => edges.get(file) ?? []);
-    const walk = vi.spyOn(peer, "appendChildIndices");
+    const walk = vi.spyOn(peer.file.wire, "preorder");
     try {
       expect(admit(peer, edges.get(peer)![0]!)).toBeNull();
       expect(walk).toHaveBeenCalled();

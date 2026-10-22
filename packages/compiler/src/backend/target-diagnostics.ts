@@ -208,6 +208,21 @@ export function moduleWasiUnavailableSurface(
         };
         return false;
       }
+      if (node.fn === "webcrypto.encrypt" || node.fn === "webcrypto.decrypt") {
+        found = {
+          surface:
+            "WebCrypto encrypt and decrypt (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
+      if (node.fn === "crypto.ecdhNew" || node.fn === "crypto.ecdhConvertKey") {
+        found = {
+          surface: "ECDH (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
       if (node.fn === "os.networkInterfaces") {
         found = {
           surface: "network-interface enumeration (WASI Preview 1 has no interface API)",

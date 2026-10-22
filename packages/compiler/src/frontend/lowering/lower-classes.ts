@@ -1,3 +1,12 @@
+import {
+  DATE_TIME_FIELD,
+  dateRootOf,
+  dateSuperCall,
+  isDatePrototypeMethod,
+  lowerDateSuperMethodCall,
+} from "./builtins/date-classes.js";
+import { lowerDateStaticCall } from "./builtins/dates.js";
+import { keyedHelperName } from "./stable-names.js";
 import { lowerValueReturningConstructorNew } from "./js-dynamic-objects.js";
 import { adaptPromiseExecutor } from "./promise-executor-adapter.js";
 import { dynUndefinedExpr, nodeThrowExpr, varRef } from "../../ir/build.js";
@@ -8,6 +17,7 @@ import {
 } from "./constructor-returns.js";
 import { checkedIterableSpread } from "./checked-iterable-spread.js";
 import { lowerReadlineUiNew } from "./builtins/readline.js";
+import { builtinMemberRequireDecl } from "./builtins/module-bindings.js";
 import { checkedClassUnionAssertion } from "./class-assertions.js";
 import { collectClassMethodMutations } from "./class-method-mutations.js";
 import { InternalCompilerError } from "../../errors.js";
@@ -83,24 +93,28 @@ import {
 } from "./call-signatures.js";
 import { omittedArgFor } from "./call-arguments.js";
 import {
+  checkerTypeDescription,
   isGenericCallableMemberType,
   jsOpenObjectType,
   typeKey,
   withUnitArm,
 } from "../type-mapper.js";
 import {
+  canonicalBuiltinModule,
   cjsClassExprWholeExportOf,
   isCjsJsFile,
   isJsSourceFile,
   isModuleExportsAccess,
   locOf,
+  requireSpecOf,
 } from "../program.js";
 import { PoisonError, dynFallbackType, jsFuncNameOf, newFnCtx, own } from "./lowerer.js";
 import { isAssertClassNew } from "./assert-instances.js";
+import { isCjsRequireGlobal } from "./lower-node-module.js";
 import { lowerArrayConstructor } from "./containers/array-construction.js";
 import { lowerMapSeedNew, lowerSetSeedNew } from "./containers/collection-methods.js";
 import { lowerObjectConstructor } from "./containers/indexed-objects.js";
-import { knownBufEncoding } from "./containers/bytes.js";
+import { knownBufEncoding, lowerNodeModulesBufferConstruct } from "./containers/bytes.js";
 import { isSafeToRepeat } from "./expressions/evaluation-safety.js";
 import { lowerSearchParamsNew } from "./builtins/url.js";
 import { lowerTextCodecNew } from "./builtins/text-codecs.js";
@@ -560,6 +574,11 @@ export interface ClassInfo {
    * lower-event-target.ts over any class rooted here. Subclass structs
    * embed the runtime prefix. */
   builtinEventTarget?: "target" | "event";
+  /** A class declared `extends Date` (builtins/date-classes.ts): its first
+   * field is the hidden `%time` value, super() sets it with the Date
+   * constructor's rules, and the Date methods it does not declare lower
+   * over that value. Subclasses inherit the field. */
+  extendsDate?: true;
   /** The synthetic LifetimeRegion class (@scriptc/experimental,
    * lifetime-regions.ts): its constructor is synthesized with the class,
    * and its methods lower at their call sites. */
@@ -684,6 +703,9 @@ export interface ClassInfo {
     path: InstantiationPath;
     family: ClassInfo;
     bindings: Map<ts.Symbol, IrType>;
+    /** The type arguments as checker types, for the resolutions that need
+     * literal identity (a conditional type over a literal argument). */
+    tsBindings: Map<ts.Symbol, ts.Type>;
     typeArgsText: string;
     ordinal: number;
   };
@@ -763,6 +785,9 @@ export interface GenericClassInfo {
   typeParams: ts.Symbol[];
   family: ClassInfo;
   instances: Map<string, { name: string; info: ClassInfo | null; poisoned?: boolean }>;
+  /** The type parameters a conditional type in the class depends on
+   * (literalSensitiveTypeParams), computed on first instantiation. */
+  literalSensitive?: Set<ts.Symbol>;
 }
 
 /** The KEY symbol behind a LATE-BOUND (`__@name@id`) property: resolved
@@ -942,7 +967,10 @@ export function registerBuiltinErrorClasses(lowerer: Lowerer): void {
       throwingSetters: [],
       staticFields: [],
     };
-    if (base) base.subclasses.push(info);
+    if (base) {
+      base.subclasses.push(info);
+      lowerer.subclassLinks++;
+    }
     lowerer.classes.set(irName, info);
   }
 }
@@ -978,6 +1006,19 @@ export function registerBuiltinEmitterClass(lowerer: Lowerer): void {
   lowerer.classes.set(RUNTIME_EMITTER_CLASS, info);
 }
 
+/** `class Bus extends require("events") {}` in a CommonJS module: the
+ * events module is the EventEmitter class itself, so the base is the
+ * runtime emitter, exactly as through a `require("events")` binding. */
+export function builtinRequireBaseOf(lowerer: Lowerer, node: ts.Expression): ClassInfo | null {
+  let expr = node;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if (!ts.isCallExpression(expr) || !isJsSourceFile(expr.getSourceFile())) return null;
+  const spec = requireSpecOf(expr);
+  if (spec === null || canonicalBuiltinModule(spec) !== "events") return null;
+  if (!isCjsRequireGlobal(lowerer, expr.expression)) return null;
+  return lowerer.classes.get(RUNTIME_EMITTER_CLASS) ?? null;
+}
+
 /** The runtime-provided node:stream classes as eagerly-registered
  * ClassInfos (the emitter story): mapType names `%Readable` et al the
  * moment a stream type appears, so the infos must exist before any
@@ -1009,7 +1050,10 @@ export function registerBuiltinStreamClasses(lowerer: Lowerer): void {
       throwingSetters: [],
       staticFields: [],
     };
-    if (base) base.subclasses.push(info);
+    if (base) {
+      base.subclasses.push(info);
+      lowerer.subclassLinks++;
+    }
     lowerer.classes.set(irName, info);
   }
 }
@@ -1036,11 +1080,16 @@ export function builtinStreamInfoOf(
     // member to the stdlib class symbol. The declaration itself is
     // alias plumbing (streamClassAliasDecl — both declaration walks
     // skip it).
+    // A `var`/`let` binding of the inline require member
+    // (`var Transform = require("stream").Transform`) is the same alias
+    // plumbing as builtinMemberRequireDecl's: its declaration owns no
+    // storage either way.
     const decl = symbol.valueDeclaration;
     if (
       decl &&
       ts.isVariableDeclaration(decl) &&
-      (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0 &&
+      ((ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0 ||
+        builtinMemberRequireDecl(decl.name, decl.initializer)) &&
       decl.initializer !== undefined &&
       ts.isPropertyAccessExpression(decl.initializer) &&
       !decl.initializer.questionDotToken &&
@@ -1399,7 +1448,8 @@ export function builtinEmitterInfoOf(
     if (
       decl !== undefined &&
       ts.isVariableDeclaration(decl) &&
-      (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0 &&
+      ((ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0 ||
+        builtinMemberRequireDecl(decl.name, decl.initializer)) &&
       decl.initializer !== undefined &&
       ts.isPropertyAccessExpression(decl.initializer) &&
       !decl.initializer.questionDotToken &&
@@ -1743,6 +1793,7 @@ export function collectClassShapeInner(
     family: ClassInfo;
     name: string;
     bindings: Map<ts.Symbol, IrType>;
+    tsBindings: Map<ts.Symbol, ts.Type>;
     typeArgsText: string;
     ordinal: number;
   },
@@ -1915,6 +1966,7 @@ export function collectClassShapeInner(
         : (computedBase?.classInfo ?? null);
     let genericBase: ts.ExpressionWithTypeArguments | undefined;
     let callableBase: ClassInfo["callableBase"];
+    let extendsDate = false;
     let factoryBaseExpression: ts.Expression | undefined;
     const adoptCallableBase = (expression: ts.Expression): boolean => {
       if (familyMode || inst || mixin) return false;
@@ -2092,6 +2144,11 @@ export function collectClassShapeInner(
       // callee is NOT a mixin function keeps the computed-expression
       // fence below.
       if (t && ts.isCallExpression(t.expression) && !t.typeArguments?.nodes) {
+        const requiredBase = builtinRequireBaseOf(lowerer, t.expression);
+        if (requiredBase) {
+          base = requiredBase;
+          continue;
+        }
         const mixinBase = lowerer.mixinCallClassInfoOf(t.expression);
         if (mixinBase) {
           base = mixinBase;
@@ -2109,6 +2166,11 @@ export function collectClassShapeInner(
       if (!t || !ts.isIdentifier(t.expression)) {
         if (t && adoptCallableBase(t.expression)) continue;
         lowerer.unsupported("SC1090", clause, "extending computed expressions");
+      }
+      if (!familyMode && !inst && !mixin && lowerer.isStdlibGlobal(t.expression, "Date")) {
+        if (t.typeArguments?.nodes) lowerer.unsupported("SC1090", t, "extending generic classes");
+        extendsDate = true;
+        continue;
       }
       const symbol = lowerer.resolveValueSymbol(t.expression);
       // Extending a REBINDABLE decorated class (analysis already ran —
@@ -2363,7 +2425,8 @@ export function collectClassShapeInner(
     for (const member of decl.members.nodes) {
       if (
         (functionLocalClass(decl) || checkedStatics) &&
-        isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
+        (isJsSourceFile(ts.getSourceFileOfNode(decl)) ||
+          (functionLocalClass(decl) && ts.isMethodDeclaration(member))) &&
         (ts.isClassStaticBlockDeclaration(member) ||
           ts
             .getModifiers(member)
@@ -4309,7 +4372,8 @@ export function collectClassShapeInner(
     const ctorParams: ParamShape[] =
       ctor && !mixinForwarding
         ? lowerer.paramShapes(ctor.parameters.nodes)
-        : (base?.ctorParams ?? (callableBase ? [{ type: DYN, mode: "dynRest" }] : []));
+        : (base?.ctorParams ??
+          (callableBase || extendsDate ? [{ type: DYN, mode: "dynRest" }] : []));
     if (
       ctor &&
       !mixinForwarding &&
@@ -4347,6 +4411,7 @@ export function collectClassShapeInner(
         // Redeclared INHERITED fields contribute no slot (their
         // initializers assign the prefix slot).
         fields: [
+          ...(extendsDate ? [{ name: DATE_TIME_FIELD, type: DATE_T }] : []),
           ...(base?.def.fields ?? []),
           ...fieldOrder
             .filter((f) => f.redeclared !== true)
@@ -4378,6 +4443,7 @@ export function collectClassShapeInner(
       base,
       ...(genericBase ? { genericBase } : {}),
       ...(callableBase ? { callableBase } : {}),
+      ...(extendsDate ? { extendsDate: true as const } : {}),
       ...(factoryBaseExpression ? { factoryBaseExpression } : {}),
       subclasses: [],
       throwingSetters,
@@ -4414,6 +4480,7 @@ export function collectClassShapeInner(
         path: inst.path,
         family: inst.family,
         bindings: inst.bindings,
+        tsBindings: inst.tsBindings,
         typeArgsText: inst.typeArgsText,
         ordinal: inst.ordinal,
       };
@@ -4443,7 +4510,10 @@ export function collectClassShapeInner(
       };
       lowerer.genericClassByDecl.set(decl, info.generic);
     }
-    if (base) base.subclasses.push(info);
+    if (base) {
+      base.subclasses.push(info);
+      lowerer.subclassLinks++;
+    }
     lowerer.classes.set(className, info);
     if (computedBase && !functionLocalClass(decl)) {
       info.def.baseValueGlobal = `%g.${className}.computedBase`;
@@ -4554,8 +4624,10 @@ export function genericClassInstanceType(
     .getTypeArguments(ref as ts.TypeReference)
     .slice(0, gci.typeParams.length);
   const mapped: IrType[] = [];
+  const tsArgs: ts.Type[] = [];
   if (args.length === gci.typeParams.length) {
     for (const a of args) {
+      tsArgs.push(lowerer.typeParamTsResolver(a) ?? a);
       const m = lowerer.mapTypeOf(a, mapArgument);
       if (!m || m.kind === "void") {
         // An UNBOUND type parameter argument (`Box<T>` outside any
@@ -4574,9 +4646,32 @@ export function genericClassInstanceType(
       const b = lowerer.typeParamBindings?.get(tp);
       if (!b) return null;
       mapped.push(b);
+      const bound = lowerer.typeParamTsBindings?.get(tp);
+      if (bound) tsArgs.push(bound);
     }
   }
-  const key = mapped.map(typeKey).join(",");
+  // A type parameter that a conditional type in the class depends on
+  // (`K extends "required" ? T : T | undefined`) is bound to its checker
+  // type for the members, and that type keys the instance: mapType alone
+  // widens a literal, so Field<string, "required"> and Field<string,
+  // "optional"> would otherwise share one layout. The other parameters get
+  // no checker binding, so nothing in the members depends on a literal
+  // the key does not carry.
+  gci.literalSensitive ??= literalSensitiveTypeParams(lowerer, gci);
+  const sensitive = (i: number): boolean =>
+    tsArgs.length === gci.typeParams.length && gci.literalSensitive!.has(gci.typeParams[i]!);
+  const checkerKey = gci.typeParams
+    .map((_, i) => (sensitive(i) ? `#${tsArgs[i]!.id}` : "*"))
+    .join(",");
+  const key =
+    mapped.map(typeKey).join(",") + (gci.literalSensitive.size > 0 ? `@${checkerKey}` : "");
+  const literalText = (i: number): string | null => {
+    const arg = sensitive(i) ? tsArgs[i] : undefined;
+    if (arg?.isStringLiteralType()) return JSON.stringify(arg.value);
+    if (arg?.isNumberLiteralType()) return String(arg.value);
+    if (arg && arg.flags & ts.TypeFlags.BooleanLiteral) return lowerer.checker.typeToString(arg);
+    return null;
+  };
   const existing = gci.instances.get(key);
   if (existing) {
     if (existing.info) lowerer.noteGenericClassInstanceDemand(existing.info);
@@ -4593,18 +4688,42 @@ export function genericClassInstanceType(
     );
   }
   const ordinal = gci.instances.size;
-  const name = `${gci.family.def.name}%${ordinal}`;
+  // The name does not take the checker type ids of the key: a literal
+  // argument is named by its text, another checker type by its
+  // description. Two keys that still describe alike number the later one.
+  const nameKey =
+    mapped.map(typeKey).join(",") +
+    (gci.literalSensitive.size > 0
+      ? `@${gci.typeParams
+          .map((_, i) =>
+            sensitive(i)
+              ? (literalText(i) ?? checkerTypeDescription(tsArgs[i]!, lowerer.typeCtx))
+              : "*",
+          )
+          .join(",")}`
+      : "");
+  const prefix = `${gci.family.def.name}%`;
+  const taken = new Set([...gci.instances.values()].map((instance) => instance.name));
+  let name = keyedHelperName(lowerer, prefix, nameKey, "");
+  for (let n = 1; taken.has(name); n++)
+    name = keyedHelperName(lowerer, prefix, `${nameKey}#${n}`, "");
   const entry: { name: string; info: ClassInfo | null; poisoned?: boolean } = { name, info: null };
   gci.instances.set(key, entry);
   const bindings = new Map<ts.Symbol, IrType>();
   gci.typeParams.forEach((tp, i) => bindings.set(tp, mapped[i]!));
-  const rendered = mapped.map((m) => lowerer.fmt(m)).join(", ");
+  const tsBindings = new Map<ts.Symbol, ts.Type>();
+  gci.typeParams.forEach((tp, i) => {
+    if (sensitive(i)) tsBindings.set(tp, tsArgs[i]!);
+  });
+  const rendered = mapped.map((m, i) => literalText(i) ?? lowerer.fmt(m)).join(", ");
   const typeArgsText = `<${rendered.length > 80 ? rendered.slice(0, 77) + "..." : rendered}>`;
   const prevBindings = lowerer.typeParamBindings;
+  const prevTsBindings = lowerer.typeParamTsBindings;
   const prevContext = lowerer.instantiationContext;
   const previousPath = lowerer.genericInstantiationPath;
   lowerer.genericInstantiationPath = path;
   lowerer.typeParamBindings = bindings;
+  lowerer.typeParamTsBindings = tsBindings;
   lowerer.instantiationContext = `instantiating class '${gci.baseName}' with ${typeArgsText}`;
   try {
     lowerer.collectClassShapeInner(decl, undefined, {
@@ -4612,6 +4731,7 @@ export function genericClassInstanceType(
       family: gci.family,
       name,
       bindings,
+      tsBindings,
       typeArgsText,
       ordinal,
     });
@@ -4623,6 +4743,7 @@ export function genericClassInstanceType(
     return null;
   } finally {
     lowerer.typeParamBindings = prevBindings;
+    lowerer.typeParamTsBindings = prevTsBindings;
     lowerer.instantiationContext = prevContext;
     lowerer.genericInstantiationPath = previousPath;
   }
@@ -4636,6 +4757,63 @@ export function genericClassInstanceType(
   lowerer.noteGenericClassInstanceDemand(info);
   lowerer.onLateClassCollected?.(info);
   return { kind: "object", className: name };
+}
+
+/** The class's type parameters that a conditional type inside it depends
+ * on: the parameters named within a type node that is a conditional type
+ * or reaches one through the type aliases and interfaces it refers to
+ * (`get(): Value<T, K>` with `type Value<T, K> = K extends "required" ? T
+ * : T | undefined`, also when the alias wraps the conditional in a union
+ * or another alias). Their arguments pick the conditional's branch. */
+function literalSensitiveTypeParams(lowerer: Lowerer, gci: GenericClassInfo): Set<ts.Symbol> {
+  const params = new Set(gci.typeParams);
+  const found = new Set<ts.Symbol>();
+  const reaches = new Map<ts.Symbol, boolean>();
+  const declarationsReach = (symbol: ts.Symbol): boolean => {
+    const target =
+      symbol.flags & ts.SymbolFlags.Alias ? lowerer.checker.getAliasedSymbol(symbol) : symbol;
+    const known = reaches.get(target);
+    if (known !== undefined) return known;
+    reaches.set(target, false); // a recursive alias reaches through its other parts
+    const result = target.declarations.some((d) =>
+      ts.isTypeAliasDeclaration(d)
+        ? reachesConditional(d.type)
+        : ts.isInterfaceDeclaration(d)
+          ? d.members.nodes.some(reachesConditional)
+          : false,
+    );
+    reaches.set(target, result);
+    return result;
+  };
+  const reachesConditional = (node: ts.Node): boolean => {
+    if (ts.isConditionalTypeNode(node)) return true;
+    if (ts.isTypeReferenceNode(node)) {
+      const name = ts.isIdentifier(node.typeName) ? node.typeName : node.typeName.right;
+      const symbol = lowerer.checker.getSymbolAtLocation(name);
+      if (symbol && !params.has(symbol) && declarationsReach(symbol)) return true;
+    }
+    let found = false;
+    ts.forEachChild(node, (child) => {
+      if (!found && reachesConditional(child)) found = true;
+    });
+    return found;
+  };
+  const collect = (node: ts.Node): void => {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
+      const symbol = lowerer.checker.getSymbolAtLocation(node.typeName);
+      if (symbol && params.has(symbol)) found.add(symbol);
+    }
+    ts.forEachChild(node, collect);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeNode(node) && reachesConditional(node)) {
+      collect(node);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const member of gci.decl.members.nodes) visit(member);
+  return found;
 }
 
 /** Runs a member-lowering thunk under an INSTANTIATION's type-parameter
@@ -4671,17 +4849,20 @@ function withInstanceBindings<T>(lowerer: Lowerer, info: ClassInfo, fn: () => T)
     }
   }
   const prevBindings = lowerer.typeParamBindings;
+  const prevTsBindings = lowerer.typeParamTsBindings;
   const prevContext = lowerer.instantiationContext;
   const prevSuppress = lowerer.suppressStats;
   const previousPath = lowerer.genericInstantiationPath;
   lowerer.genericInstantiationPath = gi.path;
   lowerer.typeParamBindings = gi.bindings;
+  lowerer.typeParamTsBindings = gi.tsBindings;
   lowerer.instantiationContext = `instantiating class '${gi.family.generic?.baseName ?? info.def.jsName ?? ""}' with ${gi.typeArgsText}`;
   lowerer.suppressStats = prevSuppress || gi.ordinal > 0;
   try {
     return fn();
   } finally {
     lowerer.typeParamBindings = prevBindings;
+    lowerer.typeParamTsBindings = prevTsBindings;
     lowerer.instantiationContext = prevContext;
     lowerer.suppressStats = prevSuppress;
     lowerer.genericInstantiationPath = previousPath;
@@ -5509,6 +5690,15 @@ export function lowerStaticFieldRead(
   if (info.classDecorators?.valueGlobalId !== undefined) return null;
   const loc = locOf(expr);
   const found = findStaticOn(lowerer, info, expr.name.text);
+  // A Date static read as a value through a class declared `extends Date`:
+  // the statics lower only as calls.
+  if (
+    !found &&
+    dateRootOf(info) &&
+    ["now", "parse", "UTC"].includes(expr.name.text) &&
+    !(ts.isCallExpression(expr.parent) && expr.parent.expression === expr)
+  )
+    lowerer.noLowering(`Date.${expr.name.text} read through a class that extends Date`, expr);
   if (hasRuntimeStatics(info) && !found?.field)
     return {
       kind: "dynKeyGet",
@@ -5549,8 +5739,18 @@ export function lowerStaticFieldRead(
   }
   // `C.name` — the JS-observable class name, a compile-time constant on
   // the direct spelling (tsc rejects user statics named `name`, so the
-  // chain above can never shadow it in TypeScript sources).
+  // chain above can never shadow it in TypeScript sources). A class of an
+  // import cycle reads it from its class object instead, whose reference
+  // checks the class's initialization (checkCycleBindingAccesses).
   if (expr.name.text === "name" && info.def.jsName !== undefined) {
+    if (lowerer.classInitFlags.get(info.def.name)?.cycle === true)
+      return {
+        kind: "libCall",
+        fn: "class.name",
+        args: [classValueRef(lowerer, info, expr.expression)],
+        type: STRING,
+        loc,
+      };
     return { kind: "strLit", value: info.def.jsName, type: STRING, loc };
   }
   if (info.callableBase)
@@ -5724,9 +5924,10 @@ export function lowerClassExpressionInfo(
           decoratorNodesOf(member).length ||
           (!isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
             (ts.isClassStaticBlockDeclaration(member) ||
-              ts
-                .getModifiers(member)
-                ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword))) ||
+              (!ts.isMethodDeclaration(member) &&
+                ts
+                  .getModifiers(member)
+                  ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)))) ||
           (ts.isMethodDeclaration(member) && member.typeParameters?.nodes.length),
       ))
   ) {
@@ -5748,7 +5949,7 @@ export function lowerClassExpressionInfo(
       )?.types?.nodes[0]?.expression;
       if (
         heritage &&
-        (ts.isCallExpression(heritage) ||
+        ((ts.isCallExpression(heritage) && !builtinRequireBaseOf(lowerer, heritage)) ||
           (ts.isIdentifier(heritage) &&
             (lowerer.peekLocal(heritage) ?? lowerer.globalOf(heritage)) != null))
       ) {
@@ -5992,13 +6193,55 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
       loc,
     });
   }
-  return info.localClass
-    ? initializeRuntimeStatics(
-        lowerer,
-        info,
-        value.kind === "classRef" ? { ...value, captures: info.localClass.captureSources } : value,
-      )
-    : value;
+  if (!info.localClass) return value;
+  const classValue = initializeRuntimeStatics(
+    lowerer,
+    info,
+    value.kind === "classRef" ? { ...value, captures: info.localClass.captureSources } : value,
+  );
+  // The base resolves statically here, but Node still evaluates the
+  // heritage expression each time the class definition runs, first.
+  const heritage = heritageWithEffects(expr);
+  if (heritage === undefined) return classValue;
+  return {
+    kind: "seqExpr",
+    stmts: [lowerer.lowerExprStatement(heritage)],
+    result: classValue,
+    type: classValue.type,
+    loc: classValue.loc,
+  };
+}
+
+/** The `extends` expression of `decl` when evaluating it can have effects
+ * (a call, construction, assignment, update, delete, await or yield
+ * outside nested functions). */
+function heritageWithEffects(decl: ts.ClassLikeDeclaration): ts.Expression | undefined {
+  const heritage = decl.heritageClauses?.nodes.find(
+    (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+  )?.types?.nodes[0]?.expression;
+  if (heritage === undefined) return undefined;
+  const effects = (node: ts.Node): boolean => {
+    if (ts.isFunctionLike(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node))
+      return false;
+    if (
+      ts.isCallExpression(node) ||
+      ts.isNewExpression(node) ||
+      ts.isTaggedTemplateExpression(node) ||
+      ts.isDeleteExpression(node) ||
+      ts.isAwaitExpression(node) ||
+      ts.isYieldExpression(node) ||
+      (ts.isPrefixUnaryExpression(node) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken ||
+          node.operator === ts.SyntaxKind.MinusMinusToken)) ||
+      ts.isPostfixUnaryExpression(node) ||
+      (ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+    )
+      return true;
+    return ts.forEachChild(node, (child) => effects(child) || undefined) ?? false;
+  };
+  return effects(heritage) ? heritage : undefined;
 }
 
 /** The EXACT class a receiver expression is statically known to BE (not
@@ -6274,6 +6517,12 @@ function staticCallOn(
   const loc = locOf(call);
   const runtimeStatic = directRuntimeStaticCall(lowerer, call, access, info, throughValue);
   if (runtimeStatic) return runtimeStatic;
+  // Date's statics through a class declared `extends Date`
+  // (`Moment.UTC(...)`), which inherits them.
+  if (dateRootOf(info) && !findStaticOn(lowerer, info, access.name.text)) {
+    const date = lowerDateStaticCall(lowerer, call, access.name.text);
+    if (date) return date;
+  }
   if (
     (hasRuntimeStatics(info) && !findStaticOn(lowerer, info, access.name.text)?.field) ||
     (info.callableBase &&
@@ -6770,14 +7019,22 @@ function thunkAsyncSlot(
 ): void {
   if (overridden.sig.async !== true) return;
   const declarer = overridden.declarer;
+  // The slot answers the body's promise: an untyped async method's `dyn`
+  // result is the promise's payload, so the slot's ABI is that promise. An
+  // async generator method's slot keeps its generator object.
+  const ret: IrType =
+    overridden.sig.gen || overridden.sig.ret.kind === "promise"
+      ? overridden.sig.ret
+      : { kind: "promise", inner: overridden.sig.ret };
   declarer.returnAdapters ??= new Map();
   if (!declarer.returnAdapters.has(mName)) {
     declarer.returnAdapters.set(mName, {
       params: [...overridden.sig.params],
-      ret: overridden.sig.ret,
+      ret,
       async: true,
     });
   }
+  overridden.sig.ret = ret;
   delete overridden.sig.async;
 }
 
@@ -7527,7 +7784,7 @@ function lowerClassCtorInner(lowerer: Lowerer, info: ClassInfo): IrFunction {
         lowerer.ctx.argumentsLocal = local;
       }
       body.push(...declared.prologue);
-      if (!ctorBase && !info.callableBase) {
+      if (!ctorBase && !info.callableBase && !info.extendsDate) {
         // Node's base-class order: field initializers run at the start
         // of construction, the parameter-property assignments open the
         // constructor body (probed — a field initializer reading a
@@ -7539,7 +7796,7 @@ function lowerClassCtorInner(lowerer: Lowerer, info: ClassInfo): IrFunction {
         body.push(...lowerer.lowerDerivedCtorBody(info, thisLocal));
       }
     } else {
-      if (ctorBase || info.callableBase) {
+      if (ctorBase || info.callableBase || info.extendsDate) {
         // Synthetic forwarding params (the inherited ABI signature).
         // Nothing references them by symbol — only the super call below,
         // which forwards the already-completed values UNCHANGED (defaults
@@ -7754,7 +8011,7 @@ export function classIteratorDrainCall(
   const key = `${cit.className}:${typeKey(outElem)}`;
   let name = lowerer.iterDrainHelpers.get(key);
   if (!name) {
-    name = `%iter.drain.${lowerer.iterDrainHelpers.size}`;
+    name = keyedHelperName(lowerer, "%iter.drain", key);
     lowerer.iterDrainHelpers.set(key, name);
     const recvT: IrType = { kind: "object", className: cit.className };
     const recvRef: IrExpr = { kind: "varRef", localId: "r.0", type: recvT, loc };
@@ -7868,7 +8125,7 @@ export function classIteratorRestDrainCall(
   const key = `it:${cit.iterT.className}`;
   let name = lowerer.iterDrainHelpers.get(key);
   if (!name) {
-    name = `%iter.drain.${lowerer.iterDrainHelpers.size}`;
+    name = keyedHelperName(lowerer, "%iter.drain", key);
     lowerer.iterDrainHelpers.set(key, name);
     const itRef: IrExpr = { kind: "varRef", localId: "it.0", type: cit.iterT, loc };
     const outRef: IrExpr = { kind: "varRef", localId: "out.0", type: outT, loc };
@@ -8382,11 +8639,38 @@ function superCallInStatementPosition(call: ts.CallExpression): boolean {
   for (;;) {
     const parent = node.parent;
     if (ts.isExpressionStatement(parent)) return true;
+    if (ts.isIfStatement(parent)) {
+      const lead = superConditionLead(parent.expression);
+      return lead !== null && call.pos >= lead.left.pos && call.end <= lead.left.end;
+    }
     const comma =
       ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.CommaToken;
     if (!comma && !ts.isParenthesizedExpression(parent)) return false;
     node = parent;
   }
+}
+
+/** The comma chain of an `if` condition whose leading operands hold a
+ * super() call (`if (super(), r === 0) throw ...`, as minifiers join a
+ * super statement with the next test), or null. The if statement runs the
+ * chain's left operand as a statement first and tests its right operand,
+ * which is what the comma evaluates. */
+export function superConditionLead(cond: ts.Expression): ts.BinaryExpression | null {
+  let expr = cond;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if (!ts.isBinaryExpression(expr) || expr.operatorToken.kind !== ts.SyntaxKind.CommaToken)
+    return null;
+  const holdsSuperCall = (operand: ts.Expression): boolean => {
+    let e = operand;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    if (ts.isCallExpression(e)) return e.expression.kind === ts.SyntaxKind.SuperKeyword;
+    return (
+      ts.isBinaryExpression(e) &&
+      e.operatorToken.kind === ts.SyntaxKind.CommaToken &&
+      (holdsSuperCall(e.left) || holdsSuperCall(e.right))
+    );
+  };
+  return holdsSuperCall(expr.left) ? expr : null;
 }
 
 /** Super statements initialize the base and then the derived fields on
@@ -8431,12 +8715,14 @@ export function lowerDerivedCtorBody(
         loc,
       },
     ];
-    if (info.callableBase) {
+    if (info.callableBase || info.extendsDate) {
       if (superCall.arguments.nodes.some(ts.isSpreadElement))
         lowerer.unsupported(
           "SC1090",
           superCall,
-          "spreading explicit super arguments into an ordinary constructor",
+          info.extendsDate
+            ? "spreading super arguments into the Date constructor"
+            : "spreading explicit super arguments into an ordinary constructor",
         );
       const pack: IrExpr = {
         kind: "dynArrLit",
@@ -8621,6 +8907,7 @@ export function superCallStmt(
     type: { kind: "object", className: info.def.name },
     loc,
   };
+  if (info.extendsDate) return dateSuperCall(thisRef, info, args[0]!, loc);
   if (info.callableBase)
     return {
       kind: "exprStmt",
@@ -8742,6 +9029,24 @@ export function lowerSuperMethodCall(
   access: ts.PropertyAccessExpression,
 ): IrExpr {
   const cls = lowerer.currentClass;
+  // `super.toISOString()` in a class declared `extends Date`.
+  if (cls?.extendsDate && !cls.base) {
+    const thisL = lowerer.resolveThis();
+    if (!thisL) lowerer.unsupported("SC1080", access);
+    const thisRef: IrExpr = {
+      kind: "varRef",
+      localId: thisL.id,
+      type: thisL.type,
+      loc: locOf(call),
+    };
+    const date = lowerDateSuperMethodCall(lowerer, call, access.name.text, cls, thisRef);
+    if (date) return date;
+    lowerer.unsupported(
+      "SC1090",
+      access,
+      `'super.${access.name.text}' (Date.prototype does not declare it)`,
+    );
+  }
   if (!cls?.base) {
     // tsc rejects super outside derived-class bodies first; defensive.
     lowerer.unsupported("SC1090", access, "'super' outside a derived class");
@@ -8786,6 +9091,17 @@ export function lowerSuperMethodCall(
     // `super.dispatchEvent(e)`, `super.preventDefault()`: the inherited
     // runtime members over this method's own `this` (subclasses cannot
     // override them, so the static answer is the runtime's).
+    if (dateRootOf(cls.base) && isDatePrototypeMethod(access.name.text)) {
+      const thisL = lowerer.resolveThis();
+      if (!thisL) lowerer.unsupported("SC1080", access);
+      const thisRef: IrExpr = {
+        kind: "varRef",
+        localId: thisL.id,
+        type: thisL.type,
+        loc: locOf(call),
+      };
+      return lowerDateSuperMethodCall(lowerer, call, access.name.text, cls.base, thisRef)!;
+    }
     if (eventTargetApiMethod(cls.base, access.name.text)) {
       const thisL = lowerer.resolveThis();
       if (!thisL) lowerer.unsupported("SC1080", access);
@@ -9204,6 +9520,11 @@ function isCollectionOrErrorClass(ref: BuiltinClassRef | null): boolean {
 
 export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
   const loc = locOf(expr);
+  // A dependency's deprecated `new Buffer(...)` fallback (containers/bytes.ts).
+  {
+    const buffer = lowerNodeModulesBufferConstruct(lowerer, expr);
+    if (buffer) return buffer;
+  }
   // new Function(...): Node's EvalError under
   // --disallow-code-generation-from-strings (code-generation.ts).
   if (codeGenerationCalleeOf(lowerer, expr.expression) === "Function")
@@ -10344,7 +10665,7 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
       const key = `x509.record:${isBytes ? "bytes" : "str"}`;
       let helper = lowerer.valueHelpers.get(key);
       if (!helper) {
-        helper = `%x509.record.${lowerer.valueHelpers.size}`;
+        helper = keyedHelperName(lowerer, "%x509.record", key);
         lowerer.valueHelpers.set(key, helper);
         const dataT = data.type;
         const dRef: IrExpr = { kind: "varRef", localId: "d.0", type: dataT, loc };

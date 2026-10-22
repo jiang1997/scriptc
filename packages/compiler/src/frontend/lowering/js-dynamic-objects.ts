@@ -21,6 +21,7 @@
  * files only, and an empty answer leaves every mapping unchanged, so
  * TypeScript programs and JavaScript that never uses these patterns
  * compile exactly as before. */
+import { keyedHelperName } from "./stable-names.js";
 import * as ts from "../ts7/adapter.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { BOOL, DYN, type IrExpr, type IrStmt } from "../../ir/ir.js";
@@ -215,10 +216,10 @@ export function lowerValueReturningConstructorNew(
       "spread arguments when constructing a class whose constructor returns a value",
     );
   }
-  const key = `ctorValue:${ts.getSourceFileOfNode(decl).fileName}:${ts.tokenStartOfNode(decl)}`;
+  const key = `ctorValue:${lowerer.positions.of(decl)}`;
   let name = lowerer.valueHelpers.get(key);
   if (name === undefined) {
-    name = `%ctorValue.${lowerer.valueHelpers.size}`;
+    name = keyedHelperName(lowerer, "%ctorValue", key);
     lowerer.valueHelpers.set(key, name);
     const savedClass = lowerer.currentClass;
     lowerer.currentClass = null;

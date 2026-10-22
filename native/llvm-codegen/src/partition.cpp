@@ -359,7 +359,34 @@ std::optional<ProgramPartitions> partitionProgramText(StringRef Text,
     } else if (Line.front() == '@') {
       Symbol S;
       S.Header = Line;
-      if (!parseGlobal(Line, S) || !Add(std::move(S)))
+      if (!parseGlobal(Line, S))
+        return std::nullopt;
+      // The emitter writes an interface dispatch table one element per
+      // line: the definition opens its aggregate initializer at the end of
+      // the line, and a line that is only the closing bracket ends it.
+      StringRef Opening = Line.rtrim();
+      if (S.Kind == SymbolKind::Variable &&
+          (Opening.ends_with(" [") || Opening.ends_with(" {"))) {
+        StringRef Close = Opening.back() == '[' ? "]" : "}";
+        size_t Cursor = Next;
+        while (true) {
+          if (Cursor >= Text.size())
+            return std::nullopt;
+          size_t LineEnd = Text.find('\n', Cursor);
+          if (LineEnd == StringRef::npos)
+            LineEnd = Text.size();
+          StringRef Element = Text.slice(Cursor, LineEnd);
+          if (Element == Close) {
+            S.Body = Text.slice(Next, LineEnd);
+            Next = LineEnd + 1;
+            break;
+          }
+          if (!Element.starts_with("  "))
+            return std::nullopt;
+          Cursor = LineEnd + 1;
+        }
+      }
+      if (!Add(std::move(S)))
         return std::nullopt;
     } else if (Line.starts_with("declare ")) {
       Symbol S;

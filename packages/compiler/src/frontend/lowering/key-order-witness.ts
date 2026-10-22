@@ -23,10 +23,12 @@
  *  - any other construction (synthesized builtin results, opaque runtime
  *    producers) pins today's table;
  *  - checked conversions from dynamic values (typed JSON.parse, values
- *    from JavaScript) pin today's table: the record-source table keeps
- *    their own key order relative to it, and another table would make
- *    values parsed in today's order keep a source view. Their order is
- *    unknown, so a copy out of such a shape cannot be ordered statically;
+ *    from JavaScript) contribute nothing: the record-source table keeps
+ *    their own key order relative to the chosen table. A shape only they
+ *    build keeps today's table, since another table would make values
+ *    parsed in today's order keep a source view; a shape object literals
+ *    also build takes the literals' order. Their order is unknown, so a
+ *    copy out of such a shape cannot be ordered statically;
  *  - a write to an optional key that may be absent appends it in Node. A
  *    key no construction creates ("late-only") goes after every key a
  *    construction can create; any other moving write goes after every key.
@@ -56,8 +58,10 @@ export type KeyOrderSegment =
   | { kind: "opaque" };
 
 /** Witness notes the lowering attaches to the IR nodes it builds. Keyed by
- * node identity, so nodes a speculative lowering discards are never walked,
- * and a node some later pass rebuilds falls back to pinning. */
+ * node identity, so nodes a speculative lowering discards are never walked.
+ * Literals the IR rewriters rebuild (traverse.ts mapExprChildren) carry
+ * their notes over (follow); a node rebuilt any other way falls back to
+ * pinning. */
 export class KeyOrderNotes {
   private readonly literals = new Map<IrExpr, KeyOrderSegment[]>();
   private readonly copies = new Map<IrExpr, string>();
@@ -75,6 +79,15 @@ export class KeyOrderNotes {
   copy(node: IrExpr, sourceShapeId: string): IrExpr {
     this.copies.set(node, sourceShapeId);
     return node;
+  }
+
+  /** A pass rebuilt `from` as `to` (traverse.ts mapExprChildren): the
+   * rebuilt literal is the same construction, so it keeps the witness. */
+  follow(from: IrExpr, to: IrExpr): void {
+    const segments = this.literals.get(from);
+    if (segments !== undefined) this.literals.set(to, segments);
+    const source = this.copies.get(from);
+    if (source !== undefined) this.copies.set(to, source);
   }
 
   observe(type: IrType): void {
@@ -388,8 +401,13 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
   // A checked conversion builds values in their source's own order, which
   // the record-source table reproduces relative to the shape's table. A new
   // table would make every value parsed in today's order keep a source
-  // view, so such shapes keep today's table.
-  for (const f of facts.values()) if (f.runtime) f.pinned = true;
+  // view, so a shape only checked conversions build keeps today's table.
+  // A shape the program also builds with object literals takes their order:
+  // the literal's values have no other way to enumerate in it, and values
+  // parsed from JSON those literals wrote (a message sent to a child or
+  // another service of the program) arrive in it too. Parsed values in any
+  // other order keep a source view, exactly as before.
+  for (const f of facts.values()) if (f.runtime && f.literals.length === 0) f.pinned = true;
 
   // Nothing to choose: every witness agrees with today's table and no
   // optional key is written late.

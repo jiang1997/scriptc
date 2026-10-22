@@ -1,6 +1,7 @@
 /* Array literals. */
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, neverTaintedJsType } from "../lowerer.js";
+import { notIterableSpelling } from "../iterable-spelling.js";
 import {
   BOOL,
   DYN,
@@ -182,6 +183,21 @@ export function lowerArrayLiteral(
         );
         if (arms.length === 1) mapped = arms[0]!;
       }
+    }
+    // A NON-EMPTY literal whose own type is an array, under a union with
+    // exactly one array arm and no tuple arm (`[1, { n: true }]` in a
+    // `Json[]` arm of a recursive `Json`): the checker types each element
+    // from the arm, so its object literals lower as the arm's elements,
+    // and the literal's own element type (`number | { n: boolean }`)
+    // cannot hold them. Build it as the arm; its value only flows into the
+    // union slot.
+    if (ctxUnion && expr.elements.nodes.length > 0 && mapped?.kind === "array") {
+      const def = lowerer.unions.get(ctxUnion.unionId);
+      const arrayArms = def?.arms.filter((a) => a.kind === "array") ?? [];
+      const tupleArms =
+        def?.arms.filter((a) => a.kind === "record" && !!lowerer.shapes.get(a.shapeId)?.tuple) ??
+        [];
+      if (arrayArms.length === 1 && tupleArms.length === 0) mapped = arrayArms[0]!;
     }
   }
   // A Date's toJSON() element keeps its null in a literal with no declared
@@ -457,12 +473,23 @@ export function lowerArrayLiteral(
           type.elem.kind === "bool" ||
           searchParamsSource)
       ) {
-        src = lowerer.coerceInto(el.expression, checkedIteratorPack(lowerer, src, locOf(el)), type);
+        src = lowerer.coerceInto(
+          el.expression,
+          checkedIteratorPack(lowerer, src, notIterableSpelling(el.expression), locOf(el)),
+          type,
+        );
       }
       // A same-family array whose ELEMENT lifts (string[] into a
       // (string | symbol)[] literal — per-element wrap/width copy):
       // the interned width helper reshapes before the spread copies.
-      if (src.type.kind === "array" && !typeEquals(src.type, type)) {
+      // A fixed TUPLE (`[...FILES]` with FILES typed `[string, string,
+      // string]`) spreads its positions in order: the width helper copies
+      // the tuple's fields into an array of the literal's element type.
+      if (
+        (src.type.kind === "array" ||
+          (src.type.kind === "record" && lowerer.shapes.get(src.type.shapeId)?.tuple === true)) &&
+        !typeEquals(src.type, type)
+      ) {
         const w = lowerer.widthCoerce(src, type);
         if (w) src = w;
       }
@@ -682,8 +709,10 @@ function lowerTupleSpreadLiteral(
   return { kind: "seqExpr", stmts, result: { kind: "recordLit", fields, type, loc }, type, loc };
 }
 
-/** Drain using checked dispatch so native class and generator iterators keep their methods. */
-function checkedIteratorPack(lowerer: Lowerer, source: IrExpr, loc: SrcLoc): IrExpr {
+/** Drain using checked dispatch so native class and generator iterators keep their methods.
+ * `spell` is the TypeError message for a source that is not iterable
+ * (notIterableSpelling). */
+function checkedIteratorPack(lowerer: Lowerer, source: IrExpr, spell: string, loc: SrcLoc): IrExpr {
   const name = "%iterator.pack.checked";
   if (!lowerer.liftedFns.some((fn) => fn.name === name)) {
     const ref = (id: string): IrExpr => ({ kind: "varRef", localId: id, type: DYN, loc });
@@ -696,14 +725,20 @@ function checkedIteratorPack(lowerer: Lowerer, source: IrExpr, loc: SrcLoc): IrE
     });
     lowerer.liftedFns.push({
       name,
-      params: [{ localId: "source", name: "source", type: DYN }],
+      params: [
+        { localId: "source", name: "source", type: DYN },
+        { localId: "spell", name: "spell", type: STRING },
+      ],
       returnType: DYN,
-      locals: ["source", "iterator", "step", "result"].map((id) => ({
-        id,
-        name: id,
-        type: DYN,
-        mutable: id !== "source",
-      })),
+      locals: [
+        ...["source", "iterator", "step", "result"].map((id) => ({
+          id,
+          name: id,
+          type: DYN,
+          mutable: id !== "source",
+        })),
+        { id: "spell", name: "spell", type: STRING, mutable: false },
+      ],
       body: [
         {
           kind: "varDecl",
@@ -711,7 +746,7 @@ function checkedIteratorPack(lowerer: Lowerer, source: IrExpr, loc: SrcLoc): IrE
           init: {
             kind: "libCall",
             fn: "dyn.iterator",
-            args: [ref("source"), { kind: "strLit", value: "value", type: STRING, loc }],
+            args: [ref("source"), { kind: "varRef", localId: "spell", type: STRING, loc }],
             type: DYN,
             loc,
           },
@@ -767,5 +802,11 @@ function checkedIteratorPack(lowerer: Lowerer, source: IrExpr, loc: SrcLoc): IrE
       loc,
     });
   }
-  return { kind: "call", callee: name, args: [source], type: DYN, loc };
+  return {
+    kind: "call",
+    callee: name,
+    args: [source, { kind: "strLit", value: spell, type: STRING, loc }],
+    type: DYN,
+    loc,
+  };
 }

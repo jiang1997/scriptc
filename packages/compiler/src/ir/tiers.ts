@@ -72,6 +72,7 @@ const DYN_KIND_TESTS: ReadonlySet<string> = new Set([
   "dyn.nativeMapIs",
   "dyn.nativeUrlIs",
   "dyn.nativeDateIs",
+  "dyn.nativeDateHandleIs",
   "dyn.nativeRegexIs",
   "dyn.dataViewIs",
   "dyn.typeof",

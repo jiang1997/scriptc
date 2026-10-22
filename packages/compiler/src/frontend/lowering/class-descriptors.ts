@@ -177,7 +177,7 @@ export function lowerClassDataDescriptor(
 
 function descriptorGuard(lowerer: Lowerer, info: ClassInfo, loc: SrcLoc): string {
   const name = `%descriptorGuard:${info.def.name}`;
-  const existing = lowerer.liftedFns.find((fn) => fn.name === name);
+  const existing = lowerer.liftedFnNamed(name);
   const key = varRef("key", DYN, loc);
   const fields = new Set<string>();
   const collect = (owner: ClassInfo): void => {

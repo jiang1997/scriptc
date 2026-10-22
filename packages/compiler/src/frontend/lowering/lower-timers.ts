@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { dynUndefinedExpr, numLit, varRef } from "../../ir/build.js";
 import * as ts from "../ts7/adapter.js";
 import { isJsSourceFile } from "../program.js";
@@ -55,7 +56,7 @@ export function adaptZeroArgTimerCallback(
     const toT: IrType = { kind: "func", params: [], ret: VOID };
     const key = `timer.dropret:${typeKey(fromT)}`;
     const existing = lowerer.arrHofHelpers.get(key);
-    const name = existing ?? `%timer.dropret.${lowerer.arrHofHelpers.size}`;
+    const name = existing ?? keyedHelperName(lowerer, "%timer.dropret", key);
     if (!existing) {
       lowerer.arrHofHelpers.set(key, name);
       lowerer.liftedFns.push(
@@ -117,7 +118,7 @@ export function adaptZeroArgTimerCallback(
   const toT: IrType = { kind: "func", params: [], ret: VOID };
   const key = `timer.droparg:${typeKey(fromT)}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%timer.droparg.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%timer.droparg", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     lowerer.liftedFns.push(
@@ -203,7 +204,7 @@ function makeTimerArgsThunk(
   const toT: IrType = { kind: "func", params: [], ret: VOID };
   const key = `timer.argsthunk:${n}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%timer.argsthunk.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%timer.argsthunk", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     const impl = `${name}.impl`;
@@ -393,10 +394,22 @@ function lowerTimerCall(
           );
     // An omitted delay is NaN, Node's undefined: the loop clamps it to
     // 1ms, and mock.timers queues it to run at the next tick.
-    const ms: IrExpr =
+    let ms: IrExpr =
       expr.arguments.nodes.length >= 2
         ? lowerer.lowerExpr(expr.arguments.nodes[1]!)
         : { kind: "numLit", value: NaN, type: F64, loc };
+    // A delay that may be a boolean (execa's `forceKillAfterTimeout = true`
+    // default flowing on to setTimeout): Node converts it with ToNumber
+    // (`after *= 1`).
+    if (ms.type.kind === "bool" || hasBoolArm(lowerer, ms.type)) {
+      ms = {
+        kind: "libCall",
+        fn: "dyn.numberConstructor",
+        args: [lowerer.coerceToExpected(ms, DYN)],
+        type: F64,
+        loc,
+      };
+    }
     if (member === "setInterval") {
       return { kind: "libCall", fn: "timers.setInterval", args: [cb, ms], type: F64, loc };
     }
@@ -509,4 +522,11 @@ function lowerTimerCall(
     return { kind: "libCall", fn: "timers.clearImmediate", args: [handle], type: VOID, loc };
   }
   return null;
+}
+
+function hasBoolArm(lowerer: Lowerer, type: IrType): boolean {
+  return (
+    type.kind === "union" &&
+    (lowerer.unions.get(type.unionId)?.arms.some((arm) => arm.kind === "bool") ?? false)
+  );
 }

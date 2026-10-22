@@ -667,7 +667,7 @@ static void scr_regex_defer_metadata(ScrArr *row, ScrDyn *source, int index) {
 
 /* The pending match source of a result, or NULL once its metadata exists. */
 static ScrRegexMatchSource *scr_regex_pending(const ScrArr *a) {
-  const ScrDyn *metadata = a->ext ? a->ext->metadata : NULL;
+  const ScrDyn *metadata = scr_arr_ext_of(a) ? scr_arr_ext_of(a)->metadata : NULL;
   if (!metadata || metadata->kind != SCR_DYN_HANDLE || metadata->v.handle.tag != SCR_DYNH_MATCH_SOURCE)
     return NULL;
   return metadata->v.handle.ptr;
@@ -691,7 +691,8 @@ static ScrDyn *scr_regex_groups_of(const ScrArr *a, uint8_t *bc) {
   const char *name = groupnames;
   for (int k = 1; k < capture_count; k++) {
     size_t length = strlen(name);
-    bool matched = (size_t)k < a->len && (size_t)k < a->cap && a->present[k] == SCR_ARR_VALUE;
+    bool matched = (size_t)k < a->len && (size_t)k < a->cap &&
+                   *scr_arr_state_ptr(a, (size_t)k) == SCR_ARR_VALUE;
     /* ES2025 duplicates sit in distinct alternatives: at most one
      * participates, and it wins over an earlier undefined. */
     if (length && (matched || !scr_dyn_obj_get(groups, name, length)))
@@ -706,7 +707,7 @@ static ScrDyn *scr_regex_groups_of(const ScrArr *a, uint8_t *bc) {
 static void scr_regex_materialize_metadata(ScrArr *a) {
   ScrRegexMatchSource *src = scr_regex_pending(a);
   if (!src) return;
-  ScrArrExt *x = a->ext;
+  ScrArrExt *x = scr_arr_ext_of(a);
   ScrDyn *source = x->metadata;
   ScrDyn *props = scr_dyn_new_obj();
   scr_dyn_obj_set(props, "index", 5, scr_dyn_new_num(x->match_index));
@@ -723,7 +724,7 @@ static bool scr_regex_copy_pending_metadata(ScrArr *a, ScrDyn *target) {
     scr_regex_materialize_metadata(a);
     return false;
   }
-  scr_dyn_arr_named_put(target, "index", 5, scr_dyn_new_num(a->ext->match_index));
+  scr_dyn_arr_named_put(target, "index", 5, scr_dyn_new_num(scr_arr_ext_of(a)->match_index));
   scr_dyn_arr_named_put(target, "input", 5, scr_regex_source_input(src));
   scr_dyn_arr_named_put(target, "groups", 6, scr_regex_groups_of(a, scr_regex_bc(src->re)));
   return true;
@@ -733,11 +734,11 @@ ScrDyn *scr_regex_result_prop(ScrArr *a, ScrStr *key) {
   ScrRegexMatchSource *src = scr_regex_pending(a);
   if (src) {
     if (key->len == 5 && memcmp(key->data, "index", 5) == 0)
-      return scr_dyn_new_num(a->ext->match_index);
+      return scr_dyn_new_num(scr_arr_ext_of(a)->match_index);
     if (key->len == 5 && memcmp(key->data, "input", 5) == 0) return scr_regex_source_input(src);
     scr_regex_materialize_metadata(a);
   }
-  ScrDyn *metadata = a->ext ? a->ext->metadata : NULL;
+  ScrDyn *metadata = scr_arr_ext_of(a) ? scr_arr_ext_of(a)->metadata : NULL;
   ScrDyn *value = metadata ? scr_dyn_obj_get(metadata, key->data, key->len) : NULL;
   return scr_dyn_retain(value ? value : scr_dyn_undefined());
 }
@@ -803,7 +804,7 @@ static uint64_t scr_regex_mask_bits(double mask) {
  * present undefined (SCR_RE_NO_SPAN when lazy), a lazy capture of an ASCII
  * subject is a span word, and every other capture a fresh string. */
 static inline void scr_regex_fill_slot(const ScrRegexInput *input, uint64_t *data,
-                                       uint8_t *present, int k, uint64_t mask, uint64_t lazy,
+                                       uint8_t *states, int k, uint64_t mask, uint64_t lazy,
                                        bool spans) {
   const uint8_t *cs = input->capture[2 * k], *ce = input->capture[2 * k + 1];
   bool deferred = k < 64 && (lazy >> k & 1);
@@ -820,7 +821,7 @@ static inline void scr_regex_fill_slot(const ScrRegexInput *input, uint64_t *dat
     state = SCR_ARR_VALUE;
   }
   data[k] = word;
-  present[k] = state;
+  *scr_arr_state_in(states, (size_t)k) = state;
 }
 
 /* re.exec(s): a fresh string[] of [whole match, ...captures], or NULL
@@ -851,29 +852,29 @@ static ScrArr *scr_regex_exec_core(ScrStr *s, ScrRegex *re, uint64_t mask, bool 
      * they stay in registers across the slot stores. */
     size_t n = (size_t)count + spans;
     uint64_t *data = out->data;
-    uint8_t *present = out->present;
+    uint8_t *states = scr_arr_states_end(out);
     if (count <= 64) {
       /* Captures neither selected nor lazy are present undefined with a
        * zero payload; only the selected and lazy ones need a decision. */
       memset(data, 0, (size_t)count * sizeof *data);
-      memset(present, SCR_ARR_UNDEFINED, (size_t)count);
+      memset(states - count, SCR_ARR_UNDEFINED, (size_t)count);
       uint64_t visit = mask | lazy;
       if (count < 64) visit &= (UINT64_C(1) << count) - 1;
       while (visit) {
         int k = __builtin_ctzll(visit);
         visit &= visit - 1;
-        scr_regex_fill_slot(&input, data, present, k, mask, lazy, spans);
+        scr_regex_fill_slot(&input, data, states, k, mask, lazy, spans);
       }
     } else {
       for (int k = 0; k < count; k++)
-        scr_regex_fill_slot(&input, data, present, k, mask, lazy, spans);
+        scr_regex_fill_slot(&input, data, states, k, mask, lazy, spans);
     }
     if (spans) {
       data[count] = (uint64_t)(uintptr_t)scr_str_retain(s);
-      present[count] = SCR_ARR_VALUE;
+      *scr_arr_state_in(states, count) = SCR_ARR_VALUE;
     }
     size_t filled = 0;
-    while (filled < n && present[filled] == SCR_ARR_VALUE) filled++;
+    while (filled < n && *scr_arr_state_in(states, filled) == SCR_ARR_VALUE) filled++;
     out->filled = (uint32_t)filled;
     out->len = n;
     if (metadata) {
@@ -904,14 +905,14 @@ static bool scr_regex_group_bytes(const ScrArr *m, double k, const char **p, siz
   /* Array lengths stay below 2^53, so signed conversions are exact. */
   if (!(k >= 0 && k < (double)(int64_t)m->len)) return false;
   size_t i = (size_t)(int64_t)k;
-  if (m->present[i] == SCR_ARR_VALUE) {
+  if (*scr_arr_state_ptr(m, i) == SCR_ARR_VALUE) {
     const ScrStr *str = (const ScrStr *)(uintptr_t)m->data[i];
     *p = str->data;
     *n = str->len;
     return true;
   }
   uint64_t span = m->data[i];
-  if (m->present[i] != SCR_ARR_UNDEFINED || span == SCR_RE_NO_SPAN) return false;
+  if (*scr_arr_state_ptr(m, i) != SCR_ARR_UNDEFINED || span == SCR_RE_NO_SPAN) return false;
   const ScrStr *subject = (const ScrStr *)(uintptr_t)m->data[m->len - 1];
   *p = subject->data + (span >> 32);
   *n = (size_t)((span & UINT32_MAX) - (span >> 32));
@@ -1045,21 +1046,22 @@ static ScrArr *scr_regex_match_all_core(ScrStr *s, ScrRegex *re, ScrArr *indices
      * directly, then the hole-free prefix is the run of captures from 0. */
     ScrArr *row = scr_arr_new_inline(SCR_ELEM_STR, (size_t)capture_count);
     uint64_t *data = row->data;
-    uint8_t *present = row->present;
+    uint8_t *states = scr_arr_states_end_w(row, 8);
     for (int k = 0; k < capture_count; k++) {
       const uint8_t *cs = capture[2 * k], *ce = capture[2 * k + 1];
       if (cs == NULL || ce == NULL) {
         data[k] = 0;
-        present[k] = SCR_ARR_UNDEFINED;
+        *scr_arr_state_in(states, (size_t)k) = SCR_ARR_UNDEFINED;
       } else {
         ScrStr *text =
             scr_regex_span(&input, scr_capture_index(&input, cs), scr_capture_index(&input, ce));
         data[k] = (uint64_t)(uintptr_t)text;
-        present[k] = SCR_ARR_VALUE;
+        *scr_arr_state_in(states, (size_t)k) = SCR_ARR_VALUE;
       }
     }
     size_t filled = 0;
-    while (filled < (size_t)capture_count && present[filled] == SCR_ARR_VALUE) filled++;
+    while (filled < (size_t)capture_count && *scr_arr_state_in(states, filled) == SCR_ARR_VALUE)
+      filled++;
     row->filled = (uint32_t)filled;
     row->len = (size_t)capture_count;
     if (source) scr_regex_defer_metadata(row, source, start);
@@ -2781,6 +2783,24 @@ static ScrDyn *scr_native_regex_invoke(void *ptr, ScrDyn *self, const char *meth
     bool matches = scr_regex_test(re, subject);
     scr_str_release(subject);
     return scr_exc_pending() ? NULL : scr_dyn_new_bool(matches);
+  }
+  if (strcmp(method, "exec") == 0) {
+    /* The match array: each capture (undefined when it did not
+     * participate), then index, input and groups; null without a match.
+     * The exec itself reads and advances lastIndex. */
+    ScrStr *subject = scr_dyn_string_coerce_js(argc ? args[0] : scr_dyn_undefined());
+    if (!subject) return NULL;
+    ScrArr *row = scr_regex_exec(subject, re);
+    scr_str_release(subject);
+    if (!row) return scr_exc_pending() ? NULL : scr_dyn_new_null();
+    ScrDyn *match = scr_dyn_new_arr();
+    for (size_t k = 0; k < row->len; k++)
+      scr_dyn_arr_push(match, *scr_arr_state_ptr(row, k) == SCR_ARR_VALUE
+                                  ? scr_dyn_new_str((ScrStr *)(uintptr_t)row->data[k])
+                                  : scr_dyn_retain(scr_dyn_undefined()));
+    scr_arr_copy_metadata(row, match);
+    scr_arr_release(row);
+    return match;
   }
   static const char message[] = "Native RegExp method has no lowering";
   scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");

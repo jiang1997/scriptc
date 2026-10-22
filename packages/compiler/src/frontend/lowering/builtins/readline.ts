@@ -353,7 +353,8 @@ function lowerPromptArg(lowerer: Lowerer, node: ts.Expression): { value: IrExpr;
  * - on/once/addListener for 'line' ((input: string) or no parameters),
  *   'error' ((err: Error) or no parameters), 'history' ((history:
  *   string[]) or no parameters), and 'close'/'pause'/'resume'/'SIGINT'/
- *   'SIGTSTP'/'SIGCONT' (no parameters), as statements.
+ *   'SIGTSTP'/'SIGCONT' (no parameters); as an expression the call yields
+ *   the interface, so registrations chain.
  * Everything else the lib declares fences member-qualified. Null for
  * non-Interface receivers. */
 export function lowerReadlineMethodCall(
@@ -505,14 +506,19 @@ export function lowerReadlineMethodCall(
         `${RL_EVENT_LIST} are the supported readline events`,
       );
     }
-    if (!ts.isExpressionStatement(call.parent)) {
-      lowerer.unsupported(
-        "SC1090",
-        call,
-        "chaining readline listener registration (register each listener as its own statement)",
-      );
-    }
-    const recv = receiver();
+    // As an expression (`rl.on("line", f).on("close", g)`), the call
+    // registers the listener and yields the interface, as Node's on() does.
+    const recvLocal = ts.isExpressionStatement(call.parent)
+      ? undefined
+      : lowerer.declareHiddenLocal("%readlineListener", F64);
+    const saved: IrStmt[] =
+      recvLocal === undefined
+        ? []
+        : [{ kind: "varDecl", localId: recvLocal.id, init: receiver(), loc }];
+    const recv: IrExpr =
+      recvLocal === undefined
+        ? receiver()
+        : { kind: "varRef", localId: recvLocal.id, type: F64, loc };
     const cb = lowerer.lowerExpr(args[1]!);
     const want =
       event === "line"
@@ -547,11 +553,19 @@ export function lowerReadlineMethodCall(
               : `'${event}' listeners with parameters or a return value (use ())`,
       );
     }
-    return {
+    const register: IrExpr = {
       kind: "libCall",
       fn: "rl.on",
       args: [recv, numLit(ev, loc), cb, boolLit(name === "once", loc)],
       type: VOID,
+      loc,
+    };
+    if (recvLocal === undefined) return register;
+    return {
+      kind: "seqExpr",
+      stmts: [...saved, { kind: "exprStmt", expr: register, loc }],
+      result: { kind: "varRef", localId: recvLocal.id, type: F64, loc },
+      type: F64,
       loc,
     };
   }

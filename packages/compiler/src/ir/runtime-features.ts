@@ -8,98 +8,163 @@ import {
   RUNTIME_STREAM_CLASSES,
 } from "./ir.js";
 import { everyModuleNode } from "./traverse.js";
+import { JsIcSites, hasJsIcSite } from "./js-ic.js";
+
+const DYN_BUFFER_NUM_METHODS: ReadonlySet<string> = new Set(
+  ["read", "write"].flatMap((rw) => [
+    ...["UInt", "Uint"].flatMap((u) =>
+      ["8", "16LE", "16BE", "32LE", "32BE"].map((w) => `${rw}${u}${w}`),
+    ),
+    ...[
+      "Int8",
+      "Int16LE",
+      "Int16BE",
+      "Int32LE",
+      "Int32BE",
+      "FloatLE",
+      "FloatBE",
+      "DoubleLE",
+      "DoubleBE",
+    ].map((n) => `${rw}${n}`),
+  ]),
+);
+
+/** Buffer.prototype members scr_bytes_dyn.c refuses on Buffer receivers. */
+const DYN_BUFFER_REFUSED_METHODS: readonly string[] = [
+  ...["read", "write"].flatMap((rw) => [
+    ...["UIntLE", "UIntBE", "UintLE", "UintBE", "IntLE", "IntBE"].map((n) => `${rw}${n}`),
+    ...["BigUInt64", "BigUint64", "BigInt64"].flatMap((n) => [`${rw}${n}LE`, `${rw}${n}BE`]),
+  ]),
+  ...["ascii", "base64", "base64url", "latin1", "hex", "ucs2", "utf8"].flatMap((enc) => [
+    `${enc}Slice`,
+    `${enc}Write`,
+  ]),
+  "inspect",
+];
+
+/** The scr_bytes_dyn.c entry, one per method family, that a checked-dynamic
+ * call of a Buffer.prototype method name routes to: the fixed-width reads and
+ * writes (both "UInt" and "Uint" spellings), write, fill, toString, the
+ * searches, and the other Buffer-only members. Each runs the method on a
+ * Buffer receiver and gives any other receiver the ordinary dispatch. */
+export const DYN_BUFFER_METHODS: ReadonlyMap<string, string> = new Map([
+  ...[...DYN_BUFFER_NUM_METHODS].map((m): [string, string] => [m, "scr_dyn_invoke_buffer_num"]),
+  ["write", "scr_dyn_invoke_buffer_write"],
+  ["fill", "scr_dyn_invoke_buffer_fill"],
+  ["toString", "scr_dyn_invoke_buffer_to_string"],
+  ...["indexOf", "lastIndexOf", "includes"].map((m): [string, string] => [
+    m,
+    "scr_dyn_invoke_buffer_search",
+  ]),
+  ...[
+    "toJSON",
+    "equals",
+    "compare",
+    "copy",
+    "swap16",
+    "swap32",
+    "swap64",
+    ...DYN_BUFFER_REFUSED_METHODS,
+  ].map((m): [string, string] => [m, "scr_dyn_invoke_buffer"]),
+]);
 
 const DYN_ASYNC_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // DEP0040 rides the dyn-async unit's warning machinery.
-  "punycode.warn",
-  "fs.callbackValue",
-  "fs.callbackCall",
-  "fs.callbackGlob",
   "async.awaitDyn",
-  "timers.immediatePromise",
+  // The child property table adopts thenables through the dyn-async unit.
+  "child.propsInstall",
+  "child.propsResolve",
   "crypto.native",
+  // The crypto global's object extends crypto.native's.
+  "webcrypto.object",
   "dyn.promiseAll",
   "dyn.promiseAllSettled",
   "dyn.promiseAny",
   "dyn.promiseResolve",
-  "process.onUncaughtException",
-  "process.offUncaughtException",
-  "process.onUnhandledRejection",
-  "process.offUnhandledRejection",
-  "process.onRejectionHandled",
-  "process.offRejectionHandled",
-  "process.onWarning",
-  "process.offWarning",
+  "fs.callbackCall",
+  "fs.callbackGlob",
+  "fs.callbackValue",
+  "process.deprecationFlag",
   "process.emitWarning",
   "process.emitWarningText",
-  "process.deprecationFlag",
+  "process.offRejectionHandled",
+  "process.offUncaughtException",
+  "process.offUnhandledRejection",
+  "process.offWarning",
+  "process.onRejectionHandled",
+  "process.onUncaughtException",
+  "process.onUnhandledRejection",
+  "process.onWarning",
   "process.setDeprecationFlag",
   "process.setEmitWarning",
+  "punycode.warn",
+  "timers.immediatePromise",
   // The performance timeline (scr_perf.c, linked with this unit for its
   // MaxPerformanceEntryBufferExceededWarning).
-  "perf.mark",
-  "perf.measure",
-  "perf.entries",
   "perf.clearMarks",
   "perf.clearMeasures",
-  "perf.entryName",
-  "perf.entryType",
-  "perf.entryStart",
-  "perf.entryDuration",
+  "perf.entries",
   "perf.entryDetail",
+  "perf.entryDuration",
   "perf.entryKeep",
+  "perf.entryName",
   "perf.entryRef",
+  "perf.entryStart",
+  "perf.entryType",
+  "perf.mark",
+  "perf.measure",
   // Blob and File (scr_blob.c, linked with this unit, which boxes their
   // reads as dyn promises).
-  "blob.new",
+  "als.disable",
+  "als.enterWith",
+  "als.exitRun",
+  "als.get",
+  "als.new",
+  "als.run",
+  "blob.arrayBuffer",
+  "blob.bytes",
   "blob.fileNew",
+  "blob.is",
+  "blob.new",
   "blob.slice",
   "blob.text",
-  "blob.bytes",
-  "blob.arrayBuffer",
-  "blob.is",
-  "util.styleText",
-  "util.inherits",
-  "util.deprecate",
-  "util.callbackify",
-  "util.debuglog",
-  "als.new",
-  "als.get",
-  "als.run",
-  "als.exitRun",
-  "als.enterWith",
-  "als.disable",
   "dc.chanBindStore",
-  "dc.chanUnbindStore",
   "dc.chanRunStores",
+  "dc.chanUnbindStore",
+  "util.callbackify",
+  "util.promisifyDyn",
+  "util.debuglog",
+  "util.deprecate",
+  "util.inherits",
+  "util.styleText",
 ]);
 
 /** The libCalls that enter AsyncLocalStorage stores (RuntimeFeatures
  * asyncContext). */
 const ASYNC_CONTEXT_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "als.run",
-  "als.exitRun",
   "als.enterWith",
+  "als.exitRun",
+  "als.run",
   "dc.chanBindStore",
   "dc.chanRunStores",
   // getTestContext() reads the test runner's entry in the same snapshot.
-  "test.hasContext",
   "test.context",
+  "test.hasContext",
 ]);
 
 const LEGACY_URL_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "url.legacyParse",
-  "url.legacyFormat",
-  "url.legacyResolve",
   "url.domainToASCII",
   "url.domainToUnicode",
+  "url.legacyFormat",
+  "url.legacyParse",
+  "url.legacyResolve",
 ]);
 
 const UTIL_CALLABLE_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "util.inherits",
-  "util.deprecate",
   "util.callbackify",
   "util.debuglog",
+  "util.deprecate",
+  "util.inherits",
 ]);
 
 /** Entry points that link the regex unit: the regex and glob matchers (fs.glob's walk compiles its patterns with the glob matcher), and readline's terminal unit (scr_readline_tty.c), which measures with the regex unit's stripVTControlCharacters. */
@@ -167,13 +232,15 @@ const STREAM_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.addAbortSignalFn",
   "stream.destroy",
   "stream.destroyErr",
-  "stream.errored",
-  "stream.prop",
   "stream.dynNative",
+  "stream.dynNativePipe",
+  "stream.errored",
   "stream.pipeDyn",
-  "stream.unpipeDyn",
+  "stream.prop",
   "stream.stdioWritable",
   "stream.unboxDyn",
+  "stream.handleStream",
+  "stream.unpipeDyn",
   "stream.workerStdio",
 ]);
 
@@ -208,20 +275,22 @@ const READABLE_DYN_ASYNC_PREFIXES: readonly string[] = ["readable.fromGen", "rea
 
 /** Entry points that link the dyn-invoke unit. */
 const DYN_INVOKE_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "stream.dynNative",
-  "stream.pipeDyn",
-  "stream.unpipeDyn",
   "dyn.arrayProtoCall",
   "dyn.arrayPrototype",
   "dyn.builtinFunction",
   "dyn.builtinMethod",
   "dyn.defineProperty",
+  "child.propsDefine",
   "dyn.defineProps",
   "dyn.definePrototypeProps",
   "dyn.functionApply",
   "dyn.globalConstructor",
   "dyn.objCreateWithProperties",
   "dyn.objectTag",
+  "stream.dynNative",
+  "stream.dynNativePipe",
+  "stream.pipeDyn",
+  "stream.unpipeDyn",
 ]);
 
 /** Member names whose constant-key dynamic reads answer the inherited Object.prototype member through the dyn-invoke unit. Mirrors expr-dynamic.ts INHERITED_OBJECT_MEMBERS (the IR layer does not import the backend). */
@@ -256,8 +325,8 @@ const CHILD_PROCESS_LIB_PREFIXES: readonly string[] = ["child.", "cp.", "spawnRe
 const BUILTIN_CLASS_LIB_FNS: readonly IrLibFn[] = [
   "dyn.builtinClass",
   // the stream classes, through scr_dyn_builtin_stream.c
-  "dyn.builtinStreamClass",
   "dyn.builtinInstanceOf",
+  "dyn.builtinStreamClass",
   "dyn.functionInstanceOf",
 ];
 
@@ -319,6 +388,8 @@ interface TypeTables {
   records: Map<string, IrRecordShape>;
   unions: Map<string, IrUnionDef>;
   classes: Map<string, IrClassDef>;
+  /** mentionsDgramSocket's carriers, computed on first use. */
+  dgramCarriers?: DgramCarriers;
 }
 
 /** Whether boxing a value of type `t` as dyn boxes a promise, which goes
@@ -382,67 +453,139 @@ function boxesPromise(t: IrType, tables: TypeTables, seen: Set<string>): boolean
   }
 }
 
+/** The record shapes, unions and classes whose values carry a dgram socket
+ * (directly or through other members), computed once per module. */
+interface DgramCarriers {
+  records: Set<string>;
+  unions: Set<string>;
+  anyClass: boolean;
+}
+
+/** Whether `t` carries a dgram socket, given the carrier sets so far:
+ * structural through functions (parameters and result), promises and
+ * collections; named records, unions and class instances by the sets. */
+function carriesDgram(t: IrType, carriers: DgramCarriers): boolean {
+  switch (t.kind) {
+    case "dgramSocket":
+      return true;
+    case "func":
+      return t.params.some((p) => carriesDgram(p, carriers)) || carriesDgram(t.ret, carriers);
+    case "promise":
+      return carriesDgram(t.inner, carriers);
+    case "array":
+    case "set":
+      return carriesDgram(t.elem, carriers);
+    case "map":
+      return carriesDgram(t.key, carriers) || carriesDgram(t.value, carriers);
+    case "record":
+      return carriers.records.has(t.shapeId);
+    case "union":
+      return carriers.unions.has(t.unionId);
+    case "object":
+      // Any class may be the instance's runtime class or one of its bases.
+      return carriers.anyClass;
+    default:
+      return false;
+  }
+}
+
+/** The module's dgram carriers: a fixpoint over its records, unions and
+ * class fields. */
+function dgramCarriers(tables: TypeTables): DgramCarriers {
+  const carriers: DgramCarriers = { records: new Set(), unions: new Set(), anyClass: false };
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [id, shape] of tables.records)
+      if (!carriers.records.has(id) && shape.fields.some((f) => carriesDgram(f.type, carriers))) {
+        carriers.records.add(id);
+        changed = true;
+      }
+    for (const [id, def] of tables.unions)
+      if (!carriers.unions.has(id) && def.arms.some((a) => carriesDgram(a, carriers))) {
+        carriers.unions.add(id);
+        changed = true;
+      }
+    if (
+      !carriers.anyClass &&
+      [...tables.classes.values()].some((c) => c.fields.some((f) => carriesDgram(f.type, carriers)))
+    ) {
+      carriers.anyClass = true;
+      changed = true;
+    }
+  }
+  return carriers;
+}
+
+/** Whether converting a value of type `t` to or from dyn converts a dgram
+ * socket, which goes through scr_dgram_dyn.c: the socket itself, or a
+ * function, collection, record, union, promise or class instance that
+ * carries one (boxed functions convert their parameters too). */
+function mentionsDgramSocket(t: IrType, tables: TypeTables): boolean {
+  tables.dgramCarriers ??= dgramCarriers(tables);
+  return carriesDgram(t, tables.dgramCarriers);
+}
+
 /** The libCall fns served by the OPTIONAL events unit (scr_events.c):
  * process signal/exit listeners and the piped-stdin surface. */
 const PROCESS_EVENT_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
-  "process.stdio",
-  "process.onSignal",
+  "process.offExit",
   "process.offSignal",
   "process.onExit",
-  "process.offExit",
+  "process.onSignal",
+  "process.stdio",
+  "stdin.nextChunk",
   "stdin.onData",
   "stdin.onEnd",
   "stdin.onError",
-  "stdin.nextChunk",
   // node:readline rides the stdin unit (scr_readline.c links beside
   // scr_events.c under the same gate).
+  "rl.checkCompleter",
+  "rl.checkOptions",
+  "rl.close",
   "rl.create",
   "rl.createSignal",
-  "rl.question",
-  "rl.questionAsync",
-  "rl.questionAsyncSignal",
-  "rl.questionDyn",
-  "rl.questionAsyncDyn",
-  "rl.questionAsyncSignalDyn",
-  "rl.close",
-  "rl.pause",
-  "rl.resume",
-  "rl.prompt",
-  "rl.promptWith",
-  "rl.setPrompt",
-  "rl.setPromptDyn",
-  "rl.getPrompt",
-  "rl.write",
-  "rl.writeKey",
-  "rl.on",
-  "rl.iterOpen",
-  "rl.iterNext",
-  "rl.iterReturn",
-  "rl.checkOptions",
-  "rl.checkCompleter",
-  "rl.setOptions",
-  "rl.setHistory",
-  "rl.history",
-  "rl.numProp",
-  "rl.terminal",
-  "rl.line",
-  "rl.isTerminal",
-  "rl.isPromises",
   "rl.cursor",
-  "rl.seq",
-  "rl.moves",
   "rl.cursorPos",
+  "rl.getPrompt",
+  "rl.history",
+  "rl.isPromises",
+  "rl.isTerminal",
+  "rl.iterNext",
+  "rl.iterOpen",
+  "rl.iterReturn",
   "rl.keypressStdin",
   "rl.keypressStream",
-  "stdin.onKeypress",
-  "rl.uiOpen",
-  "rl.uiOpenStream",
-  "rl.uiCursorTo",
-  "rl.uiMoveCursor",
+  "rl.line",
+  "rl.moves",
+  "rl.numProp",
+  "rl.on",
+  "rl.pause",
+  "rl.prompt",
+  "rl.promptWith",
+  "rl.question",
+  "rl.questionAsync",
+  "rl.questionAsyncDyn",
+  "rl.questionAsyncSignal",
+  "rl.questionAsyncSignalDyn",
+  "rl.questionDyn",
+  "rl.resume",
+  "rl.seq",
+  "rl.setHistory",
+  "rl.setOptions",
+  "rl.setPrompt",
+  "rl.setPromptDyn",
+  "rl.terminal",
   "rl.uiClearLine",
   "rl.uiClearScreenDown",
-  "rl.uiRollback",
   "rl.uiCommit",
+  "rl.uiCursorTo",
+  "rl.uiMoveCursor",
+  "rl.uiOpen",
+  "rl.uiOpenStream",
+  "rl.uiRollback",
+  "rl.write",
+  "rl.writeKey",
+  "stdin.onKeypress",
 ]);
 
 /** The legacy http2.* libCalls implemented by scr_http.c/scr_tls.c (the
@@ -483,7 +626,9 @@ const NET_PREFIXES: readonly string[] = ["net.", "http.", "tls.", "https.", "htt
 
 /** One rule per runtime feature, sorted by name. A new feature is an
  * entry here and its line in noRuntimeFeatures; RuntimeFeatures, the scan
- * and its early exit derive from this table. */
+ * and its early exit derive from this table. The lists above keep one
+ * entry per line, sorted within each commented group, so changes that add
+ * different entries touch different lines. */
 const RUNTIME_FEATURE_RULES = {
   assert: rule({ prefixes: ["assert."] }),
   /** The program enters AsyncLocalStorage stores (store.run, enterWith,
@@ -505,8 +650,9 @@ const RUNTIME_FEATURE_RULES = {
   }),
   /** scr_cipher.c over the mbedTLS archive; DEP0182 reports through the
    * process-warning unit, and unknown output encodings render through the
-   * inspect unit. */
-  cipher: rule({ fns: ["crypto.cipherNew"] }),
+   * inspect unit. WebCrypto's encrypt and decrypt (scr_webcrypto_aes.c)
+   * link the same archive. */
+  cipher: rule({ fns: ["crypto.cipherNew", "webcrypto.encrypt", "webcrypto.decrypt"] }),
   copying: rule({
     expr: (node, _tables) =>
       (node.kind === "arrIntrinsic" && COPYING_ARR_METHODS.has(node.method)) ||
@@ -515,6 +661,14 @@ const RUNTIME_FEATURE_RULES = {
   dc: rule({ prefixes: ["dc."] }),
   /** dns.lookup lives in the dgram unit. */
   dgram: rule({ prefixes: ["dgram.", "dns."], types: ["dgramSocket"] }),
+  /** A dgram socket converts to or from an untyped value (its handle box,
+   * a boxed function or record that carries one): scr_dgram_dyn.c over
+   * the dgram unit. */
+  dgramDyn: rule({
+    expr: (node, tables) =>
+      (node.kind === "dynFrom" && mentionsDgramSocket(node.value.type, tables())) ||
+      (node.kind === "dynCheck" && mentionsDgramSocket(node.type, tables())),
+  }),
   /** node:dns/promises: scr_dns_promises.c over the dgram unit. */
   dnsPromises: rule({ fns: ["dns.promisesLookup", "dns.promisesLookupService"] }),
   dynAsync: rule({
@@ -523,14 +677,18 @@ const RUNTIME_FEATURE_RULES = {
       mod.functions.some(
         (fn) => fn.async === true && fn.generator === undefined && fn.returnType.kind === "dyn",
       ),
-    // The legacy url functions and crypto.createCipheriv emit their
-    // deprecation warnings through the dyn-async unit; scr_wasm.c boxes its
-    // handles and promises through it.
+    // The legacy url functions, crypto.createCipheriv and
+    // ecdh.setPublicKey emit their deprecation warnings through the
+    // dyn-async unit (WebCrypto's encrypt and decrypt link scr_cipher.c
+    // too); scr_wasm.c boxes its handles and promises through it.
     fns: [
       ...DYN_ASYNC_LIB_FNS,
       ...READABLE_DYN_ASYNC_LIB_FNS,
       ...LEGACY_URL_LIB_FNS,
       "crypto.cipherNew",
+      "webcrypto.encrypt",
+      "webcrypto.decrypt",
+      "crypto.ecdhNew",
     ],
     prefixes: [...READABLE_DYN_ASYNC_PREFIXES, "wasm."],
     expr: (node, tables) =>
@@ -554,7 +712,12 @@ const RUNTIME_FEATURE_RULES = {
   dynBuiltinStream: rule({ fns: ["dyn.builtinStreamClass"] }),
   dynInvoke: rule({
     initial: (mod) => mod.workers === true,
-    fns: [...DYN_INVOKE_LIB_FNS, ...UTIL_CALLABLE_LIB_FNS, ...BUILTIN_CLASS_LIB_FNS],
+    fns: [
+      ...DYN_INVOKE_LIB_FNS,
+      ...UTIL_CALLABLE_LIB_FNS,
+      ...BUILTIN_CLASS_LIB_FNS,
+      "util.promisifyDyn",
+    ],
     // Constant-key reads of Object.prototype member names answer the
     // inherited member through scr_dyn_invoke.c.
     expr: (node, _tables) =>
@@ -568,9 +731,26 @@ const RUNTIME_FEATURE_RULES = {
   dynTier: rule({ prefixes: ["js."] }),
   /** Checked-dynamic stream slots test values and pipe into JavaScript
    * stream objects (scr_stream_dyn.c). */
-  streamDyn: rule({ fns: ["stream.dynNative", "stream.pipeDyn", "stream.unpipeDyn"] }),
+  streamDyn: rule({
+    fns: ["stream.dynNative", "stream.dynNativePipe", "stream.pipeDyn", "stream.unpipeDyn"],
+  }),
+  /** Own properties JavaScript adds to children (scr_dyn_handle_props.c). */
+  handleProps: rule({ fns: ["child.propsInstall"] }),
+  /** for await over checked-dynamic values (scr_dyn_for_await.c). */
+  dynForAwait: rule({ fns: ["dyn.asyncIteratorOpen", "dyn.asyncIteratorWasSync"] }),
+  /** Buffer.prototype methods called on checked-dynamic values
+   * (scr_bytes_dyn.c). */
+  dynBuffer: rule({
+    expr: (node, _tables) => node.kind === "dynInvoke" && DYN_BUFFER_METHODS.has(node.method),
+  }),
+  /** Builtin functions read as values (scr_builtin_values.c). */
+  builtinValues: rule({ fns: ["buffer.byteLenValue", "buffer.allocValue", "fs.realpathValue"] }),
   /** The stream unit emits through the emitter unit, also when the
    * program constructs no stream (a pipeline of functions). */
+  /** scr_ecdh.c over the mbedTLS archive; DEP0031 reports through the
+   * process-warning unit, and unknown encodings and formats render through
+   * the inspect unit. */
+  ecdh: rule({ fns: ["crypto.ecdhNew", "crypto.ecdhConvertKey"] }),
   emitter: rule({
     initial: (mod) =>
       mod.workers === true || (mod.classes ?? []).some((c) => c.name === RUNTIME_EMITTER_CLASS),
@@ -614,6 +794,10 @@ const RUNTIME_FEATURE_RULES = {
       "global.native",
       "util.styleText",
       "crypto.cipherNew",
+      "webcrypto.encrypt",
+      "webcrypto.decrypt",
+      "crypto.ecdhNew",
+      "crypto.ecdhConvertKey",
       ...BUILTIN_CLASS_LIB_FNS,
       ...UTIL_CALLABLE_LIB_FNS,
     ],
@@ -694,6 +878,10 @@ const RUNTIME_FEATURE_RULES = {
   }),
   tls: rule({ prefixes: ["tls.", "https.", "http2."], types: ["secureCtx"] }),
   tlsCa: rule({ prefixes: ["tlsca."] }),
+  /** util.promisify over an untyped function (scr_util_promisify.c): its
+   * promises go through the dyn-async unit and its calls through the
+   * dyn-invoke unit. */
+  utilPromisify: rule({ fns: ["util.promisifyDyn"] }),
   /** process.emitWarning is assigned (process.setEmitWarning). */
   warningReplace: rule({ fns: ["process.setEmitWarning"] }),
   /** The WebAssembly API (scr_wasm.c). */
@@ -723,25 +911,27 @@ function noRuntimeFeatures(): RuntimeFeatures {
     copying: false,
     dc: false,
     dgram: false,
+    dgramDyn: false,
     dnsPromises: false,
     dynAsync: false,
     dynBuiltinClass: false,
     dynBuiltinStream: false,
     dynInvoke: false,
     dynTier: false,
+    ecdh: false,
     emitter: false,
     eventTarget: false,
     eventsOnceSignal: false,
     fetch: false,
     fileHandle: false,
     fsWatch: false,
-    netLookup: false,
-    http: false,
     http2: false,
+    http: false,
     inspect: false,
     legacyTextDecoder: false,
     mockTimers: false,
     net: false,
+    netLookup: false,
     nodeTest: false,
     parseArgs: false,
     perfLoop: false,
@@ -752,9 +942,14 @@ function noRuntimeFeatures(): RuntimeFeatures {
     stdioExtended: false,
     stream: false,
     streamDyn: false,
+    handleProps: false,
+    dynForAwait: false,
+    dynBuffer: false,
+    builtinValues: false,
     symbol: false,
     tls: false,
     tlsCa: false,
+    utilPromisify: false,
     warningReplace: false,
     wasm: false,
     webcrypto: false,
@@ -821,6 +1016,12 @@ function scanRuntimeFeatures(mod: IrModule, stopAt?: RuntimeFeatureName): Runtim
     return keepGoing();
   };
   if (keepGoing()) everyModuleNode(mod, { expr, stmt: keepGoing, type });
+  // Inline-cache sites of dynamic-tier functions use the tier's shapes
+  // (scr_js_object.c, with the SCR_JS_TIER build of scr_json.c).
+  if (!features.dynTier && mod.functions.some((fn) => fn.tier === "dynamic")) {
+    const sites = new JsIcSites(mod);
+    features.dynTier = mod.functions.some((fn) => fn.tier === "dynamic" && hasJsIcSite(fn, sites));
+  }
   return features;
 }
 
@@ -1085,9 +1286,9 @@ export function moduleUsesTlsCa(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "tlsCa").tlsCa;
 }
 
-/** True when the module has dynamic-tier jsval operations: the link switch
- * for the scr_js_* runtime units (two-tier design I3). Programs without
- * them never link a scr_js_ symbol. */
+/** True when the module has dynamic-tier jsval operations or inline-cache
+ * sites: the link switch for the scr_js_* runtime units (two-tier design
+ * I3). Programs without them never link a scr_js_ symbol. */
 export function moduleUsesDynTier(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "dynTier").dynTier;
 }

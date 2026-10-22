@@ -1,3 +1,4 @@
+import { isErrorPrototypeValue } from "./class-prototypes.js";
 import * as ts from "../ts7/adapter.js";
 import { literalValues } from "../literal-values.js";
 import { isJsSourceFile } from "../program.js";
@@ -377,6 +378,8 @@ export function collectClassMethodMutations(
         node.initializer.kind !== ts.SyntaxKind.MissingDeclaration
       )
         markTarget(node.initializer, node);
+      if (ts.isPropertyAccessExpression(node) && isErrorPrototypeValue(lowerer, node))
+        lowerer.errorPrototypeValues = true;
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
         const base = unwrap(node.expression);
         const prototype =

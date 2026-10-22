@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { boolLit, countedFor, numLit, varRef } from "../../../ir/build.js";
 import { transformStmtList } from "../../../ir/traverse.js";
 import type { ScrDiagnostic } from "../../../diagnostics/diagnostic.js";
@@ -28,9 +29,12 @@ import {
 import { isJsSourceFile, locOf } from "../../program.js";
 import {
   type SortKeyOrder,
+  type SortKeyRead,
   buildArraySortFn,
   buildSortKeyFn,
   closureKeyOrder,
+  sortKeysId,
+  sortKeysOrder,
 } from "../lower-array-sort.js";
 import {
   arrayIndexPresent,
@@ -503,7 +507,7 @@ function arrayHofHelper(
   const key = `${method}:${typeKey(elem)}:${typeKey(fnRet)}:${arity}:${typeKey(outElem)}${site}${fastT ? ":split" : ""}${present ? ":present" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%arr.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   lowerer.arrHofInfo.set(name, { method, elem, fnRet, arity, outElem, present, split: !!fastT });
   const fn = buildArrayHofFn(
@@ -616,7 +620,7 @@ function arrayUnionHofHelper(
   const key = `union:${method}:${receiverT.unionId}:${typeKey(callbackT)}:${typeKey(resultT)}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.union.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%arr.union", key);
   lowerer.arrHofHelpers.set(key, name);
   const receiver = varRef("a.0", receiverT, loc);
   const callback = varRef("f.0", callbackT, loc);
@@ -1155,7 +1159,7 @@ function findResultRetag(
 /** The find-like predicate results whose ToBoolean has a static answer:
  * bool passes through; f64/string by value; checked values and
  * truthy-answerable unions by their runtime kind or arm. */
-function findPredicateOk(lowerer: Lowerer, fnRet: IrType): boolean {
+export function findPredicateOk(lowerer: Lowerer, fnRet: IrType): boolean {
   return (
     fnRet.kind === "bool" ||
     fnRet.kind === "f64" ||
@@ -1171,7 +1175,7 @@ function findPredicateOk(lowerer: Lowerer, fnRet: IrType): boolean {
 /** ToBoolean of a predicate result inside a synthesized HOF helper — the
  * ensureBool subset the find-like path admits (bool through; checked
  * values via dynTest; f64/string/truthy-answerable unions via toBool). */
-function predicateToBoolean(e: IrExpr): IrExpr {
+export function predicateToBoolean(e: IrExpr): IrExpr {
   if (e.type.kind === "bool") return e;
   if (e.type.kind === "dyn")
     return { kind: "dynTest", test: "truthy", value: e, type: BOOL, loc: e.loc };
@@ -1201,7 +1205,7 @@ function findHelper(
   const key = `${method}:${typeKey(elem)}:${typeKey(resultT)}:${typeKey(fnRet)}:${arity}${site}${present ? ":present" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%arr.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   const arrT = arrayOf(elem);
   const valueT = callbackValueType(lowerer, elem, present);
@@ -1301,7 +1305,7 @@ function findIndexHelper(
   const key = `${method}:${typeKey(elem)}:${typeKey(fnRet)}:${arity}${site}${fastT ? ":split" : ""}${present ? ":present" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%arr.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   if (!last)
     lowerer.arrHofInfo.set(name, {
@@ -1385,7 +1389,7 @@ function someEveryHelper(
   const key = `${method}:${typeKey(elem)}:${typeKey(fnRet)}:${arity}${site}${fastT ? ":split" : ""}${present ? ":present" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%arr.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   lowerer.arrHofInfo.set(name, {
     method,
@@ -1584,7 +1588,7 @@ function flatMapHelper(
   const key = `flatMap:${typeKey(elem)}:${typeKey(fnRet)}:${arity}${site}${fastT ? ":split" : ""}${present ? ":present" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.flatMap.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%arr.flatMap", key);
   lowerer.arrHofHelpers.set(key, name);
   lowerer.arrHofInfo.set(name, {
     method: "flatMapArray",
@@ -1826,7 +1830,7 @@ function reduceHelper(
   const key = `${method}:${typeKey(elem)}:${typeKey(accT)}:${typeKey(fnRet)}:${arity}:${hasInit ? "init" : "seed"}${site}${fastT ? ":split" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%arr.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   if (method === "reduce")
     lowerer.arrHofInfo.set(name, {
@@ -2112,11 +2116,13 @@ export function lowerArraySortCall(
     elem,
     elem.kind === "union" ? lowerer.unions.get(elem.unionId)?.arms : undefined,
   );
-  const keyed = native ? recognizedSortKey(lowerer, fnArg, elem) : null;
-  const key = `${method}:${typeKey(elem)}:${arity}${native ? ":native" : ""}${keyed ? `:keyed${keyed.order}${keyed.read ? ":field" : ""}` : ""}`;
+  const keyed = native ? recognizedSortKeys(lowerer, fnArg, elem) : null;
+  const reads = keyed?.every((k) => k.read !== null) ? keyed.map((k) => k.read!) : null;
+  const order = keyed ? sortKeysOrder(keyed) : 0;
+  const key = `${method}:${typeKey(elem)}:${arity}${native ? ":native" : ""}${keyed ? `:keyed${order}${reads ? `:field${reads.length}` : ""}` : ""}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%arr.${method}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const undefinedTag = elem.kind === "union" ? lowerer.armTag(elem.unionId, UNDEFINED_T) : -1;
     lowerer.liftedFns.push(
@@ -2128,41 +2134,46 @@ export function lowerArraySortCall(
         undefinedTag >= 0 ? undefinedTag : null,
         loc,
         native,
-        keyed && { order: keyed.order, key: keyed.read !== null },
+        keyed && { order, key: reads !== null, keys: keyed.length },
       ),
     );
   }
   const args = [receiver, fnArg];
-  if (keyed?.read) args.push(sortKeyReader(lowerer, elem, keyed.read, loc));
+  if (reads) args.push(sortKeyReader(lowerer, elem, reads, loc));
   return { kind: "call", callee: helper, args, type: arrT, loc };
 }
 
-/** The key order of a capture-free comparator closure the runtime can sort
- * by without calling it: over number elements, or over one number field
- * of record or class elements. */
-function recognizedSortKey(lowerer: Lowerer, fnArg: IrExpr, elem: IrType): SortKeyOrder | null {
+/** The keys of a capture-free comparator closure the runtime can sort by
+ * without calling it: number elements themselves, or number fields of
+ * record or class elements (one or several). */
+function recognizedSortKeys(
+  lowerer: Lowerer,
+  fnArg: IrExpr,
+  elem: IrType,
+): readonly SortKeyOrder[] | null {
   const keyed = closureKeyOrder(lowerer.liftedFns, fnArg);
   if (!keyed) return null;
-  if (keyed.read === null) return elem.kind === "f64" ? keyed : null;
+  if (keyed[0]!.read === null) return elem.kind === "f64" ? keyed : null;
   return elem.kind === "record" || elem.kind === "object" ? keyed : null;
 }
 
-/** A zero-capture closure over the shared `(x) => x.field` key reader. */
+/** A zero-capture closure over the shared key reader of these reads
+ * (buildSortKeyFn): `(x) => x.field`, or `(x, j) => key j` for several. */
 function sortKeyReader(
   lowerer: Lowerer,
   elem: IrType,
-  read: NonNullable<SortKeyOrder["read"]>,
+  reads: readonly SortKeyRead[],
   loc: SrcLoc,
 ): IrExpr {
-  const owner = read.kind === "recordGet" ? read.shapeId : read.className;
-  const cacheKey = `sortKey:${typeKey(elem)}:${read.kind}:${owner}:${read.field}`;
+  const cacheKey = `sortKey:${typeKey(elem)}:${sortKeysId(reads.map((read) => ({ order: 1, read })))}`;
   let reader = lowerer.arrHofHelpers.get(cacheKey);
   if (!reader) {
-    reader = `%arr.sortKey.${lowerer.arrHofHelpers.size}`;
+    reader = keyedHelperName(lowerer, "%arr.sortKey", cacheKey);
     lowerer.arrHofHelpers.set(cacheKey, reader);
-    lowerer.liftedFns.push(buildSortKeyFn(reader, elem, read, loc));
+    lowerer.liftedFns.push(buildSortKeyFn(reader, elem, reads, loc));
   }
-  return { kind: "closure", fnName: reader, captures: [], type: funcOf([elem], F64), loc };
+  const params = reads.length > 1 ? [elem, F64] : [elem];
+  return { kind: "closure", fnName: reader, captures: [], type: funcOf(params, F64), loc };
 }
 
 /** `d.filter(pred)` on a dyn receiver: the receiver must BE a dyn array
@@ -2298,7 +2309,7 @@ function dynFlatMapHelper(lowerer: Lowerer, elemT: IrType, arity: number, loc: S
   const key = `dynflatmap:${typeKey(elemT)}:${arity}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%dyn.flatmap.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%dyn.flatmap", key);
   lowerer.arrHofHelpers.set(key, name);
   lowerer.liftedFns.push(buildDynFlatMapFn(name, elemT, arity, loc));
   return name;
@@ -2471,7 +2482,7 @@ function dynFilterHelper(lowerer: Lowerer, elemT: IrType, arity: number, loc: Sr
   const key = `dynfilter:${typeKey(elemT)}:${arity}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%dyn.filter.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%dyn.filter", key);
   lowerer.arrHofHelpers.set(key, name);
   lowerer.liftedFns.push(buildDynFilterFn(name, elemT, arity, loc));
   return name;
@@ -2666,7 +2677,7 @@ export function lowerTuplePredicateCall(
   const key = `tuple.${method}:${typeKey(receiver.type)}:${typeKey(fnArg.type)}:${typeKey(resultT)}:${arity}${callbackSite(fnArg)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%tuple.${method}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%tuple.${method}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const v = varRef("v.0", elem, loc);
     const out = varRef("out.0", resultT, loc);

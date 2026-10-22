@@ -4,6 +4,9 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1 /* sched_getaffinity */
+#endif
 #include "scr_mailbox.h"
 
 #include <errno.h>
@@ -17,13 +20,23 @@
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sched.h>
 #endif
+#endif
+
+/* Event kinds below this have their queued events counted (scr_mailbox_count_kind). */
+#define SCR_MAILBOX_COUNTED_KINDS 16u
 
 struct ScrMailbox {
   atomic_size_t references;
   ScrMailEvent *head;
   ScrMailEvent **tail;
   bool closed;
+  size_t queued[SCR_MAILBOX_COUNTED_KINDS]; /* under the lock */
+  /* head != NULL || closed, written under the lock, read without it by
+   * scr_mailbox_wait's spin. */
+  atomic_bool ready;
 #ifdef _WIN32
   SRWLOCK lock;
   CONDITION_VARIABLE condition;
@@ -158,8 +171,13 @@ bool scr_mailbox_post(ScrMailbox *mailbox, ScrMailEvent *event) {
   event->next = NULL;
   *mailbox->tail = event;
   mailbox->tail = &event->next;
-  scr_mailbox_signal(mailbox);
+  if (event->kind < SCR_MAILBOX_COUNTED_KINDS) mailbox->queued[event->kind]++;
+  atomic_store_explicit(&mailbox->ready, true, memory_order_release);
   scr_mailbox_unlock(mailbox);
+  /* Signaled after the unlock: a woken or spinning taker then finds the
+   * lock free instead of sleeping on it until this thread's signal ends.
+   * The caller's reference keeps the mailbox alive. */
+  scr_mailbox_signal(mailbox);
   return true;
 }
 
@@ -169,9 +187,11 @@ ScrMailEvent *scr_mailbox_take(ScrMailbox *mailbox) {
   if (event) {
     mailbox->head = event->next;
     event->next = NULL;
+    if (event->kind < SCR_MAILBOX_COUNTED_KINDS) mailbox->queued[event->kind]--;
   }
   if (!mailbox->head) {
     mailbox->tail = &mailbox->head;
+    atomic_store_explicit(&mailbox->ready, mailbox->closed, memory_order_relaxed);
     scr_mailbox_drain(mailbox);
   }
   scr_mailbox_unlock(mailbox);
@@ -187,9 +207,11 @@ ScrMailEvent *scr_mailbox_take_kind(ScrMailbox *mailbox, unsigned kind, uint64_t
     *slot = event->next;
     if (mailbox->tail == &event->next) mailbox->tail = slot;
     event->next = NULL;
+    if (event->kind < SCR_MAILBOX_COUNTED_KINDS) mailbox->queued[event->kind]--;
   }
   if (!mailbox->head) {
     mailbox->tail = &mailbox->head;
+    atomic_store_explicit(&mailbox->ready, mailbox->closed, memory_order_relaxed);
     scr_mailbox_drain(mailbox);
   }
   scr_mailbox_unlock(mailbox);
@@ -199,6 +221,7 @@ ScrMailEvent *scr_mailbox_take_kind(ScrMailbox *mailbox, unsigned kind, uint64_t
 void scr_mailbox_close(ScrMailbox *mailbox) {
   scr_mailbox_lock(mailbox);
   mailbox->closed = true;
+  atomic_store_explicit(&mailbox->ready, true, memory_order_release);
   scr_mailbox_signal(mailbox);
   scr_mailbox_unlock(mailbox);
 }
@@ -210,8 +233,91 @@ bool scr_mailbox_pending(ScrMailbox *mailbox) {
   return pending;
 }
 
+unsigned scr_mailbox_head_kind(ScrMailbox *mailbox) {
+  scr_mailbox_lock(mailbox);
+  unsigned kind = mailbox->head ? mailbox->head->kind : 0;
+  scr_mailbox_unlock(mailbox);
+  return kind;
+}
+
+size_t scr_mailbox_count_kind(ScrMailbox *mailbox, unsigned kind) {
+  scr_mailbox_lock(mailbox);
+  size_t count = kind < SCR_MAILBOX_COUNTED_KINDS ? mailbox->queued[kind] : 0;
+  scr_mailbox_unlock(mailbox);
+  return count;
+}
+
+/* A taker that finds the mailbox empty spins this long before it blocks.
+ * Replies between threads usually arrive within a few microseconds, and a
+ * blocked taker pays a sleep and a wakeup for each one. */
+#ifndef SCR_MAILBOX_SPIN_NS
+#define SCR_MAILBOX_SPIN_NS 20000
+#endif
+
+static inline void scr_mailbox_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  __asm__ volatile("yield");
+#endif
+}
+
+static uint64_t scr_mailbox_now_ns(void) {
+#ifdef _WIN32
+  static LARGE_INTEGER frequency;
+  if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+  LARGE_INTEGER count;
+  QueryPerformanceCounter(&count);
+  return (uint64_t)((double)count.QuadPart * 1e9 / (double)frequency.QuadPart);
+#else
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+#endif
+}
+
+/* The number of CPUs this process may run on, read once. */
+static int scr_mailbox_cpus(void) {
+  static atomic_int cached;
+  int cpus = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (cpus) return cpus;
+#if defined(_WIN32)
+  DWORD_PTR process, system;
+  cpus = GetProcessAffinityMask(GetCurrentProcess(), &process, &system)
+             ? __builtin_popcountll((unsigned long long)process)
+             : 1;
+#elif defined(__linux__)
+  cpu_set_t set;
+  cpus = sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : 1;
+#else
+  long online = sysconf(_SC_NPROCESSORS_ONLN);
+  cpus = online > 0 ? (int)online : 1;
+#endif
+  if (cpus < 1) cpus = 1;
+  atomic_store_explicit(&cached, cpus, memory_order_relaxed);
+  return cpus;
+}
+
+/* Whether an event arrives (or the mailbox closes) within the spin, or
+ * within `milliseconds` when that is shorter. A process limited to one CPU
+ * never spins: the poster cannot run while the taker spins. */
+static bool scr_mailbox_spin(ScrMailbox *mailbox, double milliseconds) {
+  if (SCR_MAILBOX_SPIN_NS == 0 || scr_mailbox_cpus() < 2) return false;
+  uint64_t spin = SCR_MAILBOX_SPIN_NS;
+  if (milliseconds * 1e6 < (double)spin) spin = (uint64_t)(milliseconds * 1e6);
+  uint64_t end = scr_mailbox_now_ns() + spin;
+  for (;;) {
+    for (int i = 0; i < 64; i++) {
+      if (atomic_load_explicit(&mailbox->ready, memory_order_acquire)) return true;
+      scr_mailbox_relax();
+    }
+    if (scr_mailbox_now_ns() >= end) return false;
+  }
+}
+
 void scr_mailbox_wait(ScrMailbox *mailbox, double milliseconds) {
   if (!(milliseconds > 0)) return;
+  if (scr_mailbox_spin(mailbox, milliseconds)) return;
   scr_mailbox_lock(mailbox);
   if (!mailbox->head && !mailbox->closed) {
 #ifdef _WIN32

@@ -23,7 +23,7 @@ static bool copying_elem_is_ref(ScrElemKind kind) {
 
 static ScrArr *copying_arr_new_like(const ScrArr *a, size_t cap) {
   ScrArr *out = a->elem == SCR_ELEM_REF
-                    ? scr_arr_new_ops(a->ops, cap ? cap : 1)
+                    ? scr_arr_new_ops(scr_arr_ops(a), cap ? cap : 1)
                     : scr_arr_new(a->elem, cap ? cap : 1);
   out->len = cap;
   return out;
@@ -35,7 +35,7 @@ static uint64_t copying_arr_retain_slot(const ScrArr *a, uint64_t slot) {
   if (a->elem == SCR_ELEM_STR) p = scr_str_retain((ScrStr *)p);
   else if (a->elem == SCR_ELEM_ARR) p = scr_arr_retain((ScrArr *)p);
   else if (a->elem == SCR_ELEM_BYTES) p = scr_bytes_retain((ScrBytes *)p);
-  else p = a->ops->retain(p);
+  else p = scr_arr_ops(a)->retain(p);
   return copying_slot_from_ptr(p);
 }
 

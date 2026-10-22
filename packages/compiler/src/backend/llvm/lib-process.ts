@@ -60,12 +60,13 @@ export function emitChildProcessLibCall(host: LlvmEmitterContext, e: LibCallExpr
     if (e.fn === "cp.spawnDynamic") host.emitPendingCheck();
     return out;
   }
-  if (e.fn === "child.onDyn") {
+  if (e.fn === "child.onDyn" || e.fn === "child.propsOnDyn") {
     const child = host.emitExpr(e.args[0]!);
     const event = host.emitExpr(e.args[1]!);
     const cb = host.emitExpr(e.args[2]!);
-    host.declare("declare void @scr_child_on_dyn(ptr, ptr, ptr)");
-    B.line(`call void @scr_child_on_dyn(ptr ${child.name}, ptr ${event.name}, ptr ${cb.name})`);
+    const sym = e.fn === "child.onDyn" ? "scr_child_on_dyn" : "scr_child_on_dyn_hp";
+    host.declare(`declare void @${sym}(ptr, ptr, ptr)`);
+    B.line(`call void @${sym}(ptr ${child.name}, ptr ${event.name}, ptr ${cb.name})`);
     host.emitPendingCheck();
     return { name: "", type: e.type };
   }
@@ -852,7 +853,7 @@ export function emitErrorsEventsLibCall(host: LlvmEmitterContext, e: LibCallExpr
     host.emitPendingCheck();
     return { name: t, type: e.type };
   }
-  if (e.fn === "emitter.emitFlex") {
+  if (e.fn === "emitter.emitFlex" || e.fn === "emitter.emitAny") {
     const args = e.args.map((a) => host.emitExpr(a));
     const n = args.length - 2;
     let payload = "null";
@@ -866,10 +867,57 @@ export function emitErrorsEventsLibCall(host: LlvmEmitterContext, e: LibCallExpr
       }
       payload = arr;
     }
-    host.declare(`declare zeroext i1 @scr_emitter_emit_flex(ptr, ptr, ptr, ${host.sizeType})`);
+    const sym = e.fn === "emitter.emitAny" ? "scr_emitter_emit_any" : "scr_emitter_emit_flex";
+    host.declare(`declare zeroext i1 @${sym}(ptr, ptr, ptr, ${host.sizeType})`);
     const t = B.tmp();
     B.line(
-      `${t} = call i1 @scr_emitter_emit_flex(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${payload}, ${host.sizeType} ${n})`,
+      `${t} = call i1 @${sym}(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${payload}, ${host.sizeType} ${n})`,
+    );
+    host.emitPendingCheck();
+    return { name: t, type: e.type };
+  }
+  if (e.fn === "emitter.emitMixed") {
+    // (recv, name, k, ...k dyn arguments, ...converted tuple): the dyn
+    // arguments ride an exact-length array like emitFlex, the tuple the
+    // pointer-classed variadic tail like emitter.emit. Borrowed; may throw.
+    const count = e.args[2]!;
+    const k = count.kind === "numLit" ? count.value : 0;
+    const args = [e.args[0]!, e.args[1]!, ...e.args.slice(3)].map((a) => host.emitExpr(a));
+    let payload = "null";
+    if (k > 0) {
+      const arr = B.slot();
+      B.entryAllocas.push(`${arr} = alloca [${k} x ptr]`);
+      for (let i = 0; i < k; i++) {
+        const slot = B.tmp();
+        B.line(`${slot} = getelementptr inbounds [${k} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+        B.line(`store ptr ${args[i + 2]!.name}, ptr ${slot}`);
+      }
+      payload = arr;
+    }
+    const tuple = args.slice(2 + k).map((a) => {
+      const ty = host.llType(a.type);
+      if (ty === "double" || ty === "i1") {
+        const slot = B.slot();
+        B.entryAllocas.push(`${slot} = alloca ${ty} ; EventEmitter scalar argument`);
+        B.line(`store ${ty} ${a.name}, ptr ${slot}`);
+        return `ptr ${slot}`;
+      }
+      return `ptr ${a.name}`;
+    });
+    host.declare(
+      `declare zeroext i1 @scr_emitter_emit_mixed(ptr, ptr, ptr, ${host.sizeType}, ...)`,
+    );
+    const t = B.tmp();
+    B.line(
+      `${t} = call zeroext i1 (ptr, ptr, ptr, ${host.sizeType}, ...) @scr_emitter_emit_mixed(` +
+        [
+          `ptr ${args[0]!.name}`,
+          `ptr ${args[1]!.name}`,
+          `ptr ${payload}`,
+          `${host.sizeType} ${k}`,
+          ...tuple,
+        ].join(", ") +
+        `)`,
     );
     host.emitPendingCheck();
     return { name: t, type: e.type };

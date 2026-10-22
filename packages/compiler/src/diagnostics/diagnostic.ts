@@ -61,7 +61,10 @@
  *            collation does not cover (SC6003), a call feeding an instance
  *            to a cast to an unrelated class (SC6004); SC6005 (Date strings
  *            outside the native parser's grammar) is retired — the runtime
- *            parses date strings with V8's grammar
+ *            parses date strings with V8's grammar. SC61xx are performance
+ *            notes, also warnings (coverage --fail-on=dynamic opts in):
+ *            likely-hot functions that use untyped values (SC6101,
+ *            diagnostics/dynamic-tier.ts)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/ir.js";

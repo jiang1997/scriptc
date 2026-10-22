@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { InternalCompilerError } from "../../errors.js";
 import { dynUndefinedExpr, helperLoc, varRef } from "../../ir/build.js";
 import {
@@ -252,7 +253,7 @@ export function lowerSafeIndexRead(
   let name = lowerer.arrHofHelpers.get(key);
   if (!name) {
     const at = helperLoc(loc);
-    name = `%arr.idxOr.${lowerer.arrHofHelpers.size}`;
+    name = keyedHelperName(lowerer, "%arr.idxOr", key);
     lowerer.arrHofHelpers.set(key, name);
     const arrT = arr.type;
     lowerer.liftedFns.push({
@@ -298,7 +299,7 @@ export function lowerSafeBytesRead(
   let name = lowerer.arrHofHelpers.get(key);
   if (!name) {
     const at = helperLoc(loc);
-    name = `%bytes.idxOr.${lowerer.arrHofHelpers.size}`;
+    name = keyedHelperName(lowerer, "%bytes.idxOr", key);
     lowerer.arrHofHelpers.set(key, name);
     const b = varRef("b.0", bytesT, at);
     const i = varRef("i.0", F64, at);

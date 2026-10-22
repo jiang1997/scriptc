@@ -1,5 +1,6 @@
 import type { CompileFailure, CompileRequestOptions } from "../compile-types.js";
 import type { FfiProfile } from "../ffi/ffi-manifest.js";
+import { frontendDisposed } from "../frontend/dispose-hook.js";
 import {
   checkerPanicDiag,
   npmStaticRefusalDiag,
@@ -112,6 +113,7 @@ export function prepareExecutableModule(
     }
   } finally {
     fe.dispose();
+    frontendDisposed();
     timing("frontend-dispose");
   }
 
@@ -120,6 +122,6 @@ export function prepareExecutableModule(
     mod: lowered.module!,
     sourceTexts,
     stats: lowered.stats,
-    warnings: lowered.divergences ?? [],
+    warnings: [...(lowered.divergences ?? []), ...(lowered.performance ?? [])],
   };
 }

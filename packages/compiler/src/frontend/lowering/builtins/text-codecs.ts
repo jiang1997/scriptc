@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { isBuiltinClassInstance } from "./receiver-types.js";
 import { strLit, varRef, dynUndefinedExpr } from "../../../ir/build.js";
 import { staticTextDecoderEncoding } from "../text-decoder-encoding.js";
@@ -129,7 +130,7 @@ function stringDecoderHelper(
   const key = `strdec.${op}`;
   const existing = lowerer.valueHelpers.get(key);
   if (existing) return existing;
-  const name = `%strdec.${op}.${lowerer.valueHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%strdec.${op}`, key);
   lowerer.valueHelpers.set(key, name);
   const recT: IrType = { kind: "record", shapeId };
 

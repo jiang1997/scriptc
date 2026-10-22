@@ -85,7 +85,7 @@ export function lowerTimersPromisesSetInterval(
   const genT = timersPromisesIntervalType(lowerer, expr);
   if (genT === null) lowerer.badType(expr, lowerer.typeOf(expr));
   const yielded = lowerer.coerceInto(valueNode, value, genT.yieldT);
-  const fnName = `%fn${lowerer.lambdaCounter++}_tpInterval`;
+  const fnName = lowerer.closureName(loc, "_tpInterval");
   const msParam: IrLocal = { id: "%tp.ms", name: "delay", type: F64, mutable: false };
   const valueParam: IrLocal = { id: "%tp.value", name: "value", type: genT.yieldT, mutable: false };
   const promiseVoid: IrType = { kind: "promise", inner: VOID };
@@ -156,7 +156,11 @@ function isTimerHandleTyped(
   const sym = t.getAliasSymbol() ?? t.getSymbol();
   if (sym === undefined || ts.symbolName(sym) !== name) return false;
   return sym.declarations.some(
-    (d) => ts.isInterfaceDeclaration(d) && lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
+    (d) =>
+      // An interface in the fallback and @types/node 22+, a class in
+      // @types/node 20 and older.
+      (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
+      lowerer.isStdlibFile(ts.getSourceFileOfNode(d)),
   );
 }
 function isTimeoutTyped(lowerer: Lowerer, node: ts.Expression): boolean {

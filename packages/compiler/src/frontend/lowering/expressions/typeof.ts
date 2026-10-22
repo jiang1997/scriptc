@@ -171,6 +171,21 @@ export function lowerTypeofExpr(lowerer: Lowerer, expr: ts.TypeOfExpression, loc
   }
   if (constructorGlobalTypeof(lowerer, tested) !== null)
     return { kind: "strLit", value: "function", type: STRING, loc };
+  // `typeof global.setTimeout` / `typeof globalThis.queueMicrotask`: a
+  // callable standard-library global read through the global object
+  // answers like its bare spelling (JavaScript sources represent the
+  // value as an identity token, so the operand cannot answer).
+  if (ts.isPropertyAccessExpression(tested) && !tested.questionDotToken) {
+    const name = stdlibGlobalNameOf(lowerer, tested);
+    if (name !== null && name !== "globalThis") {
+      const t = lowerer.typeOf(tested);
+      if (
+        lowerer.checker.getCallSignatures(t).length > 0 ||
+        lowerer.checker.getConstructSignatures(t).length > 0
+      )
+        return { kind: "strLit", value: "function", type: STRING, loc };
+    }
+  }
   // `typeof globalThis.AbortSignal.any` (ky's feature probe): a static
   // member of a standard-library global, declared callable, whose value
   // has no representation. The read has no effects and Node's answer

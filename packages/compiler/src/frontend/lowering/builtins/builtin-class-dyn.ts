@@ -1,8 +1,18 @@
 import { numLit } from "../../../ir/build.js";
-import { BOOL, DYN, RUNTIME_EMITTER_CLASS, type IrExpr, type SrcLoc } from "../../../ir/ir.js";
+import {
+  BOOL,
+  DYN,
+  RUNTIME_EMITTER_CLASS,
+  type IrExpr,
+  type IrStmt,
+  type SrcLoc,
+} from "../../../ir/ir.js";
 import * as ts from "../../ts7/adapter.js";
 import { locOf } from "../../program.js";
 import type { Lowerer } from "../lowerer.js";
+import type { ClassInfo } from "../lower-classes.js";
+import { classInstanceOf } from "../class-dynamic-dispatch.js";
+import { isSafeToDiscard, isSafeToRepeat } from "../expressions/evaluation-safety.js";
 
 /* EventEmitter and the stream classes as untyped constructor values, the
  * bases of JavaScript constructor functions:
@@ -156,4 +166,58 @@ export function builtinClassInstanceOf(value: IrExpr, kind: number, loc: SrcLoc)
     type: BOOL,
     loc,
   };
+}
+
+/** `value instanceof Base` for an untyped value that may also hold a
+ * compiled instance: an object built by a constructor function inherits
+ * the untyped constructor's prototype, and an instance of a program class
+ * extending Base boxes as a typed reference the class test recognizes.
+ * With `callee`, the right-hand side is an untyped value and the class
+ * test applies only when it is Base's untyped constructor. */
+export function builtinClassInstanceOfAny(
+  lowerer: Lowerer,
+  value: IrExpr,
+  kind: number,
+  info: ClassInfo,
+  loc: SrcLoc,
+  callee?: IrExpr,
+): IrExpr {
+  const stmts: IrStmt[] = [];
+  const once = (expr: IrExpr, name: string, snapshot = false): IrExpr => {
+    if (!snapshot && isSafeToRepeat(expr)) return expr;
+    const local = lowerer.declareHiddenLocal(name, DYN);
+    stmts.push({ kind: "varDecl", localId: local.id, init: expr, loc });
+    return { kind: "varRef", localId: local.id, type: DYN, loc };
+  };
+  // The left operand evaluates first: a variable read keeps its value in
+  // a local when the right-hand side can assign the variable.
+  const tested = once(value, "%instanceValue", callee !== undefined && !isSafeToDiscard(callee));
+  const ctor = callee ? once(callee, "%instanceCallee") : null;
+  const compiled = classInstanceOf(lowerer, tested, info, loc);
+  const result: IrExpr = {
+    kind: "logical",
+    op: "||",
+    left: ctor
+      ? { kind: "libCall", fn: "dyn.functionInstanceOf", args: [tested, ctor], type: BOOL, loc }
+      : builtinClassInstanceOf(tested, kind, loc),
+    right: ctor
+      ? {
+          kind: "logical",
+          op: "&&",
+          left: {
+            kind: "dynScalarEq",
+            left: ctor,
+            right: builtinClassValue(kind, loc),
+            type: BOOL,
+            loc,
+          },
+          right: compiled,
+          type: BOOL,
+          loc,
+        }
+      : compiled,
+    type: BOOL,
+    loc,
+  };
+  return stmts.length ? { kind: "seqExpr", stmts, result, type: BOOL, loc } : result;
 }

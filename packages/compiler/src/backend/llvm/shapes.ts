@@ -1054,6 +1054,7 @@ export function arrNewCall(
     elem.kind === "promise" || // promise entries (Promise.all inputs): full REF story
     elem.kind === "child" || // spawned child handles: scr_child_* adapters, no trace
     elem.kind === "netServer" ||
+    elem.kind === "stats" || // fs.Stats snapshots: scr_stats_* adapters, no trace
     elem.kind === "dyn" || // native collection seeds/drains: traced REF
     elem.kind === "regex" || // RegExp values: scr_regex_* adapters, no trace (no refs inside)
     (elem.kind === "array" && traceAdapter(host, elem) !== null);
@@ -1073,15 +1074,16 @@ export function arrNewCall(
   return `call ptr @scr_arr_new_ops(ptr ${arrOps(host, elem)}, ${host.sizeType} ${capText})`;
 }
 
-/** The constant %ScrArrOps descriptor (retain, release, trace) of a REF
- * element type, defined once per module and shared by all its arrays. */
+/** The %ScrArrOps descriptor (retain, release, trace, registry id) of a REF
+ * element type, defined once per module and shared by all its arrays. It is
+ * writable: the runtime stores its registry id on the first array. */
 export function arrOps(host: ShapeHost, elem: IrType): string {
   const v = vAdapters(host, elem);
   const trace = traceArg(host, elem);
   const part = (sym: string): string => sym.replace(/^@/, "").replace(/[^A-Za-z0-9_.]/g, "_");
   const name = `@sc_arrops.${part(v.retain)}.${part(v.release)}.${part(trace)}`;
   host.declare(
-    `${name} = internal constant %ScrArrOps { ptr ${v.retain}, ptr ${v.release}, ptr ${trace} }`,
+    `${name} = internal global %ScrArrOps { ptr ${v.retain}, ptr ${v.release}, ptr ${trace}, i32 0 }`,
   );
   return name;
 }
@@ -1249,6 +1251,11 @@ export function rcMembers(
   ];
 }
 
+/** The integer type a release or retain loads and stores the count as:
+ * the rc word, or its low half (an i32 at offset 0) for class instances that
+ * keep their class number in the high half (classes.ts LlClassMeta.idInRc). */
+export type RcCount = "i32" | "i64";
+
 /** The NULL- and immortal-skipping retain body shared by every shape. A
  * retain never touches the cycle header: a buffered candidate that is
  * retained again stays a candidate (scr_cycle.c, markRoots). */
@@ -1257,8 +1264,9 @@ export function retainBody(
   fnName: string,
   comment = "",
   immortal = false,
+  count: RcCount = host.sizeType,
 ): string[] {
-  const S = host.sizeType;
+  const S = count;
   if (immortal) return immortalRcBody(host, fnName, "ptr", comment);
   return [
     `define internal ptr @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment}` : ""}`,
@@ -1325,6 +1333,8 @@ export interface DirectDestroy {
   readonly destroy: string;
   /** The child carries a collector header. */
   readonly traced: boolean;
+  /** The child's count type, when it is not the rc word (RcCount). */
+  readonly count?: RcCount;
 }
 
 /** The release of child `value` (a loaded field, possibly NULL) inside a
@@ -1339,26 +1349,27 @@ export function directChildReleaseLines(
   comment: string,
 ): string[] {
   const S = host.sizeType;
+  const C = target.count ?? S;
   host.declare(`declare void @scr_rc_destroy(ptr, ptr)`);
   const lines = [
     `  %${tag}.nn = icmp ne ptr ${value}, null`,
     `  br i1 %${tag}.nn, label %${tag}.chk, label %${tag}.next`,
     `${tag}.chk:`,
-    `  %${tag}.rc = load ${S}, ptr ${value}`,
-    `  %${tag}.last = icmp eq ${S} %${tag}.rc, 1`,
+    `  %${tag}.rc = load ${C}, ptr ${value}`,
+    `  %${tag}.last = icmp eq ${C} %${tag}.rc, 1`,
     `  br i1 %${tag}.last, label %${tag}.dead, label %${tag}.shared`,
     `${tag}.shared:`,
     `  call void ${target.release}(ptr ${value}) ; ${comment}`,
     `  br label %${tag}.next`,
     `${tag}.dead: ; ${comment}: the last reference`,
-    `  store ${S} 0, ptr ${value}`,
+    `  store ${C} 0, ptr ${value}`,
   ];
   if (target.traced) {
     host.declare(`declare void @scr_cyc_on_dead(ptr)`);
     lines.push(
       `  %${tag}.bufp = getelementptr i8, ptr ${value}, ${S} -${host.cycleBufOffset}`,
       `  %${tag}.buf = load i32, ptr %${tag}.bufp`,
-      `  %${tag}.queued = icmp slt i32 %${tag}.buf, 0`,
+      `  %${tag}.queued = icmp slt i32 %${tag}.buf, -1 ; buffered, not SCR_CYC_ACYCLIC`,
       `  br i1 %${tag}.queued, label %${tag}.unbuffer, label %${tag}.teardown`,
       `${tag}.unbuffer:`,
       `  call void @scr_cyc_on_dead(ptr ${value})`,
@@ -1514,8 +1525,9 @@ export function releaseFastPath(
   traced: boolean,
   comment = "",
   immortal = false,
+  count: RcCount = host.sizeType,
 ): string[] {
-  const S = host.sizeType;
+  const S = count;
   if (immortal) return immortalRcBody(host, fnName, "void", comment);
   return [
     `define internal void @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment} (fast path)` : ""}`,
@@ -1583,8 +1595,9 @@ function requestCycleAppend(host: ShapeHost): boolean {
 
 /** The possible-cycle-root step of a release that left a headered object
  * alive: scr_cyc_on_release with its early return inlined. Test the sign
- * of `buf` (the i32 at obj-4; negative for a queued candidate or a tenured
- * object), and buffer a new candidate: through the module's
+ * of `buf` (the i32 at obj-4; negative for a queued candidate, a young
+ * object, or an object that is never a candidate, SCR_CYC_ACYCLIC), and
+ * buffer a new candidate: through the module's
  * cycleAppendHelper in optimized builds that support it, through
  * scr_cyc_on_release otherwise. Every emitted release of a headered object
  * shares this sequence (scr_runtime.h asserts the offsets); it ends by
@@ -1607,16 +1620,16 @@ export function cycleRootLines(host: ShapeHost, done: string): string[] {
 }
 
 /** The death of a headered object: scr_cyc_on_dead with its early return
- * inlined. Only an object still in a candidate buffer
- * (`buffered` nonzero) has an entry to remove; the sequence continues at
- * the new block `next`. */
+ * inlined. Only an object still in a candidate buffer (`buf` negative and
+ * not SCR_CYC_ACYCLIC, which is -1) has an entry to remove; the sequence
+ * continues at the new block `next`. */
 export function cycleDeadLines(host: ShapeHost, next: string): string[] {
   const S = host.sizeType;
   host.declare(`declare void @scr_cyc_on_dead(ptr)`);
   return [
     `  %dbufp = getelementptr i8, ptr %o, ${S} -${host.cycleBufOffset}`,
     `  %dbuf = load i32, ptr %dbufp`,
-    `  %dqueued = icmp slt i32 %dbuf, 0`,
+    `  %dqueued = icmp slt i32 %dbuf, -1 ; buffered, not SCR_CYC_ACYCLIC`,
     `  br i1 %dqueued, label %unbuffer, label %${next}`,
     `unbuffer:`,
     `  call void @scr_cyc_on_dead(ptr %o)`,

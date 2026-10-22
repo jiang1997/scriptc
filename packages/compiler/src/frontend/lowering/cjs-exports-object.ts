@@ -25,6 +25,7 @@ import {
   cjsExportDiscardReason,
   cjsExportTargetLiteral,
   isCjsJsFile,
+  isJsSourceFile,
   isModuleExportsAccess,
   isRequireStatement,
   locOf,
@@ -367,6 +368,50 @@ function symbolIsThisFreeFunction(lowerer: Lowerer, sym: ts.Symbol | undefined):
   );
 }
 
+/** The ES-module half (a TypeScript module required from JavaScript, such
+ * as a package shim): require() answers its namespace, so a call through
+ * it binds `this` to the namespace. True when the export is a function
+ * that never reads `this` (every declaration of an overload set), a
+ * builtin module's member re-exported from its declarations, or reached
+ * through an `export *` of a module where that holds. */
+function esModuleExportIgnoresThis(
+  lowerer: Lowerer,
+  sf: ts.SourceFile,
+  name: string,
+  depth: number,
+): boolean {
+  const moduleSym = lowerer.checker.getSymbolAtLocation(sf);
+  const exported = moduleSym?.getExports().get(name as ts.__String);
+  if (exported !== undefined) {
+    const target =
+      exported.flags & ts.SymbolFlags.Alias ? lowerer.checker.getAliasedSymbol(exported) : exported;
+    const decls = target.declarations;
+    if (decls.length === 0) return false;
+    return decls.every(
+      (d) =>
+        (ts.isFunctionDeclaration(d) && !functionUsesThis(d)) ||
+        (ts.getSourceFileOfNode(d).isDeclarationFile && ts.isFunctionDeclaration(d)),
+    );
+  }
+  for (const stmt of sf.statements.nodes) {
+    if (
+      !ts.isExportDeclaration(stmt) ||
+      stmt.exportClause !== undefined ||
+      stmt.moduleSpecifier === undefined ||
+      !ts.isStringLiteral(stmt.moduleSpecifier)
+    )
+      continue;
+    const dep = resolveImport(lowerer.program, sf, stmt.moduleSpecifier.text);
+    if (
+      dep !== null &&
+      !dep.isDeclarationFile &&
+      esModuleExportIgnoresThis(lowerer, dep, name, depth + 1)
+    )
+      return true;
+  }
+  return false;
+}
+
 /** True when every value the module assigns to its export `name` is a
  * function that never reads `this`. A call through the exports object
  * (`exports.f(x)`) binds `this` to that object, which the static export
@@ -378,6 +423,7 @@ export function cjsExportCallIgnoresThis(
   depth = 0,
 ): boolean {
   if (depth > 16) return false;
+  if (!isJsSourceFile(sf)) return esModuleExportIgnoresThis(lowerer, sf, name, depth);
   const values: ts.Expression[] = [];
   ts.walkPreorder(sf, (node) => {
     if (

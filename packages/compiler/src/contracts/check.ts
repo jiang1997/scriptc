@@ -174,7 +174,8 @@ class ContractChecker {
       return `${owner}.${method[2]}`;
     }
     if (fn?.sourceName !== undefined && fn.sourceName !== "<anonymous>") return fn.sourceName;
-    if (fn !== undefined && /^%fn\d+$/.test(fnName)) return `the function at ${this.where(fn.loc)}`;
+    if (fn !== undefined && /^%fn\.[0-9a-f]{12}$/.test(fnName))
+      return `the function at ${this.where(fn.loc)}`;
     return fnName.replace(/^%/, "");
   }
 
@@ -889,10 +890,7 @@ class Int32Contracts {
             const value = s.kind === "varDecl" ? s.init : s.value;
             if (note && value && !int32(value))
               fail(note, value, value.loc, "the value stored into");
-          } else if (
-            s.kind === "forOf" ||
-            (s.kind === "tryCatch" && s.catchLocalId !== undefined)
-          ) {
+          } else if (s.kind === "forOf" || (s.kind === "tryCatch" && s.catchLocalId !== null)) {
             const id = s.kind === "forOf" ? s.localId : s.catchLocalId!;
             const note = localNote(id);
             if (note)

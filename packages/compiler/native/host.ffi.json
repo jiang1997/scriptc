@@ -1,6 +1,7 @@
 {
   "ffi_format": 6,
   "functions": [
-    { "name": "compilerNativePrivateDirectory", "symbol": "scriptc_native_private_directory", "params": ["string", "bool"], "returns": "bool" }
+    { "name": "compilerNativePrivateDirectory", "symbol": "scriptc_native_private_directory", "params": ["string", "bool"], "returns": "bool" },
+    { "name": "compilerNativeCollectCycles", "symbol": "scriptc_native_collect_cycles", "params": [], "returns": "void" }
   ]
 }

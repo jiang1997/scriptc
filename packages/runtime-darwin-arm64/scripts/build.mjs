@@ -170,7 +170,10 @@ async function build() {
             );
             const includeFlags = [
               ...(unit.source === "scr_regex.c" ? ["-I", quickjs] : []),
-              ...(unit.source === "scr_tls.c" || unit.source === "scr_cipher.c"
+              ...(unit.source === "scr_tls.c" ||
+              unit.source === "scr_cipher.c" ||
+              unit.source === "scr_ecdh.c" ||
+              unit.source === "scr_webcrypto_aes.c"
                 ? ["-I", join(mbedtls, "include")]
                 : []),
               ...(unit.source === "scr_zlib.c" || unit.source === "scr_fetch.c"
@@ -335,7 +338,7 @@ async function build() {
       package: packageManifest.name,
       version: packageManifest.version,
       target: RUNTIME_PACK_MATRIX.target,
-      runtime_abi: { version: 22, marker: "scr_runtime_abi_v22" },
+      runtime_abi: { version: 25, marker: "scr_runtime_abi_v25" },
       compiler: {
         command: compiler,
         identity: compilerVersion,

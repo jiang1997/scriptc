@@ -39,7 +39,15 @@ export interface ElementStateHost {
   allocationOwner(node: ts.Expression): ts.Symbol | null;
   /** Debug provenance for a new fact. */
   note: ((fact: "undefined" | "holes", key: string, site: ts.Node | undefined) => void) | null;
+  /** The scan read, or added to, the facts of an element key, of an owning
+   * slot, or of every array (ANY_ARRAY), for dependency tracking
+   * (SiteDependencies). */
+  read?(fact: string | ts.Symbol): void;
+  changed?(fact: string | ts.Symbol): void;
 }
+
+/** The fact name of the facts shared by every array. */
+const ANY_ARRAY = "*";
 
 /** What an array value can contain besides present values. */
 interface Contents {
@@ -179,8 +187,10 @@ export class ArrayElementStates {
       if (built !== undefined) return built;
     }
     const owner = this.host.ownerOf(e);
-    if (owner !== null)
+    if (owner !== null) {
+      this.host.read?.(owner);
       return { undefined: this.undefinedOwners.has(owner), holes: this.holeyOwners.has(owner) };
+    }
     return this.stored(this.host.arrayKeys(e));
   }
 
@@ -317,7 +327,9 @@ export class ArrayElementStates {
   /** The facts recorded for arrays with these element ABIs. */
   private stored(keys: readonly string[] | null): Contents | null {
     if (this.ownFactsOnly) return NOTHING;
+    this.host.read?.(ANY_ARRAY);
     if (keys === null) return null;
+    for (const key of keys) this.host.read?.(key);
     return {
       undefined:
         this.anyUndefined ||
@@ -333,6 +345,7 @@ export class ArrayElementStates {
     const keys = this.host.arrayKeys(node);
     if (keys !== null && keys.length === 0) return false;
     const contents = this.contents(node);
+    this.host.read?.(ANY_ARRAY);
     return contents === null
       ? this.anyUndefined || this.anyHoley
       : contents.undefined || contents.holes;
@@ -368,6 +381,7 @@ export class ArrayElementStates {
         this.holeyOwners.add(owner);
         changed = true;
       }
+      if (changed) this.host.changed?.(owner);
       return changed;
     }
     let changed = false;
@@ -406,6 +420,7 @@ export class ArrayElementStates {
     if (owner === null) return this.addUndefined(this.host.arrayKeys(receiver));
     if (this.undefinedOwners.has(owner)) return false;
     this.undefinedOwners.add(owner);
+    this.host.changed?.(owner);
     return true;
   }
 
@@ -415,6 +430,7 @@ export class ArrayElementStates {
     if (owner === null) return this.addHoles(this.host.arrayKeys(receiver));
     if (this.holeyOwners.has(owner)) return false;
     this.holeyOwners.add(owner);
+    this.host.changed?.(owner);
     return true;
   }
 
@@ -422,6 +438,7 @@ export class ArrayElementStates {
     if (keys === null) {
       if (this.anyUndefined) return false;
       this.anyUndefined = true;
+      this.host.changed?.(ANY_ARRAY);
       this.host.note?.("undefined", "*", this.site);
       return true;
     }
@@ -429,6 +446,7 @@ export class ArrayElementStates {
     for (const key of keys) {
       if (this.undefinedKeys.has(key)) continue;
       this.undefinedKeys.add(key);
+      this.host.changed?.(key);
       this.host.note?.("undefined", key, this.site);
       changed = true;
     }
@@ -439,6 +457,7 @@ export class ArrayElementStates {
     if (keys === null) {
       if (this.anyHoley) return false;
       this.anyHoley = true;
+      this.host.changed?.(ANY_ARRAY);
       this.host.note?.("holes", "*", this.site);
       return true;
     }
@@ -446,6 +465,7 @@ export class ArrayElementStates {
     for (const key of keys) {
       if (this.holeyKeys.has(key)) continue;
       this.holeyKeys.add(key);
+      this.host.changed?.(key);
       this.host.note?.("holes", key, this.site);
       changed = true;
     }

@@ -1274,7 +1274,7 @@ static void scr_dyn_all_result(ScrPromise *destination, ScrPromise *source) {
   scr_promise_fulfill_ref(destination, result, scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v);
 }
 
-static const ScrArrOps scr_dyn_arr_ops = { scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v };
+static ScrArrOps scr_dyn_arr_ops = { scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v };
 
 /* ── Thenable adoption (PromiseResolve over a checked-dynamic value) ──
  * A non-promise object whose `then` is callable resolves through

@@ -42,9 +42,12 @@
  * the emitted sc_ds walker exists only in programs that spell
  * String(unknown) themselves). Same rules: arrays join with "," and
  * null/undefined elements print empty, the checked-dynamic tree's error encoding renders
- * "name: message", functions render the native-code form, plain objects
- * are [object Object]. */
-static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
+ * "name: message", functions render the native-code form. With
+ * `to_string` (join and the default sort order, which run ToString), other
+ * objects convert with ToPrimitive's string hint, calling a toString or
+ * valueOf of their own or of their prototypes, and an exception it throws
+ * stays pending; without it (error messages), they are [object Object]. */
+static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d, bool to_string) {
   switch (d->kind) {
   case SCR_DYN_SYMBOL: {
     ScrStr *s = scr_dyn_string_coerce(d);
@@ -69,20 +72,32 @@ static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
   case SCR_DYN_STR:
     scr_jb_write(b, d->v.str->data, d->v.str->len);
     return;
-  case SCR_DYN_ARR:
-    for (size_t i = 0; i < d->v.arr.len; i++) {
+  case SCR_DYN_ARR: {
+    /* The length is read once, as join reads it; an element's toString can
+     * append to or shrink the array (scr_dyn_arr_at answers undefined past
+     * its current end). */
+    size_t len = d->v.arr.len;
+    for (size_t i = 0; i < len; i++) {
       if (i > 0) scr_jb_putc(b, ',');
       ScrDyn *e = scr_dyn_arr_at(d, (double)i);
       if (!e) return;
-      if (e->kind != SCR_DYN_UNDEF && e->kind != SCR_DYN_NULL) scr_dyn_display_buf(b, e);
+      if (e->kind != SCR_DYN_UNDEF && e->kind != SCR_DYN_NULL) scr_dyn_display_buf(b, e, to_string);
       scr_dyn_release(e);
       if (scr_exc_pending()) return;
     }
     return;
+  }
   case SCR_DYN_OBJ: {
     const ScrDyn *marker = scr_dyn_obj_get(d, "%error", 6);
     if (marker) {
       ScrStr *text = scr_dyn_error_string(d);
+      if (!text) return;
+      scr_jb_write(b, text->data, text->len);
+      scr_str_release(text);
+      return;
+    }
+    if (to_string) {
+      ScrStr *text = scr_dyn_string_coerce_js(d);
       if (!text) return;
       scr_jb_write(b, text->data, text->len);
       scr_str_release(text);
@@ -129,7 +144,7 @@ static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
 
   case SCR_DYN_TYPED_REF: {
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
-    scr_dyn_display_buf(b, materialized);
+    scr_dyn_display_buf(b, materialized, to_string);
     scr_dyn_release(materialized);
     return;
   }
@@ -142,7 +157,7 @@ static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
 ScrStr *scr_dyn_display(const ScrDyn *d) {
   ScrJsonBuf b;
   scr_jb_init(&b);
-  scr_dyn_display_buf(&b, d);
+  scr_dyn_display_buf(&b, d, false);
   return scr_jb_finish(&b);
 }
 
@@ -217,7 +232,7 @@ static bool dyn_cb_check(ScrDyn *const *args, size_t argc) {
 
   ScrJsonBuf b;
   scr_jb_init(&b);
-  scr_dyn_display_buf(&b, cb);
+  scr_dyn_display_buf(&b, cb, false);
   scr_jb_puts(&b, " is not a function");
   scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
   return false;
@@ -564,7 +579,7 @@ static ScrDyn *scr_dynh_dispatch(ScrDyn *recv, const char *method, ScrDyn *const
 static ScrStr *dyn_sort_str(const ScrDyn *e) {
   ScrJsonBuf b;
   scr_jb_init(&b);
-  scr_dyn_display_buf(&b, e);
+  scr_dyn_display_buf(&b, e, true);
   return scr_jb_finish(&b);
 }
 static bool dyn_sort_less(void *ctx, uint64_t xs, uint64_t ys, bool *failed) {
@@ -581,7 +596,13 @@ static bool dyn_sort_less(void *ctx, uint64_t xs, uint64_t ys, bool *failed) {
     return v < 0;
   }
   ScrStr *xstr = dyn_sort_str(x);
-  ScrStr *ystr = dyn_sort_str(y);
+  ScrStr *ystr = scr_exc_pending() ? NULL : dyn_sort_str(y);
+  if (scr_exc_pending()) {
+    scr_str_release(xstr);
+    if (ystr) scr_str_release(ystr);
+    *failed = true;
+    return false;
+  }
   int c = scr_str_cmp_u16(xstr, ystr);
   scr_str_release(xstr);
   scr_str_release(ystr);
@@ -790,6 +811,10 @@ static ScrDyn *scr_dyn_invoke_impl(
   if (recv->kind == SCR_DYN_HANDLE) {
     return scr_dynh_dispatch(recv, method, args, argc, what);
   }
+  if (scr_dyn_is_array_prototype(recv) && dyn_arr_proto_mutates(method)) {
+    scr_dyn_array_prototype_element_fence(recv);
+    return NULL;
+  }
 
 
   if (recv->kind == SCR_DYN_PROXY) {
@@ -820,6 +845,16 @@ static ScrDyn *scr_dyn_invoke_impl(
     if (scr_event_ref_hooks &&
         scr_event_ref_hooks->invoke(recv, method, args, argc, what, &fast))
       return fast;
+    /* An inherited Date method of an instance of a class declared `extends
+     * Date`. */
+    ScrDyn *date_method = scr_dyn_date_class_member(recv, method, strlen(method));
+    if (date_method) {
+      scr_dyn_this_push_dyn(recv);
+      ScrDyn *result = scr_dyn_call(date_method, args, argc, what);
+      scr_dyn_this_pop();
+      scr_dyn_release(date_method);
+      return result;
+    }
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(recv);
     if (scr_exc_pending()) {
       scr_dyn_release(materialized);
@@ -1194,15 +1229,20 @@ static ScrDyn *scr_dyn_invoke_impl(
       scr_jb_init(&b);
       ScrStr *separator = argc > 0 && args[0]->kind != SCR_DYN_UNDEF
         ? scr_dyn_string_coerce_js(args[0]) : scr_str_new(",", 1);
-      if (!separator) { free(b.data); return NULL; }
+      if (!separator) return NULL; /* nothing written yet */
       for (size_t i = 0; i < len; i++) {
         if (i > 0) scr_jb_write(&b, separator->data, separator->len);
         ScrDyn *e = scr_dyn_arr_at(recv, (double)i);
         if (e) {
-          if (e->kind != SCR_DYN_UNDEF && e->kind != SCR_DYN_NULL) scr_dyn_display_buf(&b, e);
+          if (e->kind != SCR_DYN_UNDEF && e->kind != SCR_DYN_NULL) scr_dyn_display_buf(&b, e, true);
           scr_dyn_release(e);
         }
-        if (!e || scr_exc_pending()) { scr_str_release(separator); free(b.data); return NULL; }
+        if (!e || scr_exc_pending()) {
+          /* The buffer's bytes live in a string allocation: discard it as one. */
+          scr_str_release(scr_jb_finish(&b));
+          scr_str_release(separator);
+          return NULL;
+        }
       }
       scr_str_release(separator);
       ScrStr *joined = scr_jb_finish(&b);
@@ -1463,7 +1503,7 @@ static ScrDyn *scr_dyn_invoke_impl(
         ScrJsonBuf b;
         scr_jb_init(&b);
         scr_jb_puts(&b, "The comparison function must be either a function or undefined: ");
-        scr_dyn_display_buf(&b, cmp);
+        scr_dyn_display_buf(&b, cmp, false);
         scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
         return NULL;
       }
@@ -2181,7 +2221,7 @@ static ScrDyn *scr_dyn_define_props_internal(ScrDyn *target, ScrDyn *descs, ScrD
       ScrJsonBuf b;
       scr_jb_init(&b);
       scr_jb_puts(&b, "Property description must be an object: ");
-      scr_dyn_display_buf(&b, descriptor);
+      scr_dyn_display_buf(&b, descriptor, false);
       scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
       scr_dyn_release(descriptor);
       goto fail;

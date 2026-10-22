@@ -274,10 +274,16 @@ void scr_eld_reset(double handle) {
   if (h != NULL) scr_eld_clear(h);
 }
 
+/* Node's event-loop-delay histogram has a lowest discernible value of 1000 ns
+ * (Histogram::Options { 1000 }): its smallest bucket spans 0..511, so an empty
+ * histogram answers 511 for every percentile. Recorded deltas are at least the
+ * resolution (>= 1 ms), where that layout and this one share bucket bounds. */
+#define SCR_ELD_EMPTY_PERCENTILE 511
+
 /* hdr_value_at_percentile; the compiler checked Node's 0 < p <= 100 range. */
 double scr_eld_percentile(double handle, double percentile) {
   ScrEld *h = scr_eld_of(handle);
-  if (h == NULL || h->total == 0) return 0;
+  if (h == NULL || h->total == 0) return SCR_ELD_EMPTY_PERCENTILE;
   double requested = percentile < 100.0 ? percentile : 100.0;
   int64_t wanted = (int64_t)((requested / 100.0) * (double)h->total + 0.5);
   if (wanted < 1) wanted = 1;

@@ -25,15 +25,6 @@ builtin-constructor-members.ts:7:25 - error SC2020: 'RegExp.prototype' is part o
 
   hint: prototype objects are not values here (method lookup is static) — call the method on an instance instead
 
-builtin-constructor-members.ts:8:26 - error SC2020: 'Promise.prototype' is part of the standard library types but has no scriptc lowering yet
-
-  7 | const regExpPrototype = RegExp.prototype;
-  8 | const promisePrototype = Promise.prototype;
-    |                          ^~~~~~~~~~~~~~~~~
-  9 | const weakSetPrototype = WeakSet.prototype;
-
-  hint: prototype objects are not values here (method lookup is static) — call the method on an instance instead
-
 builtin-constructor-members.ts:9:26 - error SC2020: 'WeakSet.prototype' is part of the standard library types but has no scriptc lowering yet
 
    8 | const promisePrototype = Promise.prototype;

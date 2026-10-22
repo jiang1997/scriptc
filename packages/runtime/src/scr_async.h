@@ -109,6 +109,15 @@ double scr_coro_await_f64(ScrPromise *p);
 bool scr_coro_await_bool(ScrPromise *p);
 ScrStr *scr_coro_await_str(ScrPromise *p); /* +1 */
 void *scr_coro_await_ref(ScrPromise *p);   /* +1 via the stored retain */
+/* A direct await of a stackless body: its promise stays inside the fiber
+ * record the spawn returns, and the awaiter takes the result from it. */
+ScrFiber *scr_async_spawn_direct(void (*entry)(ScrFiber *, void *), void *argpack);
+bool scr_coro_direct_prepare(ScrFiber *self, ScrFiber *callee);
+void scr_coro_direct_void(ScrFiber *f);
+double scr_coro_direct_f64(ScrFiber *f);
+bool scr_coro_direct_bool(ScrFiber *f);
+ScrStr *scr_coro_direct_str(ScrFiber *f); /* +1 */
+void *scr_coro_direct_ref(ScrFiber *f);   /* +1 */
 
 double scr_await_f64(ScrPromise *p); /* rejected promises re-throw */
 bool scr_await_bool(ScrPromise *p);

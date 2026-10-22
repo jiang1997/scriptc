@@ -1,6 +1,6 @@
 {
   "name": "@scriptc/compiler",
-  "version": "0.3.6",
+  "version": "0.4.1",
   "description": "The scriptc compiler — TypeScript/JavaScript frontend, typed IR, LLVM backend",
   "license": "Apache-2.0",
   "homepage": "https://scriptc.dev",
@@ -29,6 +29,7 @@
   "files": [
     "dist",
     "ambient",
+    "shims",
     "surface-manifest.json"
   ],
   "publishConfig": {

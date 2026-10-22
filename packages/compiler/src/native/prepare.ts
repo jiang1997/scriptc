@@ -7,7 +7,7 @@ import type {
   CompileLibraryOptions,
   CompileRequestOptions,
 } from "../compile-types.js";
-import { emitLlvmModule } from "../backend/llvm/emitter.js";
+import { emitLlvmModule, lowRegionTarget } from "../backend/llvm/emitter.js";
 import { inlineRcOption } from "../backend/llvm/shapes.js";
 import { executableLinkFeatures } from "../backend/executable-features.js";
 import type { NativeLinkFeatures } from "../backend/native-link-info-core.js";
@@ -143,6 +143,7 @@ function validFeatures(value: unknown): value is NativeLinkFeatures {
     "bigint",
     "searchParams",
     "qs",
+    "utilPromisify",
     "dynBuiltinClass",
     "dynBuiltinStream",
     "parseArgs",
@@ -152,12 +153,14 @@ function validFeatures(value: unknown): value is NativeLinkFeatures {
     "http2",
     "dgram",
     "dnsPromises",
+    "dgramDyn",
     "watch",
     "foreignFfi",
     "nodeTest",
     "tls",
     "tlsCa",
     "cipher",
+    "ecdh",
     "webcrypto",
     "perfLoop",
   ].every((name) => typeof features[name] === "boolean");
@@ -290,6 +293,7 @@ export function prepareNativeExecutable(
           wasi: toolchain.target.platform === "wasi",
           runtimeAbiMarker: outputKind === "obj" || outputKind === "exe",
           objectAudit: options.sanitize === true,
+          lowRegion: lowRegionTarget(toolchain.target.platform, options.sanitize === true),
           ...inlineRcOption(options.optimization, options.sanitize === true),
           ...(options.detachedExit === true && outputKind === "exe" ? { detachedExit: true } : {}),
           ...(options.optimization === "dev" && !options.strip

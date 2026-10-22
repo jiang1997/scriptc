@@ -34,11 +34,19 @@ void scr_dgram_send_str(ScrDgramSocket *s, ScrStr *data /*borrowed*/, double por
 void scr_dgram_send_bytes(ScrDgramSocket *s, ScrBytes *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
 /* The send argument-validation ladder over dyn arguments (Node's
  * signature shuffle, slice bounds, list/type contracts, port/address
- * validation, and the connected-state errors); a fully-validated
- * unconnected single-payload send RUNS, the rest meet the fence. */
+ * validation, and the connected-state errors), then the send: a list
+ * goes out as one datagram, a connected socket sends to its peer, and a
+ * completion callback receives (null, bytes) or the failure after this
+ * turn. */
 void scr_dgram_send_chk(ScrDgramSocket *s, const ScrDyn *buffer, const ScrDyn *a1,
                         const ScrDyn *a2, const ScrDyn *a3, const ScrDyn *a4,
-                        const ScrStr *fence);
+                        const ScrDyn *a5);
+/* The socket as an untyped value (SCR_DYNH_DGRAM_SOCKET): boxes of one
+ * socket share its untyped listeners; the first box installs the tag's
+ * ops. Borrows s; +1. The unbox checks the tag and answers the socket
+ * (+1), or NULL with the path-annotated TypeError pending. */
+ScrDyn *scr_dgram_to_dyn(ScrDgramSocket *s);
+ScrDgramSocket *scr_dgram_from_dyn(const ScrDyn *d, const ScrDynPath *path, const char *want);
 /* address() parts: ip THROWS "Not running" before bind/connect (+1
  * otherwise); family/port are only called after ip succeeded. */
 ScrStr *scr_dgram_addr_ip(ScrDgramSocket *s);     /* +1, may throw */

@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { npmPackageNameOf } from "./workspace-registry.js";
 import { tsgoPath } from "./ts7/session-path.js";
 
@@ -23,6 +23,15 @@ function declarationPath(name: string): string {
           : require.resolve("@scriptc/compiler/scriptc-node-fallback.d.ts")
       : join(installedDeclarationRoot, name),
   );
+}
+
+/** Directory of the shipped package shims (packages/compiler/shims): the
+ * implementation modules package-shims.ts maps npm packages to. A native
+ * distribution ships them beside its declarations. */
+export function packageShimRoot(): string {
+  return installedDeclarationRoot === null
+    ? join(dirname(require.resolve("@scriptc/compiler/scriptc.d.ts")), "..", "shims")
+    : join(installedDeclarationRoot, "shims");
 }
 
 /** Path of the shipped ambient declarations — the always-shipped CORE

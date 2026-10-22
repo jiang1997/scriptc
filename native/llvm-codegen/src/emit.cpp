@@ -30,6 +30,10 @@
 #include "llvm/PassInfo.h"
 #include "llvm/PassRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/ProfileData/InstrProfReader.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/PGOOptions.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/Caching.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -53,6 +57,10 @@ using namespace llvm;
 namespace scriptc {
 
 static constexpr size_t MaxPartitions = 64;
+// The thin link's import allowance for hot and hottest call edges, as a
+// multiple of the usual size limit, in builds with a profile. See
+// limitProfileImports().
+static constexpr const char *ProfileImportMultiplier = "2";
 
 std::optional<EmitOptions> parseEmitOptions(int Argc, char **Argv) {
   EmitOptions Options;
@@ -82,10 +90,17 @@ std::optional<EmitOptions> parseEmitOptions(int Argc, char **Argv) {
       Options.ImportBitcode.push_back(Value.str());
     else if (Arg == "--cache-dir")
       Options.CacheDirectory = Value.str();
+    else if (Arg == "--profile-generate")
+      Options.ProfileGenerate = Value.str();
+    else if (Arg == "--profile-use")
+      Options.ProfileUse = Value.str();
     else
       return std::nullopt;
   }
   if (Options.Input.empty() || Options.Outputs.empty())
+    return std::nullopt;
+  // A build either collects a profile or uses one.
+  if (!Options.ProfileGenerate.empty() && !Options.ProfileUse.empty())
     return std::nullopt;
   return Options;
 }
@@ -123,6 +138,57 @@ PipelineTuningOptions tuningFor(OptimizationLevel Level) {
   return Tuning;
 }
 
+// The profile-guided optimization a build asks for: IR instrumentation that
+// writes raw profiles to the ProfileGenerate pattern, or annotation from the
+// indexed ProfileUse profile. Functions the profile does not describe, or
+// whose control flow changed since it was collected, are optimized as without
+// one, so a stale profile loses only its gain.
+std::optional<PGOOptions> profileOptions(const EmitOptions &Options) {
+  if (!Options.ProfileGenerate.empty())
+    return PGOOptions(Options.ProfileGenerate, "", "", "",
+                      PGOOptions::IRInstr);
+  if (!Options.ProfileUse.empty())
+    return PGOOptions(Options.ProfileUse, "", "", "", PGOOptions::IRUse);
+  return std::nullopt;
+}
+
+// With a profile, the thin link imports the callees of hot call edges up to
+// 10 times, and of the hottest edges up to 100 times, the usual size limit,
+// into every partition that calls them. On large programs that triples the
+// build's time and memory for no measurable run-time gain over a much smaller
+// allowance, so profile builds use that one. The importer's limits are
+// process-wide options; the helper sets them once.
+void limitProfileImports() {
+  static const bool Limited = [] {
+    auto Registered = cl::getRegisteredOptions();
+    for (StringRef Name :
+         {"import-hot-multiplier", "import-critical-multiplier"})
+      if (cl::Option *Option = Registered.lookup(Name))
+        Option->addOccurrence(0, Name, ProfileImportMultiplier);
+    return true;
+  }();
+  (void)Limited;
+}
+
+// Reads the profile's header once, before any partition needs it: it must
+// hold IR-level counts.
+std::optional<EmitFailure> inspectProfile(const EmitOptions &Options) {
+  if (Options.ProfileUse.empty())
+    return std::nullopt;
+  Expected<std::unique_ptr<IndexedInstrProfReader>> Reader =
+      IndexedInstrProfReader::create(Options.ProfileUse,
+                                     *vfs::getRealFileSystem());
+  if (!Reader)
+    return EmitFailure{"profile_read_failed",
+                       Options.ProfileUse + ": " +
+                           toString(Reader.takeError())};
+  if (!(*Reader)->isIRLevelProfile())
+    return EmitFailure{"profile_read_failed",
+                       Options.ProfileUse +
+                           ": not an IR-level instrumentation profile"};
+  return std::nullopt;
+}
+
 // Owns the analysis managers a pipeline needs for one module.
 struct Pipeline {
   LoopAnalysisManager LAM;
@@ -131,8 +197,9 @@ struct Pipeline {
   ModuleAnalysisManager MAM;
   PassBuilder PB;
 
-  Pipeline(TargetMachine &Machine, OptimizationLevel Level)
-      : PB(&Machine, tuningFor(Level)) {
+  Pipeline(TargetMachine &Machine, OptimizationLevel Level,
+           std::optional<PGOOptions> Profile = std::nullopt)
+      : PB(&Machine, tuningFor(Level), std::move(Profile)) {
     PB.registerModuleAnalyses(MAM);
     PB.registerCGSCCAnalyses(CGAM);
     PB.registerFunctionAnalyses(FAM);
@@ -319,9 +386,9 @@ std::optional<EmitFailure> publish(StringRef TemporaryPath,
 
 std::optional<EmitFailure>
 emitModule(Module &M, TargetMachine &Machine, OptimizationLevel Level,
-           CodeGenFileType Type, StringRef OutputPath,
-           std::vector<SmallString<256>> &Temporaries) {
-  Pipeline P(Machine, Level);
+           std::optional<PGOOptions> Profile, CodeGenFileType Type,
+           StringRef OutputPath, std::vector<SmallString<256>> &Temporaries) {
+  Pipeline P(Machine, Level, std::move(Profile));
   P.PB.buildPerModuleDefaultPipeline(Level).run(M, P.MAM);
   if (std::optional<EmitFailure> Failure =
           verify(M, "post_optimization_verification_failed"))
@@ -462,7 +529,7 @@ compileUnoptimizedPartitions(const EmitOptions &Options,
     if (!Mod)
       return Failures.set({"partition_failed", toString(Mod.takeError())});
     // The O0 pipeline still lowers coroutines and always-inline calls.
-    Pipeline P(*Machine, OptimizationLevel::O0);
+    Pipeline P(*Machine, OptimizationLevel::O0, profileOptions(Options));
     P.PB.buildPerModuleDefaultPipeline(OptimizationLevel::O0)
         .run(**Mod, P.MAM);
     raw_svector_ostream Output(Objects[I]);
@@ -522,7 +589,9 @@ compileOptimizedPartitions(const EmitOptions &Options,
     SmallVector<char, 0> Bitcode;
     {
       raw_svector_ostream Stream(Bitcode);
-      Pipeline P(*Machine, Level);
+      // Profile instrumentation or annotation happens here, before the thin
+      // link; the post-link optimization reads the annotated weights.
+      Pipeline P(*Machine, Level, profileOptions(Options));
       ModulePassManager MPM = P.PB.buildThinLTOPreLinkDefaultPipeline(Level);
       MPM.addPass(BitcodeWriterPass(Stream, /*ShouldPreserveUseListOrder=*/false,
                                     /*EmitSummaryIndex=*/true,
@@ -620,8 +689,14 @@ compileOptimizedPartitions(const EmitOptions &Options,
   std::vector<std::string> Names(Count);
   for (size_t I = 0; I < Count; ++I)
     Names[I] = "partition-" + std::to_string(I);
+  if (!Options.ProfileUse.empty())
+    limitProfileImports();
   lto::LTO Link(std::move(Config),
                 lto::createInProcessThinBackend(hardware_concurrency()));
+  // Profile instrumentation gives every partition its own weak copy of the
+  // variables the profile runtime reads (the profile format and file name).
+  // One copy prevails and stays visible so the runtime's defaults do not.
+  StringSet<> ProfileSymbols;
   for (size_t I = 0; I < Count; ++I) {
     Expected<std::unique_ptr<lto::InputFile>> Input = lto::InputFile::create(
         MemoryBufferRef(Summaries[I]->getBuffer(), Names[I]));
@@ -635,7 +710,10 @@ compileOptimizedPartitions(const EmitOptions &Options,
         // external before partitioning are visible to the runtime objects
         // linked beside them; the rest may become internal again.
         bool Public = Plan.PublicSymbols.contains(Symbol.getIRName());
-        Resolution.Prevailing = true;
+        bool Profile = Symbol.getIRName().starts_with("__llvm_profile_");
+        if (Profile)
+          Public = ProfileSymbols.insert(Symbol.getIRName()).second;
+        Resolution.Prevailing = !Profile || Public;
         Resolution.VisibleToRegularObj = Public;
         Resolution.FinalDefinitionInLinkageUnit = !Public;
       }
@@ -672,7 +750,19 @@ compilePartitions(const EmitOptions &Options, const PartitionPlan &Plan,
   // helper build; source content and partition count arrive per module.
   std::string Salt = hashParts({"scriptc-partition-v1", LLVM_VERSION_STRING,
                                 Options.Target, Options.OptLevel,
-                                Options.RelocationModel, Options.SourcePath});
+                                Options.RelocationModel, Options.SourcePath,
+                                "profile-generate", Options.ProfileGenerate});
+  // A profile changes every partition it describes, so its bytes key them.
+  if (!Options.ProfileUse.empty()) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> Profile =
+        MemoryBuffer::getFile(Options.ProfileUse, /*IsText=*/false,
+                              /*RequiresNullTerminator=*/false);
+    if (!Profile)
+      return EmitFailure{"profile_read_failed",
+                         Options.ProfileUse + ": " +
+                             Profile.getError().message()};
+    Salt = hashParts({Salt, "profile-use", (*Profile)->getBuffer()});
+  }
   for (const std::string &Path : Options.ImportBitcode) {
     ErrorOr<std::unique_ptr<MemoryBuffer>> Bitcode =
         MemoryBuffer::getFile(Path, /*IsText=*/false,
@@ -805,6 +895,9 @@ int emit(const EmitOptions &Options) {
     return reportError("invalid_import",
                        "runtime bitcode import requires an optimized build",
                        Options.DiagnosticFormat);
+  if (std::optional<EmitFailure> Failure = inspectProfile(Options))
+    return reportError(Failure->Code, Failure->Message,
+                       Options.DiagnosticFormat);
   if (Options.Outputs.size() > 1)
     return emitPartitions(Options);
 
@@ -864,8 +957,9 @@ int emit(const EmitOptions &Options) {
                              ? CodeGenFileType::ObjectFile
                              : CodeGenFileType::AssemblyFile;
   std::vector<SmallString<256>> Temporaries;
-  std::optional<EmitFailure> Failure = emitModule(
-      *Mod, *Machine, Level, Type, Options.Outputs[0], Temporaries);
+  std::optional<EmitFailure> Failure =
+      emitModule(*Mod, *Machine, Level, profileOptions(Options), Type,
+                 Options.Outputs[0], Temporaries);
   if (!Failure)
     Failure = publish(Temporaries[0], Options.Outputs[0]);
   if (Failure) {

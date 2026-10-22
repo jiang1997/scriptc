@@ -13,9 +13,11 @@ import {
 } from "../backend/native-toolchain.js";
 import { installDarwinDebugSymbols, readDarwinDebugSymbols } from "../backend/debug-symbols.js";
 import {
+  hasEarlyExecutableNativeBuild,
   publishEarlyExecutableCache,
   readEarlyExecutableCache,
   readRoutedExecutableCache,
+  recordEarlyExecutableNativeBuild,
   type EarlyExecutableCacheOptions,
   type EarlyExecutableNativeFeatures,
 } from "./executable-cache.js";
@@ -45,6 +47,7 @@ const native: EarlyExecutableNativeFeatures = {
   bigint: false,
   searchParams: false,
   qs: false,
+  utilPromisify: false,
   dynBuiltinClass: false,
   dynBuiltinStream: false,
   parseArgs: false,
@@ -54,12 +57,14 @@ const native: EarlyExecutableNativeFeatures = {
   http2: false,
   dgram: false,
   dnsPromises: false,
+  dgramDyn: false,
   watch: false,
   foreignFfi: false,
   nodeTest: false,
   tls: false,
   tlsCa: false,
   cipher: false,
+  ecdh: false,
   webcrypto: false,
   perfLoop: false,
 };
@@ -220,6 +225,8 @@ test("early executable keys isolate compile modes, paths, implementation, checke
     { ...f.options, optimization: "dev" },
     { ...f.options, optimization: "speed" },
     { ...f.options, detachedExit: true },
+    { ...f.options, profile: "profile-generate:/tmp/%p.profraw" },
+    { ...f.options, profile: "profile-use:digest" },
     { ...f.options, checker: "tsc-ts-executable-identity" },
     { ...f.options, npmStatic: "auto" },
     { ...f.options, npmStatic: ["commander"] },
@@ -590,4 +597,39 @@ test("the route index still isolates eager and deferred native environments", as
       })
     )?.executableRestored,
   ).toBe(true);
+});
+
+test("a recorded native build is found by its invocation", async () => {
+  const f = await fixture();
+  expect(await hasEarlyExecutableNativeBuild(null, f.options)).toBe(false);
+  expect(await hasEarlyExecutableNativeBuild(f.root, f.options)).toBe(false);
+  await recordEarlyExecutableNativeBuild(null, f.options);
+  await recordEarlyExecutableNativeBuild(f.root, f.options);
+  expect(await hasEarlyExecutableNativeBuild(f.root, f.options)).toBe(true);
+  // The record does not depend on the compiler implementation or the native environment.
+  const rebuilt: EarlyExecutableCacheOptions = {
+    ...f.options,
+    implementation: "b".repeat(64),
+    nativeEnvironment: "another driver",
+  };
+  expect(await hasEarlyExecutableNativeBuild(f.root, rebuilt)).toBe(true);
+  expect(
+    await hasEarlyExecutableNativeBuild(f.root, {
+      ...f.options,
+      outPath: join(f.options.outDir, "other"),
+    }),
+  ).toBe(false);
+  expect(await hasEarlyExecutableNativeBuild(f.root, { ...f.options, sanitize: true })).toBe(false);
+  // Publishing an executable does not record a native build.
+  const other = { ...f.options, outPath: join(f.options.outDir, "published") };
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => trackedReadFile(f.source));
+  await publishEarlyExecutableCache(f.root, other, {
+    llvmPath: f.llvmPath,
+    irPath: f.irPath,
+    native,
+    executableRestored: false,
+    frontend: tracker.snapshot(),
+  });
+  expect(await hasEarlyExecutableNativeBuild(f.root, other)).toBe(false);
 });

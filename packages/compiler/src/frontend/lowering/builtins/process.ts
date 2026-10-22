@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { stdinKeypressListener } from "./readline.js";
 import { envSnapshotHelper, lowerProcessLoadEnvFile } from "./environment.js";
 import { dynUndefinedExpr, boolLit, numLit, strLit, varRef } from "../../../ir/build.js";
@@ -264,6 +265,53 @@ export function isOptionalProcessStreamProperty(
       return true;
   }
   return lowerer.mapTypeOf(lowerer.typeOf(expr.expression))?.kind === "procStream";
+}
+
+/** The process.versions entries @types/node declares as plain strings
+ * that the runtime's versions object (node and openssl only) lacks. */
+const ABSENT_DECLARED_VERSIONS: ReadonlySet<string> = new Set([
+  "http_parser",
+  "v8",
+  "ares",
+  "uv",
+  "zlib",
+  "modules",
+]);
+
+/** A process.versions member read whose declaration promises a string the
+ * runtime does not have. @types/node declares the entries above as plain
+ * strings, so a checked string read would throw on the absent entry and
+ * equality with undefined would fold to false. These reads keep the
+ * undefined arm, like the optional stream properties. The shipped fallback
+ * types declare other entries `string | undefined` and never reach this.
+ * An element read with a computed key qualifies when the checker types it
+ * as a plain string. */
+export function isOptionalProcessVersionsRead(lowerer: Lowerer, node: ts.Node): boolean {
+  let key: string | null;
+  if (ts.isPropertyAccessExpression(node)) key = node.name.text;
+  else if (ts.isElementAccessExpression(node))
+    key = ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null;
+  else return false;
+  if (key !== null && !ABSENT_DECLARED_VERSIONS.has(key)) return false;
+  if (!programMentionsVersions(lowerer)) return false;
+  const symbol = lowerer.typeOf(node.expression).getSymbol();
+  return (
+    symbol !== undefined &&
+    ts.symbolName(symbol) === "ProcessVersions" &&
+    symbol.declarations.some(
+      (d) => ts.isInterfaceDeclaration(d) && lowerer.isStdlibFile(d.getSourceFile()),
+    ) &&
+    lowerer.mapTypeOf(lowerer.typeOf(node))?.kind === "string"
+  );
+}
+
+/** Whether any implementation source spells `versions`. Programs that
+ * never do skip the per-read checker queries above entirely. */
+function programMentionsVersions(lowerer: Lowerer): boolean {
+  lowerer.mentionsProcessVersions ??= lowerer.program
+    .getImplementationSourceFiles()
+    .some((sf) => !sf.isDeclarationFile && sf.text.includes("versions"));
+  return lowerer.mentionsProcessVersions;
 }
 
 export function lowerProcessStreamProperty(
@@ -1514,7 +1562,7 @@ export function lowerProcessMethodCall(
     const key = `${prefix}usage.diff:${prevT.shapeId}:${t.shapeId}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%${prefix}usage.diff.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, `%${prefix}usage.diff`, key);
       lowerer.valueHelpers.set(key, helper);
       const pRef: IrExpr = { kind: "varRef", localId: "p.0", type: prevT, loc };
       const fieldOf = (name: string): IrExpr => ({
@@ -1589,7 +1637,7 @@ export function lowerProcessMethodCall(
     const key = `process.memoryUsage:${t.shapeId}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%process.memoryUsage.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%process.memoryUsage", key);
       lowerer.valueHelpers.set(key, helper);
       lowerer.liftedFns.push({
         name: helper,

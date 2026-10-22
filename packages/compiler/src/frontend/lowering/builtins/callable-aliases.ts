@@ -6,7 +6,7 @@ import { registerHttpClientFnBinding } from "../lower-server.js";
 import { isPromisifiedZlibMember } from "./compression.js";
 import { isPromisifiedCryptoMember } from "./crypto.js";
 import { isPromisifiedDnsMember } from "../lower-dgram.js";
-import { callbackPromisifyShape } from "./promisify-callback.js";
+import { callbackPromisifyShape, untypedPromisifyArgument } from "./promisify-callback.js";
 
 /** Compile-time util.promisify projections. The immutable result binding
  * owns no runtime slot: calls rewrite to the target's promise lowering,
@@ -167,7 +167,11 @@ export function registerPromisifiedBuiltinDecl(
                     : null;
   // A typed callback-last function value: the call lowers to a native
   // promisified function, and the binding holds it like any closure.
-  if (!projection && callbackPromisifyShape(lowerer, e, locOf(e)) !== null) return false;
+  if (
+    !projection &&
+    (callbackPromisifyShape(lowerer, e, locOf(e)) !== null || untypedPromisifyArgument(lowerer, e))
+  )
+    return false;
   if (!projection) {
     lowerer.noLowering(
       "util.promisify of this target",

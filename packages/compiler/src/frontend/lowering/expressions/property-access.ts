@@ -1,10 +1,16 @@
 /* Property reads (`a.b`): lowerExprInner's property-access branch, intrinsic and union properties, field reads and targets, and match-group reads. */
+import { keyedHelperName } from "../stable-names.js";
+import { staticallySelected } from "../static-typeof.js";
 import * as ts from "../../ts7/adapter.js";
 import { lowerHistogramProperty } from "../builtins/performance.js";
 import { staticFunctionNameRead } from "../static-function-names.js";
 import { typedArgumentsArity } from "../typed-arguments.js";
 import { isThisParameter } from "../call-signatures.js";
-import { localPrivateBrandClass } from "../private-brands.js";
+import {
+  checkedPrivateValue,
+  localPrivateBrandClass,
+  privateNameClass,
+} from "../private-brands.js";
 import { type Lowerer, PoisonError, jsFuncNameOf, neverTaintedJsType, own } from "../lowerer.js";
 import {
   ARRAY_METHODS,
@@ -27,6 +33,7 @@ import {
 import {
   BOOL,
   BYTES_ELEMENT_NAME,
+  BYTES_U8,
   DYN,
   F64,
   type IrExpr,
@@ -48,6 +55,7 @@ import {
   typeEquals,
   typeKey,
   unionContainerArmsOk,
+  BYTES_ELEMENT_SIZE,
 } from "../../../ir/ir.js";
 import { lowerNavigatorMember } from "../builtins/navigator.js";
 import { NODE_COMPAT_VERSION } from "../builtins/process.js";
@@ -87,7 +95,7 @@ import {
   runtimeConstructorReceiver,
 } from "../builtins/runtime-constructor.js";
 import { findGenericMethodOn, lowerStaticFieldRead } from "../lower-classes.js";
-import { lowerClassPrototypeData } from "../class-prototypes.js";
+import { isErrorPrototypeValue, lowerClassPrototypeData } from "../class-prototypes.js";
 import { lowerEnumAccess } from "../lower-enums.js";
 import {
   hasOptionalChainGuard,
@@ -100,6 +108,7 @@ import {
   lowerRequireMainProperty,
 } from "../lower-node-module.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, strLit, varRef } from "../../../ir/build.js";
+import { typedArrayLacksMember } from "../builtins/typed-array-members.js";
 import { TEMPORAL_GLOBAL } from "../../builtin-modules.js";
 import { tryLowerExpression } from "./try-lower-expression.js";
 import {
@@ -127,6 +136,7 @@ import { lowerProtocolPropertyRead } from "../class-protocol-dispatch.js";
 import { lowerReadlineProperty } from "../builtins/readline.js";
 import { lowerEventStaticProperty } from "../builtins/numbers.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "../lower-stream.js";
+import { lowerValueStreamProperty } from "../builtins/hash-stream.js";
 import { lowerEventObjectProperty } from "../lower-event-target.js";
 import { iteratorResultValueRead } from "../lower-generators.js";
 import { lowerGlobalValue } from "../lower-global-value.js";
@@ -156,10 +166,13 @@ import { narrowStoredClassValue, structuralReadType } from "../class-unions.js";
 import { InternalCompilerError } from "../../../errors.js";
 import { lowerUnionFieldRead } from "./union-fields.js";
 import { errorPropertyRead } from "../error-methods.js";
-import { isSafeToRepeat } from "./evaluation-safety.js";
+import { isSafeToDiscard, isSafeToRepeat } from "./evaluation-safety.js";
 import { isZlibStreamMember, lowerZlibStreamBytesWritten } from "../builtins/compression.js";
+import { isWebCryptoReceiver } from "../builtins/crypto.js";
 import { isFsStreamMember, lowerFsStreamProperty } from "../builtins/fs-streams.js";
 import { keyedFieldRead } from "./keyed-field-targets.js";
+import { promisePrototypeValue } from "../thenables.js";
+import { lowerChildPropertyRead } from "../handle-properties.js";
 
 /** True when a property access names an ABSTRACT property declaration
  * (`abstract p: number` — a PropertyDeclaration, not an accessor).
@@ -251,14 +264,71 @@ function isStatFsDynProperty(lowerer: Lowerer, expr: ts.PropertyAccessExpression
   );
 }
 
+/** The dgram.Socket methods its checked-dynamic handle answers as
+ * function values (scr_dgram.c's scr_dgram_dyn_method_names). */
+const DGRAM_METHOD_VALUES = new Set([
+  "on",
+  "once",
+  "addListener",
+  "removeListener",
+  "off",
+  "emit",
+  "send",
+  "close",
+  "bind",
+  "connect",
+  "disconnect",
+  "address",
+  "ref",
+  "unref",
+]);
+
 export function lowerPropertyAccessExpr(
   lowerer: Lowerer,
   expr: ts.PropertyAccessExpression,
   loc: SrcLoc,
 ): IrExpr {
+  // `value.#x` on a checked-dynamic value, or on a checked extraction of
+  // one: the field of the brand-checked receiver (checkedPrivateValue).
+  if (ts.isPrivateIdentifier(expr.name)) {
+    const owner = privateNameClass(lowerer, expr.name);
+    const field = owner?.fields.get(expr.name.text);
+    const probed = field ? tryLowerExpression(lowerer, expr.expression) : null;
+    if (owner && field && probed && checkedDynamicValue(probed)) {
+      const value = checkedDynamicValue(lowerer.lowerExpr(expr.expression))!;
+      return {
+        kind: "fieldGet",
+        obj: checkedPrivateValue(lowerer, owner, expr, value, loc),
+        className: owner.def.name,
+        field: expr.name.text,
+        type: field,
+        loc,
+      };
+    }
+  }
   if (!expr.questionDotToken) {
     const navigator = lowerNavigatorMember(lowerer, expr, NODE_COMPAT_VERSION);
     if (navigator) return navigator;
+  }
+  // A dgram socket's method read as a value in JavaScript (`emit:
+  // socket.emit.bind(socket)`): the socket crosses as its checked-dynamic
+  // handle, whose methods are function values that dispatch on their
+  // receiver, as the prototype methods do. The receiver is a native
+  // socket whatever its declaration spells (the shipped types declare no
+  // EventEmitter members), so the name decides.
+  if (
+    !expr.questionDotToken &&
+    DGRAM_METHOD_VALUES.has(expr.name.text) &&
+    isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
+    lowerer.mapTypeOf(lowerer.typeOf(expr.expression))?.kind === "dgramSocket"
+  ) {
+    return {
+      kind: "dynKeyGet",
+      value: lowerer.coerceToExpected(lowerer.lowerExpr(expr.expression), DYN),
+      key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+      type: DYN,
+      loc,
+    };
   }
   // `fn.name` on a function parameter of a generic instance keyed by
   // its argument's static name (call-site specialization).
@@ -478,7 +548,10 @@ export function lowerPropertyAccessExpr(
   // undefined value so stored probes compose with optional calls.
   if (
     stdlibGlobalNameOf(lowerer, expr.expression) === "globalThis" &&
-    !lowerer.checker.getPropertyOfType(lowerer.typeOf(expr.expression), expr.name.text)
+    !lowerer.checker.getPropertyOfType(
+      lowerer.typeOf(staticallySelected(lowerer, expr.expression)),
+      expr.name.text,
+    )
   ) {
     return dynUndefinedExpr(loc);
   }
@@ -731,6 +804,10 @@ export function lowerPropertyAccessExpr(
     const typed = lowerProtocolPropertyRead(lowerer, expr);
     if (typed) return typed;
   }
+  {
+    const promiseMember = lowerPromiseConstructorRead(lowerer, expr);
+    if (promiseMember) return promiseMember;
+  }
   const handled =
     lowerer.lowerProcessEnvGet(expr) ??
     lowerer.lowerServerProperty(expr) ??
@@ -790,8 +867,16 @@ export function lowerPropertyAccessExpr(
     if (runtimeOptionalClassField(lowerer, handled, expr)) return handled;
     return iteratorResultValueRead(lowerer, handled, expr) ?? lowerer.maybeNarrow(handled, expr);
   }
+  // `globalThis.crypto` is the WebCrypto object the bare `crypto` answers.
+  if (
+    !expr.questionDotToken &&
+    stdlibGlobalNameOf(lowerer, expr.expression) === "globalThis" &&
+    stdlibGlobalNameOf(lowerer, expr) === "crypto"
+  ) {
+    return { kind: "libCall", fn: "webcrypto.object", args: [], type: DYN, loc };
+  }
   // `globalThis.<name>` that no lowering above claimed
-  // (globalThis.crypto, globalThis.SubtleCrypto, globalThis.localStorage
+  // (globalThis.SubtleCrypto, globalThis.localStorage
   // — the harness's capability-conditional knownGlobals adds): the
   // PROPERTY spelling of the identifier chokepoint's JS rule — a stdlib
   // global taken as a VALUE in a JavaScript source is the same opaque
@@ -869,7 +954,7 @@ export function lowerPropertyAccessExpr(
         type: STRING,
         loc: locOf(expr.name),
       };
-      const opt = hasOptionalChainGuard(expr.expression);
+      const opt = hasOptionalChainGuard(expr.expression, lowerer);
       return lowerer.maybeNarrow(
         {
           kind: "dynKeyGet",
@@ -978,7 +1063,7 @@ export function lowerPropertyAccessExpr(
         type: STRING,
         loc: locOf(expr.name),
       };
-      const opt = hasOptionalChainGuard(expr.expression);
+      const opt = hasOptionalChainGuard(expr.expression, lowerer);
       return lowerer.maybeNarrow(
         {
           kind: "dynKeyGet",
@@ -1110,7 +1195,7 @@ export function lowerPropertyAccessExpr(
         type: STRING,
         loc: locOf(expr.name),
       };
-      const opt = hasOptionalChainGuard(expr.expression);
+      const opt = hasOptionalChainGuard(expr.expression, lowerer);
       const read: IrExpr = {
         kind: "dynKeyGet",
         key,
@@ -1205,7 +1290,7 @@ export function lowerPropertyAccessExpr(
       type: STRING,
       loc: locOf(expr.name),
     };
-    const opt = hasOptionalChainGuard(expr.expression);
+    const opt = hasOptionalChainGuard(expr.expression, lowerer);
     return lowerer.maybeNarrow(
       {
         kind: "dynKeyGet",
@@ -1376,11 +1461,43 @@ export function lowerPropertyAccessExpr(
       expr,
     );
   }
+  const childProperty = lowerChildPropertyRead(lowerer, expr);
+  if (childProperty) return childProperty;
+  // A member a typed array's type does not declare (a JavaScript read, or
+  // one under @ts-ignore), such as the feature probe `typeof bytes.toHex`:
+  // when Node's prototype chain for the value lacks the name too, the read
+  // answers undefined, as GetV does there. Names Node has keep the fence.
+  // The element size reads the same way where the checker's type of the
+  // receiver no longer names a typed array (`a instanceof Uint8Array ||
+  // a.BYTES_PER_ELEMENT === 1`, whose right side narrows `a` to never).
+  if (recvLowered.type.kind === "bytes" && expr.name.text === "BYTES_PER_ELEMENT") {
+    return afterReceiver(recvLowered, numLit(BYTES_ELEMENT_SIZE[recvLowered.type.elem], loc), loc);
+  }
+  if (
+    recvLowered.type.kind === "bytes" &&
+    !declaredMemberOf(lowerer, expr.expression, expr.name.text) &&
+    typedArrayLacksMember(expr.name.text, recvLowered.type.elem === "u8")
+  ) {
+    return afterReceiver(recvLowered, dynUndefinedExpr(loc), loc);
+  }
   lowerer.unsupported(
     "SC1090",
     expr,
     `reading '${expr.name.text}' from a value of type '${lowerer.checker.typeToString(lowerer.typeOf(expr.expression))}'`,
   );
+}
+
+/** `result` after evaluating `receiver` for its effects (none to keep when
+ * the read is safe to discard). */
+function afterReceiver(receiver: IrExpr, result: IrExpr, loc: SrcLoc): IrExpr {
+  if (isSafeToDiscard(receiver)) return result;
+  return {
+    kind: "seqExpr",
+    stmts: [{ kind: "exprStmt", expr: receiver, loc }],
+    result,
+    type: result.type,
+    loc,
+  };
 }
 
 /** A call expression, through parentheses: its value has no other holder. */
@@ -1580,6 +1697,19 @@ export function lowerIntrinsicProperty(
     return { kind: "libCall", fn: "dyn.arrayPrototype", args: [], type: DYN, loc: locOf(expr) };
   if (lowerer.stdlibGlobalMember(expr, "Object") === "prototype")
     return { kind: "libCall", fn: "dyn.objectPrototype", args: [], type: DYN, loc: locOf(expr) };
+  // Error.prototype as a value (`F.prototype = Object.create(Error.prototype)`)
+  // and Error.captureStackTrace read as a function (`if
+  // (Error.captureStackTrace) ...`).
+  if (isErrorPrototypeValue(lowerer, expr))
+    return { kind: "libCall", fn: "dyn.errorPrototype", args: [], type: DYN, loc: locOf(expr) };
+  if (lowerer.stdlibGlobalMember(expr, "Error") === "captureStackTrace")
+    return {
+      kind: "libCall",
+      fn: "dyn.errorCaptureStackTraceFunction",
+      args: [],
+      type: DYN,
+      loc: locOf(expr),
+    };
   // Function.prototype as a VALUE (a prototype-chain link:
   // `Object.setPrototypeOf(F.prototype, Function.prototype)`): one
   // anonymous function answering undefined, length 0 — a zero-capture
@@ -1624,6 +1754,38 @@ export function lowerIntrinsicProperty(
   if (netAddressStatic) return netAddressStatic;
   if (lowerer.stdlibGlobalMember(expr, "Buffer") === "isBuffer")
     return lowerCheckedPredicateValue(lowerer, "Buffer.isBuffer", "buffer", locOf(expr));
+  // Buffer statics as function values (`Buffer.byteLength.bind(Buffer)` in
+  // truncate-utf8-bytes): the checked forms take any argument as Node does.
+  if (lowerer.stdlibGlobalMember(expr, "Buffer") === "byteLength")
+    return lowerer.lowerNativeCallableValue(
+      {
+        fn: "buffer.byteLenValue",
+        params: [DYN, DYN],
+        result: F64,
+        valueParams: [
+          { mode: "required", type: DYN },
+          { mode: "optional", type: DYN, defaultValue: undefined },
+        ],
+      },
+      "Buffer.byteLength",
+      locOf(expr),
+    );
+  if (lowerer.stdlibGlobalMember(expr, "Buffer") === "alloc")
+    return bufferAllocValue(lowerer, locOf(expr));
+  if (lowerer.stdlibGlobalMember(expr, "Buffer") === "compare")
+    return lowerer.lowerNativeCallableValue(
+      {
+        fn: "buffer.compareChk",
+        params: [DYN, DYN],
+        result: F64,
+        valueParams: [
+          { mode: "required", type: DYN },
+          { mode: "required", type: DYN },
+        ],
+      },
+      "Buffer.compare",
+      locOf(expr),
+    );
   if (lowerer.stdlibGlobalMember(expr, "Date") === "now")
     return lowerer.lowerNativeCallableValue(
       {
@@ -2051,6 +2213,14 @@ export function lowerIntrinsicProperty(
         loc,
       };
     }
+    // The element size: a constant of the element kind (1 for a Buffer).
+    if (name === "BYTES_PER_ELEMENT") {
+      const expected = lowerer.mapTypeOf(lowerer.typeOf(expr.expression));
+      const receiver =
+        expected?.kind === "bytes" ? strictReceiver(expected) : lowerer.lowerExpr(expr.expression);
+      if (receiver.type.kind === "bytes")
+        return afterReceiver(receiver, numLit(BYTES_ELEMENT_SIZE[receiver.type.elem], loc), loc);
+    }
     if (name === "length" || name === "byteLength") {
       const expected = lowerer.mapTypeOf(lowerer.typeOf(expr.expression));
       let receiver =
@@ -2205,9 +2375,78 @@ export function lowerIntrinsicProperty(
         own(STDLIB_SURFACE.string, name) !== undefined
       : ARRAY_METHODS.has(name)
   ) {
+    // A JavaScript string method read as a value (smol-toml's
+    // `!!(''.isWellFormed)` feature probe): String.prototype's method, the
+    // runtime's interned function that runs it on its receiver.
+    if (kind === "string" && isJsSourceFile(expr.getSourceFile()) && !expr.questionDotToken) {
+      const receiver = lowerer.lowerExpr(expr.expression);
+      const method: IrExpr = {
+        kind: "libCall",
+        fn: "dyn.builtinMethod",
+        args: [
+          { kind: "strLit", value: "String", type: STRING, loc: locOf(expr) },
+          { kind: "strLit", value: name, type: STRING, loc: locOf(expr.name) },
+        ],
+        type: DYN,
+        loc: locOf(expr),
+      };
+      return isSafeToDiscard(receiver)
+        ? method
+        : {
+            kind: "seqExpr",
+            stmts: [{ kind: "exprStmt", expr: receiver, loc: locOf(expr.expression) }],
+            result: method,
+            type: DYN,
+            loc: locOf(expr),
+          };
+    }
     lowerer.unsupported("SC1090", expr, `${kind} methods as values (call '${name}' directly)`);
   }
   return null;
+}
+
+/** Buffer.alloc as a function value (`var alloc = Buffer.alloc` in
+ * tar-stream): the runtime checks the size, allocates and fills with
+ * `fill` and `encoding` as Node's alloc does. */
+function bufferAllocValue(lowerer: Lowerer, loc: SrcLoc): IrExpr {
+  const name = "%builtin.Buffer.alloc";
+  if (!lowerer.builtinCallableValueFns.has(name)) {
+    lowerer.builtinCallableValueFns.set(name, name);
+    const params = ["size", "fill", "encoding"].map((id) => ({ localId: id, name: id, type: DYN }));
+    lowerer.liftedFns.push({
+      name,
+      params,
+      returnType: BYTES_U8,
+      locals: params.map((p) => ({ id: p.localId, name: p.name, type: DYN, mutable: false })),
+      loc,
+      body: [
+        {
+          kind: "return",
+          value: {
+            kind: "libCall",
+            fn: "buffer.allocValue",
+            args: params.map((p) => varRef(p.localId, DYN, loc)),
+            type: BYTES_U8,
+            loc,
+          },
+          loc,
+        },
+      ],
+    });
+  }
+  return {
+    kind: "dynFrom",
+    value: {
+      kind: "closure",
+      fnName: name,
+      captures: [],
+      type: { kind: "func", params: [DYN, DYN, DYN], ret: BYTES_U8 },
+      loc,
+    },
+    fnName: "alloc",
+    type: DYN,
+    loc,
+  };
 }
 
 /** A `T | undefined` class field read that the checker narrowed to `T`
@@ -2590,7 +2829,7 @@ export function lowerGroupsProjection(
   const key = `regexgroups:${shapeId}:${groups.map((g) => `${g.name}=${g.index}`).join(",")}:${recvKey}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%regex.groups.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%regex.groups", key);
     lowerer.valueHelpers.set(key, helper);
     const body: IrStmt[] = [];
     const locals: IrLocal[] = [{ id: "m.0", name: "m", type: recv.type, mutable: true }];
@@ -2723,7 +2962,7 @@ export function lowerFieldRead(lowerer: Lowerer, expr: ts.PropertyAccessExpressi
           kind: "dynKeyGet",
           value,
           key: { kind: "strLit", value: expr.name.text, type: STRING, loc: locOf(expr.name) },
-          ...(expr.questionDotToken || hasOptionalChainGuard(expr.expression)
+          ...(expr.questionDotToken || hasOptionalChainGuard(expr.expression, lowerer)
             ? { optional: true as const }
             : {}),
           type: DYN,
@@ -2766,6 +3005,9 @@ export function lowerFieldRead(lowerer: Lowerer, expr: ts.PropertyAccessExpressi
     if (
       receiverIr?.kind !== "object" &&
       propSym &&
+      // The WebCrypto object's generic getRandomValues reads off its
+      // dynamic object.
+      !isWebCryptoReceiver(lowerer, expr.expression) &&
       isGenericCallableMemberType(lowerer.checker.getTypeOfSymbol(propSym), lowerer.checker) &&
       // CLASS members keep the class-path fences (a poisoned class's own
       // diagnostics, the bound-method fence above).
@@ -3079,7 +3321,7 @@ export function lowerUnionProperty(
       kind: "dynKeyGet",
       value: lowerer.coerceToExpected(value, DYN),
       key,
-      ...(hasOptionalChainGuard(expr.expression) ? { optional: true as const } : {}),
+      ...(hasOptionalChainGuard(expr.expression, lowerer) ? { optional: true as const } : {}),
       type: DYN,
       loc: locOf(expr),
     };
@@ -3340,6 +3582,13 @@ export function classFieldTarget(
  * known class instance OR a record, and the member is a field or (class
  * receivers) a declared accessor property. Returns the pieces of a
  * fieldSet/recordSet/accessor-call (minus value/kind) or null. */
+/** The checked-dynamic value `expr` reads: itself, or the value a checked
+ * extraction validates. Null for other expressions. */
+function checkedDynamicValue(expr: IrExpr): IrExpr | null {
+  if (expr.type.kind === "dyn") return expr;
+  return expr.kind === "dynCheck" && expr.value.type.kind === "dyn" ? expr.value : null;
+}
+
 export function fieldTarget(
   lowerer: Lowerer,
   access: ts.PropertyAccessExpression,
@@ -3374,6 +3623,30 @@ export function fieldTarget(
         className: owner.info.def.name,
       };
       return classFieldTarget(lowerer, access.expression, ownerType, access.name.text);
+    }
+  }
+  // `value.#x = v` on a checked-dynamic value: the field of the
+  // brand-checked receiver (checkedPrivateValue).
+  if (ts.isPrivateIdentifier(access.name)) {
+    const owner = privateNameClass(lowerer, access.name);
+    const probed = owner?.fields.has(access.name.text)
+      ? tryLowerExpression(lowerer, access.expression)
+      : null;
+    if (owner && probed && checkedDynamicValue(probed)) {
+      const receiver = checkedPrivateValue(
+        lowerer,
+        owner,
+        access,
+        checkedDynamicValue(lowerer.lowerExpr(access.expression))!,
+        locOf(access),
+      );
+      return classFieldTarget(
+        lowerer,
+        access.expression,
+        { kind: "object", className: owner.def.name },
+        access.name.text,
+        receiver,
+      );
     }
   }
   const stored = ts.isIdentifier(access.expression)
@@ -3801,6 +4074,8 @@ function lowerStreamObjectProperty(
   expr: ts.PropertyAccessExpression,
 ): IrExpr | null {
   if (expr.questionDotToken && !lowerer.chainHandled.has(expr)) return null;
+  const valueStream = lowerValueStreamProperty(lowerer, expr);
+  if (valueStream) return valueStream;
   const recvT = lowerer.mapTypeOf(lowerer.typeOf(expr.expression));
   if (recvT?.kind !== "object") return null;
   const info = lowerer.classes.get(recvT.className);
@@ -4064,4 +4339,76 @@ function jsFunctionExpandoMember(lowerer: Lowerer, access: ts.PropertyAccessExpr
 export function declaredMemberOf(lowerer: Lowerer, receiver: ts.Expression, name: string): boolean {
   const symbol = lowerer.checker.getPropertyOfType(lowerer.typeOf(receiver), name);
   return !!symbol && symbol.declarations.length > 0;
+}
+
+/** Whether `expr` reads Promise.prototype, directly or as
+ * `promise.constructor.prototype`. The checker types it Promise<any>, but
+ * the value is an ordinary object, so a binding inferred from it stays
+ * checked-dynamic (as in Node, promise methods called on it throw). */
+export function isPromisePrototypeRead(lowerer: Lowerer, expr: ts.Expression | undefined): boolean {
+  if (!expr) return false;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if (!ts.isPropertyAccessExpression(expr) || expr.questionDotToken) return false;
+  if (expr.name.text !== "prototype") return false;
+  if (lowerer.stdlibGlobalMember(expr, "Promise") === "prototype") return true;
+  const inner = expr.expression;
+  return (
+    ts.isPropertyAccessExpression(inner) &&
+    !inner.questionDotToken &&
+    inner.name.text === "constructor" &&
+    lowerer.mapTypeOf(lowerer.typeOf(inner.expression))?.kind === "promise"
+  );
+}
+
+/** A promise's `constructor` (the Promise constructor value), and
+ * Promise.prototype read as `promise.constructor.prototype` or
+ * `Promise.prototype` (execa's `(async () => {})().constructor.prototype`):
+ * an object holding the runtime's then, catch and finally (thenables.ts).
+ * Null for other reads. */
+function lowerPromiseConstructorRead(
+  lowerer: Lowerer,
+  expr: ts.PropertyAccessExpression,
+): IrExpr | null {
+  if (expr.questionDotToken) return null;
+  const loc = locOf(expr);
+  const isPromise = (node: ts.Expression): boolean =>
+    lowerer.mapTypeOf(lowerer.typeOf(node))?.kind === "promise";
+  if (expr.name.text === "prototype") {
+    if (lowerer.stdlibGlobalMember(expr, "Promise") === "prototype")
+      return promisePrototypeValue(lowerer, loc);
+    const inner = expr.expression;
+    if (
+      ts.isPropertyAccessExpression(inner) &&
+      !inner.questionDotToken &&
+      inner.name.text === "constructor" &&
+      isPromise(inner.expression)
+    ) {
+      const receiver = lowerer.lowerExpr(inner.expression);
+      const prototype = promisePrototypeValue(lowerer, loc);
+      return isSafeToDiscard(receiver)
+        ? prototype
+        : {
+            kind: "seqExpr",
+            stmts: [{ kind: "exprStmt", expr: receiver, loc }],
+            result: prototype,
+            type: DYN,
+            loc,
+          };
+    }
+    return null;
+  }
+  if (expr.name.text === "constructor" && isPromise(expr.expression)) {
+    const receiver = lowerer.lowerExpr(expr.expression);
+    const ctor = builtinGlobalValue("Promise", loc)!;
+    return isSafeToDiscard(receiver)
+      ? ctor
+      : {
+          kind: "seqExpr",
+          stmts: [{ kind: "exprStmt", expr: receiver, loc }],
+          result: ctor,
+          type: DYN,
+          loc,
+        };
+  }
+  return null;
 }

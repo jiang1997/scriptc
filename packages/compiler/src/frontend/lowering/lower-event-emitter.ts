@@ -42,6 +42,7 @@
  * emit-overrides block at the bottom of this file (per-event
  * monomorphization of the override body, dispatch on the dynamic class,
  * super.emit as the prototype chain). */
+import { keyedHelperName } from "./stable-names.js";
 import { checkKeypressListener } from "./builtins/readline.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
@@ -53,6 +54,8 @@ import {
   BOOL,
   canBoxFuncIntoDyn,
   canConvertToDyn,
+  canDynCheckTo,
+  isDynTypedRefType,
   DYN,
   F64,
   type IrExpr,
@@ -69,7 +72,7 @@ import {
   VOID,
 } from "../../ir/ir.js";
 import { STREAM_FORCED_EVENT_NAMES, streamForcedTuple, streamSidesOf } from "./lower-stream.js";
-import { boolLit, strLit, varRef } from "../../ir/build.js";
+import { boolLit, dynUndefinedExpr, strLit, varRef } from "../../ir/build.js";
 import { tryLowerExpression } from "./expressions/try-lower-expression.js";
 import { lowerAddAbortListener } from "./builtin-calls.js";
 import { requestGeneralStreamSurface } from "./general-streams.js";
@@ -336,9 +339,15 @@ function emitterEvents(lowerer: Lowerer): Map<string, EventSig> {
           const cbCt = lowerer.typeOf(node.arguments.nodes[1]);
           const cbT =
             lowerer.mapTypeOf(cbCt) ?? dynFallbackType(lowerer, node.arguments.nodes[1], cbCt);
+          // A TypeScript listener with no parameters is typed too: it
+          // registers without the adapter, so an untyped emit reaches it
+          // only through the event's fixed ABI. A JavaScript function
+          // without parameters can still read `arguments`.
           if (
             cbT?.kind !== "dyn" &&
-            (cbT?.kind !== "func" || cbT.params.some((p) => p.kind !== "dyn"))
+            (cbT?.kind !== "func" ||
+              (cbT.params.length === 0 && !isJsSourceFile(sf)) ||
+              cbT.params.some((p) => p.kind !== "dyn"))
           ) {
             sigOf(name).typedListener = true;
           }
@@ -623,7 +632,7 @@ function lowerFlexListenerCall(
   const key = `emitter.${registering ? "onFlex" : "offDyn"}:${typeKey(recvT)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%emitter.${registering ? "onFlex" : "offFlex"}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%emitter.${registering ? "onFlex" : "offFlex"}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const params: IrParam[] = [
       { localId: "r.0", name: "r", type: recvT },
@@ -842,7 +851,7 @@ function lowerDynListenerCall(
   const existing = lowerer.arrHofHelpers.get(key);
   let helper = existing;
   if (!helper) {
-    helper = `%emitter.${registering ? "onDyn" : "offDyn"}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%emitter.${registering ? "onDyn" : "offDyn"}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const check: IrStmt = {
       kind: "exprStmt",
@@ -926,6 +935,239 @@ function lowerDynListenerCall(
     args: registering
       ? [receiver, eventNameExpr(name, loc), cbDyn, boolLit(once, loc), boolLit(prepend, loc)]
       : [receiver, eventNameExpr(name, loc), cbDyn],
+    type: recvT,
+    loc,
+  };
+}
+
+/** The literal events typed code dispatches with a fixed tuple — it emits
+ * them or listens with typed parameters — whose names an untyped receiver
+ * may also use. 'error' and the meta events are excluded: the runtime fixes
+ * their tuples itself (scr_emitter_on_flex / scr_emitter_emit_flex). */
+function bridgedEvents(lowerer: Lowerer): { name: string; tuple: IrType[] }[] {
+  const table = emitterEvents(lowerer);
+  const events: { name: string; tuple: IrType[] }[] = [];
+  for (const [key, sig] of table) {
+    if (key === "error" || key === ERROR_MONITOR_EVENT || META_EVENTS.has(key)) continue;
+    if (sig.conflict !== null || (!sig.fromEmit && sig.typedListener !== true)) continue;
+    if (flexibleJsEvent(key, sig)) continue;
+    if (computedPatterns(lowerer).some((pattern) => patternMatchesName(pattern, key))) continue;
+    events.push({ name: eventKeyName(key), tuple: sig.tuple });
+  }
+  return events;
+}
+
+/** `emit(name, ...args)` through an untyped value on a (non-stream)
+ * emitter-rooted receiver, when typed code fixes the tuple of some event.
+ * Listeners registered as checked-dynamic functions receive the arguments
+ * as given; when the name is such an event and a listener with typed
+ * parameters is registered, the arguments also convert to the event's tuple
+ * (a mismatch throws the checked conversion's TypeError). Null when no event
+ * needs this, so the caller keeps the plain untyped emit. */
+export function lowerDynamicEmitterEmit(
+  lowerer: Lowerer,
+  receiver: IrExpr,
+  name: IrExpr,
+  payload: IrExpr[],
+  loc: SrcLoc,
+): IrExpr | null {
+  const recvT = receiver.type;
+  if (recvT.kind !== "object") return null;
+  const k = payload.length;
+  const getRecord = (id: string) => lowerer.shapes.get(id);
+  const getUnion = (id: string) => lowerer.unions.get(id);
+  const checkable = (t: IrType): boolean =>
+    t.kind === "dyn" ||
+    isDynTypedRefType(t) ||
+    isUnitType(t) ||
+    (t.kind === "union"
+      ? (getUnion(t.unionId)?.arms.every(checkable) ?? false)
+      : canDynCheckTo(t, getRecord, getUnion));
+  const converted = (tuple: IrType[]): IrExpr[] | null => {
+    if (!tuple.every(checkable)) return null;
+    const out: IrExpr[] = [];
+    for (let i = 0; i < tuple.length; i++) {
+      const arg = i < k ? varRef(`a.${i}`, DYN, loc) : dynUndefinedExpr(loc);
+      const value = lowerer.coerceToExpected(arg, tuple[i]!);
+      if (!typeEquals(value.type, tuple[i]!)) return null;
+      out.push(value);
+    }
+    return out;
+  };
+  const events = bridgedEvents(lowerer)
+    .map((event) => ({ ...event, args: converted(event.tuple) }))
+    .filter((event) => event.args !== null);
+  if (events.length === 0) return null;
+  const key = `emitter.dynEmit:${typeKey(recvT)}:${k}`;
+  let helper = lowerer.arrHofHelpers.get(key);
+  if (!helper) {
+    helper = keyedHelperName(lowerer, "%emitter.dynEmit", key);
+    lowerer.arrHofHelpers.set(key, helper);
+    const params: IrParam[] = [
+      { localId: "r.0", name: "r", type: recvT },
+      { localId: "n.0", name: "n", type: STRING },
+      ...payload.map((_, i) => ({ localId: `a.${i}`, name: `a${i}`, type: DYN })),
+    ];
+    const r = varRef("r.0", recvT, loc);
+    const n = varRef("n.0", STRING, loc);
+    const dynArgs = payload.map((_, i) => varRef(`a.${i}`, DYN, loc));
+    const body: IrStmt[] = events.map((event): IrStmt => ({
+      kind: "if",
+      cond: {
+        kind: "strEq",
+        negated: false,
+        left: n,
+        right: strLit(event.name, loc),
+        type: BOOL,
+        loc,
+      },
+      then: [
+        {
+          kind: "if",
+          cond: { kind: "libCall", fn: "emitter.hasTyped", args: [r, n], type: BOOL, loc },
+          then: [
+            {
+              kind: "return",
+              value: {
+                kind: "libCall",
+                fn: "emitter.emitMixed",
+                args: [
+                  r,
+                  n,
+                  { kind: "numLit", value: k, type: F64, loc },
+                  ...dynArgs,
+                  ...event.args!,
+                ],
+                type: BOOL,
+                loc,
+              },
+              loc,
+            },
+          ],
+          else_: null,
+          loc,
+        },
+      ],
+      else_: null,
+      loc,
+    }));
+    body.push({
+      kind: "return",
+      value: { kind: "libCall", fn: "emitter.emitAny", args: [r, n, ...dynArgs], type: BOOL, loc },
+      loc,
+    });
+    lowerer.liftedFns.push({
+      name: helper,
+      params,
+      returnType: BOOL,
+      locals: params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+      body,
+      loc,
+    });
+  }
+  return { kind: "call", callee: helper, args: [receiver, name, ...payload], type: BOOL, loc };
+}
+
+/** on/once/prepend*(name, fn) through an untyped value on a (non-stream)
+ * emitter-rooted receiver, when typed code fixes the tuple of some event.
+ * Under such an event's name the function registers with a typed adapter
+ * for typed emits as well as its checked-dynamic thunk for untyped ones;
+ * other names register the thunk alone. Null when no event needs this. */
+export function lowerDynamicEmitterOn(
+  lowerer: Lowerer,
+  receiver: IrExpr,
+  name: IrExpr,
+  cb: IrExpr,
+  once: boolean,
+  prepend: boolean,
+  loc: SrcLoc,
+): IrExpr | null {
+  const recvT = receiver.type;
+  if (recvT.kind !== "object") return null;
+  const getRecord = (id: string) => lowerer.shapes.get(id);
+  const getUnion = (id: string) => lowerer.unions.get(id);
+  const events = bridgedEvents(lowerer).filter((event) =>
+    event.tuple.every((t) => t.kind === "dyn" || canConvertToDyn(t, getRecord, getUnion)),
+  );
+  if (events.length === 0) return null;
+  const key = `emitter.dynOn:${typeKey(recvT)}`;
+  let helper = lowerer.arrHofHelpers.get(key);
+  if (!helper) {
+    helper = keyedHelperName(lowerer, "%emitter.dynOn", key);
+    lowerer.arrHofHelpers.set(key, helper);
+    const params: IrParam[] = [
+      { localId: "r.0", name: "r", type: recvT },
+      { localId: "n.0", name: "n", type: STRING },
+      { localId: "cb.0", name: "cb", type: DYN },
+      { localId: "o.0", name: "o", type: BOOL },
+      { localId: "p.0", name: "p", type: BOOL },
+    ];
+    const locals: IrLocal[] = params.map((p) => ({
+      id: p.localId,
+      name: p.name,
+      type: p.type,
+      mutable: false,
+    }));
+    const r = varRef("r.0", recvT, loc);
+    const n = varRef("n.0", STRING, loc);
+    const fn = varRef("cb.0", DYN, loc);
+    const o = varRef("o.0", BOOL, loc);
+    const p = varRef("p.0", BOOL, loc);
+    const body: IrStmt[] = [
+      {
+        kind: "exprStmt",
+        expr: { kind: "libCall", fn: "emitter.checkListener", args: [fn], type: VOID, loc },
+        loc,
+      },
+    ];
+    events.forEach((event, i) => {
+      const adapterT: IrType = { kind: "func", params: event.tuple, ret: VOID };
+      const adapter = `a.${i}`;
+      locals.push({ id: adapter, name: "a", type: adapterT, mutable: false });
+      body.push({
+        kind: "if",
+        cond: {
+          kind: "strEq",
+          negated: false,
+          left: n,
+          right: strLit(event.name, loc),
+          type: BOOL,
+          loc,
+        },
+        then: [
+          {
+            kind: "varDecl",
+            localId: adapter,
+            init: { kind: "dynCheck", value: fn, type: adapterT, loc },
+            loc,
+          },
+          {
+            kind: "return",
+            value: {
+              kind: "libCall",
+              fn: "emitter.onDyn",
+              args: [r, n, fn, varRef(adapter, adapterT, loc), o, p],
+              type: recvT,
+              loc,
+            },
+            loc,
+          },
+        ],
+        else_: null,
+        loc,
+      });
+    });
+    body.push({
+      kind: "return",
+      value: { kind: "libCall", fn: "emitter.onAny", args: [r, n, fn, o, p], type: recvT, loc },
+      loc,
+    });
+    lowerer.liftedFns.push({ name: helper, params, returnType: recvT, locals, body, loc });
+  }
+  return {
+    kind: "call",
+    callee: helper,
+    args: [receiver, name, cb, boolLit(once, loc), boolLit(prepend, loc)],
     type: recvT,
     loc,
   };
@@ -1887,8 +2129,12 @@ function ensureEmitSpec(lowerer: Lowerer, info: ClassInfo, event: string, tuple:
       params: tuple.map((t) => ({ type: t, mode: "required" as const })),
       ret: BOOL,
     });
-    if (info.def.methods) info.def.methods.push(mName);
-    else info.def.methods = [mName];
+    // Specializations sit in the method list sorted by event name, so the
+    // class table does not depend on which body asked for one first.
+    const methods = (info.def.methods ??= []);
+    const after = methods.findIndex((m) => m.startsWith("emit:") && m > mName);
+    if (after < 0) methods.push(mName);
+    else methods.splice(after, 0, mName);
   }
   const ordinal = lowerer.emitSpecQueue.filter((q) => q.info === info).length;
   lowerer.emitSpecQueue.push({ info, event, tuple, ordinal });
@@ -2114,7 +2360,7 @@ function emitDispatchExpr(
   const key = `emitter.emitDispatch:${typeKey(recvT)}:${name}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%emitter.emitDispatch.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%emitter.emitDispatch", key);
     lowerer.arrHofHelpers.set(key, helper);
     const params: IrParam[] = [
       { localId: "r.0", name: "r", type: recvT },
@@ -2179,7 +2425,7 @@ function eventsOnceBoxer(
   const key = `eventsOnce:${typeKey(fnType)}`;
   let name = lowerer.valueHelpers.get(key);
   if (name === undefined) {
-    name = `%events.onceArgs.${lowerer.valueHelpers.size}`;
+    name = keyedHelperName(lowerer, "%events.onceArgs", key);
     lowerer.valueHelpers.set(key, name);
     const params: IrParam[] = tuple.map((type, i) => ({
       localId: `%once.a${i}`,

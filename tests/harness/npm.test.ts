@@ -72,7 +72,7 @@ const KNOWN: Record<string, Known> = {
   "node24-esm-metadata": { run: "SC1090" },
   "node24-event-emitter": { run: "SC2020" },
   "node24-file-url-conversion": { build: "SC1090" },
-  "node24-fs-descriptors": { run: "SC1090" },
+  "node24-fs-descriptors": { run: "SC2020" },
   "node24-mime": { run: "SC2020" },
   "node24-mime-errors": { run: "SC1090" },
   "node24-no-error-assertions": { run: "SC2020" },
@@ -86,7 +86,7 @@ const KNOWN: Record<string, Known> = {
   "node24-timers-unref": { run: "SC2020" },
   "node24-url-factories": { run: "SC2020" },
   "node24-url-mutation": { run: "SC1090" },
-  "node24-util-adapters": { run: "SC2020" },
+  "node24-util-adapters": { run: "Object.create with this value is not supported yet" },
   "node24-util-types": { run: "SC1090" },
   "node24-web-stream-encoding": { run: "SC1090" },
   "node24-web-stream-errors": { run: "SC1090" },
@@ -110,6 +110,11 @@ const KNOWN: Record<string, Known> = {
 };
 
 const cases = shardSelect(npmCases(fixturesRoot), (c) => c.name);
+
+/** Per-case timeouts past the default 120 s: the undici cases compile the
+ * built-in undici implementation's module graph, which a sanitized build
+ * on a CI runner takes minutes to compile. */
+const TIMEOUTS: Record<string, number> = { undici5: 600_000, undici7: 600_000 };
 
 interface RunResult {
   stdout: Buffer;
@@ -233,7 +238,7 @@ describe(`npm native (${cases.length} programs${sanitize ? ", sanitized" : ""}${
         }
         await expectMatchesNode(c, built.binary);
       },
-      120_000,
+      TIMEOUTS[c.name] ?? 120_000,
     );
   }
 });

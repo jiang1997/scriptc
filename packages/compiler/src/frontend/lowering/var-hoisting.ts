@@ -41,7 +41,10 @@ export function earlyReadVarSymbols(
     if (sf.isDeclarationFile) continue;
     const bindings = new Map<ts.Symbol, Binding>();
     const names = new Set<string>();
+    const functionNames = new Set<string>();
     ts.walkPreorder(sf, (node) => {
+      if (ts.isFunctionDeclaration(node) && node.name !== undefined)
+        functionNames.add(node.name.text);
       if (!ts.isVariableDeclarationList(node)) return undefined;
       if ((node.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using)) !== 0)
         return undefined;
@@ -66,7 +69,7 @@ export function earlyReadVarSymbols(
     });
     if (bindings.size === 0) continue;
     const refs = referencesByName(lowerer, sf, names);
-    const analysis = new ScopeAnalysis(lowerer, sf);
+    const analysis = new ScopeAnalysis(lowerer, sf, functionNames);
     for (const [symbol, binding] of bindings) {
       const settle = analysis.settleIndex(binding.scope, symbol);
       const early = (refs.get(symbol) ?? []).some(
@@ -151,6 +154,31 @@ function referencesByName(
     if (ts.isIdentifier(node) && names.has(node.text)) idents.push(node);
     return undefined;
   });
+  return referencesBySymbol(lowerer, idents);
+}
+
+/** The identifiers of `sf` named in `names`, by name, each list in source
+ * order. */
+function identifiersByName(
+  sf: ts.SourceFile,
+  names: ReadonlySet<string>,
+): Map<string, ts.Identifier[]> {
+  const out = new Map<string, ts.Identifier[]>();
+  ts.walkPreorder(sf, (node) => {
+    if (!ts.isIdentifier(node) || !names.has(node.text)) return undefined;
+    const list = out.get(node.text);
+    if (list) list.push(node);
+    else out.set(node.text, [node]);
+    return undefined;
+  });
+  return out;
+}
+
+/** `idents` by resolved symbol, each list in the order of `idents`. */
+function referencesBySymbol(
+  lowerer: Lowerer,
+  idents: readonly ts.Identifier[],
+): Map<ts.Symbol, ts.Identifier[]> {
   lowerer.checker.prefetchSymbolNodesExact(idents);
   const out = new Map<ts.Symbol, ts.Identifier[]>();
   for (const id of idents) {
@@ -173,10 +201,14 @@ class ScopeAnalysis {
    * its own body names is never called through that name). */
   private readonly functionMemo = new Map<string, boolean>();
   private readonly functionRefs = new Map<ts.Node, ts.Identifier[]>();
+  /** The file's identifiers named like one of its function declarations,
+   * by name, collected in one walk on first use. */
+  private functionNameIdents: Map<string, ts.Identifier[]> | null = null;
 
   constructor(
     private readonly lowerer: Lowerer,
     private readonly sf: ts.SourceFile,
+    private readonly functionNames: ReadonlySet<string>,
   ) {
     this.js = isJsSourceFile(sf);
   }
@@ -263,11 +295,18 @@ class ScopeAnalysis {
     const refs =
       symbol === undefined
         ? []
-        : (referencesByName(this.lowerer, this.sf, new Set([name.text])).get(symbol) ?? []).filter(
-            (ref) => ref !== name,
-          );
+        : (
+            referencesBySymbol(this.lowerer, this.identifiersNamed(name.text)).get(symbol) ?? []
+          ).filter((ref) => ref !== name);
     this.functionRefs.set(fn, refs);
     return refs;
+  }
+
+  /** The identifiers named `text`, the name of a function declaration of
+   * the file. */
+  private identifiersNamed(text: string): readonly ts.Identifier[] {
+    this.functionNameIdents ??= identifiersByName(this.sf, this.functionNames);
+    return this.functionNameIdents.get(text) ?? [];
   }
 }
 

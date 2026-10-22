@@ -23,6 +23,7 @@
  * is little-endian, which the short-string words assume.
  */
 import type { IrType } from "../../ir/ir.js";
+import { SCR_ARR_FIELD } from "./common.js";
 import { FN_ATTRS } from "./shapes.js";
 
 export type ArraySearchKind = "ptr" | "str";
@@ -63,14 +64,16 @@ export function emitArraySearchHelpers(
       `define internal double @${arraySearchHelperName(kind)}(ptr %a, ptr %v) ${FN_ATTRS} {`,
       `entry:`,
       `  %lenp = getelementptr inbounds %ScrArr, ptr %a, i32 0, i32 1`,
-      `  %len = load ${sz}, ptr %lenp${sz === "i64" ? ", !range !{i64 0, i64 4294967296}" : ""}`,
+      ...(sz === "i64"
+        ? [`  %len32 = load i32, ptr %lenp`, `  %len = zext i32 %len32 to i64`]
+        : [`  %len = load i32, ptr %lenp`]),
       `  %fp = getelementptr inbounds %ScrArr, ptr %a, i32 0, i32 6`,
       `  %f32 = load i32, ptr %fp`,
       widen,
       `  %dense = icmp eq ${sz} %f, %len`,
       `  br i1 %dense, label %scan, label %slow`,
       `scan:`,
-      `  %dp = getelementptr inbounds %ScrArr, ptr %a, i32 0, i32 8`,
+      `  %dp = getelementptr inbounds %ScrArr, ptr %a, i32 0, i32 ${SCR_ARR_FIELD.data}`,
       `  %data = load ptr, ptr %dp`,
     );
     if (kind === "ptr") {

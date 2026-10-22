@@ -71,841 +71,337 @@
       "slug": "assert",
       "title": "Assertion testing",
       "entries": 29,
-      "apiEntries": 29,
-      "static": {
-        "supported": 0,
-        "partial": 23,
-        "refused": 0,
-        "not-implemented": 6,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 29
     },
     {
       "slug": "async_context",
       "title": "Asynchronous context tracking",
       "entries": 20,
-      "apiEntries": 20,
-      "static": {
-        "supported": 0,
-        "partial": 7,
-        "refused": 0,
-        "not-implemented": 13,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 20
     },
     {
       "slug": "async_hooks",
       "title": "Async hooks",
       "entries": 20,
-      "apiEntries": 20,
-      "static": {
-        "supported": 0,
-        "partial": 4,
-        "refused": 0,
-        "not-implemented": 16,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 20
     },
     {
       "slug": "buffer",
       "title": "Buffer",
       "entries": 99,
-      "apiEntries": 99,
-      "static": {
-        "supported": 16,
-        "partial": 7,
-        "refused": 0,
-        "not-implemented": 76,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 99
     },
     {
       "slug": "addons",
       "title": "C++ addons",
       "entries": 3,
-      "apiEntries": 3,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 3,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 3
     },
     {
       "slug": "n-api",
       "title": "C/C++ addons with Node-API",
       "entries": 192,
-      "apiEntries": 192,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 192,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 192
     },
     {
       "slug": "child_process",
       "title": "Child processes",
       "entries": 39,
-      "apiEntries": 39,
-      "static": {
-        "supported": 0,
-        "partial": 18,
-        "refused": 0,
-        "not-implemented": 21,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 39
     },
     {
       "slug": "cluster",
       "title": "Cluster",
       "entries": 34,
-      "apiEntries": 34,
-      "static": {
-        "supported": 0,
-        "partial": 4,
-        "refused": 0,
-        "not-implemented": 30,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 34
     },
     {
       "slug": "console",
       "title": "Console",
       "entries": 24,
-      "apiEntries": 24,
-      "static": {
-        "supported": 0,
-        "partial": 23,
-        "refused": 0,
-        "not-implemented": 1,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 24
     },
     {
       "slug": "crypto",
       "title": "Crypto",
       "entries": 152,
-      "apiEntries": 152,
-      "static": {
-        "supported": 6,
-        "partial": 39,
-        "refused": 21,
-        "not-implemented": 86,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 152
     },
     {
       "slug": "diagnostics_channel",
       "title": "Diagnostics Channel",
       "entries": 71,
-      "apiEntries": 71,
-      "static": {
-        "supported": 0,
-        "partial": 8,
-        "refused": 0,
-        "not-implemented": 63,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 71
     },
     {
       "slug": "dns",
       "title": "DNS",
       "entries": 51,
-      "apiEntries": 51,
-      "static": {
-        "supported": 0,
-        "partial": 10,
-        "refused": 0,
-        "not-implemented": 41,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 51
     },
     {
       "slug": "domain",
       "title": "Domain",
       "entries": 12,
-      "apiEntries": 12,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 12,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 12
     },
     {
       "slug": "environment_variables",
       "title": "Environment Variables",
       "entries": 2,
-      "apiEntries": 2,
-      "static": {
-        "supported": 0,
-        "partial": 2,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 2
     },
     {
       "slug": "errors",
       "title": "Errors",
       "entries": 478,
-      "apiEntries": 478,
-      "static": {
-        "supported": 0,
-        "partial": 8,
-        "refused": 0,
-        "not-implemented": 470,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 478
     },
     {
       "slug": "events",
       "title": "Events",
       "entries": 78,
-      "apiEntries": 78,
-      "static": {
-        "supported": 18,
-        "partial": 35,
-        "refused": 0,
-        "not-implemented": 25,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 78
     },
     {
       "slug": "fs",
       "title": "File system",
       "entries": 280,
-      "apiEntries": 280,
-      "static": {
-        "supported": 7,
-        "partial": 200,
-        "refused": 0,
-        "not-implemented": 73,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 280
     },
     {
       "slug": "globals",
       "title": "Globals",
       "entries": 92,
-      "apiEntries": 92,
-      "static": {
-        "supported": 1,
-        "partial": 16,
-        "refused": 0,
-        "not-implemented": 75,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 92
     },
     {
       "slug": "http",
       "title": "HTTP",
       "entries": 176,
-      "apiEntries": 176,
-      "static": {
-        "supported": 0,
-        "partial": 131,
-        "refused": 0,
-        "not-implemented": 45,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 176
     },
     {
       "slug": "http2",
       "title": "HTTP/2",
       "entries": 168,
-      "apiEntries": 168,
-      "static": {
-        "supported": 0,
-        "partial": 14,
-        "refused": 2,
-        "not-implemented": 152,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 168
     },
     {
       "slug": "https",
       "title": "HTTPS",
       "entries": 20,
-      "apiEntries": 20,
-      "static": {
-        "supported": 0,
-        "partial": 12,
-        "refused": 0,
-        "not-implemented": 8,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 20
     },
     {
       "slug": "inspector",
       "title": "Inspector",
       "entries": 35,
-      "apiEntries": 35,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 35,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 35
     },
     {
       "slug": "stream_iter",
       "title": "Iterable Streams API",
       "entries": 65,
-      "apiEntries": 65,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 65,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 65
     },
     {
       "slug": "modules",
       "title": "Modules: CommonJS modules",
       "entries": 27,
-      "apiEntries": 27,
-      "static": {
-        "supported": 0,
-        "partial": 24,
-        "refused": 0,
-        "not-implemented": 1,
-        "by-design": 0,
-        "unreviewed": 2,
-        "not-applicable": 0
-      }
+      "apiEntries": 27
     },
     {
       "slug": "esm",
       "title": "Modules: ECMAScript modules",
       "entries": 22,
-      "apiEntries": 22,
-      "static": {
-        "supported": 0,
-        "partial": 13,
-        "refused": 0,
-        "not-implemented": 9,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 22
     },
     {
       "slug": "module",
       "title": "Modules: node:module API",
       "entries": 30,
-      "apiEntries": 30,
-      "static": {
-        "supported": 0,
-        "partial": 5,
-        "refused": 0,
-        "not-implemented": 25,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 30
     },
     {
       "slug": "packages",
       "title": "Modules: Packages",
       "entries": 8,
-      "apiEntries": 8,
-      "static": {
-        "supported": 0,
-        "partial": 8,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 8
     },
     {
       "slug": "typescript",
       "title": "Modules: TypeScript",
       "entries": 2,
-      "apiEntries": 2,
-      "static": {
-        "supported": 2,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 2
     },
     {
       "slug": "net",
       "title": "Net",
       "entries": 119,
-      "apiEntries": 119,
-      "static": {
-        "supported": 16,
-        "partial": 39,
-        "refused": 0,
-        "not-implemented": 64,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 119
     },
     {
       "slug": "os",
       "title": "OS",
       "entries": 24,
-      "apiEntries": 24,
-      "static": {
-        "supported": 0,
-        "partial": 24,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 24
     },
     {
       "slug": "path",
       "title": "Path",
       "entries": 17,
-      "apiEntries": 17,
-      "static": {
-        "supported": 0,
-        "partial": 17,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 17
     },
     {
       "slug": "perf_hooks",
       "title": "Performance hooks",
       "entries": 131,
-      "apiEntries": 131,
-      "static": {
-        "supported": 0,
-        "partial": 25,
-        "refused": 0,
-        "not-implemented": 106,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 131
     },
     {
       "slug": "permissions",
       "title": "Permissions",
       "entries": 4,
-      "apiEntries": 4,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 4,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 4
     },
     {
       "slug": "process",
       "title": "Process",
       "entries": 120,
-      "apiEntries": 120,
-      "static": {
-        "supported": 0,
-        "partial": 51,
-        "refused": 0,
-        "not-implemented": 69,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 120
     },
     {
       "slug": "punycode",
       "title": "Punycode",
       "entries": 9,
-      "apiEntries": 9,
-      "static": {
-        "supported": 0,
-        "partial": 8,
-        "refused": 0,
-        "not-implemented": 1,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 9
     },
     {
       "slug": "querystring",
       "title": "Query strings",
       "entries": 7,
-      "apiEntries": 7,
-      "static": {
-        "supported": 0,
-        "partial": 7,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 7
     },
     {
       "slug": "readline",
       "title": "Readline",
       "entries": 43,
-      "apiEntries": 43,
-      "static": {
-        "supported": 0,
-        "partial": 42,
-        "refused": 0,
-        "not-implemented": 1,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 43
     },
     {
       "slug": "repl",
       "title": "REPL",
       "entries": 14,
-      "apiEntries": 14,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 14,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 14
     },
     {
       "slug": "sqlite",
       "title": "SQLite",
       "entries": 52,
-      "apiEntries": 52,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 52,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 52
     },
     {
       "slug": "stream",
       "title": "Stream",
       "entries": 140,
-      "apiEntries": 140,
-      "static": {
-        "supported": 0,
-        "partial": 53,
-        "refused": 0,
-        "not-implemented": 87,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 140
     },
     {
       "slug": "string_decoder",
       "title": "String decoder",
       "entries": 4,
-      "apiEntries": 4,
-      "static": {
-        "supported": 0,
-        "partial": 4,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 4
     },
     {
       "slug": "test",
       "title": "Test runner",
       "entries": 117,
-      "apiEntries": 117,
-      "static": {
-        "supported": 0,
-        "partial": 65,
-        "refused": 0,
-        "not-implemented": 52,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 117
     },
     {
       "slug": "timers",
       "title": "Timers",
       "entries": 25,
-      "apiEntries": 25,
-      "static": {
-        "supported": 0,
-        "partial": 22,
-        "refused": 0,
-        "not-implemented": 3,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 25
     },
     {
       "slug": "tls",
       "title": "TLS/SSL",
       "entries": 67,
-      "apiEntries": 67,
-      "static": {
-        "supported": 0,
-        "partial": 9,
-        "refused": 4,
-        "not-implemented": 54,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 67
     },
     {
       "slug": "tracing",
       "title": "Trace events",
       "entries": 9,
-      "apiEntries": 9,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 9,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 9
     },
     {
       "slug": "tty",
       "title": "TTY",
       "entries": 19,
-      "apiEntries": 19,
-      "static": {
-        "supported": 0,
-        "partial": 7,
-        "refused": 0,
-        "not-implemented": 12,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 19
     },
     {
       "slug": "dgram",
       "title": "UDP/datagram",
       "entries": 38,
-      "apiEntries": 38,
-      "static": {
-        "supported": 0,
-        "partial": 12,
-        "refused": 0,
-        "not-implemented": 26,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 38
     },
     {
       "slug": "url",
       "title": "URL",
       "entries": 62,
-      "apiEntries": 62,
-      "static": {
-        "supported": 0,
-        "partial": 42,
-        "refused": 0,
-        "not-implemented": 20,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 62
     },
     {
       "slug": "util",
       "title": "Utilities",
       "entries": 109,
-      "apiEntries": 109,
-      "static": {
-        "supported": 0,
-        "partial": 72,
-        "refused": 0,
-        "not-implemented": 37,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 109
     },
     {
       "slug": "v8",
       "title": "V8",
       "entries": 68,
-      "apiEntries": 68,
-      "static": {
-        "supported": 0,
-        "partial": 4,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 64,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 68
     },
     {
       "slug": "vm",
       "title": "VM",
       "entries": 41,
-      "apiEntries": 41,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 41,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 41
     },
     {
       "slug": "wasi",
       "title": "WASI",
       "entries": 7,
-      "apiEntries": 7,
-      "static": {
-        "supported": 0,
-        "partial": 0,
-        "refused": 0,
-        "not-implemented": 0,
-        "by-design": 7,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 7
     },
     {
       "slug": "webcrypto",
       "title": "Web Crypto API",
       "entries": 156,
-      "apiEntries": 156,
-      "static": {
-        "supported": 2,
-        "partial": 21,
-        "refused": 0,
-        "not-implemented": 133,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 156
     },
     {
       "slug": "webstreams",
       "title": "Web Streams API",
       "entries": 89,
-      "apiEntries": 89,
-      "static": {
-        "supported": 0,
-        "partial": 8,
-        "refused": 1,
-        "not-implemented": 80,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 89
     },
     {
       "slug": "worker_threads",
       "title": "Worker threads",
       "entries": 66,
-      "apiEntries": 66,
-      "static": {
-        "supported": 0,
-        "partial": 46,
-        "refused": 0,
-        "not-implemented": 20,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 66
     },
     {
       "slug": "zlib",
       "title": "Zlib",
       "entries": 94,
-      "apiEntries": 94,
-      "static": {
-        "supported": 0,
-        "partial": 52,
-        "refused": 12,
-        "not-implemented": 30,
-        "by-design": 0,
-        "unreviewed": 0,
-        "not-applicable": 0
-      }
+      "apiEntries": 94
     }
   ],
   "rows": [
@@ -11750,9 +11246,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Implemented for the call shapes accepted by the compiler lowering.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12946,9 +12442,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12969,9 +12465,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13085,7 +12581,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13108,7 +12604,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13131,7 +12627,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13154,7 +12650,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13177,7 +12673,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13200,7 +12696,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13223,7 +12719,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13246,7 +12742,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13269,7 +12765,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13292,7 +12788,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13315,7 +12811,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13338,7 +12834,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers; the stream.Transform interface is refused.",
+        "detail": "Matches Node's update() output lengths, padding, authentication tags, string encodings, and state errors for the supported ciphers, and its stream.Transform behavior: chunks written through update(), final() pushed at the end, and its errors reported through 'error'.",
         "verification": "test-backed"
       }
     },
@@ -13613,9 +13109,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13636,9 +13132,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13659,9 +13155,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13682,9 +13178,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13705,9 +13201,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13728,9 +13224,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13751,9 +13247,9 @@
         "inherited": false
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's key formats, point encodings, private-key range checks, key-pair checks and errors on the supported curves; ECDH.convertKey is supported, and property reads and writes are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -19096,9 +18592,9 @@
       "anchor": "err_crypto_ecdh_invalid_format",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -19114,9 +18610,9 @@
       "anchor": "err_crypto_ecdh_invalid_public_key",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -68586,9 +68082,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -68793,9 +68289,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80160,9 +79656,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80184,7 +79680,7 @@
       },
       "static": {
         "status": "supported",
-        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
         "verification": "test-backed"
       }
     },
@@ -80207,7 +79703,7 @@
       },
       "static": {
         "status": "supported",
-        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
         "verification": "test-backed"
       }
     },
@@ -80505,9 +80001,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80528,9 +80024,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80551,9 +80047,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80643,9 +80139,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80666,9 +80162,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -80712,9 +80208,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {

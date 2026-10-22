@@ -1,6 +1,6 @@
 import type { IrExpr, IrFunction, IrModule, IrStmt, IrType } from "../ir/ir.js";
 import { RUNTIME_EMITTER_CLASS, RUNTIME_STREAM_CLASSES, typeKey } from "../ir/ir.js";
-import { dynamicFieldStores } from "../ir/int32-slots.js";
+import { dynamicFieldStores, type DynamicFieldStores } from "../ir/int32-slots.js";
 import { everyExprChild, everyStmtChild, everyTypeChild } from "../ir/traverse.js";
 
 /** Which shape fields can be written after their object escapes.
@@ -72,6 +72,7 @@ export function fieldKey(unit: string, field: string): string {
 export function computeCycleMutability(
   mod: IrModule,
   unitOfClass: (className: string) => string,
+  stores?: DynamicFieldStores,
 ): CycleMutability {
   const result: CycleMutability = {
     all: false,
@@ -100,7 +101,7 @@ export function computeCycleMutability(
   // intrinsics other than publish (which only marks objects immortal), the
   // intern-table operations (which store published values) and ThreadSlots
   // reads stay conservative.
-  const dynStores = dynamicFieldStores(mod);
+  const dynStores = stores ?? dynamicFieldStores(mod);
   const dynamicStores = dynStores.all || dynStores.names.size > 0;
   result.emptyPropertyBags = !dynamicStores;
   const boundaryWrites = (e: IrExpr): boolean =>

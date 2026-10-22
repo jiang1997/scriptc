@@ -1,5 +1,5 @@
 import { isRefCounted, type IrClassDef, type IrExpr, type IrModule, type IrStmt } from "./ir.js";
-import { dynamicFieldStores } from "./int32-slots.js";
+import { dynamicFieldStores, type DynamicFieldStores } from "./int32-slots.js";
 import { everyExprChild, everyStmtChild } from "./traverse.js";
 
 /** Whole-program final reference fields.
@@ -78,11 +78,15 @@ export function constructorClass(fnName: string): string | null {
 /** `scalars` extends the analysis from reference-counted fields to fields of
  * every type, for consumers that read a final field's value once instead of
  * borrowing it (field-values.ts). */
-export function analyzeFinalFields(mod: IrModule, scalars = false): FinalFields {
+export function analyzeFinalFields(
+  mod: IrModule,
+  scalars = false,
+  stores?: DynamicFieldStores,
+): FinalFields {
   const classes = new Map((mod.classes ?? []).map((c) => [c.name, c]));
   const finals = new FinalFields(classes);
   if (mod.lib) return finals;
-  const dynamic = dynamicFieldStores(mod);
+  const dynamic = stores ?? dynamicFieldStores(mod);
   if (dynamic.all) return finals;
 
   const genericFamilies = new Set<string>();

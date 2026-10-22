@@ -175,6 +175,11 @@ struct ScrStreamState {
   ScrStreamPlainInv flush_inv;
   bool flush_called;
   bool flush_pending; /* _flush called, its callback not yet run */
+  /* Transform._write's backpressure: the readable length when the
+   * transform started, and whether its completed write waits for the
+   * readable side to read (Node's kCallback). */
+  size_t xf_length;
+  bool xf_held;
   /* A _final that completes at once (zlib's ZlibBase): 'prefinish' starts
    * the flush and 'finish' does not wait for it. */
   bool flush_on_prefinish;
@@ -412,6 +417,7 @@ typedef enum {
   SCR_ST_ERROR_BUFFER,  /* errorBuffer: buffered write and end() callbacks */
   SCR_ST_CONSTRUCT,     /* constructNT: run the construct hook */
   SCR_ST_CONSTRUCTED,   /* onConstruct: resume reads/writes/destroy */
+  SCR_ST_XF_DONE,       /* a transform's write callback after push(null) */
 } ScrStreamTickOp;
 
 typedef struct ScrStreamTick {
@@ -688,8 +694,13 @@ static void scr_stream_call_read(ScrStream *s) {
   }
   if (st->r.read_cb == NULL) {
     /* transform reads are push-driven; the attempt still clears the
-     * initial sync flag (Node's Transform._read ran) */
+     * initial sync flag (Node's Transform._read ran) and runs a held
+     * write callback */
     st->r.in_read_sync = false;
+    if (st->xf_held) {
+      st->xf_held = false;
+      scr_stream_write_done(s, NULL);
+    }
     return;
   }
   st->r.reading = true;
@@ -1706,17 +1717,20 @@ static void scr_stream_wq_push(ScrStreamState *st, ScrBytes *chunk /*moves*/, Sc
   st->w.n++;
 }
 
+static void scr_stream_transform_callback(ScrStream *s);
+
 static void scr_stream_do_write(ScrStream *s, ScrBytes *chunk /*moves*/, ScrClosure *cb /*moves*/) {
   ScrStreamState *st = s->st;
   st->w.writing = true;
   st->w.wsync = true;
   st->w.inflight_len = chunk->len;
   st->w.inflight_cb = cb;
+  if (st->is_transform || st->passthrough) st->xf_length = st->r.length;
   if (st->passthrough && st->transform_cb == NULL) {
     /* identity: push through, complete synchronously */
     scr_stream_add_chunk(s, chunk, false);
     scr_bytes_release(chunk);
-    if (!scr_exc_pending()) scr_stream_write_done(s, NULL);
+    if (!scr_exc_pending()) scr_stream_transform_callback(s);
     st->w.wsync = false;
     return;
   }
@@ -3294,13 +3308,13 @@ ScrDyn *scr_stream_from_done(void) {
 }
 
 /* ── pipeline function stages (pipeline.js: makeAsyncIterable, pumpToNode) ──
- * A run of async generator functions between two node streams. Each
- * stage is called while the pipeline is set up, in pipeline order:
- * makeAsyncIterable hands the first one the previous stream itself (a
- * Readable is async iterable) and each later one the previous stage's
- * generator. The last generator is pumped into the stream after the run
- * with pumpToNode. The stages and helpers use the closure ABI (the
- * closure first; the callee owns its parameters). */
+ * Runs of async generator functions between node streams. Each stage is
+ * called while the pipeline is set up, in pipeline order:
+ * makeAsyncIterable hands a stage that follows a stream the stream itself
+ * (a Readable is async iterable) and any other stage the previous stage's
+ * generator. The last generator of a run that a stream follows is pumped
+ * into that stream with pumpToNode. The stages and helpers use the closure
+ * ABI (the closure first; the callee owns its parameters). */
 
 typedef ScrPromise *(*ScrPipeNextFn)(ScrClosure *, ScrGen *);
 typedef ScrDyn *(*ScrPipeReadFn)(ScrClosure *, void *);
@@ -3309,19 +3323,24 @@ typedef ScrDyn *(*ScrPipeBoxFn)(ScrClosure *, ScrPromise *);
 enum { SCR_PIPE_DEST_STREAM, SCR_PIPE_DEST_PROMISE = 2 };
 
 typedef struct {
-  size_t at;                 /* streams[0..at-1] come before the stages */
   size_t count;              /* the function stages */
+  uint64_t positions;        /* bit j: the pipeline's j-th stage is a function */
   /* stage(source[, { signal }]) answers an async generator, or a promise
    * for a promise destination; the source is absent for a source
-   * function, else the previous stream or async generator */
+   * function (position 0), else the previous stream or async generator */
   ScrClosure **stages;
-  bool source;               /* stages[0] is the source (at == 0) */
   int dest;                  /* the last stage: SCR_PIPE_DEST_* */
   unsigned opts_mask;        /* bit i: stages[i] takes the { signal } argument */
   ScrDyn *signal;            /* the pipeline's AbortSignal when opts_mask != 0 */
-  ScrClosure *next, *read, *ret; /* the pumped generator's helpers, or NULL */
+  /* (next, read, return) for each generator pumped into a stream, in
+   * pipeline order, or NULL */
+  ScrClosure **helpers;
   ScrClosure *box;           /* SCR_PIPE_DEST_PROMISE: boxes its promise as a dyn promise */
 } ScrPipeStages;
+
+static bool scr_pipe_is_stage(const ScrPipeStages *fs, size_t j) {
+  return fs && j < 64 && ((fs->positions >> j) & 1u);
+}
 
 /* stages[i](source[, { signal }]): the callee owns its parameters. */
 static void *scr_pipe_call_stage(const ScrPipeStages *fs, size_t i, void *src /*moves*/) {
@@ -3331,7 +3350,7 @@ static void *scr_pipe_call_stage(const ScrPipeStages *fs, size_t i, void *src /*
     opts = scr_dyn_new_obj();
     scr_dyn_obj_set(opts, "signal", 6, scr_dyn_retain(fs->signal));
   }
-  if (i == 0 && fs->source) {
+  if (i == 0 && (fs->positions & 1u)) {
     return opts ? ((void *(*)(ScrClosure *, ScrDyn *))st->fn)(st, opts)
                 : ((void *(*)(ScrClosure *))st->fn)(st);
   }
@@ -3580,17 +3599,17 @@ static void scr_pump_after_wait(ScrPump *pm, int stage, bool rejected) {
 }
 
 /* pumpToNode(gen, w, finish, { end }): starts at once, as the async
- * function does. The helpers are borrowed. */
-static void scr_pump_start(ScrStreamPipeCtx *ctx, ScrGen *gen /*moves*/, const ScrPipeStages *fs,
+ * function does. The helpers (next, read, return) are borrowed. */
+static void scr_pump_start(ScrStreamPipeCtx *ctx, ScrGen *gen /*moves*/, ScrClosure *const *helpers,
                            ScrStream *w, bool end) {
   ScrPump *pm = calloc(1, sizeof *pm);
   if (!pm) scr_stream_oom();
   pm->rc = 1;
   pm->ctx = scr_stream_pipectx_retain_v(ctx);
   pm->gen = gen;
-  pm->next = scr_closure_retain(fs->next);
-  pm->read = scr_closure_retain(fs->read);
-  pm->ret = scr_closure_retain(fs->ret);
+  pm->next = scr_closure_retain(helpers[0]);
+  pm->read = scr_closure_retain(helpers[1]);
+  pm->ret = scr_closure_retain(helpers[2]);
   pm->w = scr_stream_retain(w);
   pm->end = end;
   pm->drain_l = scr_pump_closure((void *)&scr_pump_drain_l, pm);
@@ -3721,27 +3740,27 @@ static ScrStream *scr_stream_pipeline_ex(size_t n, ScrStream **streams, ScrClosu
     ctx->dispose = add(signal, listener);
     scr_dyn_release(listener);
   }
-  /* pipelineImpl's loop over the stages: the n streams, with fs->count
-   * function stages before streams[fs->at] */
+  /* pipelineImpl's loop over the stages: the n streams and fs->count
+   * function stages, at the positions fs->positions names */
   size_t stages = n + (fs ? fs->count : 0);
-  size_t fn_first = fs ? fs->at : stages, fn_end = fs ? fs->at + fs->count : stages;
   ScrStream *ret = NULL;
   ScrGen *ret_gen = NULL; /* +1: ret when the previous stage was a function */
   size_t i = 0;           /* the next stream */
+  size_t k = 0;           /* the next function stage */
+  size_t h = 0;           /* the next pumped generator's helpers */
   for (size_t j = 0; j < stages; j++) {
     bool reading = j + 1 < stages;
     bool end = reading || end_opt;
     bool last = j + 1 == stages;
-    if (j >= fn_first && j < fn_end) {
+    if (scr_pipe_is_stage(fs, j)) {
       /* ret = stage({ signal }) for the source, else
        * stage(makeAsyncIterable(ret), { signal }) */
-      size_t k = j - fn_first;
       bool dest = last && fs->dest != SCR_PIPE_DEST_STREAM;
-      void *src = k == 0 && fs->source ? NULL
-                  : ret_gen            ? (void *)ret_gen
-                                       : (void *)scr_stream_retain(ret);
+      void *src = j == 0  ? NULL
+                  : ret_gen ? (void *)ret_gen
+                            : (void *)scr_stream_retain(ret);
       ret_gen = NULL;
-      void *out = scr_pipe_call_stage(fs, k, src);
+      void *out = scr_pipe_call_stage(fs, k++, src);
       if (scr_exc_pending()) {
         if (out && dest) scr_promise_release(out);
         else if (out) scr_gen_release(out);
@@ -3776,7 +3795,7 @@ static ScrStream *scr_stream_pipeline_ex(size_t n, ScrStream **streams, ScrClosu
     }
     ScrStream *s = streams[i];
     bool writing = j > 0;
-    if (reading && !(j + 1 >= fn_first && j + 1 < fn_end) &&
+    if (reading && !scr_pipe_is_stage(fs, j + 1) &&
         (streams[i + 1]->st->close_emitted || streams[i + 1]->st->destroyed)) {
       scr_pipe_throw("ERR_STREAM_UNABLE_TO_PIPE", "Cannot pipe to a closed or destroyed stream",
                      SCR_ERR_ERROR);
@@ -3803,7 +3822,7 @@ static ScrStream *scr_stream_pipeline_ex(size_t n, ScrStream **streams, ScrClosu
       ctx->finish_count++;
       ScrGen *g = ret_gen;
       ret_gen = NULL;
-      scr_pump_start(ctx, g, fs, s, end);
+      scr_pump_start(ctx, g, fs->helpers + 3 * h++, s, end);
     } else if (j > 0) {
       if (!ret->st->has_r) {
         static const char msg[] =
@@ -3841,12 +3860,12 @@ static ScrStream *scr_stream_pipeline_ex(size_t n, ScrStream **streams, ScrClosu
   return scr_stream_retain(ret);
 }
 
-static ScrPipeStages scr_pipe_stages_of(double at, double count, ScrClosure **stages, double flags,
-                                        double mask, ScrClosure *next, ScrClosure *read,
-                                        ScrClosure *ret, ScrClosure *box, ScrDyn *signal) {
+static ScrPipeStages scr_pipe_stages_of(double count, ScrClosure **stages, double positions,
+                                        double flags, double mask, ScrClosure **helpers,
+                                        ScrClosure *box, ScrDyn *signal) {
   int bits = (int)flags;
-  ScrPipeStages fs = {(size_t)at, (size_t)count, stages, (bits & 1) != 0, (bits >> 1) & 3,
-                      (unsigned)mask, signal, next, read, ret, box};
+  ScrPipeStages fs = {(size_t)count, (uint64_t)positions, stages, (bits >> 1) & 3, (unsigned)mask,
+                      signal, helpers, box};
   return fs;
 }
 
@@ -3864,25 +3883,25 @@ static void scr_pipe_dyn_value_inv(ScrClosure *cb, ScrError *err, ScrDyn *value,
   if (r != NULL) scr_dyn_release(r);
 }
 
-/* pipeline(...) with a run of function stages (see ScrPipeStages): flags
- * bit 0 marks a source function and bits 1-2 the destination kind; mask
- * names the stages taking { signal }. The helpers, box, signal and abort
- * are borrowed (each NULL when unused); cb moves. */
-ScrStream *scr_stream_pipeline_stages(double n, ScrStream **streams, double at, double count,
-                                      ScrClosure **stages, double flags, double mask,
-                                      ScrClosure *next, ScrClosure *read, ScrClosure *ret,
-                                      ScrClosure *box, ScrDyn *signal, ScrClosure *abort,
-                                      ScrClosure *cb, ScrStreamErrInv inv) {
-  ScrPipeStages fs = scr_pipe_stages_of(at, count, stages, flags, mask, next, read, ret, box, signal);
+/* pipeline(...) with function stages (see ScrPipeStages): positions
+ * marks the function stages among the n + count stages, flags bits 1-2
+ * give the destination kind, and mask names the stages taking
+ * { signal }. The helpers, box, signal and abort are borrowed (each NULL
+ * when unused); cb moves. */
+ScrStream *scr_stream_pipeline_stages(double n, ScrStream **streams, double count,
+                                      ScrClosure **stages, double positions, double flags,
+                                      double mask, ScrClosure **helpers, ScrClosure *box,
+                                      ScrDyn *signal, ScrClosure *abort, ScrClosure *cb,
+                                      ScrStreamErrInv inv) {
+  ScrPipeStages fs = scr_pipe_stages_of(count, stages, positions, flags, mask, helpers, box, signal);
   return scr_stream_pipeline_ex((size_t)n, streams, cb, inv, true, NULL, NULL, &fs, abort, NULL);
 }
 
-ScrStream *scr_stream_pipeline_stages_dyn(double n, ScrStream **streams, double at, double count,
-                                          ScrClosure **stages, double flags, double mask,
-                                          ScrClosure *next, ScrClosure *read, ScrClosure *ret,
-                                          ScrClosure *box, ScrDyn *signal, ScrClosure *abort,
-                                          ScrDyn *cb) {
-  ScrPipeStages fs = scr_pipe_stages_of(at, count, stages, flags, mask, next, read, ret, box, signal);
+ScrStream *scr_stream_pipeline_stages_dyn(double n, ScrStream **streams, double count,
+                                          ScrClosure **stages, double positions, double flags,
+                                          double mask, ScrClosure **helpers, ScrClosure *box,
+                                          ScrDyn *signal, ScrClosure *abort, ScrDyn *cb) {
+  ScrPipeStages fs = scr_pipe_stages_of(count, stages, positions, flags, mask, helpers, box, signal);
   ScrClosure *c = scr_stream_dynopt_clo(cb, (void *)&scr_stream_finished_dyn_inv);
   /* a function destination's value reaches the callback */
   ScrPipeValInv vi = fs.dest != SCR_PIPE_DEST_STREAM ? &scr_pipe_dyn_value_inv : NULL;
@@ -4263,12 +4282,12 @@ static void scr_sp_value_inv(ScrClosure *cb, ScrError *err, ScrDyn *value, ScrPr
   scr_promise_release(p);
 }
 
-ScrPromise *scr_sp_pipeline_stages(double n, ScrStream **streams, double at, double count,
-                                   ScrClosure **stages, double flags, double mask,
-                                   ScrClosure *next, ScrClosure *read, ScrClosure *ret,
-                                   ScrClosure *box, ScrDyn *signal, ScrClosure *abort) {
+ScrPromise *scr_sp_pipeline_stages(double n, ScrStream **streams, double count,
+                                   ScrClosure **stages, double positions, double flags,
+                                   double mask, ScrClosure **helpers, ScrClosure *box,
+                                   ScrDyn *signal, ScrClosure *abort) {
   ScrPromise *p = scr_promise_new();
-  ScrPipeStages fs = scr_pipe_stages_of(at, count, stages, flags, mask, next, read, ret, box, signal);
+  ScrPipeStages fs = scr_pipe_stages_of(count, stages, positions, flags, mask, helpers, box, signal);
   ScrPipeValInv vi = fs.dest != SCR_PIPE_DEST_STREAM ? &scr_sp_value_inv : NULL;
   ScrStream *dst = scr_stream_pipeline_ex((size_t)n, streams, scr_sp_watcher(p), &scr_sp_settle_inv,
                                           true, NULL, NULL, &fs, abort, vi);
@@ -4420,7 +4439,7 @@ static ScrPromise *scr_sc_consume(ScrStream *s, int kind) {
     scr_promise_reject_pending(p);
     return p;
   }
-  static const ScrArrOps bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
+  static ScrArrOps bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
   ScrArr *chunks = scr_arr_new_ops(&bytes_ops, 4);
   ScrStreamErrInv fin_inv = kind == SCR_SC_TEXT    ? &scr_sc_fin_text
                             : kind == SCR_SC_JSON  ? &scr_sc_fin_json
@@ -4740,12 +4759,14 @@ ScrStream *scr_stream_rl_from_dyn(const ScrDyn *value, bool output) {
   if (value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
       !memcmp(value->v.typed_ref.type_key, "object:", 7)) {
     ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-    const ScrVt *vt = stream->vt;
-    bool duplex = vt == &scr_duplex_vt || vt == &scr_transform_vt || vt == &scr_passthrough_vt ||
-                  scr_vt_within(vt, &scr_duplex_vt);
-    bool ok = duplex || (output ? vt == &scr_writable_vt || scr_vt_within(vt, &scr_writable_vt)
-                                : vt == &scr_readable_vt || scr_vt_within(vt, &scr_readable_vt));
-    if (ok) return stream;
+    const ScrVt *vt = scr_stream_vt_of(stream);
+    if (vt) {
+      bool duplex = vt == &scr_duplex_vt || vt == &scr_transform_vt || vt == &scr_passthrough_vt ||
+                    scr_vt_within(vt, &scr_duplex_vt);
+      bool ok = duplex || (output ? vt == &scr_writable_vt || scr_vt_within(vt, &scr_writable_vt)
+                                  : vt == &scr_readable_vt || scr_vt_within(vt, &scr_readable_vt));
+      if (ok) return stream;
+    }
     value->v.typed_ref.release(stream);
   }
   static const char in_m[] = "createInterface with an input that is not a readable stream has no lowering";
@@ -5798,6 +5819,19 @@ void scr_stream_destroy_done(ScrStream *s, ScrError *err /*moves*/) {
   }
 }
 
+/* Transform._write's callback after the transform pushed its output:
+ * on a tick once the readable side has ended, at once when the writable
+ * side has ended, the transform pushed nothing, or the readable buffer is
+ * below its high-water mark, and otherwise when the readable side next
+ * reads (Transform._read). */
+static void scr_stream_transform_callback(ScrStream *s) {
+  ScrStreamState *st = s->st;
+  if (st->r.ended) scr_st_tick(s, SCR_ST_XF_DONE, NULL, NULL);
+  else if (st->w.ending || st->xf_length == st->r.length || st->r.length < st->r.hwm)
+    scr_stream_write_done(s, NULL);
+  else st->xf_held = true;
+}
+
 void scr_stream_transform_done(ScrStream *s, ScrError *err /*moves*/, ScrBytes *data /*moves*/,
                                ScrStr *data_str /*moves*/) {
   if (!err) {
@@ -5818,7 +5852,8 @@ void scr_stream_transform_done(ScrStream *s, ScrError *err /*moves*/, ScrBytes *
     if (err) scr_error_release(err);
     return;
   }
-  scr_stream_write_done(s, err);
+  if (err) scr_stream_write_done(s, err);
+  else scr_stream_transform_callback(s);
 }
 
 void scr_stream_flush_done(ScrStream *s, ScrError *err /*moves*/, ScrBytes *data /*moves*/,
@@ -6169,6 +6204,9 @@ static void scr_stream_run_tick(ScrStreamTick *t) {
       }
       break;
     }
+    case SCR_ST_XF_DONE:
+      if (st->w.writing) scr_stream_write_done(s, NULL);
+      break;
     case SCR_ST_AFTER_WRITE: {
       st->w.after_scheduled = false;
       ScrClosure *cb = t->cb;
@@ -6367,8 +6405,11 @@ static void scr_stream_dispatch(void) {
   }
 }
 
+static const ScrHandleStreamHooks scr_handle_stream_hooks_impl;
+
 void scr_stream_install(void) {
   scr_emitter_on_hook = &scr_stream_on_listener;
+  scr_handle_stream_hooks = &scr_handle_stream_hooks_impl;
   scr_loop_set_stream(&scr_stream_ticks_pending, &scr_stream_dispatch);
 }
 
@@ -6407,23 +6448,138 @@ void scr_stream_worker_stdio(void) {
 #endif
 }
 
-static ScrStream *scr_stream_view_receiver(const ScrDyn *value) {
-  if (value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
-      !memcmp(value->v.typed_ref.type_key, "object:", 7)) {
-    ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-    const ScrVt *vt = stream->vt;
-    if ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
-        (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post)) return stream;
-    value->v.typed_ref.release(stream);
+/* ── handles that are Transforms (Cipheriv, Decipheriv) ──────────────────
+ * A Transform handle (ScrDynHandleOps.transform) used as a stream gets one
+ * native Transform, built here on first use and kept in the handle's
+ * slot. Its steps share the handle (held, and traced: the handle and its
+ * stream form a cycle the collector reclaims) and the handle's static
+ * ops: each chunk goes through the handle's update(), and the flush pushes
+ * final() or reports its error. */
+
+static void *scr_handle_ops_retain(void *p) { return p; }
+static void scr_handle_ops_release(void *p) { (void)p; }
+
+static const ScrDynHandleOps *scr_handle_step_handle_ops(ScrClosure *cb) {
+  return scr_box_get_ref(cb->caps[1]);
+}
+
+/* The step's handle, borrowed: scr_box_get_ref answers +1, and the box
+ * keeps the handle alive. */
+static void *scr_handle_step_handle(ScrClosure *cb) {
+  void *h = scr_box_get_ref(cb->caps[0]);
+  scr_handle_step_handle_ops(cb)->release(h);
+  return h;
+}
+
+static const ScrDynHandleTransform *scr_handle_step_ops(ScrClosure *cb) {
+  return scr_handle_step_handle_ops(cb)->transform;
+}
+
+/* The pending exception as a stream error (+1). */
+static ScrError *scr_handle_step_caught(void) {
+  ScrCaught *caught = scr_exc_take();
+  ScrDyn *value = scr_caught_to_dyn(caught);
+  scr_caught_release(caught);
+  ScrError *err = value ? scr_errdyn_err_of(value) : NULL;
+  if (value) scr_dyn_release(value);
+  return err ? err : scr_stream_mkerr("ERR_INTERNAL_ASSERTION", "a Transform handle threw a value that is not an Error");
+}
+
+static void scr_handle_step_transform(ScrClosure *cb, ScrStream *s, ScrBytes *chunk) {
+  /* A throwing update() leaves the exception pending: it throws out of
+   * the write, as Node's _transform does. */
+  ScrBytes *out = scr_handle_step_ops(cb)->update(scr_handle_step_handle(cb), chunk);
+  if (out) scr_stream_transform_done(s, NULL, out, NULL);
+}
+
+static void scr_handle_step_flush(ScrClosure *cb, ScrStream *s) {
+  ScrBytes *out = scr_handle_step_ops(cb)->final(scr_handle_step_handle(cb));
+  scr_stream_flush_done(s, out ? NULL : scr_handle_step_caught(), out, NULL);
+}
+
+static void scr_handle_step_destroy(ScrClosure *cb, ScrStream *s, ScrError *err) {
+  (void)cb;
+  scr_stream_destroy_done(s, err ? scr_error_retain(err) : NULL);
+}
+
+static ScrClosure *scr_handle_step(const ScrDynHandleOps *ops, void *h) {
+  ScrClosure *step = scr_closure_new(NULL, 2);
+  step->caps[0] = scr_box_new_obj(ops->retain, ops->release, ops->transform->trace);
+  scr_box_set_ref(step->caps[0], ops->retain(h));
+  step->caps[1] = scr_box_new_obj(scr_handle_ops_retain, scr_handle_ops_release, NULL);
+  scr_box_set_ref(step->caps[1], (void *)ops);
+  return step;
+}
+
+/* The Transform of handle h (+1), built on first use. */
+static ScrStream *scr_handle_transform(const ScrDynHandleOps *ops, void *h) {
+  const ScrDynHandleTransform *t = ops->transform;
+  ScrStream *s = t->stream(h);
+  if (!s) {
+    s = scr_stream_new_transform(-1, -1, true, true, true, true, true,
+                                 scr_handle_step(ops, h), scr_handle_step_transform,
+                                 scr_handle_step(ops, h), scr_handle_step_flush,
+                                 scr_handle_step(ops, h), scr_handle_step_destroy);
+    s->cls = ops->cls;
+    t->set_stream(h, s, scr_stream_release_v);
   }
+  return scr_stream_retain(s);
+}
+
+/* The native stream of a checked-dynamic Transform handle (+1), or NULL
+ * when the value is not one. */
+ScrStream *scr_stream_of_handle(const ScrDyn *value) {
+  if (value->kind != SCR_DYN_HANDLE) return NULL;
+  const ScrDynHandleOps *ops = scr_dyn_handle_ops_of(value);
+  return ops->transform ? scr_handle_transform(ops, value->v.handle.ptr) : NULL;
+}
+
+/* A boxed native stream (+1), or NULL for any other value. */
+static ScrStream *scr_stream_boxed(const ScrDyn *value) {
+  if (value->kind != SCR_DYN_TYPED_REF || value->v.typed_ref.type_key_len <= 7 ||
+      memcmp(value->v.typed_ref.type_key, "object:", 7) != 0)
+    return NULL;
+  ScrStream *stream = scr_dyn_typed_ref_unbox(value);
+  const ScrVt *vt = scr_stream_vt_of(stream);
+  if (vt && ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
+             (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post)))
+    return stream;
+  value->v.typed_ref.release(stream);
+  return NULL;
+}
+
+/* stream.handleStream: the stream of a value typed as a stream handle
+ * class (a Cipheriv or Decipheriv), +1. A value of that type can also be
+ * the stream itself, boxed (the stream addAbortSignal answers). */
+ScrStream *scr_stream_handle(const ScrDyn *value) {
+  ScrStream *stream = scr_stream_of_handle(value);
+  if (!stream) stream = scr_stream_boxed(value);
+  if (stream) return stream;
+  static const char message[] = "Stream use of a value that is not a native stream has no lowering";
+  scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+  return NULL;
+}
+
+static ScrStream *scr_stream_view_receiver(const ScrDyn *value) {
+  ScrStream *stream = scr_stream_of_handle(value);
+  if (!stream) stream = scr_stream_boxed(value);
+  if (stream) return stream;
   scr_dyn_arg_type_fail("destination", "an instance of Stream", value);
   return NULL;
 }
 
-static ScrDyn *scr_stream_view_call(ScrClosure *cb, ScrDyn *const *args, size_t argc) {
-  ScrStream *stream = scr_box_get_ref(cb->caps[0]);
-  ScrStr *name = scr_box_get_ref(cb->caps[1]);
-  const char *method = name->data;
+/* The members a native stream answers to checked-dynamic calls. */
+static const char *const scr_stream_dyn_methods[] = {
+  "on", "once", "addListener", "prependListener", "prependOnceListener",
+  "off", "removeListener", "pipe", "unpipe", "read", "pause", "resume", "isPaused",
+  "setEncoding", "write", "end", "destroy", "cork", "uncork",
+};
+
+/* A checked-dynamic call of one of a native stream's members (borrowed
+ * stream): the result, +1, with `this` results answering `self`, or the
+ * current `this` when self is NULL. */
+static ScrDyn *scr_stream_dyn_call(ScrStream *stream, ScrDyn *self, const char *method,
+                                   ScrDyn *const *args, size_t argc) {
   ScrDyn *result = NULL;
   ScrDyn *first = argc ? args[0] : scr_dyn_undefined();
   if (!strcmp(method, "on") || !strcmp(method, "once") || !strcmp(method, "addListener") ||
@@ -6499,21 +6655,72 @@ static ScrDyn *scr_stream_view_call(ScrClosure *cb, ScrDyn *const *args, size_t 
     scr_error_release(error);
   } else if (!strcmp(method, "cork")) scr_stream_cork(stream);
   else if (!strcmp(method, "uncork")) scr_stream_uncork(stream);
-  if (!result && !scr_exc_pending()) result = scr_dyn_this_get();
+  if (!result && !scr_exc_pending()) result = self ? scr_dyn_retain(self) : scr_dyn_this_get();
+  return result;
+}
+
+static ScrDyn *scr_stream_view_call(ScrClosure *cb, ScrDyn *const *args, size_t argc) {
+  ScrStream *stream = scr_box_get_ref(cb->caps[0]);
+  ScrStr *name = scr_box_get_ref(cb->caps[1]);
+  ScrDyn *result = scr_stream_dyn_call(stream, NULL, name->data, args, argc);
   scr_str_release(name);
   scr_stream_release(stream);
   return result;
 }
 
+/* ScrHandleStreamHooks.call: a member a native stream answers to
+ * checked-dynamic calls, on the handle's Transform. Members that answer
+ * the stream answer `self`. */
+static bool scr_handle_stream_call(const ScrDynHandleOps *ops, void *h, ScrDyn *self,
+                                   const char *method, ScrDyn *const *args, size_t argc,
+                                   ScrDyn **result) {
+  for (size_t i = 0; i < sizeof scr_stream_dyn_methods / sizeof *scr_stream_dyn_methods; i++) {
+    if (strcmp(method, scr_stream_dyn_methods[i]) != 0) continue;
+    ScrStream *stream = scr_handle_transform(ops, h);
+    *result = scr_stream_dyn_call(stream, self, method, args, argc);
+    scr_stream_release(stream);
+    return true;
+  }
+  return false;
+}
+
+/* The stream properties a checked-dynamic read answers. */
+static const char *const scr_stream_dyn_properties[] = {
+  "readable", "readableEnded", "readableLength", "readableHighWaterMark",
+  "writable", "writableEnded", "writableFinished", "writableLength", "writableHighWaterMark",
+  "writableNeedDrain", "destroyed", "closed",
+};
+
+static ScrDyn *scr_stream_dyn_property(ScrStream *stream, const char *name) {
+  double value = scr_stream_prop(stream, name);
+  bool number = strstr(name, "Length") || strstr(name, "HighWaterMark");
+  return number ? scr_dyn_new_num(value) : scr_dyn_new_bool(value != 0);
+}
+
+/* ScrHandleStreamHooks.get: a stream property of the handle's Transform. */
+static ScrDyn *scr_handle_stream_get(const ScrDynHandleOps *ops, void *h, const char *key,
+                                     size_t key_len) {
+  for (size_t i = 0; i < sizeof scr_stream_dyn_properties / sizeof *scr_stream_dyn_properties; i++) {
+    const char *name = scr_stream_dyn_properties[i];
+    if (strlen(name) != key_len || memcmp(name, key, key_len) != 0) continue;
+    ScrStream *stream = scr_handle_transform(ops, h);
+    ScrDyn *value = scr_stream_dyn_property(stream, name);
+    scr_stream_release(stream);
+    return value;
+  }
+  return NULL;
+}
+
+static const ScrHandleStreamHooks scr_handle_stream_hooks_impl = {
+  scr_handle_stream_call,
+  scr_handle_stream_get,
+};
+
 ScrDyn *scr_stream_dyn_view(ScrStream *stream) {
   ScrDyn *view = scr_dyn_new_obj();
   ScrDyn *prototype = scr_dyn_new_obj();
-  static const char *const methods[] = {
-    "on", "once", "addListener", "prependListener", "prependOnceListener",
-    "off", "removeListener", "pipe", "unpipe", "read", "pause", "resume", "isPaused",
-    "setEncoding", "write", "end", "destroy", "cork", "uncork",
-  };
-  for (size_t i = 0; i < sizeof methods / sizeof *methods; i++) {
+  const char *const *methods = scr_stream_dyn_methods;
+  for (size_t i = 0; i < sizeof scr_stream_dyn_methods / sizeof *scr_stream_dyn_methods; i++) {
     ScrClosure *cb = scr_closure_new((void *)scr_stream_view_call, 2);
     cb->caps[0] = scr_box_new_obj(scr_stream_retain_v, scr_stream_release_v, scr_stream_trace);
     cb->caps[1] = scr_box_new(SCR_BOX_STR);
@@ -6522,16 +6729,9 @@ ScrDyn *scr_stream_dyn_view(ScrStream *stream) {
     scr_dyn_obj_set(prototype, methods[i], strlen(methods[i]),
         scr_dyn_new_func(cb, scr_stream_view_call, 0, "native stream method", methods[i]));
   }
-  static const char *const properties[] = {
-    "readable", "readableEnded", "readableLength", "readableHighWaterMark",
-    "writable", "writableEnded", "writableFinished", "writableLength", "writableHighWaterMark",
-    "writableNeedDrain", "destroyed", "closed",
-  };
-  for (size_t i = 0; i < sizeof properties / sizeof *properties; i++) {
-    double value = scr_stream_prop(stream, properties[i]);
-    bool number = strstr(properties[i], "Length") || strstr(properties[i], "HighWaterMark");
-    scr_dyn_obj_set(view, properties[i], strlen(properties[i]),
-        number ? scr_dyn_new_num(value) : scr_dyn_new_bool(value != 0));
+  for (size_t i = 0; i < sizeof scr_stream_dyn_properties / sizeof *scr_stream_dyn_properties; i++) {
+    const char *name = scr_stream_dyn_properties[i];
+    scr_dyn_obj_set(view, name, strlen(name), scr_stream_dyn_property(stream, name));
   }
   if (stream->st->native && stream->st->native_ops && stream->st->native_ops->view) {
     ScrClosure *cb = scr_closure_new((void *)scr_stream_view_call, 2);
@@ -6710,17 +6910,13 @@ ScrStream *scr_stream_pipe_general(ScrStream *src, ScrStream *dst, bool end) {
 
 /* A pipeline() stage that arrives as a checked-dynamic value (the
  * stream.unboxDyn libCall): a boxed native stream unwraps by identity
- * (+1); any other value throws the compiled program's not-supported
- * message (Node also takes iterables and functions there). */
+ * (+1), a stream handle (a Cipheriv or Decipheriv) answers its stream, and
+ * any other value throws the compiled program's not-supported message
+ * (Node also takes iterables and functions there). */
 ScrStream *scr_stream_unbox_dyn(const ScrDyn *value, const ScrStr *message) {
-  if (value->kind == SCR_DYN_TYPED_REF && value->v.typed_ref.type_key_len > 7 &&
-      !memcmp(value->v.typed_ref.type_key, "object:", 7)) {
-    ScrStream *stream = scr_dyn_typed_ref_unbox(value);
-    const ScrVt *vt = stream->vt;
-    if ((vt->pre >= scr_readable_vt.pre && vt->pre <= scr_readable_vt.post) ||
-        (vt->pre >= scr_writable_vt.pre && vt->pre <= scr_writable_vt.post)) return stream;
-    value->v.typed_ref.release(stream);
-  }
+  ScrStream *stream = scr_stream_of_handle(value);
+  if (!stream) stream = scr_stream_boxed(value);
+  if (stream) return stream;
   scr_throw_error_msg_code(SCR_ERR_ERROR, message->data, message->len, "SC2020");
   return NULL;
 }

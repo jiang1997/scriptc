@@ -10,6 +10,9 @@ import type { IrLibFn } from "./builtin-signatures.js";
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // Node's argument, cipher-name, IV, tag-length and key-length errors.
   "crypto.cipherNew",
+  // Node's curve, key, point, encoding and format errors.
+  "crypto.ecdhNew",
+  "crypto.ecdhConvertKey",
   // node:test's { timeout } and { concurrency } range checks.
   "test.register",
   "test.registerEmpty",
@@ -77,6 +80,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "procStream.write",
   "child.stdioStream",
   "stream.unboxDyn",
+  "stream.handleStream",
   "stream.pipeDyn",
   "stream.unpipeDyn",
   "weakMap.new",
@@ -85,12 +89,18 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "bytes.constructor",
   "bytes.instanceOf",
   "buffer.byteLenDyn",
+  "buffer.byteLenValue",
+  "buffer.allocValue",
+  "fs.realpathValue",
   "bytes.construct",
   "arrayBuffer.new",
   "sharedArrayBuffer.new",
   "atomics.op",
   "atomics.wait",
   "atomics.notify",
+  "atomics.opDyn",
+  "atomics.waitDyn",
+  "atomics.notifyDyn",
   "arrayBuffer.byteLengthGetter",
   "arrayBuffer.viewU8C",
   "arrayBuffer.viewI8",
@@ -232,12 +242,16 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // 'error' has no listener, Node's unhandled-'error' contract.
   "emitter.emit",
   "emitter.emitFlex",
+  "emitter.emitAny",
+  "emitter.emitMixed",
+  "emitter.listenersDyn",
   "emitter.emitError",
   "emitter.on",
   "emitter.off",
   "emitter.checkListener",
   "emitter.onDyn",
   "emitter.onFlex",
+  "emitter.onAny",
   "emitter.offDyn",
   "emitter.onData",
   "emitter.onDataDyn",
@@ -453,6 +467,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // The caller's lookup runs synchronously inside the connect call — a
   // throw there propagates like Node's.
   "net.connectLookup",
+  "net.connectLookupDyn",
   "cp.execSync",
   "cp.execCapture",
   // The client request constructors validate the method token
@@ -523,6 +538,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "date.nativeNew",
   "date.nativeNewFields",
   "date.nativeNewValue",
+  "date.argumentsTime",
   "date.checkedValue",
   "util.parseArgs",
   "util.parseEnv",
@@ -535,6 +551,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "util.inherits",
   "util.deprecate",
   "util.callbackify",
+  "util.promisifyDyn",
   "util.debuglog",
   // The URI codecs throw the spec's URIError: decoding on bad hex/invalid
   // UTF-8 octets, encoding (and querystring.escape) on a lone surrogate.
@@ -589,6 +606,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.objCreateWithProperties",
   "dyn.getPrototype",
   "dyn.setPrototype",
+  // Error.captureStackTrace: Node's TypeError for a primitive target, and
+  // the error string conversion of name and message
+  "dyn.errorCaptureStackTrace",
   // a proxy in the prototype chain can throw
   "dyn.builtinInstanceOf",
   "dyn.functionInstanceOf",
@@ -627,6 +647,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.destructureRest",
   "dyn.arrayFromIterator",
   "dyn.iterator",
+  "dyn.asyncIteratorOpen",
   "dyn.iteratorResult",
   "dyn.iteratorStep",
   "dyn.mapSeedEntries",
@@ -645,6 +666,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.bagSet",
   "dyn.defineProperty",
   "dyn.getOwnPropertyDescriptor",
+  "child.propsDefine",
+  "child.propsDescriptor",
+  "child.propsOnDyn",
   "dyn.arrayProtoCall",
   "process.chdir",
   "os.getPriority",
@@ -769,6 +793,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "buffer.poolFromBytes",
   "buffer.poolFromArray",
   "buffer.poolFromDyn",
+  "buffer.poolFromDynRef",
+  "buffer.poolFromDynOffset",
   // The checked-dynamic compare/equals validators: Node's argument
   // ladders throw ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE catchably.
   "buffer.compareChk",

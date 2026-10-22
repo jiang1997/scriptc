@@ -31,9 +31,11 @@ import {
   mangleFunction,
   mangleWrapper,
   mangleVtStruct,
+  mangleAsyncDirectSpawn,
 } from "../mangle.js";
 import {
   classEnvironmentIndex,
+  classIdVtLines,
   classStructSym,
   vtEntriesFor,
   type LlClassMeta,
@@ -52,6 +54,7 @@ import {
   inputSuffixWrites,
 } from "./borrowed-inputs.js";
 import type { Writes } from "./reference-writes.js";
+import { emitJsIcCall, jsIcSiteOf } from "./js-ic.js";
 import { emitClassMembership, emitDowncastGuard } from "./narrow-guards.js";
 
 export function emitCallExpr(
@@ -72,7 +75,7 @@ export function emitCallExpr(
     | "instanceOf"
     | "virtualCall"
   >,
-  awaitEntry: false | "await" | "adopt" | "inline" = false,
+  awaitEntry: false | "await" | "adopt" | "inline" | "direct" = false,
   /** A projection consumes a scalar union result (Int32Abi.union): answer
    * a private stack box instead of a heap box. */
   stackResult = false,
@@ -87,6 +90,12 @@ export function emitCallExpr(
     case "call": {
       const callee = host.fnByName.get(e.callee);
       if (!callee) throw new InternalCompilerError(`llvm emitter bug: unknown callee ${e.callee}`);
+      if (!plainCall && !awaitEntry && !resultSlot && !stackResult) {
+        // A property helper called from dynamic-tier code is an inline
+        // cache site (two-tier design S4).
+        const site = jsIcSiteOf(host, e);
+        if (site) return emitJsIcCall(host, e, callee, site);
+      }
       if (callee.fastRead === "index" && !plainCall && !awaitEntry && !resultSlot) {
         const indexed = emitNumericIndexRead(host, e, callee);
         if (indexed) return indexed;
@@ -176,6 +185,14 @@ export function emitCallExpr(
             : `${host.llType(callee.params[i]!.type)} ${a.name}`,
         )
         .join(", ");
+      if (awaitEntry === "direct") {
+        // A stackless coroutine's await of a stackless callee: the spawn
+        // returns the callee's fiber record (emitCoroDirectAwait).
+        host.directAwaitCallees.add(e.callee);
+        const record = B.tmp();
+        B.line(`${record} = call ptr @${mangleAsyncDirectSpawn(e.callee)}(${argList})`);
+        return { name: record, type: callee.returnType };
+      }
       if (awaitEntry === "inline") {
         // A stackless coroutine's await of a fiberless callee: the entry
         // runs the body in place and leaves a throw pending; the enclosing
@@ -913,9 +930,18 @@ export function emitCallExpr(
             ? `@${mangleBorrowedFunction(known!.name)}`
             : `@${mangleBorrowingWrapper(known!.name)}`
           : undefined;
+      // A known target outside the may-throw set leaves nothing pending, so
+      // only the entry through the closure's own pointer needs the test.
+      // Worker programs keep it on every path: there it also observes
+      // termination, which loops count on (callTestsPending).
+      const quiet =
+        known !== undefined && !host.mayThrow.has(known.name) && host.mod.workers !== true;
+      let pending = host.indirectMayThrow;
+      let pendingGuard: string | undefined;
       let t: string;
       if (direct && e.callee.kind === "closure") {
         t = invoke(lending ?? direct, !host.receiverReaders.ignores(known!));
+        if (quiet) pending = false;
       } else {
         const fnp = B.tmp(),
           fn = B.tmp();
@@ -975,17 +1001,21 @@ export function emitCallExpr(
             B.line(
               `${t} = phi ${host.llType(e.type)} [ ${specialized}, %${fastEnd} ], [ ${indirect}, %${fallbackEnd} ]`,
             );
+          if (quiet && pending) {
+            pendingGuard = B.tmp();
+            B.line(`${pendingGuard} = phi i1 [ false, %${fastEnd} ], [ true, %${fallbackEnd} ]`);
+          }
         }
       }
       if (e.type.kind === "void") {
-        if (host.indirectMayThrow) host.emitPendingCheck();
+        if (pending) host.emitPendingCheck(undefined, false, pendingGuard);
         if (lent) host.releaseTemps(host.frames.pop()!);
         return { name: "", type: e.type };
       }
       // The check runs AFTER the result temp joins the frame: an unwind
       // releases it (the dummy is NULL for refcounted returns).
       const out = host.own({ name: t, type: e.type });
-      if (host.indirectMayThrow) host.emitPendingCheck();
+      if (pending) host.emitPendingCheck(undefined, false, pendingGuard);
       if (lent) {
         host.toFrame(out);
         host.releaseTemps(host.frames.pop()!);
@@ -1193,15 +1223,20 @@ export function emitCallExpr(
         if (!borrowed.has(index)) host.toFrame(a);
       });
       const recv = args[0]!.name;
-      const vtp = B.tmp();
       const vt = B.tmp();
       const fnp = B.tmp();
       const fn = B.tmp();
-      B.line(
-        `${vtp} = getelementptr inbounds %${classStructSym(e.className)}, ptr ${recv}, i64 0, i32 1`,
-      );
       // Set once at allocation (classes.ts launders each new object).
-      B.line(`${vt} = load ptr, ptr ${vtp}, !invariant.group !{}`);
+      if (meta.idInRc)
+        for (const line of classIdVtLines(meta, recv, vt, ", !invariant.group !{}"))
+          B.line(line.trimStart());
+      else {
+        const vtp = B.tmp();
+        B.line(
+          `${vtp} = getelementptr inbounds %${classStructSym(e.className)}, ptr ${recv}, i64 0, i32 1`,
+        );
+        B.line(`${vt} = load ptr, ptr ${vtp}, !invariant.group !{}`);
+      }
       B.line(
         `${fnp} = getelementptr inbounds %${mangleVtStruct(meta.root.def.name)}, ptr ${vt}, i64 0, i32 ${slotIdx + 1}`,
       );

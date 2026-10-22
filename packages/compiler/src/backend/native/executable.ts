@@ -113,6 +113,7 @@ interface RuntimeUnitContext {
   tls: boolean;
   tlsCa: boolean;
   cipher: boolean;
+  ecdh: boolean;
   lreObjects: readonly string[];
   zlibObjects: readonly string[];
   tlsArchive: string | null;
@@ -179,8 +180,12 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   unit((u) => u.opts.assert || u.regex || u.opts.symbol, "scr_assert.c"),
   unit((u) => u.opts.inspect, "scr_inspect.c", "scr_console_native.c"),
   unit((u) => u.opts.dynInvoke || u.opts.workers || u.nativeFetch, "scr_dyn_invoke.c"),
+  // Buffer.prototype methods called on checked-dynamic values.
+  unit((u) => u.opts.dynBuffer === true && u.opts.dynInvoke, "scr_bytes_dyn.c"),
+  // Builtin functions read as values in JavaScript dependencies.
+  unit((u) => u.opts.builtinValues === true, "scr_builtin_values.c"),
   unit((u) => u.opts.dc, "scr_dc.c"),
-  unit((u) => u.opts.dynTier, "scr_js_value.c"),
+  unit((u) => u.opts.dynTier, "scr_js_value.c", "scr_js_object.c"),
   unit((u) => u.opts.eventTarget || u.nativeFetch, "scr_event_target.c"),
   unit((u) => u.opts.wasm, "scr_wasm.c"),
   unit(
@@ -241,6 +246,8 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
     (u) => u.opts.parseArgs && u.opts.inspect && u.opts.dynAsync && u.opts.dynInvoke && u.regex,
     "scr_util_callable.c",
   ),
+  // util.promisify over an untyped function: dyn promises and calls.
+  unit((u) => u.opts.utilPromisify && u.opts.dynAsync && u.opts.dynInvoke, "scr_util_promisify.c"),
   unit(
     (u) =>
       u.opts.dynBuiltinClass &&
@@ -268,6 +275,10 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   // Checked-dynamic stream slots test values and call JavaScript stream
   // members through the dyn-invoke unit.
   unit((u) => u.opts.streamDyn === true, "scr_stream_dyn.c"),
+  // Own properties JavaScript adds to children.
+  unit((u) => u.opts.handleProps === true, "scr_dyn_handle_props.c"),
+  // for await over checked-dynamic values.
+  unit((u) => u.opts.dynForAwait === true, "scr_dyn_for_await.c"),
   // FileHandle streams reference both the stream unit and FileHandle.
   unit((u) => u.opts.stream && u.opts.fileHandle, "scr_fs_stream_fh.c"),
   // The readiness-poller backends (scr_platform.h): kqueue on macOS/BSD,
@@ -281,10 +292,13 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   unit((u) => u.opts.http2, "scr_http2.c"),
   unit((u) => u.opts.dgram, "scr_dgram.c"),
   unit((u) => u.opts.dgram && u.opts.dnsPromises, "scr_dns_promises.c"),
+  unit((u) => u.opts.dgram && u.opts.dgramDyn, "scr_dgram_dyn.c"),
   unit((u) => u.opts.watch, "scr_watch.c"),
   unit((u) => u.opts.foreignFfi, "scr_ffi_queue.c"),
   unit((u) => u.opts.nodeTest, "scr_test.c"),
   unit((u) => u.opts.webcrypto, "scr_webcrypto.c"),
+  // The crypto global's object extends scr_async_dyn.c's.
+  unit((u) => u.opts.webcrypto && u.opts.dynAsync, "scr_webcrypto_object.c"),
   // The CA-store unit rides its own gate OR the tls one: scr_tls.c
   // references its default-set override unconditionally.
   unit((u) => u.tlsCa, "scr_tls_ca.c"),
@@ -295,6 +309,8 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
           join(vendorTlsDir(), "include"),
           ...(u.tls ? [u.rt(join(u.rtDir, "scr_tls.c"))] : []),
           ...(u.cipher ? [u.rt(join(u.rtDir, "scr_cipher.c"))] : []),
+          ...(u.ecdh ? [u.rt(join(u.rtDir, "scr_ecdh.c"))] : []),
+          ...(u.cipher && u.opts.webcrypto ? [u.rt(join(u.rtDir, "scr_webcrypto_aes.c"))] : []),
           u.tlsArchive,
           // mbedTLS's win32 entropy poll is BCryptGenRandom (bcrypt.h).
           // The unconditional win32 libs above do not carry it.
@@ -330,6 +346,9 @@ const RUNTIME_DEFINES: readonly {
   when: (opts: CcOptions) => boolean | undefined;
 }[] = [
   { define: "SCR_TEXT_DECODER_LEGACY", when: (opts) => opts.textDecoderLegacy },
+  // Checked objects carry the dynamic tier's shapes (scr_json.c's SCR_JS_TIER build); only
+  // programs with dynamic-tier code select it.
+  { define: "SCR_JS_TIER", when: (opts) => opts.dynTier === true },
   { define: "SCR_WARNING_REPLACE", when: (opts) => opts.warningReplace },
   { define: "SCR_STDIO_EXTENDED", when: (opts) => opts.stdioExtended },
   { define: "SCR_YIN", when: (opts) => opts.youngNursery },
@@ -356,9 +375,10 @@ export async function compileCInternal(
   const http = (opts.http ?? false) || nativeFetch;
   const tls = (opts.tls ?? false) || nativeFetch;
   const tlsCa = (opts.tlsCa ?? false) || tls;
-  // Symmetric ciphers link the same mbedTLS archive as TLS.
+  // Symmetric ciphers and ECDH link the same mbedTLS archive as TLS.
   const cipher = opts.cipher ?? false;
-  const mbedtls = tls || cipher;
+  const ecdh = opts.ecdh ?? false;
+  const mbedtls = tls || cipher || ecdh;
   const driver = resolveCc();
   const darwinDebugSymbols = needsDarwinDebugSymbols(
     targetPlatform(driver),
@@ -715,6 +735,7 @@ export async function compileCInternal(
       tls,
       tlsCa,
       cipher,
+      ecdh,
       lreObjects,
       zlibObjects,
       tlsArchive,

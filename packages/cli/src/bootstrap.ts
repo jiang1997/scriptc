@@ -66,6 +66,10 @@ async function tryFastPath(): Promise<number | null> {
     values["emit-ir"] ||
     values.lib ||
     values["provenance-sources"] ||
+    // The full compiler keys these builds by the profile's bytes.
+    values["profile-generate"] !== undefined ||
+    values["profile-use"] !== undefined ||
+    values.sparse ||
     (values["external-types"] ?? []).length > 0
   )
     return null;
@@ -156,6 +160,10 @@ async function tryFastPath(): Promise<number | null> {
   if (hit === null) return null;
   if (!values["keep-llvm"]) await rm(hit.llvmPath, { force: true });
   if (command === "build") {
+    // A cached build repeats its performance warning (SC6101).
+    const performance = hit.performance ?? [];
+    if (performance.length > 0 && values["dynamic-tier-warning"] !== false)
+      process.stderr.write(startup.renderPerformanceWarnings(performance) + "\n");
     process.stdout.write(`${outPath}\n`);
     return 0;
   }
@@ -213,6 +221,7 @@ async function coverageFastPath(
   const hit = await startup.readCoverageVerdict(resolve(inputArg), {}).catch(() => null);
   if (hit === null) return null;
   const { coverage, sourceTexts } = hit;
+  if (values["dynamic-tier-warning"] === false) delete coverage.performance;
   if (print === "diagnostics") {
     const envelope = startup.coverageEnvelope(coverage, {
       compilerVersion: packageVersion(),

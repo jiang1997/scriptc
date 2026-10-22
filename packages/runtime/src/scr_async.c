@@ -616,6 +616,13 @@ struct ScrFiber {
   struct ScrFiber *awaiter;
   /* This fiber was parked by such a child; set before the switch away. */
   bool await_parked;
+  /* A stackless body spawned for a direct await (scr_async_spawn_direct):
+   * its promise lives in the same block (ScrDirectFiber) and nothing else
+   * sees it. Once the awaiting coroutine suspends it is direct_awaiter, the
+   * finished body wakes it in place of the promise's settlement, and the
+   * awaiter destroys the record when it takes the result. */
+  bool direct;
+  struct ScrFiber *direct_awaiter;
 #ifdef SCR_ASAN_FIBERS
   void *fake_stack;
   /* Live stackless async fibers (scr_async_spawn_stackless) form a list
@@ -2138,11 +2145,31 @@ static void scr_prefix_on_fresh_stack(ScrFiber *f, void (*entry)(ScrFiber *, voi
 }
 #endif
 
-ScrPromise *scr_async_spawn_stackless(void (*entry)(ScrFiber *, void *), void *argpack) {
-  ScrFiber *f = scr_mem_calloc(sizeof *f);
-  if (!f) scr_oom();
+/* A directly awaited body's fiber record and its promise, one block. */
+typedef struct {
+  ScrFiber fiber;
+  ScrPromise promise;
+} ScrDirectFiber;
+
+/* Creates a stackless body's fiber and runs its eager prefix, which
+ * returns at the first suspension or the end. A direct fiber's promise is
+ * embedded and immortal (retains and releases skip it). */
+static ScrFiber *scr_spawn_stackless_fiber(void (*entry)(ScrFiber *, void *), void *argpack,
+                                           bool direct) {
+  ScrFiber *f;
+  if (direct) {
+    ScrDirectFiber *block = scr_mem_calloc(sizeof *block);
+    if (!block) scr_oom();
+    f = &block->fiber;
+    f->promise = &block->promise;
+    f->promise->rc = SIZE_MAX;
+    f->direct = true;
+  } else {
+    f = scr_mem_calloc(sizeof *f);
+    if (!f) scr_oom();
+    f->promise = scr_promise_new();
+  }
   scr_fiber_track(f);
-  f->promise = scr_promise_new();
   f->stackless = true;
   f->als = scr_als_ctx_retain(*SCR_ALS_SLOT());
   /* The lifetime region the eager prefix runs in, which every later step
@@ -2171,6 +2198,11 @@ ScrPromise *scr_async_spawn_stackless(void (*entry)(ScrFiber *, void *), void *a
   scr_current = spawner;
   scr_exc_swap_cell(spawner ? &spawner->exc : NULL);
   scr_als_active = spawner ? &spawner->als : &scr_als_main_slot;
+  return f;
+}
+
+ScrPromise *scr_async_spawn_stackless(void (*entry)(ScrFiber *, void *), void *argpack) {
+  ScrFiber *f = scr_spawn_stackless_fiber(entry, argpack, false);
   ScrPromise *result = scr_promise_retain(f->promise);
   if (f->done) {
     scr_promise_release(f->promise);
@@ -2178,6 +2210,14 @@ ScrPromise *scr_async_spawn_stackless(void (*entry)(ScrFiber *, void *), void *a
     scr_fibers_live--;
   }
   return result;
+}
+
+/* A stackless body that a stackless coroutine awaits right away (the
+ * compiler's direct await): its promise never escapes, so it is embedded
+ * in the fiber record, which the awaiter takes the result from
+ * (scr_coro_direct_*) and then destroys. */
+ScrFiber *scr_async_spawn_direct(void (*entry)(ScrFiber *, void *), void *argpack) {
+  return scr_spawn_stackless_fiber(entry, argpack, true);
 }
 #endif
 
@@ -2447,7 +2487,28 @@ bool scr_coro_await_prepare(ScrFiber *self, ScrPromise *p) {
 
 bool scr_coro_hop_prepare(ScrFiber *self) { return scr_coro_hop_needed(self); }
 
-void scr_coro_async_finish(ScrFiber *self) { scr_fiber_finish(self); }
+/* A directly awaited body's end: its awaiter is the promise's only waiter,
+ * and it observes a rejection when it takes the result, so the body wakes
+ * it where the settlement would, without the unhandled-rejection ledger. */
+static void scr_direct_finish(ScrFiber *self) {
+  ScrPromise *p = self->promise;
+  bool stopped = false;
+#ifdef SCR_WORKERS
+  /* A stop request rejects like the fiber epilogue does (scr_fiber_finish). */
+  stopped = scr_context_checkpoint();
+#endif
+  if (stopped || scr_exc_pending()) scr_promise_reject_from_cell(p, &self->exc);
+  if (stopped) p->rejection_observed = true;
+  if (p->state == SCR_PROM_PENDING)
+    scr_trap("scriptc: internal error: directly awaited body finished unsettled\n");
+  self->done = true;
+  if (self->direct_awaiter != NULL) scr_promise_wake_one(self->direct_awaiter);
+}
+
+void scr_coro_async_finish(ScrFiber *self) {
+  if (self->direct) scr_direct_finish(self);
+  else scr_fiber_finish(self);
+}
 
 /* Extraction after the await's suspension: the promise has settled. */
 static bool scr_coro_await_settled(ScrPromise *p) {
@@ -2469,6 +2530,66 @@ ScrStr *scr_coro_await_str(ScrPromise *p) {
 }
 void *scr_coro_await_ref(ScrPromise *p) {
   return scr_coro_await_settled(p) && p->payload ? p->retain_fn(p->payload) : NULL;
+}
+
+/* A direct await of a stackless body (scr_async_spawn_direct): a body
+ * still running gets the coroutine as its only awaiter, which its finish
+ * wakes as a settlement wakes a promise's waiter; a finished body is a
+ * settled promise, which takes one microtask turn. */
+bool scr_coro_direct_prepare(ScrFiber *self, ScrFiber *callee) {
+  if (!callee->done) {
+    callee->direct_awaiter = self;
+    return true;
+  }
+  return scr_coro_hop_needed(self);
+}
+
+/* The result of a finished direct body: its promise's settlement, read as
+ * scr_coro_await_* reads it (a rejection re-throws), then the record goes. */
+static inline void scr_direct_destroy(ScrFiber *f) {
+  /* Only a rejection reason is left: values moved out, and nothing waits
+   * on or shares the promise. */
+  if (f->promise->payload_kind != SCR_EXC_NONE) scr_promise_release_payload(f->promise);
+  scr_fiber_destroy(f);
+  scr_fibers_live--;
+}
+
+void scr_coro_direct_void(ScrFiber *f) {
+  scr_coro_await_settled(f->promise);
+  scr_direct_destroy(f);
+}
+double scr_coro_direct_f64(ScrFiber *f) {
+  double v = scr_coro_await_settled(f->promise) ? f->promise->f64 : 0;
+  scr_direct_destroy(f);
+  return v;
+}
+bool scr_coro_direct_bool(ScrFiber *f) {
+  bool v = scr_coro_await_settled(f->promise) ? f->promise->b : false;
+  scr_direct_destroy(f);
+  return v;
+}
+/* String and reference results move out of the record (+1). */
+ScrStr *scr_coro_direct_str(ScrFiber *f) {
+  ScrPromise *p = f->promise;
+  ScrStr *v = NULL;
+  if (scr_coro_await_settled(p)) {
+    v = (ScrStr *)p->payload;
+    p->payload = NULL;
+    p->payload_kind = SCR_EXC_NONE;
+  }
+  scr_direct_destroy(f);
+  return v;
+}
+void *scr_coro_direct_ref(ScrFiber *f) {
+  ScrPromise *p = f->promise;
+  void *v = NULL;
+  if (scr_coro_await_settled(p)) {
+    v = p->payload;
+    p->payload = NULL;
+    p->payload_kind = SCR_EXC_NONE;
+  }
+  scr_direct_destroy(f);
+  return v;
 }
 #endif
 
@@ -2897,6 +3018,19 @@ ScrPromise *scr_fsp_readdir(ScrStr *path) {
 
 ScrPromise *scr_fsp_rm(ScrStr *path) {
   scr_fs_rm(path);
+  return scr_promise_settled_void();
+}
+
+ScrPromise *scr_fsp_rm_opts(ScrStr *path, bool recursive, bool force) {
+  scr_fs_rm_opts(path, recursive, force);
+  return scr_promise_settled_void();
+}
+
+/* fs.promises.rm validates the path before its options, unlike rmSync. */
+ScrPromise *scr_fsp_rm_opts_retry(ScrStr *path, bool recursive, bool force, double max_retries,
+                                  double retry_delay) {
+  if (scr_fs_path_ok(path, "path") && scr_fs_rm_retry_options_ok(max_retries, retry_delay))
+    scr_fs_rm_opts_retry(path, recursive, force, max_retries, retry_delay);
   return scr_promise_settled_void();
 }
 
@@ -3969,7 +4103,7 @@ static void scr_resume_fiber(ScrFiber *f) {
     scr_loop_reap = NULL;
   }
 #endif
-  if (f->done) {
+  if (f->done && !f->direct) {
     scr_promise_release(f->promise);
     scr_fiber_destroy(f);
     scr_fibers_live--;
@@ -4129,6 +4263,25 @@ static int scr_workers_pollfd(void) {
  * interleave with event delivery (Node's checkpoint after each
  * macrotask). */
 bool scr_loop_has_ready(void) { return scr_ready_len > 0 || scr_nt_head != NULL; }
+
+/* The poll phase runs once per loop iteration, like libuv's: the net unit
+ * drains the poller at most once between check phases. I/O that becomes
+ * ready while this iteration's callbacks run (a loopback connect started
+ * by one of them) waits for the next iteration, so immediates queued in
+ * the meantime fire first — Node's poll → check order. A full batch polls
+ * again without waiting, at most SCR_LOOP_IO_BATCHES times per phase (the
+ * count libuv's uv__io_poll uses); later events wait for the next
+ * iteration, so timers and immediates still run while sockets stay busy. */
+enum { SCR_LOOP_IO_BATCHES = 48 };
+static SCR_TL bool scr_loop_io_open = true;
+static SCR_TL int scr_loop_io_batches = 0;
+bool scr_loop_io_take(void) {
+  bool open = scr_loop_io_open;
+  scr_loop_io_open = false;
+  return open;
+}
+bool scr_loop_io_more(void) { return ++scr_loop_io_batches < SCR_LOOP_IO_BATCHES; }
+void scr_loop_io_reopen(void) { scr_loop_io_open = true; }
 
 /* The process.nextTick queue to exhaustion, ticks queued meanwhile
  * included. false: a tick threw (uncaught, pending). */
@@ -4400,6 +4553,8 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
 #ifdef SCR_WORKERS
     if (scr_workers_ready_fn && scr_workers_ready_fn()) due = now;
 #endif
+    /* An idle moment: a full pass the death rule deferred runs now. */
+    if (due > now && scr_cyc_collect_idle()) now = scr_now_ms();
 #if !defined(_WIN32) && !defined(__wasi__)
     if (due > now) scr_fiber_stacks_clear();
 #endif
@@ -4607,6 +4762,7 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
      * every macrotask; pending ticks or a woken fiber restart the turn
      * first (the timer loop's break above), so the phase only runs on a
      * drained checkpoint. */
+    bool check_ran = false;
     if (scr_ready_len == 0 && scr_nt_head == NULL && scr_nunhandled == 0 && scr_pending_immediates > 0) {
       size_t end = scr_nimmediates;
       while (scr_immediates_head < end) {
@@ -4637,6 +4793,15 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
         scr_immediates_head = 0;
         scr_nimmediates = 0;
       }
+      check_ran = true;
+    }
+    /* The next poll phase opens once this iteration's check phase ran (or
+     * had nothing to run). A check phase deferred for pending microtasks
+     * keeps it closed, so the next iteration reaches the check phase
+     * before polling again. */
+    if (check_ran || scr_pending_immediates == 0) {
+      scr_loop_io_open = true;
+      scr_loop_io_batches = 0;
     }
   }
   return rejection_failed;
@@ -4653,6 +4818,7 @@ void scr_loop_commonjs_entry(void) { scr_loop_cjs_entry = true; }
 bool scr_loop_run(ScrPromise *top_level) {
   /* The main module's body has returned: an enterWith it made ends here. */
   scr_loop_started = true;
+  scr_cyc_note_event_loop();
   if (scr_als_main_slot != NULL) scr_als_main_clear();
   bool first_checkpoint = !scr_loop_cjs_entry;
   bool rejection_failed;

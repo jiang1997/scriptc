@@ -63,6 +63,8 @@ interface EarlyLibraryCacheStamp {
 export interface EarlyLibraryNativeFeatures {
   backend: "llvm";
   dynInvoke: boolean;
+  /** Buffer.prototype methods on checked-dynamic values (scr_bytes_dyn.c). */
+  dynBuffer?: boolean;
   dynTier?: boolean;
   regex: boolean;
   assert: boolean;

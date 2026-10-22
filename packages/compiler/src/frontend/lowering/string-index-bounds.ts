@@ -243,7 +243,8 @@ export class StringIndexBounds {
   /** Every write of a block-scoped local or parameter, or null for any
    * other binding (module imports, var, class members, ...). */
   private binding(symbol: ts.Symbol): Binding | null {
-    if (this.bindings.has(symbol)) return this.bindings.get(symbol)!;
+    const cached = this.bindings.get(symbol);
+    if (cached !== undefined) return cached;
     const result = this.scanBinding(symbol);
     this.bindings.set(symbol, result);
     return result;

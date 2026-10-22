@@ -60,12 +60,17 @@ typedef struct ScrArrOps {
   void *(*retain)(void *);
   void (*release)(void *);
   ScrTraceFn trace;
+  /* Registry id (scr_arr_ops_table), 0 until scr_arr_ops_register assigns
+   * it on the first array of the type. Descriptors are writable for it. */
+  uint32_t id;
 } ScrArrOps;
 
 typedef struct ScrArr {
   size_t rc; /* SIZE_MAX = immortal (unused for arrays; kept per convention) */
-  size_t len;
-  size_t cap; /* dense capacity; sparse entries cover indices >= cap */
+  /* Length and dense capacity are at most SCR_ARR_MAX_LENGTH (2^32 - 1);
+   * sparse entries cover indices >= cap. */
+  uint32_t len;
+  uint32_t cap;
   /* One ScrElemKind. */
   uint8_t elem;
   /* 1 exactly when ops->trace is non-NULL: the element type carries a cycle
@@ -76,7 +81,10 @@ typedef struct ScrArr {
    * ref elements and the historic element kinds keep the lean 1-word
    * header. Kept beside `elem` so the RC fast paths test it with one load. */
   uint8_t cyc;
-  /* Storage flags private to scr_array.c (inline slots, head room). */
+  /* The low SCR_ARR_OPS_SHIFT bits: storage flags (SCR_ARR_INLINE_SLOTS,
+   * SCR_ARR_HEAD_ROOM, SCR_ARR_UNSHIFTED, SCR_ARR_HAS_EXT). The rest: the
+   * registry id of the element type's ops (scr_arr_ops), 0 for every kind
+   * but SCR_ELEM_REF. */
   uint16_t spare;
   /* A lower bound on the hole-free prefix: filled <= len, filled <= cap,
    * and every dense state below it is SCR_ARR_VALUE. Element reads below
@@ -85,17 +93,15 @@ typedef struct ScrArr {
    * undefined) or move states below it lowers it first (scr_arr_cut);
    * 0 is always valid. */
   uint32_t filled;
-  /* SCR_ELEM_REF only; NULL for every other element kind. */
-  const ScrArrOps *ops;
   /* Dense values: `cap` 8-byte slots, or `cap` bytes for SCR_ELEM_BOOL
-   * (scr_arr_slot_width). Sparse entries and properties keep 8-byte slots
-   * for every kind; a bool slot is 0 or 1 wherever it lives. */
+   * (scr_arr_slot_width), followed in the same allocation by one state byte
+   * per slot in reverse slot order (scr_arr_states_end). Sparse entries and properties keep 8-byte
+   * slots for every kind; a bool slot is 0 or 1 wherever it lives. Rarely
+   * used storage (sparse indices, noncanonical numeric properties,
+   * match-result metadata) lives out of line, and an array that has it
+   * (SCR_ARR_HAS_EXT) keeps a pointer to it in the word before the dense
+   * allocation (scr_arr_ext_of). */
   uint64_t *data;
-  uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
-  /* Rarely used storage (sparse indices, noncanonical numeric properties,
-   * match-result metadata) lives out of line: NULL until first needed, so
-   * the common dense array stays small. */
-  struct ScrArrExt *ext;
 } ScrArr;
 
 typedef struct ScrArrExt {
@@ -111,21 +117,120 @@ typedef struct ScrArrExt {
    * scr_regex.c), and match_index is the result's UTF-16 start index. */
   struct ScrDyn *metadata;
   double match_index;
+  /* The element ops of an array whose ops have no registry id
+   * (SCR_ARR_OPS_OVERFLOW). */
+  const ScrArrOps *ops;
 } ScrArrExt;
 /* The LLVM backend mirrors ScrArr as %ScrArr: its inline retain/release read
  * `cyc` (field 4, i8) to decide mark-live / candidate buffering exactly like
- * scr_arr_retain and scr_arr_release; its inline element access uses filled
- * (field 6, i32), data (field 8) and present (field 9). */
-_Static_assert(offsetof(ScrArr, cyc) == 3 * sizeof(size_t) + 1,
+ * scr_arr_retain and scr_arr_release; its inline element access uses len and
+ * cap (fields 1 and 2, i32), filled (field 6, i32) and data (field 7), and
+ * finds the state of slot i at data + cap * (slot width + 1) - 1 - i. */
+_Static_assert(offsetof(ScrArr, len) == sizeof(size_t) && sizeof(((ScrArr *)0)->len) == 4,
+               "emitted length reads load ScrArr.len as %ScrArr field 1, an i32");
+_Static_assert(offsetof(ScrArr, cap) == sizeof(size_t) + 4 && sizeof(((ScrArr *)0)->cap) == 4,
+               "emitted capacity reads load ScrArr.cap as %ScrArr field 2, an i32");
+_Static_assert(offsetof(ScrArr, cyc) == sizeof(size_t) + 9,
                "inline RC fast paths read ScrArr.cyc as %ScrArr field 4");
-_Static_assert(offsetof(ScrArr, filled) == 3 * sizeof(size_t) + 4,
+_Static_assert(offsetof(ScrArr, filled) == sizeof(size_t) + 12,
                "inline element access reads ScrArr.filled as %ScrArr field 6");
-_Static_assert(offsetof(ScrArr, data) == 3 * sizeof(size_t) + 8 + sizeof(void *),
-               "inline element reads use ScrArr.data as %ScrArr field 8");
+_Static_assert(offsetof(ScrArr, data) == sizeof(size_t) + 16,
+               "inline element reads use ScrArr.data as %ScrArr field 7");
+_Static_assert(sizeof(ScrArr) == sizeof(size_t) + 16 + sizeof(void *),
+               "ScrArr is 32 bytes on 64-bit targets");
+
+/* Storage flags in `spare`. Inline slots: the dense slots live in the
+ * array's own block, after the header. Head room: `data` has advanced past
+ * vacated slots of its allocation, and the slot before `data` holds their
+ * count. Unshifted: an unshift had to move every element. Has ext: the word
+ * before the dense allocation (head room included) points at the array's
+ * ScrArrExt; such an array always has an allocation of its own, without
+ * inline slots. */
+#define SCR_ARR_INLINE_SLOTS 1u
+#define SCR_ARR_HEAD_ROOM 2u
+#define SCR_ARR_UNSHIFTED 4u
+#define SCR_ARR_HAS_EXT 8u
+
+/* The start of the dense slots' allocation: `data` less any head room. */
+static inline uint64_t *scr_arr_block(const ScrArr *a) {
+  return (a->spare & SCR_ARR_HEAD_ROOM) ? a->data - (size_t)a->data[-1] : a->data;
+}
+
+/* Bytes before the dense allocation of an array with out-of-line storage:
+ * its pointer, in a word that keeps the 8-byte slots aligned on every
+ * target. */
+#define SCR_ARR_EXT_PREFIX sizeof(uint64_t)
+
+/* The out-of-line storage of `a`, or NULL while it has none. */
+static inline struct ScrArrExt *scr_arr_ext_of(const ScrArr *a) {
+  if (!(a->spare & SCR_ARR_HAS_EXT)) return NULL;
+  struct ScrArrExt *x;
+  memcpy(&x, (const char *)scr_arr_block(a) - SCR_ARR_EXT_PREFIX, sizeof x);
+  return x;
+}
+
+/* Element ops by registry id: `spare >> SCR_ARR_OPS_SHIFT` of an array.
+ * Id 0 is no ops; ids are assigned on each descriptor's first array, in
+ * any thread. A program with more element types than the field holds keeps
+ * the ops of the rest in the array's ext (SCR_ARR_OPS_OVERFLOW). */
+#define SCR_ARR_OPS_SHIFT 4
+#define SCR_ARR_OPS_OVERFLOW (UINT16_MAX >> SCR_ARR_OPS_SHIFT)
+extern const ScrArrOps *scr_arr_ops_table[SCR_ARR_OPS_OVERFLOW];
+/* Assigns the id on a descriptor's first array; out of line, so the id
+ * load in scr_arr_ops_id stays the only cost on later arrays. */
+__attribute__((cold, noinline)) uint32_t scr_arr_ops_register(ScrArrOps *ops);
+
+/* The registry id an array of element ops `ops` stores (0 for NULL). */
+static inline uint32_t scr_arr_ops_id(const ScrArrOps *ops) {
+  if (!ops) return 0;
+  uint32_t id = __atomic_load_n(&ops->id, __ATOMIC_ACQUIRE);
+  return id ? id : scr_arr_ops_register((ScrArrOps *)ops);
+}
+
+/* The element ops of an array whose ops have no registry id. */
+const ScrArrOps *scr_arr_ops_overflow(const ScrArr *a);
+
+/* The element ops of `a`: NULL for every kind but SCR_ELEM_REF. */
+static inline const ScrArrOps *scr_arr_ops(const ScrArr *a) {
+  uint32_t id = (uint32_t)a->spare >> SCR_ARR_OPS_SHIFT;
+  if (__builtin_expect(id == SCR_ARR_OPS_OVERFLOW, 0)) return scr_arr_ops_overflow(a);
+  return scr_arr_ops_table[id];
+}
 
 /* Bytes per dense value slot. */
 static inline size_t scr_arr_slot_width(const ScrArr *a) {
   return a->elem == SCR_ELEM_BOOL ? 1 : sizeof(uint64_t);
+}
+
+/* The dense states, one byte per slot, share the values' allocation (inline
+ * slots included). They follow the `cap` value slots in reverse slot order:
+ * the state of slot i is the byte i + 1 before scr_arr_states_end(a). Removing
+ * slots from the front (head room: `data` advances, `cap` drops) leaves every
+ * remaining state at its address. The address is computed on integers, so a
+ * NULL `data` stays NULL. */
+static inline uint8_t *scr_arr_states_end(const ScrArr *a) {
+  return (uint8_t *)((uintptr_t)a->data + (uintptr_t)a->cap * (scr_arr_slot_width(a) + 1));
+}
+
+/* scr_arr_states_end for an array whose slots are known to be `width`
+ * bytes wide: a constant multiple, with no element-kind test. */
+static inline uint8_t *scr_arr_states_end_w(const ScrArr *a, size_t width) {
+  return (uint8_t *)((uintptr_t)a->data + (uintptr_t)a->cap * (width + 1));
+}
+
+/* The state of dense slot `index` (< cap), given the end of the states. */
+static inline uint8_t *scr_arr_state_in(const uint8_t *end, size_t index) {
+  return (uint8_t *)end - 1 - index;
+}
+
+static inline uint8_t *scr_arr_state_ptr(const ScrArr *a, size_t index) {
+  return scr_arr_state_in(scr_arr_states_end(a), index);
+}
+
+/* The states of dense slots [from, from + count) are contiguous, in reverse
+ * order; this is their first byte (the state of slot from + count - 1). */
+static inline uint8_t *scr_arr_state_run(const ScrArr *a, size_t from, size_t count) {
+  return scr_arr_states_end(a) - from - count;
 }
 
 /* The dense value at `index` (< cap) as an 8-byte slot, and its store. */
@@ -145,18 +250,18 @@ static inline void scr_arr_cut(ScrArr *a, size_t index) {
   if (a->filled > index) a->filled = (uint32_t)index;
 }
 
-/* The first index in [f, end) whose state is not a present value (or end).
- * Compares eight states per step: bulk copies (slice, concat, spread) end
- * with this scan over the whole copied range. */
-static inline size_t scr_arr_value_run(const uint8_t *present, size_t f, size_t end) {
+/* The first index in [f, end) whose state is not a present value (or end),
+ * given the end of the states. Compares eight states per step: bulk copies
+ * (slice, concat, spread) end with this scan over the whole copied range. */
+static inline size_t scr_arr_value_run(const uint8_t *states_end, size_t f, size_t end) {
   const uint64_t values = 0x0101010101010101ull * SCR_ARR_VALUE;
   while (end - f >= 8) {
     uint64_t word;
-    memcpy(&word, present + f, sizeof word);
+    memcpy(&word, states_end - f - 8, sizeof word);
     if (word != values) break;
     f += 8;
   }
-  while (f < end && present[f] == SCR_ARR_VALUE) f++;
+  while (f < end && *scr_arr_state_in(states_end, f) == SCR_ARR_VALUE) f++;
   return f;
 }
 
@@ -165,7 +270,7 @@ static inline size_t scr_arr_value_run(const uint8_t *present, size_t f, size_t 
 static inline void scr_arr_refill(ScrArr *a) {
   size_t end = a->len < a->cap ? a->len : a->cap;
   size_t f = a->filled;
-  if (f < end) f = scr_arr_value_run(a->present, f, end);
+  if (f < end) f = scr_arr_value_run(scr_arr_states_end(a), f, end);
   a->filled = (uint32_t)f;
 }
 
@@ -212,6 +317,22 @@ static inline ScrArr *scr_arr_retain(ScrArr *a) {
  * the candidate-root buffer like every headered type. */
 void scr_arr_release(ScrArr *a);
 void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
+/* The commit of a live array view calls this on `a`, the array converted
+ * from `view`, before `target` takes its storage: `a` takes the view's named
+ * (non-index) properties as its metadata and the noncanonical numeric
+ * properties of `target`, so neither is lost when the storage is swapped. */
+void scr_arr_adopt_view_properties(ScrArr *a, struct ScrDyn *view, ScrArr *target);
+/* True when `key` is the string spelling of a number that is not an array
+ * index ("-1", "1.5", "NaN", "Infinity"), with the number in *out. Arrays
+ * keep such properties in their noncanonical property table. */
+bool scr_arr_numeric_key(const char *key, size_t len, double *out);
+/* Whether the array still has the named or noncanonical numeric property
+ * `key`: `for...in` skips a key deleted before its turn. Borrows both. */
+bool scr_arr_has_named_key(ScrArr *a, ScrStr *key);
+/* The enumerable string keys `for...in` visits after the indices: the
+ * noncanonical numeric properties, then the named properties in insertion
+ * order. +1. */
+ScrArr *scr_arr_named_keys(ScrArr *a);
 /* Installed by scr_regex.c when it records a pending match source; this
  * unit links without the regex runtime. Writes the pending metadata of
  * `a` into its dynamic copy or materializes it, answering whether it
@@ -337,6 +458,15 @@ double scr_arr_unshift_many(ScrArr *a, size_t count, const uint64_t *slots);
 double scr_arr_push_spread(ScrArr *a, const ScrArr *src);
 /* Append a concat argument by indexed property copy, preserving holes. */
 double scr_arr_concat_copy(ScrArr *a, const ScrArr *src);
+/* The same append for Array.prototype.concat's fresh result: dense storage
+ * grows to exactly the combined length instead of geometrically. */
+double scr_arr_concat_copy_exact(ScrArr *a, const ScrArr *src);
+/* Exact dense capacity for an array literal about to copy `src` and then
+ * `plain` more elements (a spread position). */
+void scr_arr_reserve_spread(ScrArr *a, const ScrArr *src, size_t plain);
+/* Exact dense capacity for `n` elements of an array that is filled to that
+ * length next (Array.from({ length: n })); no effect for other lengths. */
+void scr_arr_reserve_len(ScrArr *a, double n);
 
 /* unshift returns the new length and _ref takes ownership. The spread form
  * borrows a same-element-kind source, retains copied refs, and snapshots
@@ -358,7 +488,11 @@ struct ScrClosure;
  * (-1) without side effects: f64 elements are their own keys, and reference
  * elements read theirs through the borrowed `key` closure (element ->
  * number). Keys that are all numbers other than NaN and -0 then sort without
- * calling `f`, with the same stable result. */
+ * calling `f`, with the same stable result. An `order` from 2 says `f`
+ * orders reference elements by several such keys, the first deciding: the
+ * low byte is the key count (2..8), each bit from bit 8 marks a key that
+ * orders descending, and `key` reads key j of an element (element, j ->
+ * number). */
 void scr_arr_sort_values(ScrArr *a, double count, struct ScrClosure *f, uint32_t arity,
                          int32_t order, struct ScrClosure *key);
 /* Comparator sort of a dense array in place: `a.sort(f)`, or with `owned`

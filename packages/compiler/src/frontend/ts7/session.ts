@@ -18,6 +18,24 @@ import type {
   Ts7SourceMetadata,
 } from "./session-schema.generated.js";
 
+/** Project options tsgo still reports for a tsconfig but the TS 7 SDK
+ * schema no longer declares. scriptc adopts them (ADOPTED_OPTIONS), so the
+ * options a project reports are parsed with them declared: a native
+ * compiler keeps only declared fields when it parses the response. */
+export interface Ts7ProjectCompilerOptions extends Ts7CompilerOptionsData {
+  alwaysStrict?: boolean;
+  esModuleInterop?: boolean;
+  allowSyntheticDefaultImports?: boolean;
+}
+
+interface Ts7ReportedProjectData extends Ts7ProjectData {
+  compilerOptions: Ts7ProjectCompilerOptions;
+}
+
+interface Ts7ReportedSnapshotData extends Ts7SnapshotData {
+  projects: Ts7ReportedProjectData[];
+}
+
 export interface Ts7FileChanges {
   changed?: SemanticDocument[];
   created?: SemanticDocument[];
@@ -104,7 +122,7 @@ export class Ts7Session {
 
   updateSnapshot(params: Ts7Update = {}): Ts7SessionSnapshot {
     const paths = this.initialize();
-    const data = parseSemanticJson<Ts7SnapshotData>(
+    const data = parseSemanticJson<Ts7ReportedSnapshotData>(
       this.text("updateSnapshot", JSON.stringify(params)),
     );
     const snapshot = new Ts7SessionSnapshot(data, this, paths);
@@ -160,7 +178,7 @@ export class Ts7SessionSnapshot {
   private disposed = false;
 
   constructor(
-    data: Ts7SnapshotData,
+    data: Ts7ReportedSnapshotData,
     private readonly session: Ts7Session,
     readonly paths: Ts7Paths,
   ) {
@@ -189,7 +207,7 @@ export class Ts7SessionSnapshot {
   }
   getDefaultProjectForFile(file: SemanticDocument): Ts7SessionProject | undefined {
     this.ensureActive();
-    const data = this.session.request<Ts7ProjectData | null>("getDefaultProjectForFile", {
+    const data = this.session.request<Ts7ReportedProjectData | null>("getDefaultProjectForFile", {
       snapshot: this.id,
       file,
     });
@@ -215,12 +233,12 @@ export class Ts7SessionSnapshot {
 export class Ts7SessionProject {
   readonly id: string;
   readonly configFileName: string;
-  readonly compilerOptions: Ts7CompilerOptionsData;
+  readonly compilerOptions: Ts7ProjectCompilerOptions;
   readonly rootFiles: string[];
   readonly program: Ts7SessionProgram;
   readonly checker: SemanticChecker;
 
-  constructor(data: Ts7ProjectData, snapshot: Ts7SessionSnapshot, session: Ts7Session) {
+  constructor(data: Ts7ReportedProjectData, snapshot: Ts7SessionSnapshot, session: Ts7Session) {
     this.id = data.id;
     this.configFileName = data.configFileName;
     this.compilerOptions = data.compilerOptions;
@@ -261,7 +279,7 @@ export class Ts7SessionProgram {
       ...(file === undefined ? {} : { file }),
     };
   }
-  getCompilerOptions(): Ts7CompilerOptionsData {
+  getCompilerOptions(): Ts7ProjectCompilerOptions {
     this.ensureActive();
     return this.project.compilerOptions;
   }
@@ -280,9 +298,13 @@ export class Ts7SessionProgram {
     if (source === undefined) {
       const bytes = this.session.binary("getSourceFile", JSON.stringify(this.query(file)));
       if (bytes.length !== 0) {
-        const ast = new AstFile(bytes, () => {
-          this.session.timing.materialized();
-        });
+        const ast = new AstFile(
+          bytes,
+          () => {
+            this.session.timing.materialized();
+          },
+          { writeTargets: true },
+        );
         this.session.timing.fetched(Math.max(0, ast.wire.nodeCount - 2));
         source = this.session.cache.set(path, ast.sourceFile, this.snapshot.id, this.project.id);
       }

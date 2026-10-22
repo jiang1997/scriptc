@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { dynUndefinedExpr, boolLit } from "../../ir/build.js";
 /* The dgram/dns-surface lowering (node:dgram + node:dns — a spoke module
  * like lower-server.ts): module-function calls (dgram createSocket, dns
@@ -9,7 +10,6 @@ import { dynUndefinedExpr, boolLit } from "../../ir/build.js";
  * generic rejection, never silence. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { ladderFenceExpr } from "./lowerer.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import {
   BOOL,
@@ -28,6 +28,7 @@ import {
 } from "../../ir/ir.js";
 import { resultIsDiscarded } from "./call-position.js";
 import { lowerCallbackArg as lowerCallbackArgShared } from "./callback-arg.js";
+import { documentedParameter } from "./call-signatures.js";
 
 const DGRAM_SURFACE_HINT =
   "bind, connect, disconnect, send, address, close, unref/ref, the socket " +
@@ -357,7 +358,7 @@ function checkedDynPromise(
   const key = `dns.promise:${typeKey(declared)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%dns.promise.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%dns.promise", key);
     lowerer.valueHelpers.set(key, helper);
     const promiseT: IrType = { kind: "promise", inner: DYN };
     lowerer.liftedFns.push({
@@ -441,8 +442,31 @@ function lowerDnsModuleCall(
     const hostname = dyn(args[0]!);
     const options = args.length === 3 ? dyn(args[1]!) : dynUndefinedExpr(loc);
     const last = args[args.length - 1]!;
-    const typed = typedResult(last);
-    const cb = lowerDnsCallback(lowerer, last, "lookup callbacks");
+    // Options known only at run time (a checked-dynamic value, or one cast
+    // to an overload's option type) decide between Node's two callback
+    // shapes there: the address is a string, or an address list with
+    // `all: true`. An inline callback then binds its parameters as
+    // checked-dynamic values, whatever the overload the checker picked
+    // says, and its body tests what actually arrived.
+    let runtimeOptions = false;
+    if (args.length === 3) {
+      let inner: ts.Expression = args[1]!;
+      while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner))
+        inner = inner.expression;
+      runtimeOptions = lowerer.mapTypeOf(lowerer.typeOf(inner))?.kind === "dyn";
+    }
+    let callbackNode: ts.Expression = last;
+    while (ts.isParenthesizedExpression(callbackNode)) callbackNode = callbackNode.expression;
+    const dynCallback =
+      runtimeOptions && (ts.isArrowFunction(callbackNode) || ts.isFunctionExpression(callbackNode));
+    const typed = dynCallback ? boolLit(false, loc) : typedResult(last);
+    if (dynCallback) lowerer.dynParamLambdas.add(callbackNode);
+    let cb: IrExpr;
+    try {
+      cb = lowerDnsCallback(lowerer, last, "lookup callbacks");
+    } finally {
+      if (dynCallback) lowerer.dynParamLambdas.delete(callbackNode);
+    }
     return {
       kind: "libCall",
       fn: "dns.lookupDyn",
@@ -496,6 +520,17 @@ function lowerDnsModuleCall(
     "lookup, lookupService, getServers, getDefaultResultOrder, and setDefaultResultOrder are the lowered dns module functions",
     ts.isIdentifier(expr.expression) ? lowerer.resolveValueSymbol(expr.expression) : undefined,
   );
+}
+
+/** A listener JavaScript leaves untyped: a function literal with a
+ * parameter that has neither an annotation nor JSDoc (paramShape makes it
+ * checked-dynamic), or any other untyped value. */
+function untypedJsListener(lowerer: Lowerer, node: ts.Expression): boolean {
+  let e = node;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (ts.isArrowFunction(e) || ts.isFunctionExpression(e))
+    return e.parameters.nodes.some((param) => !documentedParameter(param));
+  return (lowerer.typeOf(e).flags & ts.TypeFlags.Any) !== 0;
 }
 
 /** Method calls on dgram.Socket receivers — one entry in lower-calls.ts's
@@ -553,9 +588,9 @@ export function lowerDgramMethodCall(
     // send(msg, port, address) — one datagram to an explicit destination
     // (the static fast path). Every OTHER shape in a JS source rides the
     // checked-dynamic ladder (dgram.sendChk): Node's signature shuffle,
-    // slice bounds, list/type contracts, port/address validation, and
-    // the connected-state errors — with the compiler-rendered fence as
-    // the post-validation tail for the callback/list/connected forms.
+    // slice bounds, list/type contracts, port/address validation, the
+    // connected-state errors, then the send itself — lists, connected
+    // sends and completion callbacks included.
     const staticShape =
       args.length === 3 &&
       !args.some(ts.isSpreadElement) &&
@@ -579,13 +614,13 @@ export function lowerDgramMethodCall(
     }
     if (
       isJsSourceFile(ts.getSourceFileOfNode(call)) &&
-      args.length <= 5 &&
+      args.length <= 6 &&
       !args.some(ts.isSpreadElement)
     ) {
       const receiver = lowerer.lowerExpr(access.expression);
       const slots: IrExpr[] = [];
       let ok = true;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 6; i++) {
         const n = args[i];
         if (!n) {
           slots.push(dynUndefinedExpr(loc));
@@ -613,16 +648,7 @@ export function lowerDgramMethodCall(
         return {
           kind: "libCall",
           fn: "dgram.sendChk",
-          args: [
-            receiver,
-            ...slots,
-            ladderFenceExpr(
-              lowerer,
-              `send in this form`,
-              call,
-              "send(msg, port, address) — one string or Buffer datagram — is the lowered form; callback, list, and connected sends have no lowering yet",
-            ),
-          ],
+          args: [receiver, ...slots],
           type: VOID,
           loc,
         };
@@ -686,6 +712,22 @@ export function lowerDgramMethodCall(
   }
   if ((name === "on" || name === "once") && args.length === 2) {
     requireStatementPosition(lowerer, call, `socket.${name}(...)`);
+    // A JavaScript listener whose parameters are untyped registers through
+    // the socket's checked-dynamic handle, which hands it untyped values.
+    if (isJsSourceFile(ts.getSourceFileOfNode(call)) && untypedJsListener(lowerer, args[1]!)) {
+      return {
+        kind: "dynInvoke",
+        recv: lowerer.coerceToExpected(lowerer.lowerExpr(access.expression), DYN),
+        method: name,
+        calleeName: ts.getTextOfNode(access),
+        args: [
+          lowerer.lowerExprExpecting(args[0]!, DYN),
+          lowerer.lowerExprExpecting(args[1]!, DYN),
+        ],
+        type: DYN,
+        loc,
+      };
+    }
     const once = boolLit(name === "once", loc);
     const evT = lowerer.typeOf(args[0]!);
     const event = evT.isStringLiteralType() ? evT.value : null;
@@ -850,7 +892,7 @@ export function lowerPromisifiedDnsCall(
   const key = `dnsPromise:${JSON.stringify(value)}`;
   let name = lowerer.valueHelpers.get(key);
   if (!name) {
-    name = `%dnsPromise.${lowerer.valueHelpers.size}`;
+    name = keyedHelperName(lowerer, "%dnsPromise", key);
     lowerer.valueHelpers.set(key, name);
     lowerer.liftedFns.push({
       name,

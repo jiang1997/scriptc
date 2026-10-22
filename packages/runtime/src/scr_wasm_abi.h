@@ -174,6 +174,22 @@ typedef struct {
 } ScrWasmRegistry;
 extern const ScrWasmRegistry scr_wasm_registry;
 
+/* The modules the build saw but does not translate, emitted next to the
+ * registry: unsupported proposals, invalid modules and translator
+ * limits. `reason` is a clause naming why (not NUL-terminated). */
+typedef struct {
+  uint8_t sha256[32];
+  uint64_t byte_length;
+  const char *reason;
+  uint64_t reason_len;
+} ScrWasmUntranslatedDesc;
+
+typedef struct {
+  uint64_t count;
+  const ScrWasmUntranslatedDesc *modules;
+} ScrWasmUntranslatedTable;
+extern const ScrWasmUntranslatedTable scr_wasm_untranslated;
+
 /* Runtime objects the translated code reads at fixed offsets. */
 typedef struct ScrWasmMemory {
   uint8_t *base;      /* 0 */

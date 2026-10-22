@@ -116,6 +116,7 @@ export function isNativeBuiltinValueInitializer(
       ["parseInt", "parseFloat"].includes(lowerer.stdlibGlobalMember(expr, "Number") ?? "") ||
       lowerer.stdlibGlobalMember(expr, "Buffer") === "isBuffer" ||
       lowerer.stdlibGlobalMember(expr, "Array") === "prototype" ||
+      lowerer.stdlibGlobalMember(expr, "Promise") === "prototype" ||
       (ts.isPropertyAccessExpression(expr.expression) &&
         lowerer.stdlibGlobalMember(expr.expression, "Array") === "prototype") ||
       lowerer.stdlibGlobalMember(expr, "Object") === "assign" ||
