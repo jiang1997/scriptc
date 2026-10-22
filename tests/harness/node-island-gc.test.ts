@@ -1,7 +1,7 @@
 /* Cross-heap cycle collection (scope-B NI-8) where a differential corpus
  * program cannot show it. tests/fixtures/node-island/gc-cycles.mjs makes
  * and drops one cross-heap cycle of each shape per iteration and keeps some
- * reachable from one side only; the corpus (6880-6885) pins the same shapes
+ * reachable from one side only; the corpus (6890-6895) pins the same shapes
  * against Node.
  *  - The memory and the handles a program holds do not grow with the
  *    number of cycles it dropped (10k against 100k iterations).
