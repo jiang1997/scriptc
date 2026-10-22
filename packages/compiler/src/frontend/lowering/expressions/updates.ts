@@ -30,6 +30,7 @@ import {
 } from "../../../ir/ir.js";
 import { isJsSourceFile, locOf } from "../../program.js";
 import { classToNumberConversion } from "../class-to-primitive.js";
+import { lowerPrimitiveUnionNumber } from "../lower-calls.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, varRef } from "../../../ir/build.js";
 import { fenceNodeModuleMutation } from "../lower-node-module.js";
 import { staticFieldWriteTarget } from "../lower-classes.js";
@@ -132,8 +133,12 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
       const classNumber = classToNumberConversion(lowerer, raw, expr.operand, "unary plus");
       if (classNumber) return classNumber;
       const operand = lowerOptionalNumber(lowerer, raw, loc, expr.operand);
-      if (operand.type.kind !== "f64") operatorUnsupported(lowerer, expr, "+", [raw.type]);
-      return operand;
+      if (operand.type.kind === "f64") return operand;
+      // `+process.argv[2]`: a `string | undefined` (or other primitive
+      // union) converts as Number(value) does.
+      const unionNumber = lowerPrimitiveUnionNumber(lowerer, raw, expr.operand, loc);
+      if (unionNumber) return unionNumber;
+      operatorUnsupported(lowerer, expr, "+", [raw.type]);
     }
     case ts.SyntaxKind.ExclamationToken: {
       // `!x` is ToBoolean-then-negate: f64/string operands go through toBool.

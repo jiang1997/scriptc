@@ -68,8 +68,10 @@ export class GeneratorDynamicDispatch {
     this.properties.set(method, { fn, types: new Set() });
     this.generated.add(fn);
     lowerer.liftedFns.push(fn);
+    lowerer.shareHelper(fn);
     // The runtime's own helper functions answer the helper methods.
     if (HELPER_METHODS.has(method)) return fn;
+    lowerer.shareHelper(`%dyn.generator.method.${method}`);
     lowerer.liftedFns.push({
       name: `%dyn.generator.method.${method}`,
       params: [{ localId: "arg", name: "arg", type: DYN }],
@@ -209,6 +211,7 @@ export class GeneratorDynamicDispatch {
             this.dispatches.set(key, dispatch);
             this.generated.add(helper);
             lowerer.liftedFns.push(helper);
+            lowerer.shareHelper(helper);
             changed = true;
           }
           return {

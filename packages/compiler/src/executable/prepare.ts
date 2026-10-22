@@ -122,6 +122,6 @@ export function prepareExecutableModule(
     mod: lowered.module!,
     sourceTexts,
     stats: lowered.stats,
-    warnings: lowered.divergences ?? [],
+    warnings: [...(lowered.divergences ?? []), ...(lowered.performance ?? [])],
   };
 }

@@ -50,6 +50,7 @@ import { emitBytesLoopVersionGuard } from "./bytes-loop-versions.js";
 import { mangleLocal } from "../mangle.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import type { LlValue } from "./expr-context.js";
+import { widenInteger } from "./integer-values.js";
 import { SCALAR_UNION_RESULT } from "./int32-abi.js";
 import { emitLiteralSwitch } from "./switch-dispatch.js";
 import {
@@ -267,6 +268,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
       else emitter.toFrame(v);
       B.line(`store ${emitter.llType(b.type)} ${v.name}, ptr ${b.slot}`);
       emitter.storeIntegerView(s.localId, v, s.init);
+      storeIntegerTemp(emitter, s.localId, b, v);
       if (isRefCounted(b.type)) {
         emitter.scopes[emitter.scopes.length - 1]!.push({ slot: b.slot, type: b.type });
         emitter.noteLastUseMove(s, b);
@@ -517,6 +519,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         s.index,
         s.value,
         emitter.bytesBounds.has(s),
+        emitter.bytesOwned.has(s),
       );
       break;
     }
@@ -558,7 +561,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         emitter.emitPublishedFieldGuard(obj.name, null, s.field);
       const { ptr, type, inline } =
         s.kind === "fieldSet"
-          ? emitter.classFieldPtr(obj.name, s.className, s.field)
+          ? emitter.classFieldPtr(obj.name, s.className, s.field, "compressed")
           : emitter.recordFieldPtr(obj.name, s.shapeId, s.field);
       // A result-slot entry fills zeroed caller storage, each field once.
       if (
@@ -945,18 +948,32 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         B.startBlock(done);
         break;
       }
-      const version =
+      const versionable =
         emitter.bytesLoopVersionsEnabled &&
         emitter.bytesLoopVersioning.size < MAX_BYTES_LOOP_VERSION_DEPTH &&
-        !emitter.bytesLoopVersioning.has(s)
-          ? emitter.matchBytesLoopVersion(s, countedLoop)
-          : null;
+        !emitter.bytesLoopVersioning.has(s);
+      // A loop to a typed array's or an array's length keeps its integer
+      // induction. Its counted form only gives the version guard the
+      // counter's iteration space, so the guard also covers accesses of
+      // other typed arrays at the counter, such as `x[i]` and `y[i]` in
+      // `for (let i = 0; i < out.length; i++) out[i] = x[i] * y[i]`.
+      const versionCounted =
+        versionable && !countedLoop && integerLoop && emitter.countedLoopsEnabled
+          ? matchIntegerCountedForLoop(
+              s,
+              emitter.numericLocals,
+              emitter.integerRanges,
+              emitter.unaliasedArrays,
+            )
+          : countedLoop;
+      const version = versionable ? emitter.matchBytesLoopVersion(s, versionCounted) : null;
       if (version) {
         const fast = B.newLabel("bytes.version.fast"),
           slow = B.newLabel("bytes.version.slow"),
           done = B.newLabel("bytes.version.done");
         emitBytesLoopVersionGuard(emitter, version, fast, slow);
         const originalBounds = emitter.bytesBounds,
+          originalOwned = emitter.bytesOwned,
           originalRanges = emitter.integerRanges;
         emitter.bytesLoopVersioning.add(s);
         try {
@@ -965,6 +982,8 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
           B.br(done);
           B.startBlock(fast);
           emitter.bytesBounds = new Set([...originalBounds, ...version.bounds]);
+          if (version.owned.size > 0)
+            emitter.bytesOwned = new Set([...originalOwned, ...version.owned]);
           if (version.ranges.size > 0)
             emitter.integerRanges = new Map([...originalRanges, ...version.ranges]);
           if (version.counted?.guarded) emitter.provenCountedGuards.add(s);
@@ -972,6 +991,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
           B.br(done);
         } finally {
           emitter.bytesBounds = originalBounds;
+          emitter.bytesOwned = originalOwned;
           emitter.integerRanges = originalRanges;
           emitter.provenCountedGuards.delete(s);
           emitter.bytesLoopVersioning.delete(s);
@@ -1526,6 +1546,48 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
  * Abrupt completions inside tryBody/catchBody ride the finallyStack:
  * returns inline copies at the return site, while break/continue use the
  * shared region walk before branching to their resolved target. */
+/** A constant number local whose initializer has an exact integer form
+ * (such as `const j = i * 4` in a typed-array loop version) keeps that
+ * integer in an i64 slot beside the double, so reads such as `px[j + 1]`
+ * index with integer arithmetic instead of converting the double back.
+ * Every other declaration of the local drops the integer: the same
+ * declaration is emitted once per loop copy, and a copy must not read the
+ * integer another copy stored. */
+function storeIntegerTemp(
+  emitter: LlEmitter,
+  localId: string,
+  b: ReturnType<LlEmitter["binding"]>,
+  v: LlValue,
+): void {
+  const local = b.local;
+  if (
+    !emitter.integerTempsEnabled ||
+    b.kind !== "local" ||
+    !local ||
+    local.type.kind !== "f64" ||
+    local.mutable ||
+    local.tdz === true ||
+    emitter.captureIds.has(localId) ||
+    !v.integer
+  ) {
+    emitter.integerTemps.delete(localId);
+    return;
+  }
+  const B = emitter.B;
+  let slot = emitter.integerTemps.get(localId)?.slot;
+  if (slot === undefined) {
+    slot = B.slot();
+    B.entryAllocas.push(`${slot} = alloca i64 ; integer ${local.name}`);
+  }
+  B.line(`store i64 ${widenInteger(emitter, v.integer)}, ptr ${slot}`);
+  emitter.integerTemps.set(localId, {
+    slot,
+    type: "i64",
+    signed: true,
+    range: v.integer.range,
+  });
+}
+
 export function emitTryCatch(emitter: LlEmitter, s: IrStmt & { kind: "tryCatch" }): void {
   const B = emitter.B;
   const hasCatch = s.catchBody !== null;

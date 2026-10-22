@@ -4348,7 +4348,9 @@ function canBoxDynCompositeAt(
       }
     }
     default:
-      return false;
+      // Runtime handles (a socket in a diagnostics message) box by
+      // reference wherever the walker meets them, as at the top level.
+      return DYN_HANDLE_KINDS.has(t.kind);
   }
 }
 

@@ -11,6 +11,7 @@ import {
   rawBytes,
   requestHandler,
 } from "./lib-abi.js";
+import { sniCallbackArgs } from "./lib-http2.js";
 import { emitAlwaysThrowLibCall } from "./lib-shared.js";
 
 export function emitTlsLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
@@ -42,6 +43,27 @@ export function emitTlsLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValu
         e.fn === "https.createServer" ? "scr_https_create_server" : "scr_tls_create_server",
         [...rawBytes(host, args[0]!), ...rawBytes(host, args[1]!), ...handler],
       );
+    }
+    case "tls.createServerSni":
+    case "tls.createServerSniCb": {
+      const cb = args[3];
+      const handler =
+        cb === undefined
+          ? [ptr(), ptr()]
+          : callbackAdapter(
+              host,
+              cb,
+              callbackType(cb).params.length === 0
+                ? "scr_net_conn_thunk0"
+                : "scr_net_conn_thunk_sock",
+              ["ptr", "ptr"],
+            );
+      return finishRuntimeCall(host, e, "scr_tls_create_server_sni", [
+        ...rawBytes(host, args[0]!),
+        ...rawBytes(host, args[1]!),
+        ...handler,
+        ...sniCallbackArgs(host, args[2]!),
+      ]);
     }
     case "tls.createServerDyn":
     case "tls.createServerDynCb":

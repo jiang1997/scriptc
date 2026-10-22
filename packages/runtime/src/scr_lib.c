@@ -6821,6 +6821,17 @@ double scr_math_round(double x) {
  * powers, follow libm. */
 double scr_math_pow(double base, double exponent) {
   if (isnan(exponent) || (isinf(exponent) && fabs(base) == 1.0)) return NAN;
+  /* 2 ** n for an integer n in the double range is an exact power of two,
+   * the value pow returns; its bits are the exponent alone. */
+  if (base == 2.0 && exponent >= -1074.0 && exponent <= 1023.0) {
+    int32_t n = (int32_t)exponent;
+    if ((double)n == exponent) {
+      uint64_t bits = n >= -1022 ? (uint64_t)(n + 1023) << 52 : UINT64_C(1) << (n + 1074);
+      double result;
+      memcpy(&result, &bits, sizeof result);
+      return result;
+    }
+  }
   return pow(base, exponent);
 }
 

@@ -176,22 +176,30 @@ export function emitBytesLength(
   return { name: out, type: F64 };
 }
 
-/** Worker programs: a view of a SharedArrayBuffer (`shared` is fixed before
- * script code can see the view) is read and written by the runtime under
- * its shared-memory lock; every other buffer belongs to this thread and
- * takes the ordinary inline path. The test follows the index check: a
+/** A view's shared backing (null for a buffer this thread owns). It is
+ * set at construction, before script code can see the view. */
+export function emitBytesSharedStorage(host: LlvmEmitterContext, receiver: string): string {
+  const B = host.B;
+  const slot = B.tmp(),
+    storage = B.tmp();
+  B.line(`${slot} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 9`);
+  B.line(`${storage} = load ptr, ptr ${slot}${bytesHeaderAlias(host)}`);
+  return storage;
+}
+
+/** Worker programs: an element of a view of a SharedArrayBuffer (`shared` is
+ * fixed before script code can see the view) is read and written with one
+ * relaxed atomic access of its width, as the runtime's shared accessors do;
+ * every other buffer belongs to this thread and takes the ordinary path. The test follows the index check: a
  * view's length never changes, so both paths use the one checked integer
  * index. Branches to the returned label for a thread-owned buffer and
  * continues in the shared block. */
 function emitSharedBytesSplit(host: LlvmEmitterContext, receiver: string): string {
   const B = host.B;
   host.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
-  const slot = B.tmp(),
-    storage = B.tmp(),
+  const storage = emitBytesSharedStorage(host, receiver),
     isShared = B.tmp(),
     expected = B.tmp();
-  B.line(`${slot} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 9`);
-  B.line(`${storage} = load ptr, ptr ${slot}${bytesHeaderAlias(host)}`);
   B.line(`${isShared} = icmp ne ptr ${storage}, null`);
   B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${isShared}, i1 false)`);
   const shared = B.newLabel("bytes.shared"),
@@ -209,15 +217,17 @@ export function emitBytesGet(
   expr?: IrExpr,
   inBounds = false,
   invalidNaN = false,
+  owned = false,
 ): LlValue {
   const B = host.B;
   // Any invalid index traps (the array runtime's discipline).
-  if (!invalidNaN) return emitBytesLoad(host, elem, receiver, index, expr, inBounds, undefined);
+  if (!invalidNaN)
+    return emitBytesLoad(host, elem, receiver, index, expr, inBounds, undefined, owned);
   // The numeric view of an ordinary read: an invalid index never touches
   // storage and reads as NaN — ToNumber of Node's undefined.
   const invalid = B.newLabel("bytes.read.invalid");
   const done = B.newLabel("bytes.read.done");
-  const loaded = emitBytesLoad(host, elem, receiver, index, expr, inBounds, invalid);
+  const loaded = emitBytesLoad(host, elem, receiver, index, expr, inBounds, invalid, owned);
   const ok = B.newLabel("bytes.read.ok");
   B.br(ok);
   B.startBlock(ok);
@@ -260,8 +270,10 @@ function emitBytesLoad(
   expr: IrExpr | undefined,
   inBounds: boolean,
   invalid: string | undefined,
+  owned: boolean,
 ): LlValue {
-  if (host.mod.workers) {
+  // `owned`: an enclosing version guard proved the view thread-owned.
+  if (host.mod.workers && !owned) {
     const idx = emitBytesIndex(host, receiver, index, expr, invalid, inBounds);
     return emitSharedOrLocalLoad(host, elem, receiver, idx);
   }
@@ -276,8 +288,9 @@ function emitBytesLoad(
  * shared. An integer element joins as its 32-bit value and converts to a
  * number after the join, as the local load does, so compares and
  * ToInt32/ToUint32 of the result stay integer operations. The shared read
- * is an ordinary call: another thread's write must stay visible to a loop
- * that reads the same element again. */
+ * is a monotonic atomic load, which LLVM neither hoists nor merges: another
+ * thread's write stays visible to a loop that reads the same element again.
+ * Float16 elements read through the runtime. */
 function emitSharedOrLocalLoad(
   host: LlvmEmitterContext,
   elem: IrBytesElem,
@@ -286,12 +299,18 @@ function emitSharedOrLocalLoad(
 ): LlValue {
   const B = host.B;
   const floating = elem === "f16" || elem === "f32" || elem === "f64";
-  const fn = floating ? "scr_bytes_shared_get_f64" : "scr_bytes_shared_get_int";
-  const ret = floating ? "double" : "i32";
-  host.declare(`declare ${ret} @${fn}(ptr, ${host.sizeType})`);
   const local = emitSharedBytesSplit(host, receiver);
-  const shared = B.tmp();
-  B.line(`${shared} = call ${ret} @${fn}(ptr ${receiver}, ${host.sizeType} ${idx}) cold`);
+  let shared: string;
+  if (elem === "f16") {
+    host.declare(`declare double @scr_bytes_shared_get_f64(ptr, ${host.sizeType})`);
+    shared = B.tmp();
+    B.line(
+      `${shared} = call double @scr_bytes_shared_get_f64(ptr ${receiver}, ${host.sizeType} ${idx}) cold`,
+    );
+  } else {
+    const loaded = emitSharedLoadAt(host, elem, host.emitBytesData(receiver), idx);
+    shared = loaded.uint32 ?? loaded.name;
+  }
   const sharedDone = B.newLabel("bytes.shared.done");
   B.br(sharedDone);
   B.startBlock(local);
@@ -314,6 +333,43 @@ function emitSharedOrLocalLoad(
   const signed = elem === "i8" || elem === "i16" || elem === "i32";
   B.line(`${out} = ${signed ? "sitofp" : "uitofp"} i32 ${u32} to double`);
   return { name: out, type: F64, uint32: u32 };
+}
+
+/** The element at a checked index of a shared view, given its data pointer:
+ * a relaxed atomic load of the element's width, aligned as shared views
+ * are. Not for Float16 elements. */
+function emitSharedLoadAt(
+  host: LlvmEmitterContext,
+  elem: IrBytesElem,
+  data: string,
+  idx: string,
+): LlValue {
+  const B = host.B;
+  const size = BYTES_ELEMENT_SIZE[elem];
+  const p = B.tmp();
+  if (elem === "f32" || elem === "f64") {
+    const ty = elem === "f32" ? "float" : "double";
+    const raw = B.tmp();
+    B.line(`${p} = getelementptr inbounds ${ty}, ptr ${data}, ${host.sizeType} ${idx}`);
+    B.line(`${raw} = load atomic ${ty}, ptr ${p} monotonic, align ${size}`);
+    if (elem === "f64") return { name: raw, type: F64 };
+    const out = B.tmp();
+    B.line(`${out} = fpext float ${raw} to double`);
+    return { name: out, type: F64 };
+  }
+  const bits = size * 8;
+  const raw = B.tmp();
+  B.line(`${p} = getelementptr inbounds i${bits}, ptr ${data}, ${host.sizeType} ${idx}`);
+  B.line(`${raw} = load atomic i${bits}, ptr ${p} monotonic, align ${size}`);
+  const signed = elem === "i8" || elem === "i16" || elem === "i32";
+  let wide = raw;
+  if (bits < 32) {
+    wide = B.tmp();
+    B.line(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${raw} to i32`);
+  }
+  const out = B.tmp();
+  B.line(`${out} = ${signed ? "sitofp" : "uitofp"} i32 ${wide} to double`);
+  return { name: out, type: F64, uint32: wide };
 }
 
 /** The element at a checked index of a thread-owned view, given its data
@@ -471,13 +527,14 @@ export function emitBytesSet(
   indexExpr?: IrExpr,
   expr?: IrExpr,
   inBounds = false,
+  owned = false,
 ): void {
   const B = host.B;
   // Invalid integer-indexed writes are ignored after evaluating the RHS.
   const done = B.newLabel("bytes.store.done");
   const data = host.emitBytesData(receiver);
   const idx = emitBytesIndex(host, receiver, index, indexExpr, done, inBounds);
-  if (host.mod.workers) {
+  if (host.mod.workers && !owned && elem === "f16") {
     host.declare(`declare void @scr_bytes_shared_set(ptr, ${host.sizeType}, double)`);
     const local = emitSharedBytesSplit(host, receiver);
     B.line(
@@ -488,42 +545,72 @@ export function emitBytesSet(
   }
   let stored: string | null;
   if (elem === "u8c") {
-    host.declare(`declare double @scr_bytes_to_u8_clamp(double)`);
-    const clamped = B.tmp();
+    // ToUint8Clamp, as scr_bytes_to_u8_clamp computes it: NaN and values
+    // at most 0 store 0, values at least 255 store 255, and values between
+    // round to the nearest integer, ties to even. Adding and subtracting
+    // 2^52 rounds a value in (0, 255) that way in the default rounding mode,
+    // with no call or branch, so loops of clamped stores can vectorize.
+    const positive = B.tmp(),
+      high = B.tmp(),
+      shifted = B.tmp(),
+      rounded = B.tmp(),
+      upper = B.tmp(),
+      clamped = B.tmp();
     stored = B.tmp();
-    B.line(`${clamped} = call double @scr_bytes_to_u8_clamp(double ${value.name})`);
+    B.line(`${positive} = fcmp ogt double ${value.name}, 0.0`);
+    B.line(`${high} = fcmp oge double ${value.name}, 255.0`);
+    B.line(`${shifted} = fadd double ${value.name}, 0x4330000000000000`);
+    B.line(`${rounded} = fsub double ${shifted}, 0x4330000000000000`);
+    B.line(`${upper} = select i1 ${high}, double 255.0, double ${rounded}`);
+    B.line(`${clamped} = select i1 ${positive}, double ${upper}, double 0.0`);
     B.line(`${stored} = fptoui double ${clamped} to i32`);
   } else
     stored =
       elem === "f16" || elem === "f32" || elem === "f64"
         ? null
         : host.emitToUint32(value.name, expr, value.uint32);
-  const p = B.tmp();
   if (elem === "f16") {
     // One round-to-nearest-even step from the double, in the runtime.
     host.declare(`declare zeroext i16 @scr_f16_from_f64(double)`);
     const narrowed = B.tmp();
+    const p = B.tmp();
     B.line(`${narrowed} = call zeroext i16 @scr_f16_from_f64(double ${value.name})`);
     B.line(`${p} = getelementptr inbounds i16, ptr ${data}, ${host.sizeType} ${idx}`);
     B.line(`store i16 ${narrowed}, ptr ${p}, align 1${bytesElementAlias(host)}`);
-  } else if (BYTES_ELEMENT_SIZE[elem] < 4) {
-    const bits = BYTES_ELEMENT_SIZE[elem] * 8;
-    const byte = B.tmp();
-    B.line(`${byte} = trunc i32 ${stored!} to i${bits}`);
-    B.line(`${p} = getelementptr inbounds i${bits}, ptr ${data}, ${host.sizeType} ${idx}`);
-    B.line(`store i${bits} ${byte}, ptr ${p}, align 1${bytesElementAlias(host)}`);
-  } else if (elem === "f32") {
-    const narrowed = B.tmp();
-    B.line(`${narrowed} = fptrunc double ${value.name} to float`);
-    B.line(`${p} = getelementptr inbounds float, ptr ${data}, ${host.sizeType} ${idx}`);
-    B.line(`store float ${narrowed}, ptr ${p}, align 1${bytesElementAlias(host)}`);
-  } else if (elem === "f64") {
-    B.line(`${p} = getelementptr inbounds double, ptr ${data}, ${host.sizeType} ${idx}`);
-    B.line(`store double ${value.name}, ptr ${p}, align 1${bytesElementAlias(host)}`);
-  } else {
-    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, ${host.sizeType} ${idx}`);
-    B.line(`store i32 ${stored!}, ptr ${p}, align 1${bytesElementAlias(host)}`);
+    B.br(done);
+    B.startBlock(done);
+    return;
   }
+  // The element's bits as an LLVM value of the element's width.
+  let ty: string;
+  let operand: string;
+  if (BYTES_ELEMENT_SIZE[elem] < 4) {
+    ty = `i${BYTES_ELEMENT_SIZE[elem] * 8}`;
+    operand = B.tmp();
+    B.line(`${operand} = trunc i32 ${stored!} to ${ty}`);
+  } else if (elem === "f32") {
+    ty = "float";
+    operand = B.tmp();
+    B.line(`${operand} = fptrunc double ${value.name} to float`);
+  } else if (elem === "f64") {
+    ty = "double";
+    operand = value.name;
+  } else {
+    ty = "i32";
+    operand = stored!;
+  }
+  if (host.mod.workers && !owned) {
+    // A shared view's element takes a relaxed atomic store of its width.
+    const local = emitSharedBytesSplit(host, receiver);
+    const p = B.tmp();
+    B.line(`${p} = getelementptr inbounds ${ty}, ptr ${data}, ${host.sizeType} ${idx}`);
+    B.line(`store atomic ${ty} ${operand}, ptr ${p} monotonic, align ${BYTES_ELEMENT_SIZE[elem]}`);
+    B.br(done);
+    B.startBlock(local);
+  }
+  const p = B.tmp();
+  B.line(`${p} = getelementptr inbounds ${ty}, ptr ${data}, ${host.sizeType} ${idx}`);
+  B.line(`store ${ty} ${operand}, ptr ${p}, align 1${bytesElementAlias(host)}`);
   B.br(done);
   B.startBlock(done);
 }
@@ -661,6 +748,7 @@ export function emitBytesIntrinsic(
         e.args[0],
         host.bytesBounds.has(e),
         e.invalidNaN === true,
+        host.bytesOwned.has(e),
       );
     case "slice":
       return call(

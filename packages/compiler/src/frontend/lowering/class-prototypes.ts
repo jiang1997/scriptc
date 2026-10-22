@@ -6,6 +6,7 @@ import {
   DYN,
   STRING,
   SYMBOL_T,
+  VOID,
   isUnitType,
   type IrExpr,
   type IrFunction,
@@ -121,6 +122,7 @@ export function classPrototypeData(
     const globalId = `%g.${name}`;
     const readyId = `${globalId}.ready`;
     info.def.prototypeDataHelper = name;
+    lowerer.shareHelper(name);
     const className = info.def.jsName ?? info.def.name;
     lowerer.globalsList.push({
       id: globalId,
@@ -153,6 +155,18 @@ export function classPrototypeData(
               value: base
                 ? { kind: "libCall", fn: "dyn.objCreate", args: [base], type: DYN, loc }
                 : { kind: "dynObjLit", fields: [], type: DYN, loc },
+              loc,
+            },
+            // util.inspect prints an instance with its class's name.
+            {
+              kind: "exprStmt",
+              expr: {
+                kind: "libCall",
+                fn: "dyn.nameClassPrototype",
+                args: [value, { kind: "strLit", value: className, type: STRING, loc }],
+                type: VOID,
+                loc,
+              },
               loc,
             },
             {

@@ -131,13 +131,6 @@ uint32_t scr_arr_ops_register(ScrArrOps *ops) {
 
 const ScrArrOps *scr_arr_ops_overflow(const ScrArr *a) { return scr_arr_ext_of(a)->ops; }
 
-/* Record `ops` as the element ops of `a` (NULL for none). */
-static void scr_arr_set_ops(ScrArr *a, const ScrArrOps *ops) {
-  uint32_t id = scr_arr_ops_id(ops);
-  a->spare = (uint16_t)((a->spare & ((1u << SCR_ARR_OPS_SHIFT) - 1)) | (id << SCR_ARR_OPS_SHIFT));
-  if (id == SCR_ARR_OPS_OVERFLOW) scr_arr_ext(a)->ops = ops;
-}
-
 /* Canonical array indices grow indexed storage and may leave holes. Negative,
  * fractional, NaN, infinity, and 2^32-1 numeric keys use the ordinary
  * property vector; only a missing property or a low-level read of a hole
@@ -402,9 +395,10 @@ static void scr_arr_sparse_drop_prefix(ScrArr *a, size_t count) {
 #define SCR_ARR_MIN_GROWTH ((size_t)4)
 
 /* Inline slots: an array built by scr_arr_new_small / scr_arr_new_ops_small
- * (empty literals the compiler sees appended to) keeps its first dense
- * slots and states in its own block, right after the ScrArr, so it costs
- * one allocation and its first elements share the header's cache lines.
+ * (empty literals the compiler sees appended to), or constructed with a
+ * known element count of up to SCR_ARR_KNOWN_INLINE_MAX, keeps its first
+ * dense slots and states in its own block, right after the ScrArr, so it
+ * costs one allocation and its first elements share the header's cache lines.
  * `spare` records it. Growth past the inline capacity moves the slots to an
  * ordinary allocation; the inline room then stays unused until the array is
  * freed. */
@@ -523,6 +517,30 @@ static size_t scr_arr_small_cap(size_t prefix, bool bools) {
   (void)prefix;
   (void)bools;
   return SCR_ARR_SMALL_SLOTS;
+#endif
+}
+
+/* The most slots a construction with a known element count (array
+ * literals, copies, slices and the arrays the runtime builds) keeps inline.
+ * Larger counts, and blocks past the small-object allocator, keep separate
+ * storage: an array that then grows leaves its inline room unused, which
+ * this bound keeps small. */
+#define SCR_ARR_KNOWN_INLINE_MAX ((size_t)16)
+
+/* Inline capacity of a construction of `need` elements with `prefix` bytes
+ * of block before the slots, rounded up to fill the block; 0 when its slots
+ * stay separate. */
+static size_t scr_arr_known_cap(size_t prefix, size_t need, bool bools) {
+  if (need == 0 || need > SCR_ARR_KNOWN_INLINE_MAX) return 0;
+#if SCR_SMALL_ALLOC
+  size_t unit = bools ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES;
+  size_t bytes = prefix + need * unit;
+  if (bytes > SCR_SA_MAX) return 0;
+  return (scr_sa_class_size(scr_sa_class(bytes)) - prefix) / unit;
+#else
+  (void)prefix;
+  (void)bools;
+  return need;
 #endif
 }
 
@@ -1180,7 +1198,8 @@ static inline __attribute__((always_inline)) ScrArr *scr_arr_make(ScrElemKind el
                                                                   size_t initial_cap,
                                                                   bool small) {
   size_t unit = elem == SCR_ELEM_BOOL ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES;
-  size_t inline_cap = small ? scr_arr_small_cap(SCR_ARR_INLINE_OFFSET, elem == SCR_ELEM_BOOL) : 0;
+  size_t inline_cap = small ? scr_arr_small_cap(SCR_ARR_INLINE_OFFSET, elem == SCR_ELEM_BOOL)
+                            : scr_arr_known_cap(SCR_ARR_INLINE_OFFSET, initial_cap, elem == SCR_ELEM_BOOL);
   ScrArr *a = scr_mem_alloc(inline_cap ? SCR_ARR_INLINE_OFFSET + inline_cap * unit : sizeof(ScrArr));
   if (!a) scr_arr_oom();
   a->rc = 1;
@@ -1310,11 +1329,17 @@ static void scr_arr_gc_free(void *a0) {
   scr_cyc_free_inline(a);
 }
 
-static ScrArr *scr_arr_make_ops(const ScrArrOps *ops, size_t initial_cap, bool small) {
+/* Inlined into each constructor like scr_arr_make: with `small` and the
+ * count constant, scr_arr_new_ops_small's size class folds to a table
+ * index. */
+static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops(const ScrArrOps *ops,
+                                                                      size_t initial_cap,
+                                                                      bool small) {
   ScrArr *a;
   bool cyc = ops->trace != NULL;
+  size_t prefix = SCR_ARR_INLINE_OFFSET + (cyc ? sizeof(ScrCycHdr) : 0);
   size_t inline_cap =
-      small ? scr_arr_small_cap(SCR_ARR_INLINE_OFFSET + (cyc ? sizeof(ScrCycHdr) : 0), false) : 0;
+      small ? scr_arr_small_cap(prefix, false) : scr_arr_known_cap(prefix, initial_cap, false);
   size_t size = inline_cap ? SCR_ARR_INLINE_OFFSET + inline_cap * SCR_ARR_SLOT_BYTES : sizeof(ScrArr);
   if (cyc) {
     static ScrCycType cyc_type = { &scr_arr_trace_v, &scr_arr_gc_free, SCR_CYC_KIND_ARRAY };
@@ -1328,12 +1353,19 @@ static ScrArr *scr_arr_make_ops(const ScrArrOps *ops, size_t initial_cap, bool s
   a->cap = 0;
   a->elem = SCR_ELEM_REF;
   a->cyc = cyc;
-  a->spare = 0;
+  /* The ops id is written with the other header fields: reading `spare`
+   * back after scr_arr_use_inline sets its inline flag stalls the
+   * store-to-load forward. */
+  uint32_t id = scr_arr_ops_id(ops);
+  a->spare = (uint16_t)(id << SCR_ARR_OPS_SHIFT);
   a->filled = 0;
   a->data = NULL;
-  scr_arr_set_ops(a, ops);
   if (inline_cap) scr_arr_use_inline(a, inline_cap);
   else if (initial_cap > 0) scr_arr_grow_dense_to(a, initial_cap, SCR_ARR_GROW_EXACT);
+  /* After the storage: ops past the registry live in the ext, whose
+   * pointer precedes the dense allocation, so inline slots move out first
+   * (scr_arr_ext). */
+  if (id == SCR_ARR_OPS_OVERFLOW) scr_arr_ext(a)->ops = ops;
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
 #endif
@@ -4790,16 +4822,103 @@ ScrStr *scr_str_raw(ScrArr *raw, ScrArr *subs) {
   return out;
 }
 
+bool scr_arr_numeric_key(const char *key, size_t len, double *out) {
+  char text[64];
+  if (len == 0 || len >= sizeof text) return false;
+  memcpy(text, key, len);
+  text[len] = '\0';
+  char *end;
+  double number = strtod(text, &end);
+  if (end != text + len) return false;
+  char spelled[64];
+  if (scr_f64_to_str(number, spelled) != len || memcmp(spelled, key, len) != 0) return false;
+  size_t index;
+  if (scr_arr_valid_index(number, &index)) return false;
+  *out = number;
+  return true;
+}
+
 void scr_arr_copy_metadata(ScrArr *a, ScrDyn *target) {
   const ScrDyn *metadata = SCR_AX(a)->metadata;
   if (metadata && metadata->kind == SCR_DYN_HANDLE && metadata->v.handle.tag == SCR_DYNH_MATCH_SOURCE &&
       scr_arr_match_copy(a, target))
     return;
-  if (!SCR_AX(a)->metadata) return;
-  for (size_t i = 0; i < SCR_AX(a)->metadata->v.obj.len; i++) {
-    ScrDynEntry *entry = &SCR_AX(a)->metadata->v.obj.entries[i];
+  metadata = SCR_AX(a)->metadata;
+  if (!metadata) return;
+  for (size_t i = 0; i < metadata->v.obj.len; i++) {
+    const ScrDynEntry *entry = &metadata->v.obj.entries[i];
     ScrStr *key = scr_str_new(entry->key, entry->key_len);
-    scr_dyn_key_set(target, key, entry->value);
+    if (!entry->accessor && entry->writable && entry->enumerable && entry->configurable) {
+      scr_dyn_key_set(target, key, entry->value);
+    } else {
+      /* Properties defined through a view keep their attributes. */
+      ScrDyn *name = scr_dyn_new_str(key);
+      ScrDyn *descriptor = scr_dyn_own_descriptor(metadata, key);
+      if (descriptor) scr_dyn_release(scr_dyn_define_property(target, name, descriptor));
+      scr_dyn_release(descriptor);
+      scr_dyn_release(name);
+    }
     scr_str_release(key);
   }
+}
+
+ScrArr *scr_arr_named_keys(ScrArr *a) {
+  /* Most arrays have no out-of-line storage: they share one immortal empty
+   * result, which `for...in` only reads. */
+  static ScrArr none = {.rc = SIZE_MAX, .elem = SCR_ELEM_STR};
+  const ScrArrExt *x = scr_arr_ext_of(a);
+  if (!x) return &none;
+  ScrArr *keys = scr_arr_new(SCR_ELEM_STR, 0);
+  for (size_t i = 0; i < x->prop_len; i++)
+    scr_arr_push_ref(keys, scr_str_new(x->props[i].key, x->props[i].key_len));
+  const ScrDyn *metadata = x->metadata;
+  if (metadata && metadata->kind == SCR_DYN_HANDLE && metadata->v.handle.tag == SCR_DYNH_MATCH_SOURCE) {
+    static const char *const names[] = {"index", "input", "groups"};
+    for (size_t i = 0; i < 3; i++) scr_arr_push_ref(keys, scr_str_new(names[i], strlen(names[i])));
+    return keys;
+  }
+  if (!metadata || metadata->kind != SCR_DYN_OBJ) return keys;
+  for (size_t i = 0; i < metadata->v.obj.len; i++) {
+    const ScrDynEntry *entry = &metadata->v.obj.entries[i];
+    if (!entry->enumerable || scr_arr_prop_index(a, entry->key, entry->key_len) != SIZE_MAX) continue;
+    scr_arr_push_ref(keys, scr_str_new(entry->key, entry->key_len));
+  }
+  return keys;
+}
+
+bool scr_arr_has_named_key(ScrArr *a, ScrStr *key) {
+  const ScrArrExt *x = scr_arr_ext_of(a);
+  if (!x) return false;
+  if (scr_arr_prop_index(a, key->data, key->len) != SIZE_MAX) return true;
+  const ScrDyn *metadata = x->metadata;
+  if (metadata && metadata->kind == SCR_DYN_HANDLE && metadata->v.handle.tag == SCR_DYNH_MATCH_SOURCE)
+    return true; /* index, input and groups, the only keys a pending result lists */
+  if (!metadata || metadata->kind != SCR_DYN_OBJ) return false;
+  for (size_t i = 0; i < metadata->v.obj.len; i++) {
+    const ScrDynEntry *entry = &metadata->v.obj.entries[i];
+    if (entry->key_len == key->len && memcmp(entry->key, key->data, key->len) == 0) return true;
+  }
+  return false;
+}
+
+void scr_arr_adopt_view_properties(ScrArr *a, ScrDyn *view, ScrArr *target) {
+  ScrArrExt *from = scr_arr_ext_of(target);
+  if (from && from->prop_len) {
+    /* Both arrays have the same element type, so the slots keep their owner. */
+    ScrArrExt *x = scr_arr_ext(a);
+    ScrArrProp *props = x->props;
+    size_t len = x->prop_len, cap = x->prop_cap;
+    x->props = from->props;
+    x->prop_len = from->prop_len;
+    x->prop_cap = from->prop_cap;
+    from->props = props;
+    from->prop_len = len;
+    from->prop_cap = cap;
+  }
+  ScrDyn *named = view && view->kind == SCR_DYN_ARR ? view->v.arr.properties : NULL;
+  if (!named || named->v.obj.len == 0) return;
+  ScrArrExt *x = scr_arr_ext(a);
+  ScrDyn *old = x->metadata;
+  x->metadata = scr_dyn_retain(named);
+  scr_dyn_release(old);
 }

@@ -7,6 +7,7 @@ import { type Lowerer, own } from "../lowerer.js";
 import { locOf } from "../../program.js";
 import { CIPHER_TYPE_NAMES } from "../../type-mapper.js";
 import { CRYPTO_CIPHERS, CRYPTO_CURVES, CRYPTO_HASHES } from "../crypto-tables.js";
+import { stdlibGlobalNameOf } from "../surfaces.js";
 import {
   BOOL,
   BYTES_U8,
@@ -1316,8 +1317,10 @@ export function lowerCryptoGetRandomValues(
 }
 
 /** Whether `receiver` names a WebCrypto Crypto object: the `crypto`
- * global (also through globalThis) or node:crypto's `webcrypto`. */
+ * global (also through globalThis or an alias of it) or node:crypto's
+ * `webcrypto`. */
 export function isWebCryptoReceiver(lowerer: Lowerer, receiver: ts.Expression): boolean {
+  if (stdlibGlobalNameOf(lowerer, receiver) === "crypto") return true;
   if (ts.isIdentifier(receiver)) {
     if (receiver.text === "crypto" && lowerer.isStdlibGlobal(receiver, "crypto")) return true;
     const imported = lowerer.builtinImportOf(receiver);

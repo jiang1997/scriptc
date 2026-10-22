@@ -678,6 +678,7 @@ void scr_net_server_release(ScrNetServer *s) {
 #ifdef SCR_RC_AUDIT
     scr_net_live--;
 #endif
+    scr_weak_dispose_inline(s); /* weak collections keyed by this socket or server */
     free(s);
   }
 }
@@ -724,6 +725,7 @@ void scr_net_sock_release(ScrNetSocket *s) {
 #ifdef SCR_RC_AUDIT
     scr_net_live--;
 #endif
+    scr_weak_dispose_inline(s); /* weak collections keyed by this socket or server */
     free(s);
   }
 }

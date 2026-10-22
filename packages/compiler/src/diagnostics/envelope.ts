@@ -16,6 +16,7 @@
  * bumps it. */
 import { readFileSync } from "node:fs";
 import type { ScrDiagnostic } from "./diagnostic.js";
+import { isPerformanceCode } from "./dynamic-tier.js";
 import type { WasmModuleReport } from "../wasm/discover.js";
 
 export const DIAGNOSTICS_SCHEMA = "scriptc-diagnostics";
@@ -25,12 +26,14 @@ export const DIAGNOSTICS_SCHEMA_VERSION = 1;
  *  - invalid-source: the program itself is wrong (TypeScript errors, bad JSON modules)
  *  - unsupported: valid TypeScript/JavaScript scriptc cannot compile yet
  *  - divergence: compiles, but the native program behaves differently from Node
+ *  - performance: compiles and behaves as under Node, but runs slower than typed code would
  *  - environment: project configuration, scriptc's type world, toolchain or target
  *  - internal: a compiler bug */
 export type DiagnosticCategory =
   | "invalid-source"
   | "unsupported"
   | "divergence"
+  | "performance"
   | "environment"
   | "internal";
 
@@ -149,12 +152,13 @@ export interface DiagnosticsEnvelope {
 /** The divergence band: compiles, but the program can behave differently
  * from Node. Warnings, never build failures. */
 export function isDivergenceCode(code: string): boolean {
-  return /^SC6\d{3}$/.test(code);
+  return /^SC60\d{2}$/.test(code);
 }
 
 export function categoryOf(diag: ScrDiagnostic): DiagnosticCategory {
   const code = diag.code;
   if (isDivergenceCode(code)) return "divergence";
+  if (isPerformanceCode(code)) return "performance";
   if (code === "SC0001") return diag.typeWorld === true ? "environment" : "invalid-source";
   if (code === "SC0003") return "invalid-source";
   if (code === "SC0002" || code === "SC0004") return "environment";
@@ -274,7 +278,7 @@ export function locateDiagnostic(
   return {
     code: diag.code,
     category: categoryOf(diag),
-    severity: isDivergenceCode(diag.code) ? "warning" : "error",
+    severity: isDivergenceCode(diag.code) || isPerformanceCode(diag.code) ? "warning" : "error",
     scope,
     file: diag.loc.file,
     line: start.line,

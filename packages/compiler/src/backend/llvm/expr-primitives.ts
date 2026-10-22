@@ -59,7 +59,8 @@ export function emitLiteralExpr(
       throw new InternalCompilerError(`llvm emitter bug: bare unitLit '${e.unit}'`);
     case "varRef": {
       host.materializeSplitLocal(e.localId);
-      const integerSlot = host.integerLoopBindings.get(e.localId);
+      const integerSlot =
+        host.integerLoopBindings.get(e.localId) ?? host.integerTemps.get(e.localId);
       if (integerSlot !== undefined) {
         const integer = B.tmp();
         const number = B.tmp();
@@ -1064,13 +1065,17 @@ export function emitRecordExpr(
   switch (e.kind) {
     case "fieldGet": {
       const obj = host.emitReadReceiver(e.obj);
-      const { ptr, type, inline } = host.classFieldPtr(obj.name, e.className, e.field);
+      const { ptr, type, inline } = host.classFieldPtr(
+        obj.name,
+        e.className,
+        e.field,
+        "compressed",
+      );
       if (host.int32Slots.isField(e.className, e.field)) return host.loadInt32Field(ptr, e.type);
       if (inline) return host.own({ name: host.inlineFieldUnion(ptr, type), type: e.type });
       const nullable = host.nullableFieldGet(e);
       if (nullable) {
-        const p = B.tmp();
-        B.line(`${p} = load ptr, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+        const p = host.loadRef(ptr);
         return host.own({ name: host.nullableToOwnedUnion(p, nullable), type: e.type });
       }
       const v = host.loadField(ptr, type, false);

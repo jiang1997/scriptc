@@ -1743,8 +1743,9 @@ function knownBufferProducer(
 
 /** Buffer.from over a checked-dynamic source and encoding, both already in
  * repeatable locals: Node's fromString takes utf8 for an absent, non-string
- * or empty encoding and throws ERR_UNKNOWN_ENCODING for an unknown name;
- * other sources ignore the encoding. */
+ * or empty encoding and throws ERR_UNKNOWN_ENCODING for an unknown name; an
+ * ArrayBuffer takes the second argument as its byte offset; other sources
+ * ignore it. */
 function dynBufferFromParts(source: IrExpr, encoding: IrExpr, loc: SrcLoc): IrExpr {
   const utf8: IrExpr = { kind: "strLit", value: "utf8", type: STRING, loc };
   const isString = (x: IrExpr): IrExpr => ({
@@ -1786,10 +1787,12 @@ function dynBufferFromParts(source: IrExpr, encoding: IrExpr, loc: SrcLoc): IrEx
       type: BYTES_U8,
       loc,
     },
+    // An ArrayBuffer takes the second argument as its byte offset
+    // (scr_buffer_from_dyn_offset_pooled); other values convert with utf8.
     else_: {
       kind: "libCall",
-      fn: "buffer.poolFromDynRef",
-      args: [source, utf8],
+      fn: "buffer.poolFromDynOffset",
+      args: [source, encoding],
       type: BYTES_U8,
       loc,
     },
@@ -1972,7 +1975,8 @@ function lowerBufferStaticValue(
       const srcNode = args[0].expression;
       const srcIr = lowerer.mapTypeOf(lowerer.typeOf(srcNode));
       if (srcIr?.kind === "bytes") {
-        const receiver = lowerer.lowerExpr(srcNode);
+        // A JavaScript field can hold the typed array as a dynamic value.
+        const receiver = lowerer.lowerExprExpecting(srcNode, srcIr);
         const idxArgs = args.slice(1).map((a) => lowerer.lowerExprExpecting(a, F64));
         return {
           kind: "bytesIntrinsic",

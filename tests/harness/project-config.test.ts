@@ -764,6 +764,35 @@ test("node-types: exec's numeric ExecException.code remains a named fence", asyn
   }
 });
 
+test("node-types: fs functions take URL paths under @types/node's PathLike", async () => {
+  const dir = outDirFor("node-fs-url-paths");
+  const result = await compile(join(nodeTypesDir, "fs-url-paths.ts"), {
+    outPath: join(dir, "fs-url-paths"),
+    outDir: dir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const { stdout } = await execFileAsync(result.binaryPath);
+  expect(stdout).toBe("hello 5 5\n");
+});
+
+test("node-types: existsSync and fs.promises URL paths remain named fences", async () => {
+  const dir = outDirFor("node-fs-url-path-fences");
+  const result = await compile(join(nodeTypesDir, "fs-url-path-fences.ts"), {
+    outPath: join(dir, "fs-url-path-fences"),
+    outDir: dir,
+    sanitize,
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message])).toEqual([
+    ["SC2020", expect.stringContaining("'existsSync with a URL path'")],
+    ["SC2020", expect.stringContaining("'fs.promises.readFile with a URL path'")],
+    ["SC2020", expect.stringContaining("'fs.promises.stat with a URL path'")],
+  ]);
+});
+
 test("node-types: path and os lower statically under @types/node's shapes", async () => {
   const outDir = outDirFor("node-path-os");
   const result = await compile(join(nodeTypesDir, "path-os.ts"), {
@@ -1090,6 +1119,24 @@ test("node-types: WebCrypto HMAC matches Node under @types/node", async () => {
   const entry = join(nodeTypesDir, "webcrypto-hmac.ts");
   const result = await compile(entry, {
     outPath: join(outDir, "webcrypto-hmac"),
+    outDir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
+test("node-types: WebCrypto secret keys match Node under @types/node", async () => {
+  const outDir = outDirFor("node-webcrypto-keys");
+  const entry = join(nodeTypesDir, "webcrypto-keys.ts");
+  const result = await compile(entry, {
+    outPath: join(outDir, "webcrypto-keys"),
     outDir,
     sanitize,
   });

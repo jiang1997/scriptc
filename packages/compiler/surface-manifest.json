@@ -763,14 +763,6 @@
       "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and public and private KeyObjects — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, secret KeyObjects, and the introspection statics"
     },
     {
-      "id": "node-builtin.crypto.webcrypto",
-      "kind": "node-builtin",
-      "name": "crypto.webcrypto",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "the WebCrypto object has no lowering — the lowered crypto surface is randomUUID, randomBytes, and the createHash chain"
-    },
-    {
       "id": "node-builtin.dgram",
       "kind": "node-builtin",
       "name": "dgram",
@@ -5719,14 +5711,14 @@
       "kind": "stdlib",
       "name": "CryptoKey",
       "status": "static",
-      "note": "secret HMAC keys with type, extractable, algorithm and usages, and instanceof CryptoKey"
+      "note": "secret HMAC, AES, PBKDF2 and HKDF keys with type, extractable, algorithm and usages, and instanceof CryptoKey"
     },
     {
       "id": "stdlib.webcrypto.subtle",
       "kind": "stdlib",
       "name": "globalThis.crypto.subtle",
       "status": "static",
-      "note": "importKey('raw') for HMAC keys, HMAC sign and verify, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused"
+      "note": "importKey, generateKey and exportKey (raw and jwk) for HMAC and AES keys, importKey for PBKDF2 and HKDF keys, AES-GCM, AES-CBC and AES-CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign and verify, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused"
     },
     {
       "id": "syntax.async-generators",

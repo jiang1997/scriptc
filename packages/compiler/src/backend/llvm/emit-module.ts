@@ -545,6 +545,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ``,
     `@scr_error_vts = external ${tl}global [${RUNTIME_ERROR_CLASSES.size} x %ScrVt]`,
     `declare void @scr_init()`,
+    ...(emitter.usesCompactRefs ? [`declare void @scr_plr_init()`] : []),
     `declare void @scr_lib_init(i32, ptr)`,
     ...(emitter.mod.workers ? [`declare void @scr_runtime_workers_v8()`] : []),
     ...(emitter.stackChecks?.size ? [`declare void @scr_stack_guard_init()`] : []),
@@ -837,6 +838,9 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ...(emitter.runtimeAbiMarker ? [`  call void @${RUNTIME_ABI_MARKER}()`] : []),
     ...(emitter.mod.workers ? [`  call void @scr_runtime_workers_v8()`] : []),
     `  call void @scr_init()`,
+    // Compressed fields hold addresses in the program-lifetime region, which
+    // is reserved below 32 GiB before compiled code runs.
+    ...(emitter.usesCompactRefs ? [`  call void @scr_plr_init()`] : []),
     // Each context (the main thread, every worker) installs its stack
     // guard before running compiled code that checks it.
     ...(emitter.stackChecks?.size ? [`  call void @scr_stack_guard_init()`] : []),

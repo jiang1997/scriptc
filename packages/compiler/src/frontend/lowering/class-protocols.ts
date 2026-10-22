@@ -98,7 +98,11 @@ export class ClassProtocols {
    * could read a stale value. A view of readonly data that nothing
    * observes stays a native record. */
   private markIdentityFlows(protocols: Set<ts.Symbol>): void {
-    const sites: { source: ts.Expression; target: () => ts.Type | undefined }[] = [];
+    const sites: {
+      source: ts.Expression;
+      target: () => ts.Type | undefined;
+      assertion?: true;
+    }[] = [];
     /** Expressions whose values are observed as whole objects. */
     const observed: ts.Expression[] = [];
     /** Receivers whose type arguments or elements are observed (Set and Map
@@ -233,6 +237,7 @@ export class ClassProtocols {
         sites.push({
           source: node.expression,
           target: () => this.checker.getTypeFromTypeNode(typeNode),
+          assertion: true,
         });
       }
       if (ts.isArrowFunction(node) || ts.isFunctionExpression(node))
@@ -325,11 +330,29 @@ export class ClassProtocols {
     }
     this.facts = facts;
     const pending: { sourceType: ts.Type; target: () => ts.Type | undefined }[] = [];
+    /** Views a value of unknown origin is asserted to and that expose a
+     * method of a class the view accepts (see methodViewSources). */
+    const methodViews = new Set<ts.Symbol>();
     for (let i = 0; i < sites.length; i++) {
       const site = sites[i]!;
       const source = sourceNodes[i]!;
       const sourceType = attempt(() => this.checker.getTypeAtLocation(source));
-      if (sourceType !== undefined) pending.push({ sourceType, target: site.target });
+      if (sourceType === undefined) continue;
+      if (
+        site.assertion &&
+        (sourceType.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0 &&
+        this.methods.size > 0
+      ) {
+        const target = attempt(site.target);
+        if (target !== undefined)
+          for (const { classType, view } of attempt(() => this.methodViewSources(target)) ?? []) {
+            pending.push({ sourceType: classType, target: () => view });
+            const symbol = view.getSymbol();
+            if (symbol !== undefined) methodViews.add(symbol);
+          }
+        continue;
+      }
+      pending.push({ sourceType, target: site.target });
     }
     for (const { fn, index, name } of callbackParams) {
       attempt(() => {
@@ -372,7 +395,12 @@ export class ClassProtocols {
     // Keep the marks a copy would be told apart from, and the marks whose
     // values flow into a kept view or another live protocol.
     const added = [...marked].filter((symbol) => !before.has(symbol));
-    const kept = new Set(added.filter((symbol) => this.needsView(symbol, marked, facts)));
+    // A copy of an instance drops the methods its class defines, so a view
+    // that exposes one of them stays live wherever such an instance may
+    // arrive.
+    const kept = new Set(
+      added.filter((symbol) => methodViews.has(symbol) || this.needsView(symbol, marked, facts)),
+    );
     let grew = true;
     while (grew) {
       grew = false;
@@ -389,6 +417,33 @@ export class ClassProtocols {
     }
     for (const symbol of added) if (!kept.has(symbol)) marked.delete(symbol);
     this.facts = null;
+  }
+
+  /** The program classes a value asserted from `unknown` or `any` to
+   * `target` may be an instance of while `target` exposes one of their
+   * methods: for each structural part of `target` with a callable member,
+   * the instance type of every class that declares a method of that name
+   * and is assignable to the part. A record copy of such an instance would
+   * drop the method, which Node reads from the instance's prototype. */
+  private methodViewSources(target: ts.Type): { classType: ts.Type; view: ts.Type }[] {
+    const parts = target.isUnionType() ? ts.constituentTypes(target) : [target];
+    const out: { classType: ts.Type; view: ts.Type }[] = [];
+    for (const part of parts) {
+      if (!this.isStructuralTarget(part)) continue;
+      for (const property of this.checker.getPropertiesOfType(part)) {
+        const memberType = this.checker.getNonNullableType(this.checker.getTypeOfSymbol(property));
+        if (this.checker.getCallSignatures(memberType).length === 0) continue;
+        for (const declaration of this.methods.get(ts.symbolName(property)) ?? []) {
+          const classSymbol = declaration.name
+            ? this.checker.getSymbolAtLocation(declaration.name)
+            : undefined;
+          if (classSymbol === undefined) continue;
+          const classType = this.checker.getDeclaredTypeOfSymbol(classSymbol);
+          if (this.checker.isTypeAssignableTo(classType, part)) out.push({ classType, view: part });
+        }
+      }
+    }
+    return out;
   }
 
   /** The symbols of `type`'s object parts: union and intersection members,

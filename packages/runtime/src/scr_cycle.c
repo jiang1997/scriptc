@@ -361,7 +361,15 @@ uint32_t scr_cyc_register(ScrCycType *type) {
 }
 
 void *scr_cyc_alloc(size_t size, ScrCycType *type) {
-  return scr_cyc_alloc_inline(size, type);
+  void *obj = scr_cyc_alloc_inline(size, type);
+  if (type->trace == scr_cyc_no_children) scr_cyc_hdr(obj)->buf = SCR_CYC_ACYCLIC;
+  return obj;
+}
+
+void scr_cyc_no_children(void *obj, ScrTraceVisit visit, void *ctx) {
+  (void)obj;
+  (void)visit;
+  (void)ctx;
 }
 
 void scr_cyc_free(void *obj) { scr_cyc_free_inline(obj); }
@@ -1175,7 +1183,13 @@ void scr_cyc_on_release(void *obj) {
   ScrCycHdr *h = scr_cyc_hdr(obj);
   /* Releasing an existing candidate cannot advance the trigger. A pass
    * always re-arms after its teardowns, including any candidates they add. */
-  if (scr_cyc_is_buffered(h)) return;
+  if (scr_cyc_release_done(h)) return;
+  /* An object without cycle-capable children whose SCR_CYC_ACYCLIC a pass
+   * or the young-in nursery replaced gets it back. */
+  if (scr_cyc_type(h)->trace == scr_cyc_no_children) {
+    h->buf = SCR_CYC_ACYCLIC;
+    return;
+  }
 #if SCR_CYC_INLINE_BUFFERING
   if (scr_cyc_append(h, obj)) return;
 #endif
@@ -1346,14 +1360,17 @@ static void scr_scan_black(void *obj, uintptr_t depth) {
   ScrCycHdr *h = scr_cyc_hdr(obj);
   scr_cyc_set_color(h, SCR_CYC_BLACK);
   /* Drop markGray's component number: a survivor leaves the pass unbuffered
-   * unless it is a candidate that a limited pass did not take. */
-  if (!scr_cyc_is_buffered(h)) scr_cyc_clear_buffered(h);
+   * unless it is a candidate that a limited pass did not take, and one
+   * without cycle-capable children leaves it SCR_CYC_ACYCLIC again. */
+  const ScrCycType *type = scr_cyc_type(h);
+  bool acyclic = type->trace == scr_cyc_no_children;
+  if (!scr_cyc_is_buffered(h)) h->buf = acyclic ? SCR_CYC_ACYCLIC : 0;
   if (scr_cyc_gen(h) < SCR_CYC_OLD) scr_cyc_push_work(&scr_promote, obj);
+  if (acyclic) return;
   if (depth == SCR_CYC_WALK_DEPTH) {
     scr_cyc_push_work(&scr_restore_pending, obj);
     return;
   }
-  const ScrCycType *type = scr_cyc_type(h);
   SCR_CYC_CHILDREN(obj, type, scr_sb_array, scr_sb_visit, depth + 1);
 }
 static void scr_restore_from(void *root) {
@@ -1881,7 +1898,8 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit, bool doomed) {
       void *obj = scr_cands.v[i];
       ScrCycHdr *h = scr_cyc_hdr(obj);
       if (scr_cyc_color(h) == SCR_CYC_DOOMED) continue; /* being freed below */
-      if (!scr_cyc_is_buffered(h)) {
+      /* A candidate without cycle-capable children was never on a cycle. */
+      if (!scr_cyc_is_buffered(h) && h->buf != SCR_CYC_ACYCLIC) {
         /* A survivor promoted into a level its type bypasses moves past
          * it, as a release would buffer it. */
         if (scr_cyc_gen(h) == SCR_CYC_MATURE && scr_cyc_bypassed(scr_cyc_type(h), SCR_CYC_MATURE))

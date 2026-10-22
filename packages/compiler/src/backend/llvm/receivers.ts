@@ -118,7 +118,12 @@ export function emitReadReceiver(emitter: LlEmitter, e: IrExpr): LlValue {
       const { ptr, type, inline } = emitter.recordFieldPtr(receiver.name, e.shapeId, e.field);
       return { name: emitter.loadRecordField(ptr, type, inline), type: e.type };
     }
-    const { ptr, type, inline } = emitter.classFieldPtr(receiver.name, e.className, e.field);
+    const { ptr, type, inline } = emitter.classFieldPtr(
+      receiver.name,
+      e.className,
+      e.field,
+      "compressed",
+    );
     if (emitter.int32Slots.isField(e.className, e.field))
       return emitter.loadInt32Field(ptr, e.type);
     return { name: emitter.loadField(ptr, type, inline), type: e.type };

@@ -1057,10 +1057,10 @@ static int scr_tls_handshake(void *tctx) {
   if (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
     scr_tls_verify_msg(t, msg, sizeof msg);
   } else if (r == MBEDTLS_ERR_SSL_CONN_EOF || r == MBEDTLS_ERR_NET_CONN_RESET) {
-    /* the peer died mid-handshake: the http layer's own premature-close
-     * shape ('socket hang up') is Node's message — tear down without an error
-     * at this level and let the closed hook classify it */
-    scr_net_sock_transport_error(t->sock, NULL);
+    /* The peer closed or reset the connection mid-handshake: Node's
+     * ECONNRESET for tls.connect and https.request alike. */
+    scr_net_sock_transport_error(
+        t->sock, "Client network socket disconnected before secure TLS connection was established");
     return -1;
   } else if (r == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE &&
              t->ssl.MBEDTLS_PRIVATE(in_msg) != NULL &&
@@ -1170,8 +1170,15 @@ static ScrNetServer *scr_tls_create_server_alpn(const char *cert, size_t cert_le
                                                 const char *key, size_t key_len,
                                                 ScrClosure *handler /*moves, nullable*/,
                                                 ScrNetConnFn fn, char **alpn /*moves, nullable*/,
-                                                int min_version, int max_version) {
+                                                int min_version, int max_version,
+                                                ScrClosure *sni_cb /*moves, nullable*/,
+                                                void *sni_answer_fn) {
   ScrTlsSrv *srv = scr_tls_srv_new(cert, cert_len, key, key_len, false);
+  if (sni_cb != NULL) {
+    srv->sni_cb = sni_cb; /* moves; released with srv */
+    srv->sni_answer_fn = sni_answer_fn;
+    mbedtls_ssl_conf_sni(&srv->conf, &scr_tls_f_sni, NULL);
+  }
   srv->max_tls12 = max_version == 12;
   if (!scr_tls_conf_versions(&srv->conf, min_version, max_version)) {
     /* Node's server then fails every handshake; nothing here models
@@ -1198,7 +1205,21 @@ static ScrNetServer *scr_tls_create_server_alpn(const char *cert, size_t cert_le
 ScrNetServer *scr_tls_create_server(const char *cert, size_t cert_len, const char *key,
                                      size_t key_len, ScrClosure *handler /*moves, nullable*/,
                                      ScrNetConnFn fn) {
-  return scr_tls_create_server_alpn(cert, cert_len, key, key_len, handler, fn, NULL, 12, 13);
+  return scr_tls_create_server_alpn(cert, cert_len, key, key_len, handler, fn, NULL, 12, 13, NULL,
+                                    NULL);
+}
+
+/* tls.createServer({ cert, key, SNICallback }): the pre-parse machinery
+ * (design note atop the SNI section) hands each ClientHello's servername
+ * to the callback and serves the context it answers, or the default pair
+ * for none. A NULL sni_cb (the callback union's undefined arm) is
+ * scr_tls_create_server. */
+ScrNetServer *scr_tls_create_server_sni(const char *cert, size_t cert_len, const char *key,
+                                         size_t key_len, ScrClosure *handler /*moves, nullable*/,
+                                         ScrNetConnFn fn, ScrClosure *sni_cb /*moves, nullable*/,
+                                         void *sni_answer_fn) {
+  return scr_tls_create_server_alpn(cert, cert_len, key, key_len, handler, fn, NULL, 12, 13, sni_cb,
+                                    sni_answer_fn);
 }
 
 ScrNetServer *scr_https_create_server(const char *cert, size_t cert_len, const char *key,
@@ -2024,7 +2045,7 @@ ScrNetServer *scr_tls_create_server_dyn(const ScrDyn *opts /*borrowed*/,
   }
   ScrNetServer *s = scr_tls_create_server_alpn((const char *)cert->data, cert->len,
                                                 (const char *)key->data, key->len, handler, fn,
-                                                alpn, min_version, max_version);
+                                                alpn, min_version, max_version, NULL, NULL);
   scr_bytes_release(cert);
   scr_bytes_release(key);
   return s;

@@ -1434,6 +1434,38 @@ static void check_death_brings_full_pass(void) {
   free(keep);
 }
 
+/* An object whose type's trace is scr_cyc_no_children starts out
+ * SCR_CYC_ACYCLIC and is never buffered. A pass that reaches it from a dead
+ * cycle frees it with the cycle when the cycle held its last reference, and
+ * otherwise leaves it SCR_CYC_ACYCLIC with its outside count. */
+static void check_acyclic_objects(void) {
+  static ScrCycType leaf_type = { &scr_cyc_no_children, &node_free, 0 };
+  size_t before = freed;
+  Node *leaf = scr_cyc_alloc(sizeof(*leaf), &leaf_type);
+  ScrCycHdr *h = scr_cyc_hdr(leaf);
+  check(h->buf == SCR_CYC_ACYCLIC && !scr_cyc_is_buffered(h), "acyclic object did not start acyclic");
+  leaf->rc = 2; /* an outside owner and a temporary reference */
+  release_live(leaf);
+  check(h->buf == SCR_CYC_ACYCLIC, "release buffered an acyclic object");
+
+  Node *first = make_ring(2);
+  first->other = leaf;
+  leaf->rc++;
+  release_live(first);
+  scr_cyc_pass_at(SCR_CYC_NURSERY);
+  check(freed == before + 2, "nursery pass did not free the ring");
+  check(leaf->rc == 1 && h->buf == SCR_CYC_ACYCLIC, "acyclic survivor lost its count or its mark");
+
+  Node *second = make_ring(2);
+  second->next->other = leaf;
+  leaf->rc++;
+  release_live(leaf); /* the outside owner lets go: only the ring holds it */
+  check(h->buf == SCR_CYC_ACYCLIC, "release buffered an acyclic object");
+  release_live(second);
+  scr_collect_cycles();
+  check(freed == before + 5, "acyclic object held only by a dead ring was not freed with it");
+}
+
 int main(void) {
   check_inline_buffering();
   check_old_garbage_reclaimed_while_growing();
@@ -1467,6 +1499,7 @@ int main(void) {
   check_limited_pass();
   check_large_old_buffer_with_nursery_candidates();
   check_unjudged_backlog_follows_growth();
+  check_acyclic_objects();
   printf("cycle collection checks passed: threshold=%zu growth_cap=%zu\n",
          configured_nursery_threshold(), configured_growth_cap());
   return 0;

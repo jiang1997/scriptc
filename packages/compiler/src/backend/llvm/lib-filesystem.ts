@@ -969,6 +969,64 @@ export function emitPathUrlLibCall(host: LlvmEmitterContext, e: LibCallExpr): Ll
   return host.emitGenericLibCall(e);
 }
 
+/** Math.pow(2, n): for an integer n from -1074 to 1023 the result is the
+ * power of two whose bits are its exponent field (or, below -1022, one
+ * mantissa bit of a subnormal), the value pow returns. Other exponents call
+ * scr_math_pow. */
+function emitPowerOfTwo(host: LlvmEmitterContext, n: string): string {
+  const B = host.B;
+  const check = B.newLabel("pow2.check");
+  const exact = B.newLabel("pow2.exact");
+  const call = B.newLabel("pow2.call");
+  const join = B.newLabel("pow2.join");
+  const low = B.tmp();
+  const high = B.tmp();
+  const inRange = B.tmp();
+  B.line(`${low} = fcmp oge double ${n}, ${f64Lit(-1074)}`);
+  B.line(`${high} = fcmp ole double ${n}, ${f64Lit(1023)}`);
+  B.line(`${inRange} = and i1 ${low}, ${high}`);
+  B.condBr(inRange, check, call);
+  B.startBlock(check);
+  const int = B.tmp();
+  const back = B.tmp();
+  const integral = B.tmp();
+  B.line(`${int} = fptosi double ${n} to i32`);
+  B.line(`${back} = sitofp i32 ${int} to double`);
+  B.line(`${integral} = fcmp oeq double ${back}, ${n}`);
+  B.condBr(integral, exact, call);
+  B.startBlock(exact);
+  const normal = B.tmp();
+  const biased = B.tmp();
+  const biasedWide = B.tmp();
+  const normalBits = B.tmp();
+  const shift = B.tmp();
+  const shiftWide = B.tmp();
+  const subnormalBits = B.tmp();
+  const bits = B.tmp();
+  const power = B.tmp();
+  B.line(`${normal} = icmp sge i32 ${int}, -1022`);
+  B.line(`${biased} = add i32 ${int}, 1023`);
+  B.line(`${biasedWide} = zext i32 ${biased} to i64`);
+  B.line(`${normalBits} = shl i64 ${biasedWide}, 52`);
+  B.line(`${shift} = add i32 ${int}, 1074`);
+  B.line(`${shiftWide} = zext i32 ${shift} to i64`);
+  B.line(`${subnormalBits} = shl i64 1, ${shiftWide}`);
+  B.line(`${bits} = select i1 ${normal}, i64 ${normalBits}, i64 ${subnormalBits}`);
+  B.line(`${power} = bitcast i64 ${bits} to double`);
+  const exactEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(call);
+  host.declare(`declare double @scr_math_pow(double, double)`);
+  const called = B.tmp();
+  B.line(`${called} = call double @scr_math_pow(double ${f64Lit(2)}, double ${n})`);
+  const callEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(join);
+  const out = B.tmp();
+  B.line(`${out} = phi double [ ${power}, %${exactEnd} ], [ ${called}, %${callEnd} ]`);
+  return out;
+}
+
 export function emitPrimitiveLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
   const B = host.B;
   if (e.fn === "math.min" || e.fn === "math.max") {
@@ -985,6 +1043,10 @@ export function emitPrimitiveLibCall(host: LlvmEmitterContext, e: LibCallExpr): 
   if (e.fn === "math.trunc") {
     const v = host.emitExpr(e.args[0]!);
     return { name: emitTruncF64(host, v.name), type: e.type };
+  }
+  if (e.fn === "math.pow" && e.args[0]!.kind === "numLit" && e.args[0]!.value === 2) {
+    const v = host.emitExpr(e.args[1]!);
+    return { name: emitPowerOfTwo(host, v.name), type: e.type };
   }
   if (e.fn === "math.floor" || e.fn === "math.ceil") {
     const intr = e.fn === "math.floor" ? "floor" : "ceil";

@@ -344,7 +344,7 @@ export function emitDynamicExpr(
           const payload = host.unionPeek(u.name, def.id);
           const { ptr, type, inline } =
             arm.kind === "object"
-              ? host.classFieldPtr(payload, arm.className, e.field)
+              ? host.classFieldPtr(payload, arm.className, e.field, "compressed")
               : host.recordFieldPtr(payload, arm.shapeId, e.field);
           const nullable =
             arm.kind === "object" ? host.nullableFields.get(arm.className, e.field) : null;

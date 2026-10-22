@@ -758,6 +758,14 @@ export function emitLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
     const inline = emitInlineAtomicsOp(host, e);
     if (inline) return inline;
   }
+  if (e.fn === "bytes.isAbsent") {
+    // A borrowed read: retaining an absent Buffer would dereference NULL.
+    const value = host.emitReadReceiver(e.args[0]!);
+    const t = host.B.tmp();
+    host.B.line(`${t} = icmp eq ptr ${value.name}, null`);
+    return { name: t, type: e.type };
+  }
+  if (e.fn === "bytes.absent") return host.own({ name: "null", type: e.type });
   const prefix = e.fn.slice(0, e.fn.indexOf(".")) as LibCallPrefix;
   // events.once builds typed listener adapters beside the emitter calls.
   if (e.fn === "events.once" || e.fn === "events.onceSignal")
@@ -864,6 +872,7 @@ export function emitLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
     case "events":
     case "blob":
     case "wasm":
+    case "array":
     case "record":
     case "disposable":
     case "punycode":

@@ -172,6 +172,84 @@ static void check_documents(void) {
   scr_message_free(message);
 }
 
+/* A message larger than the encoder's inline arrays (nodes, properties,
+ * identities and the visit stack) keeps its key order, shared values and
+ * text, and an encode started from a getter during another encode
+ * produces its own message. */
+static SCR_TL ScrMessage *nested_message;
+static ScrDyn *nested_getter(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
+  (void)closure; (void)args; (void)argc;
+  ScrDyn *inner = scr_dyn_new_arr();
+  scr_dyn_arr_push(inner, scr_dyn_new_num(41));
+  nested_message = scr_message_encode(inner);
+  scr_dyn_release(inner);
+  return scr_dyn_new_num(42);
+}
+
+static void check_large(void) {
+  ScrDyn *root = scr_dyn_new_obj();
+  ScrDyn *shared = scr_dyn_new_obj();
+  put_number(shared, "shared", 1);
+  ScrDyn *chain = root;
+  char key[32];
+  for (int i = 0; i < 40; i++) {
+    ScrDyn *item = scr_dyn_new_obj();
+    put_number(item, "index", i);
+    snprintf(key, sizeof key, "label-%d", i);
+    ScrStr *text = scr_str_new(key, strlen(key));
+    scr_dyn_obj_set(item, "label", 5, scr_dyn_new_str(text));
+    scr_str_release(text);
+    scr_dyn_obj_set(item, "shared", 6, scr_dyn_retain(shared));
+    snprintf(key, sizeof key, "item%d", i);
+    scr_dyn_obj_set(root, key, strlen(key), item);
+    /* A chain 40 objects deep grows the visit stack. */
+    ScrDyn *next = scr_dyn_new_obj();
+    scr_dyn_obj_set(chain, "next", 4, next);
+    chain = next;
+  }
+  scr_dyn_release(shared);
+  ScrClosure *closure = scr_closure_new(NULL, 0);
+  ScrDyn *descriptor = scr_dyn_new_obj();
+  scr_dyn_obj_set(descriptor, "get", 3, scr_dyn_new_func(closure, nested_getter, 0, "", ""));
+  scr_dyn_obj_set(descriptor, "enumerable", 10, scr_dyn_new_bool(true));
+  ScrStr *name = scr_str_new("nested", 6);
+  ScrDyn *name_value = scr_dyn_new_str(name);
+  scr_dyn_release(scr_dyn_define_property(root, name_value, descriptor));
+  scr_dyn_release(name_value);
+  scr_dyn_release(descriptor);
+  scr_str_release(name);
+  ScrMessage *message = scr_message_encode(root);
+  assert(message && !scr_exc_pending() && nested_message);
+  scr_dyn_release(root);
+  scr_collect_cycles();
+  ScrDyn *decoded = scr_message_decode(message);
+  assert(decoded && !scr_exc_pending());
+  assert(decoded->v.obj.len == 42);
+  assert(decoded->v.obj.entries[0].key_len == 5 && !memcmp(decoded->v.obj.entries[0].key, "item0", 5));
+  assert(decoded->v.obj.entries[41].key_len == 6 && !memcmp(decoded->v.obj.entries[41].key, "nested", 6));
+  assert(scr_dyn_obj_get(decoded, "nested", 6)->v.num == 42);
+  ScrDyn *first = scr_dyn_obj_get(decoded, "item0", 5);
+  for (int i = 0; i < 40; i++) {
+    snprintf(key, sizeof key, "item%d", i);
+    ScrDyn *item = scr_dyn_obj_get(decoded, key, strlen(key));
+    assert(item && scr_dyn_obj_get(item, "index", 5)->v.num == i);
+    assert(scr_dyn_obj_get(item, "shared", 6) == scr_dyn_obj_get(first, "shared", 6));
+    snprintf(key, sizeof key, "label-%d", i);
+    ScrStr *label = scr_dyn_obj_get(item, "label", 5)->v.str;
+    assert(label->len == strlen(key) && !memcmp(label->data, key, label->len));
+  }
+  ScrDyn *link = decoded;
+  for (int i = 0; i < 40; i++) link = scr_dyn_obj_get(link, "next", 4);
+  assert(link && link->kind == SCR_DYN_OBJ && link->v.obj.len == 0);
+  scr_dyn_release(decoded);
+  ScrDyn *inner = scr_message_decode(nested_message);
+  assert(inner && inner->v.arr.len == 1 && inner->v.arr.items[0]->v.num == 41);
+  scr_dyn_release(inner);
+  scr_collect_cycles();
+  scr_message_free(nested_message);
+  scr_message_free(message);
+}
+
 /* A link-gated unit's handle crosses threads through the transfer hooks in
  * its ops: share on the sender, adopt on the receiver, drop with the
  * message. The test borrows the last capacity slot, which no unit uses, so
@@ -297,6 +375,7 @@ int main(void) {
   check_getters();
   check_rejection();
   check_documents();
+  check_large();
   check_handle_transfer();
   scr_context_cleanup();
   puts("message graphs preserve identity, sparse values, byte aliases and getter order");

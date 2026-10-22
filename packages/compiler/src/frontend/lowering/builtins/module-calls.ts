@@ -25,6 +25,7 @@ import {
   lowerFsWriteOptionsCall,
   lowerFsReadPathCall,
 } from "./filesystem-calls.js";
+import { checkFsUrlPaths, isFsPathParam, lowerFsPath } from "./fs-paths.js";
 import { lowerBufferEncodingCall } from "./text-codecs.js";
 import { lowerUtilTypeCall } from "./util-types.js";
 import { InternalCompilerError } from "../../../errors.js";
@@ -58,6 +59,7 @@ export function lowerBuiltinModuleCall(
   loc: SrcLoc,
 ): IrExpr {
   const name = ts.getTextOfNode(expr.expression);
+  checkFsUrlPaths(lowerer, expr, bi);
   if (bi.module === "util/types") {
     return lowerUtilTypeCall(lowerer, expr, bi, loc, name);
   }
@@ -240,7 +242,7 @@ export function lowerBuiltinModuleCall(
     expr.arguments.nodes.length === 1 &&
     lowerer.mapTypeOf(lowerer.typeOf(expr.arguments.nodes[0]!))?.kind !== "f64"
   ) {
-    const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+    const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
     return { kind: "libCall", fn: "fs.readFileSyncBytes", args: [path], type: BYTES_U8, loc };
   }
   if (
@@ -308,7 +310,7 @@ export function lowerBuiltinModuleCall(
     if (expr.arguments.nodes.length < 1 || expr.arguments.nodes.length > 2) {
       lowerer.noLowering(`${bi.member} with ${expr.arguments.nodes.length} arguments`, expr);
     }
-    const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+    const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
     const second: IrExpr = expr.arguments.nodes[1]
       ? lowerer.lowerExprExpecting(expr.arguments.nodes[1], F64)
       : { kind: "numLit", value: 0, type: F64, loc };
@@ -470,7 +472,11 @@ export function lowerBuiltinModuleCall(
     );
     args = lowerer.completeArgs(expr.arguments.nodes, shapes, loc, expr);
   } else {
-    args = expr.arguments.nodes.map((a, i) => lowerer.lowerExprExpecting(a, fn.params[i]));
+    args = expr.arguments.nodes.map((a, i) =>
+      bi.module === "fs" && isFsPathParam(bi.member, i)
+        ? lowerFsPath(lowerer, a)
+        : lowerer.lowerExprExpecting(a, fn.params[i]),
+    );
     for (let i = args.length; i < fn.params.length; i++) {
       const dflt = fn.defaults![i - required]!;
       args.push({ kind: "strLit", value: dflt, type: STRING, loc });

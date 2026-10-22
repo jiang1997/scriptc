@@ -72,17 +72,14 @@ export function lowerNumberStaticCall(
     return { kind: "libCall", fn, args: [arg], type: BOOL, loc };
   }
   if (member === "parseFloat" || member === "parseInt") {
-    const want = member === "parseFloat" ? 1 : 2;
-    if (call.arguments.nodes.length !== want) {
-      lowerer.noLowering(
-        `Number.${member} with ${call.arguments.nodes.length} argument${call.arguments.nodes.length === 1 ? "" : "s"}`,
-        call,
-        member === "parseInt" ? "pass an explicit radix: Number.parseInt(s, 10)" : undefined,
-      );
+    const count = call.arguments.nodes.length;
+    if (count < 1 || count > (member === "parseFloat" ? 1 : 2)) {
+      lowerer.noLowering(`Number.${member} with ${count} argument${count === 1 ? "" : "s"}`, call);
     }
     // Number.parseFloat/Number.parseInt ARE the global parsers: over a
     // string argument they lower to the same static parse (parseInt with
-    // its explicit radix); only the coercing argument shapes are refused.
+    // its radix, or radix 0 when it is missing); only the coercing argument
+    // shapes are refused.
     const probed = tryLowerExpression(lowerer, call.arguments.nodes[0]!);
     if (probed !== null && isStringLike(lowerer, probed.type)) {
       const parsed = lowerStaticNumberGlobal(lowerer, member, call, call.arguments.nodes, loc);
@@ -101,7 +98,10 @@ export function lowerNumberStaticCall(
       };
       if (member === "parseFloat")
         return { kind: "libCall", fn: "num.parseFloat", args: [text], type: F64, loc };
-      const radix = lowerer.lowerExprExpecting(call.arguments.nodes[1]!, F64);
+      const radixNode = call.arguments.nodes[1];
+      const radix: IrExpr = radixNode
+        ? lowerer.lowerExprExpecting(radixNode, F64)
+        : { kind: "numLit", value: 0, type: F64, loc };
       return { kind: "libCall", fn: "num.parseInt", args: [text, radix], type: F64, loc };
     }
     const argText =

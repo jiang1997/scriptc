@@ -549,6 +549,9 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
         const callable = lowerer.lowerBuiltinCallableValue(bi, loc);
         if (callable) return callable;
       }
+      // node:crypto's webcrypto is the WebCrypto global's object.
+      if (bi.module === "crypto" && bi.member === "webcrypto")
+        return { kind: "libCall", fn: "webcrypto.object", args: [], type: DYN, loc };
       // JavaScript sources: an otherwise unsupported builtin VALUE is
       // the same identity-token story as stdlib globals above (the
       // harness adds worker_threads.Worker to its identity Set).
@@ -721,7 +724,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
     return { kind: "closure", fnName: name, captures: [], type, loc };
   }
   if (lowerer.isStdlibGlobal(expr, "crypto"))
-    return { kind: "libCall", fn: "crypto.native", args: [], type: DYN, loc };
+    return { kind: "libCall", fn: "webcrypto.object", args: [], type: DYN, loc };
   const nativeAlias = stdlibGlobalNameOf(lowerer, expr);
   if (nativeAlias === "Buffer" && expr.text !== "Buffer") {
     return { kind: "strLit", value: "[builtin Buffer]", type: STRING, loc };

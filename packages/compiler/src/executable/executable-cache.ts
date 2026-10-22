@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import type { FrontendInputSnapshot } from "../frontend/input-tracker.js";
 import { frontendInputsStillMatch, validFrontendInputSnapshot } from "../frontend/input-tracker.js";
 import { compilerReleaseVersion } from "../library/sidecar.js";
@@ -113,6 +114,8 @@ interface EarlyExecutableCacheStamp {
   };
   nativeDependencies: NativeArtifactDependency[] | null;
   native: EarlyExecutableNativeFeatures;
+  /** The build's performance warnings (SC61xx), which a cache hit repeats. */
+  performance?: ScrDiagnostic[];
   integrity: string;
 }
 
@@ -182,6 +185,8 @@ export interface EarlyExecutableCacheHit {
   executableRestored: boolean;
   native: EarlyExecutableNativeFeatures;
   frontend: FrontendInputSnapshot;
+  /** The performance warnings the build reported (SC61xx), repeated on a hit. */
+  performance?: ScrDiagnostic[];
 }
 
 export interface EarlyExecutableCachePublish extends EarlyExecutableCacheHit {
@@ -612,6 +617,9 @@ async function readExecutableCache(
       native: stamp.native,
       executableRestored,
       frontend: stamp.frontend,
+      ...(Array.isArray(stamp.performance) && stamp.performance.length > 0
+        ? { performance: stamp.performance }
+        : {}),
       ...(ir === null ? {} : { irPath: paths.irPath }),
     };
   } catch {
@@ -795,6 +803,9 @@ export async function publishEarlyExecutableCache(
       },
       nativeDependencies: executable === null ? null : result.nativeDependencies!,
       native: result.native,
+      ...(result.performance === undefined || result.performance.length === 0
+        ? {}
+        : { performance: result.performance }),
     };
     const stamp: EarlyExecutableCacheStamp = { ...unsigned, integrity: stampIntegrity(unsigned) };
     await writeFile(join(stage, "stamp.json"), `${JSON.stringify(stamp)}\n`, { mode: 0o600 });

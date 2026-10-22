@@ -246,10 +246,15 @@ export const STRING_MAX_UNITS = 0x7fffffff;
 
 /** Bound counters of a while loop by its condition. A counter qualifies when
  * the loop (condition and body) changes it only by increments of positive
- * integer literals outside nested loops, switch and exception regions, and a
- * conjunct of the condition compares it below a literal, a binding the loop
- * never writes, or the length of a string binding the loop never writes
- * (`while (x * x + y * y <= 4 && it < MAX) it++`, `while (pos < text.length)`).
+ * integer literals outside switch and exception regions and loops other
+ * than nested while loops, and a conjunct of the condition compares it below
+ * a literal, a binding the loop never writes, or the length of a string
+ * binding the loop never writes (`while (x * x + y * y <= 4 && it < MAX)
+ * it++`, `while (pos < text.length)`). A nested while loop may advance the
+ * counter only when its own condition bounds it the same way and does not
+ * write it (a scanner's `while (pos < end && isDigit(...)) pos++`): its
+ * passes start at most at that bound, so it leaves the counter at its entry
+ * value or at the highest value one of its passes reaches.
  * The body runs only after that conjunct held, and the condition never
  * writes the counter, so every pass starts at most at the conjunct's bound.
  * The pass then climbs by the increments on its path; an increment inside an
@@ -270,30 +275,51 @@ export function guardedLoopCounterFacts(
     if (opaque || delta === null || delta <= 0 || delta > 2147483647) refused.add(id);
     else budget.set(id, (budget.get(id) ?? 0) + delta);
   };
+  // Nested while loops outside opaque regions, checked against their own
+  // conditions once the stable bounds are known. Only loops that highestCount
+  // walks pass by pass qualify: statements of the body, its blocks and its
+  // branches. One in a labeled block or among an expression's statements
+  // (`indirect`) is an ordinary loop region.
+  const nested: (IrStmt & { kind: "while" })[] = [];
+  let indirect = 0;
   const expr = (e: IrExpr): boolean => {
     if (e.kind === "assignExpr") write(e.localId, increment(e.localId, e.value));
     if (e.kind === "incDec") write(e.localId, e.op === "+" ? 1 : null);
-    return everyExprChild(e, expr, stmt);
+    return everyExprChild(e, expr, (x) => {
+      indirect++;
+      const completed = stmt(x);
+      indirect--;
+      return completed;
+    });
   };
+  const condition = new Set<string>();
   const stmt = (s: IrStmt): boolean => {
+    const bounded = s.kind === "while" && opaque === 0 && indirect === 0 && !s.labels?.length;
+    const labeled = s.kind === "block" && !!s.labels?.length;
     const region =
-      s.kind === "for" ||
-      s.kind === "while" ||
-      s.kind === "doWhile" ||
-      s.kind === "forOf" ||
-      s.kind === "tryCatch" ||
-      s.kind === "switch";
+      !bounded &&
+      (s.kind === "for" ||
+        s.kind === "while" ||
+        s.kind === "doWhile" ||
+        s.kind === "forOf" ||
+        s.kind === "tryCatch" ||
+        s.kind === "switch");
+    if (bounded) {
+      nested.push(s);
+      conditionWrites(s.cond);
+    }
     if (region) opaque++;
+    if (labeled) indirect++;
     if (s.kind === "assign") write(s.localId, increment(s.localId, s.value));
     if (s.kind === "varDecl" || s.kind === "forOf") write(s.localId, null);
     if (s.kind === "tryCatch" && s.catchLocalId) write(s.catchLocalId, null);
     const completed = everyStmtChild(s, expr, stmt);
+    if (labeled) indirect--;
     if (region) opaque--;
     return completed;
   };
   // The condition is evaluated before every pass; a write there would
   // separate the compared value from the one the body sees.
-  const condition = new Set<string>();
   const conditionWrites = (e: IrExpr): boolean => {
     if (e.kind === "assignExpr" || e.kind === "incDec") condition.add(e.localId);
     return everyExprChild(e, conditionWrites, (s) => {
@@ -304,8 +330,9 @@ export function guardedLoopCounterFacts(
     });
   };
   conditionWrites(loop.cond);
-  for (const id of condition) refused.add(id);
   loop.body.every(stmt);
+  // Nested loops' conditions are collected during the walk.
+  for (const id of condition) refused.add(id);
   const stable = (id: string): boolean => {
     const local = locals.get(id);
     return local !== undefined && !local.boxed && !local.tdz && !budget.has(id) && !refused.has(id);
@@ -359,6 +386,11 @@ export function guardedLoopCounterFacts(
     }
     return ceiling;
   };
+  // A nested while loop advances only the counters its condition bounds.
+  for (const inner of nested) {
+    const caps = ceilings(inner.cond);
+    for (const id of writtenLocals(inner.body)) if (!caps.has(id)) refused.add(id);
+  }
   const ceiling = ceilings(loop.cond);
   for (const id of budget.keys()) {
     const local = locals.get(id),
@@ -375,11 +407,15 @@ export function guardedLoopCounterFacts(
 
 /** The largest value counter `id` takes in one pass of `body`, which starts
  * at most at `entry`. The caller has checked that the body changes the
- * counter only by positive literal increments outside nested loops, switch,
- * exception and labeled regions, so those regions leave it unchanged, and
- * every exit from a straight-line path leaves the body. An `if` whose
- * condition does not write the counter caps it in the then branch by the
- * condition's bounds; any other statement adds the increments it holds. */
+ * counter only by positive literal increments outside switch, exception and
+ * labeled loop regions and loops other than nested while loops whose
+ * conditions bound it, and every exit from a straight-line path leaves the
+ * body. An `if` whose condition does not write the counter caps it in the
+ * then branch by the condition's bounds. A nested while loop that is a
+ * statement of the body, or of its blocks and branches, is walked from its
+ * bound; any other statement adds the increments it holds, and one that
+ * holds a loop writing the counter (in an expression or a labeled block)
+ * leaves it unbounded. */
 function highestCount(
   body: readonly IrStmt[],
   id: string,
@@ -396,6 +432,13 @@ function highestCount(
     };
     const stmt = (x: IrStmt): boolean => {
       if (x.kind === "assign" && x.localId === id) total += increment(id, x.value) ?? 0;
+      // A loop reached here, inside an expression or a labeled region rather
+      // than through `walk`, can repeat its increments: no bound.
+      if (
+        (x.kind === "while" || x.kind === "doWhile" || x.kind === "for" || x.kind === "forOf") &&
+        writtenLocals([x]).has(id)
+      )
+        total = Infinity;
       return everyStmtChild(x, expr, stmt);
     };
     if (expression) expr(e as IrExpr);
@@ -416,6 +459,21 @@ function highestCount(
         count = Math.max(then, else_);
       } else if (s.kind === "block" && !s.labels?.length) {
         count = walk(s.body, count);
+      } else if (
+        s.kind === "while" &&
+        !s.labels?.length &&
+        increments(s.cond, true) === 0 &&
+        ceilings(s.cond).has(id)
+      ) {
+        // Every pass starts at most at the bound; the loop ends at its entry
+        // value or where a pass left the counter.
+        const cap = ceilings(s.cond).get(id)!;
+        const outer = highest;
+        highest = cap;
+        walk(s.body, cap);
+        const inner = highest;
+        highest = Math.max(outer, inner);
+        count = Math.max(count, inner);
       } else {
         count += increments(s, false);
         highest = Math.max(highest, count);
@@ -433,6 +491,21 @@ function highestCount(
   };
   walk(body, entry);
   return highest;
+}
+
+/** The bindings `body` assigns or increments anywhere. */
+function writtenLocals(body: readonly IrStmt[]): Set<string> {
+  const ids = new Set<string>();
+  const expr = (e: IrExpr): boolean => {
+    if (e.kind === "assignExpr" || e.kind === "incDec") ids.add(e.localId);
+    return everyExprChild(e, expr, stmt);
+  };
+  const stmt = (s: IrStmt): boolean => {
+    if (s.kind === "assign") ids.add(s.localId);
+    return everyStmtChild(s, expr, stmt);
+  };
+  body.every(stmt);
+  return ids;
 }
 
 /** Recognize only exits whose target cannot be inside this statement list.

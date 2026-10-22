@@ -5,34 +5,57 @@ import { BOOL, DYN, type IrExpr, type IrLibFn } from "../../../ir/ir.js";
 import { lowerDynObjectLiteral } from "../expressions/object-literals.js";
 import { stdlibGlobalNameOf } from "../surfaces.js";
 import { WEBCRYPTO_DYN_TYPES } from "../../type-mapper.js";
+import { isWebCryptoReceiver } from "./crypto.js";
 
-/* WebCrypto's HMAC slice (scr_webcrypto.c): `crypto.subtle.importKey`,
- * `sign`, `verify` and `digest` called on the crypto global (also through
- * globalThis) lower to runtime entry points that take the argument vector
- * as one dyn array and answer a promise, so Web IDL conversion, algorithm
- * normalization and every error stay Node-shaped at run time. CryptoKey
+/* WebCrypto's secret-key slice (scr_webcrypto.c, with encrypt and
+ * decrypt in scr_webcrypto_aes.c): `crypto.subtle`'s `importKey`,
+ * `generateKey`, `exportKey`, `encrypt`, `decrypt`, `deriveBits`,
+ * `deriveKey`, `sign`, `verify` and `digest`
+ * called on the crypto global (also through
+ * globalThis, node:crypto's webcrypto and node:crypto's subtle) lower to
+ * runtime entry points that take the argument vector as one dyn array and
+ * answer a promise, so Web IDL conversion, algorithm normalization and
+ * every error stay Node-shaped at run time. CryptoKey
  * values are native handles; their type maps to dyn and their members
  * are handle reads. Other SubtleCrypto methods are refused by name. */
 
 const SUBTLE_LOWERED: ReadonlyMap<string, IrLibFn> = new Map([
   ["importKey", "webcrypto.importKey"],
+  ["generateKey", "webcrypto.generateKey"],
+  ["exportKey", "webcrypto.exportKey"],
+  ["encrypt", "webcrypto.encrypt"],
+  ["decrypt", "webcrypto.decrypt"],
+  ["deriveBits", "webcrypto.deriveBits"],
+  ["deriveKey", "webcrypto.deriveKey"],
   ["sign", "webcrypto.sign"],
   ["verify", "webcrypto.verify"],
   ["digest", "webcrypto.digest"],
 ]);
 
 const SUBTLE_HINT =
-  "the native WebCrypto surface is crypto.subtle.importKey('raw', ...) for HMAC keys, sign and verify with HMAC, and digest with SHA-1, SHA-256, SHA-384 or SHA-512, each called directly on crypto.subtle";
+  "the native WebCrypto surface is crypto.subtle's importKey, generateKey and exportKey for HMAC and AES keys (importKey also for PBKDF2 and HKDF keys), encrypt and decrypt with AES-GCM, AES-CBC or AES-CTR, deriveBits and deriveKey with PBKDF2 or HKDF, sign and verify with HMAC, and digest with SHA-1, SHA-256, SHA-384 or SHA-512, each called directly on crypto.subtle";
 
-/** Whether `node` is `crypto.subtle` on the WebCrypto global. */
+/** Whether `node` is a SubtleCrypto object: `subtle` on a WebCrypto
+ * Crypto object (the global, globalThis.crypto or node:crypto's
+ * `webcrypto`) or node:crypto's own `subtle` export, named or through
+ * the namespace. */
 function isSubtleReceiver(lowerer: Lowerer, node: ts.Expression): boolean {
   while (ts.isParenthesizedExpression(node)) node = node.expression;
-  return (
-    ts.isPropertyAccessExpression(node) &&
-    !node.questionDotToken &&
-    node.name.text === "subtle" &&
-    stdlibGlobalNameOf(lowerer, node.expression) === "crypto"
-  );
+  if (ts.isIdentifier(node)) {
+    const imported = lowerer.builtinImportOf(node);
+    return imported?.module === "crypto" && imported.member === "subtle";
+  }
+  if (
+    !ts.isPropertyAccessExpression(node) ||
+    node.questionDotToken ||
+    node.name.text !== "subtle"
+  ) {
+    return false;
+  }
+  if (stdlibGlobalNameOf(lowerer, node.expression) === "crypto") return true;
+  if (isWebCryptoReceiver(lowerer, node.expression)) return true;
+  const member = lowerer.builtinMemberOf(node);
+  return member?.module === "crypto" && member.member === "subtle";
 }
 
 /** `crypto.subtle.<method>(...args)`: the lowered methods become their
@@ -50,17 +73,6 @@ export function lowerWebCryptoCall(lowerer: Lowerer, call: ts.CallExpression): I
   }
   if (call.arguments.nodes.some(ts.isSpreadElement)) {
     lowerer.noLowering(`crypto.subtle.${member} with spread arguments`, call, SUBTLE_HINT);
-  }
-  // JsonWebKey imports are not implemented: a literal 'jwk' format is
-  // refused here (the runtime refuses a computed one).
-  const format = call.arguments.nodes[0];
-  if (
-    member === "importKey" &&
-    format !== undefined &&
-    ts.isStringLiteralLike(format) &&
-    format.text === "jwk"
-  ) {
-    lowerer.noLowering("crypto.subtle.importKey with the 'jwk' key format", format, SUBTLE_HINT);
   }
   const loc = locOf(call);
   const args = call.arguments.nodes.map((arg) =>

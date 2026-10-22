@@ -46,6 +46,7 @@ import { literalValues } from "./literal-values.js";
 import { remapUnionDiscriminant } from "./union-discriminants.js";
 
 import { isJsSourceFile, isNodeTypesPath } from "./program.js";
+import { isProvenanceSourceFile } from "./provenance-registry.js";
 import { functionCanReturnUndefined } from "./function-completion.js";
 import { accessorSlotProp, recordTextCodecClass } from "../ir/ir.js";
 // typeKey moved to ir/ir.ts (the backend needs it too, for per-type
@@ -145,6 +146,16 @@ export const WEBCRYPTO_DYN_TYPES: ReadonlySet<string> = new Set([
   "KeyAlgorithm",
   "HmacImportParams",
   "HmacKeyAlgorithm",
+  "HmacKeyGenParams",
+  "AesKeyGenParams",
+  "AesKeyAlgorithm",
+  "JsonWebKey",
+  "AesGcmParams",
+  "AesCbcParams",
+  "AesCtrParams",
+  "Pbkdf2Params",
+  "HkdfParams",
+  "AesDerivedKeyParams",
 ]);
 
 export const FETCH_AMBIENT_TYPES = [
@@ -1108,6 +1119,17 @@ export type TypeParamTsResolver = (t: ts.Type) => ts.Type | null;
  * once per Lowerer and threaded through the recursion — adding a hook means
  * one new field here, not a new parameter at every call site. */
 export interface TypeMapperCtx {
+  /** Set only while a union maps an arm that is the type inferred from an
+   * empty object literal, beside another non-nullish arm: that arm holds
+   * only the literal's objects, so it maps to the empty record (see the
+   * empty object type rule in the object mapping). */
+  emptyLiteralArm?: boolean;
+  /** The class value a generic factory's result type names when the factory
+   * returns one of its own local classes through a constructor type
+   * (`function struct<S>(v: S): Struct<S> { class Base {}; return Base as
+   * Struct<S>; }`), by the checker type: the declared result inside the
+   * instance being lowered, the instantiated result at its calls. */
+  localClassValue?: (type: ts.Type) => IrType | null;
   checker: ts.TypeChecker;
   /** JavaScript declarations whose instance or object-literal types only
    * the checked-dynamic representation holds (js-dynamic-objects.ts).
@@ -1647,10 +1669,18 @@ export function mapType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       return STRING;
     if (flags & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) return BOOL;
   }
+  const localValue = ctx.localClassValue?.(type);
+  if (localValue) {
+    contextResolutions++;
+    return localValue;
+  }
   const topLevel = mapTypeDepth === 0;
   const typeId = (type as { id?: number }).id;
   const memoizable = typeId !== undefined && (ctx.canMemoizeType?.() ?? true);
-  const memoKey = memoizable ? `${0}:${typeId}` : null;
+  // An empty literal's type maps to the empty record as an unreduced union's
+  // arm (emptyLiteralArm) and to the checked-dynamic value elsewhere: the two
+  // answers keep separate memo entries.
+  const memoKey = memoizable ? `${ctx.emptyLiteralArm ? 1 : 0}:${typeId}` : null;
   if (memoKey !== null) {
     const memo = ctx.typeMemo?.get(memoKey);
     if (memo !== undefined) return memo;
@@ -2458,6 +2488,27 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       ) {
         return { kind: "classval", className: inst.className };
       }
+    }
+    // A constructable declared in the program whose instances are not one
+    // program class's (`new () => unknown`, `abstract new () => S` over a
+    // record, a type that also names static members such as `{ readonly
+    // schema: unknown; new (): unknown }`, construct overloads): the class
+    // value rides the checked-dynamic tree, as an `unknown` slot already
+    // holds one. `new` through it and static reads dispatch at run time,
+    // and the constructed value checks into the signature's instance type.
+    // Lib and package constructables keep their fences, and so do those of
+    // fetched provenance sources (third-party code under its own policies:
+    // an unused `@__PURE__` const typed `{ new (): any }` elides there).
+    if (
+      ctorSigs.length > 0 &&
+      checker.getCallSignatures(widened).length === 0 &&
+      (widened.getSymbol()?.declarations.length ?? 0) > 0 &&
+      widened.getSymbol()!.declarations.every((d) => {
+        const sf = ts.getSourceFileOfNode(d);
+        return ctx.isProgramFile(sf) && !isProvenanceSourceFile(sf.fileName);
+      })
+    ) {
+      return DYN;
     }
   }
   // Map<K, V>: a reference to the standard library's Map interface —
@@ -4650,6 +4701,18 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         );
       };
       const hasArrayPart = parts.some((part) => checker.isArrayType(part) || matchArray(part));
+      // Subtype reduction removes every arm assignable to `{}`, so a union
+      // that keeps another non-nullish arm beside an empty literal's `{}`
+      // was not reduced: that `{}` arm holds only the literal's objects.
+      const nullish = ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void;
+      const literalEmptyArms =
+        parts.some((part) => isEmptyObjectLiteralType(part, ctx)) &&
+        parts.some(
+          (part) =>
+            (part.flags & nullish) === 0 &&
+            !checker.isNeverType(part) &&
+            !isEmptyObjectLiteralType(part, ctx),
+        );
       for (const part of parts) {
         if (hasArrayPart && emptyTuple(part)) continue;
         // TypeScript's client can retain impossible intersections in a
@@ -4668,7 +4731,17 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
           byKey.set(typeKey(NULL_T), NULL_T);
           continue;
         }
-        const mapped = mapType(part, ctx);
+        let mapped: IrType | null;
+        if (literalEmptyArms && isEmptyObjectLiteralType(part, ctx)) {
+          ctx.emptyLiteralArm = true;
+          try {
+            mapped = mapType(part, ctx);
+          } finally {
+            ctx.emptyLiteralArm = false;
+          }
+        } else {
+          mapped = mapType(part, ctx);
+        }
 
         if (!mapped) {
           return null;
@@ -7519,25 +7592,29 @@ function mapRecordTypeInner(
     // An INDEX-SIGNATURE shape is exempt: `Record<string, T>` legitimately
     // has zero declared members — the signature is the shape.
     if (computed && props.length === 0 && !indexValue) return null;
-    // A DECLARED empty object type — `{}` (spelled or the checker's shared
-    // intrinsic), `interface Empty {}` — is tsc's TOP type over non-nullish
-    // values: every number, string, record, array, function, or class
-    // instance is assignable into the slot, so the exact-record stance
-    // cannot hold it. It lowers like `unknown` (the dyn), the same rule
-    // as `object` and the lib's `Object`: assignments convert at the site
-    // (sources outside the checked-dynamic tree fence there, exactly as unknown does), reads
-    // narrow back out through the same checked casts. The type INFERRED
-    // from an empty object literal (`const o = {}`) stays the empty record
-    // — it describes a value the program built, not an annotation that
-    // admits everything — and computed empties (`Partial<T>` in a generic
-    // body) returned null above. Empty shapes WITH an index signature
-    // (`Record<string, T>`) are not empty: the signature is the shape.
+    // An empty object type — `{}` (spelled, the checker's shared
+    // intrinsic, or inferred from an empty object literal), `interface
+    // Empty {}` — is tsc's TOP type over non-nullish values: every number,
+    // string, record, array, function, or class instance is assignable
+    // into the slot, so the exact-record stance cannot hold it. It lowers
+    // like `unknown` (the dyn), the same rule as `object` and the lib's
+    // `Object`: assignments convert at the site (sources outside the
+    // checked-dynamic tree fence there, exactly as unknown does), reads
+    // narrow back out through the same checked casts. A literal's inferred
+    // `{}` is no exception: union subtype reduction folds primitives into
+    // it (`["12", {}]` is `{}[]`, `flag ? "x" : {}` is `{}`), and `let o =
+    // {}` admits `o = "x"`. As an arm beside another non-nullish arm (the
+    // union was not reduced, `string | {} | DataView`) it holds only the
+    // literal's objects and stays the empty record (emptyLiteralArm).
+    // Computed empties (`Partial<T>` in a generic body) returned null
+    // above. Empty shapes WITH an index signature (`Record<string, T>`) are
+    // not empty: the signature is the shape.
     if (
       props.length === 0 &&
       indexValue === undefined &&
       checker.getCallSignatures(widened).length === 0 &&
       checker.getConstructSignatures(widened).length === 0 &&
-      !(anonSym !== undefined && anonSym.declarations.some((d) => ts.isObjectLiteralExpression(d)))
+      !(ctx.emptyLiteralArm && isEmptyObjectLiteralType(widened, ctx))
     ) {
       return DYN;
     }
@@ -8176,4 +8253,20 @@ function innerBlockedMember(
     return step(`.${ts.symbolName(p)}`, fieldTs);
   }
   return here;
+}
+
+/** The type tsc infers from an empty object literal (`{}` written as a
+ * value): no members, index signatures or signatures, declared by an object
+ * literal expression. */
+function isEmptyObjectLiteralType(type: ts.Type, ctx: TypeMapperCtx): boolean {
+  const { checker } = ctx;
+  const symbol = type.getSymbol();
+  return (
+    symbol !== undefined &&
+    symbol.declarations.some((d) => ts.isObjectLiteralExpression(d)) &&
+    checker.getPropertiesOfType(type).length === 0 &&
+    checker.getIndexInfosOfType(type).length === 0 &&
+    checker.getCallSignatures(type).length === 0 &&
+    checker.getConstructSignatures(type).length === 0
+  );
 }

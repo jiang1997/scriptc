@@ -16,4 +16,7 @@
   A call on an ECDH value whose arguments no @types/node overload accepts (`getPublicKey("HEX")`) is refused at compile time, as is `computeSecret(view, encoding)`: Node reads that encoding as the input encoding and answers a Buffer where @types/node declares a string.
   ECDH property reads and writes throw a coded SC2020 error.
   Other public-key operations remain unsupported.
+  The WebCrypto `crypto` global, which node:crypto also exports as `webcrypto`, supports `randomUUID()` and `getRandomValues()`, also read as values from untyped JavaScript.
+  Its `subtle` object, also node:crypto's `subtle` export, supports `generateKey()` and `exportKey()` for HMAC and AES keys, `importKey()` for HMAC, AES, PBKDF2, and HKDF keys, `encrypt()` and `decrypt()` with AES-GCM, AES-CBC, and AES-CTR on native targets, `deriveBits()` and `deriveKey()` with PBKDF2 and HKDF, HMAC `sign()` and `verify()`, and SHA-1 and SHA-2 `digest()`.
+  Secret keys import and export in the `raw`, `raw-secret`, and `jwk` formats; other SubtleCrypto methods, algorithms, and key formats are refused.
   Native derivations finish before their deferred callbacks, so computation blocks the caller.

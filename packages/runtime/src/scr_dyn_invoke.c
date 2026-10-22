@@ -811,6 +811,10 @@ static ScrDyn *scr_dyn_invoke_impl(
   if (recv->kind == SCR_DYN_HANDLE) {
     return scr_dynh_dispatch(recv, method, args, argc, what);
   }
+  if (scr_dyn_is_array_prototype(recv) && dyn_arr_proto_mutates(method)) {
+    scr_dyn_array_prototype_element_fence(recv);
+    return NULL;
+  }
 
 
   if (recv->kind == SCR_DYN_PROXY) {

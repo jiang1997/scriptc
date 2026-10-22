@@ -60,10 +60,14 @@ export function lowerAtomicsCall(
   // has a concrete typed-array binding. Validate the actual lowered storage.
   const array = lowerer.lowerExpr(source);
   const type = array.type;
+  // An untyped array (a JavaScript `workerData` or field): the runtime
+  // checks its kind and throws Node's TypeError for any other value.
+  const dynamic = type?.kind === "dyn";
   if (
-    type?.kind !== "bytes" ||
-    !["i8", "u8", "i16", "u16", "i32", "u32"].includes(type.elem) ||
-    ((member === "wait" || member === "notify") && type.elem !== "i32")
+    !dynamic &&
+    (type?.kind !== "bytes" ||
+      !["i8", "u8", "i16", "u16", "i32", "u32"].includes(type.elem) ||
+      ((member === "wait" || member === "notify") && type.elem !== "i32"))
   ) {
     lowerer.noLowering(
       `Atomics.${member} over this array`,
@@ -82,7 +86,7 @@ export function lowerAtomicsCall(
   if (member === "wait")
     return {
       kind: "libCall",
-      fn: "atomics.wait",
+      fn: dynamic ? "atomics.waitDyn" : "atomics.wait",
       args: [array, index, arg(2, 0), arg(3, Infinity)],
       type: STRING,
       loc,
@@ -90,14 +94,14 @@ export function lowerAtomicsCall(
   if (member === "notify")
     return {
       kind: "libCall",
-      fn: "atomics.notify",
+      fn: dynamic ? "atomics.notifyDyn" : "atomics.notify",
       args: [array, index, arg(2, Infinity)],
       type: F64,
       loc,
     };
   return {
     kind: "libCall",
-    fn: "atomics.op",
+    fn: dynamic ? "atomics.opDyn" : "atomics.op",
     args: [array, index, arg(2, 0), arg(3, 0), number(operation)],
     type: F64,
     loc,

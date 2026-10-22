@@ -4749,7 +4749,8 @@ function lowerTlsServerOptions(
   lowerer: Lowerer,
   node: ts.Expression,
   what: string,
-): { cert: IrExpr; key: IrExpr } {
+  allowSni = false,
+): { cert: IrExpr; key: IrExpr; sni?: IrExpr } {
   if (!ts.isObjectLiteralExpression(node)) {
     lowerer.noLowering(
       `${what} with a non-literal options argument`,
@@ -4760,6 +4761,8 @@ function lowerTlsServerOptions(
   const loc = locOf(node);
   let cert: IrExpr | null = null;
   let key: IrExpr | null = null;
+  let sni: IrExpr | undefined;
+  let pendingSni: IrStmt | null = null;
   for (const prop of node.properties.nodes) {
     let initializer: ts.Expression | null;
     if (
@@ -4777,6 +4780,25 @@ function lowerTlsServerOptions(
       );
     }
     const k = (prop.name as ts.Identifier | ts.StringLiteral).text;
+    if (k === "SNICallback" && allowSni) {
+      const value =
+        initializer !== null
+          ? lowerer.lowerExpr(initializer)
+          : lowerer.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+      const checked = checkSniCallbackValue(lowerer, value, prop, what);
+      if (cert !== null && key !== null) {
+        sni = checked;
+      } else {
+        // The runtime call reads cert and key first. A cert or key entry
+        // after the callback can change the binding the callback reads,
+        // so the callback is saved ahead of the next of them, in source
+        // order.
+        const saved = lowerer.declareHiddenLocal("%sniCallback", checked.type);
+        pendingSni = { kind: "varDecl", localId: saved.id, init: checked, loc: locOf(prop) };
+        sni = varRef(saved.id, checked.type, locOf(prop));
+      }
+      continue;
+    }
     if (k !== "cert" && k !== "key") {
       const init = ts.isPropertyAssignment(prop) ? prop.initializer : null;
       if (
@@ -4801,7 +4823,7 @@ function lowerTlsServerOptions(
         "cert and key (PEM strings or Buffers) are the supported options",
         {
           SNICallback:
-            "SNICallback lowers only on http2.createSecureServer({ allowHTTP1: true, ... }) — serve one cert/key pair here",
+            "SNICallback lowers on tls.createServer and http2.createSecureServer({ allowHTTP1: true, ... }) — serve one cert/key pair here",
           requestCert:
             "client-certificate handshakes are not modeled (SEMANTICS.md divergence 55) — requestCert: false is the lowered value",
         },
@@ -4838,6 +4860,10 @@ function lowerTlsServerOptions(
         "cert/key are PEM strings or Buffers here",
       );
     }
+    if (pendingSni !== null) {
+      v = { kind: "seqExpr", stmts: [pendingSni], result: v, type: v.type, loc };
+      pendingSni = null;
+    }
     if (k === "cert") cert = v;
     else key = v;
   }
@@ -4848,7 +4874,7 @@ function lowerTlsServerOptions(
       "the supported options object is { cert, key } (PEM strings or Buffers)",
     );
   }
-  return { cert, key };
+  return sni === undefined ? { cert, key } : { cert, key, sni };
 }
 
 /** The options argument of tls/https createServer, split three ways: an
@@ -4911,12 +4937,24 @@ function lowerTlsServerOptionsOrDyn(
   what: string,
   includeHttpTimeoutOptions = false,
   runtimeKeys: ReadonlySet<string> = new Set(),
-): { cert: IrExpr; key: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
-  if (
-    ts.isObjectLiteralExpression(node) &&
-    !tlsLiteralNeedsRuntimeWalk(node, includeHttpTimeoutOptions, runtimeKeys)
-  ) {
-    return lowerTlsServerOptions(lowerer, node, what);
+  allowSni = false,
+): { cert: IrExpr; key: IrExpr; sni?: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
+  if (ts.isObjectLiteralExpression(node)) {
+    if (!tlsLiteralNeedsRuntimeWalk(node, includeHttpTimeoutOptions, runtimeKeys))
+      return lowerTlsServerOptions(lowerer, node, what, allowSni);
+    const sniOption = node.properties.nodes.find(
+      (p) =>
+        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+        (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+        p.name.text === "SNICallback",
+    );
+    if (allowSni && sniOption !== undefined) {
+      lowerer.noLowering(
+        `${what} with SNICallback and options the runtime walk reads`,
+        sniOption,
+        "SNICallback lowers with cert and key; ALPNProtocols, minVersion, maxVersion and the validated options are not combined with it yet",
+      );
+    }
   }
   const v = lowerer.lowerExpr(node);
   if (v.type.kind === "dyn") return { dyn: v };
@@ -5078,10 +5116,25 @@ function lowerTlsModuleCall(
       "tls.createServer",
       false,
       TLS_SERVER_RUNTIME_OPTIONS,
+      true,
     );
     if (args.length === 1) {
-      return opts.dyn !== undefined
-        ? { kind: "libCall", fn: "tls.createServerDyn", args: [opts.dyn], type: NETSERVER_T, loc }
+      if (opts.dyn !== undefined)
+        return {
+          kind: "libCall",
+          fn: "tls.createServerDyn",
+          args: [opts.dyn],
+          type: NETSERVER_T,
+          loc,
+        };
+      return opts.sni !== undefined
+        ? {
+            kind: "libCall",
+            fn: "tls.createServerSni",
+            args: [opts.cert, opts.key, opts.sni],
+            type: NETSERVER_T,
+            loc,
+          }
         : {
             kind: "libCall",
             fn: "tls.createServer",
@@ -5099,11 +5152,19 @@ function lowerTlsModuleCall(
       "use (socket) or ()",
       [NETSOCKET_T],
     );
-    return opts.dyn !== undefined
+    if (opts.dyn !== undefined)
+      return {
+        kind: "libCall",
+        fn: "tls.createServerDynCb",
+        args: [opts.dyn, cb],
+        type: NETSERVER_T,
+        loc,
+      };
+    return opts.sni !== undefined
       ? {
           kind: "libCall",
-          fn: "tls.createServerDynCb",
-          args: [opts.dyn, cb],
+          fn: "tls.createServerSniCb",
+          args: [opts.cert, opts.key, opts.sni, cb],
           type: NETSERVER_T,
           loc,
         }
@@ -5481,6 +5542,44 @@ const SNI_HINT =
   "...(x ? { SNICallback: x } : {}) — the callback is (servername, cb) => void " +
   "with cb: (err: Error | null, ctx?: tls.SecureContext) => void";
 
+/** An SNICallback option value: (servername: string, cb) => void where cb
+ * is (err: Error | null, ctx?: SecureContext) => void, or that function
+ * unioned with undefined (no callback). cb may declare fewer params (the
+ * emitted answer thunk matches its ABI), but what it does declare must
+ * carry the arms the thunk decodes. */
+function lowerSniCallbackValue(
+  lowerer: Lowerer,
+  node: ts.Expression,
+  blame: ts.Node,
+  what: string,
+): IrExpr {
+  return checkSniCallbackValue(lowerer, lowerer.lowerExpr(node), blame, what);
+}
+
+function checkSniCallbackValue(lowerer: Lowerer, v: IrExpr, blame: ts.Node, what: string): IrExpr {
+  const shapeOk = (t: IrType): boolean => {
+    if (t.kind !== "func" || t.ret.kind !== "void" || t.params.length !== 2) return false;
+    if (t.params[0]!.kind !== "string") return false;
+    const cbT = t.params[1]!;
+    if (cbT.kind !== "func" || cbT.ret.kind !== "void" || cbT.params.length > 2) return false;
+    const armKinds = (u: IrType): string[] =>
+      u.kind === "union" ? (lowerer.unions.get(u.unionId)?.arms ?? []).map((a) => a.kind) : [];
+    const p0 = cbT.params[0];
+    if (p0 !== undefined && !armKinds(p0).includes("nullT")) return false;
+    const p1 = cbT.params[1];
+    if (p1 !== undefined && !armKinds(p1).includes("secureCtx")) return false;
+    return true;
+  };
+  const arms = v.type.kind === "union" ? (lowerer.unions.get(v.type.unionId)?.arms ?? []) : [];
+  const funcArm = v.type.kind === "func" ? v.type : arms.find((a) => a.kind === "func");
+  const unionOk =
+    v.type.kind !== "union" || (arms.length === 2 && arms.some((a) => a.kind === "undefinedT"));
+  if (funcArm === undefined || !unionOk || !shapeOk(funcArm)) {
+    lowerer.noLowering(`a ${what} SNICallback of '${lowerer.fmt(v.type)}' values`, blame, SNI_HINT);
+  }
+  return v;
+}
+
 /** Strips parentheses and type assertions: the portless spelling wraps
  * an options spread as `...({ ... } as Record<string, unknown>)`. */
 function stripParensAndCasts(node: ts.Expression): ts.Expression {
@@ -5733,43 +5832,8 @@ function lowerHttp2ModuleCall(
     let sni: IrExpr | null = null;
     let allowHttp1 = false;
     let enableConnectProtocol = false;
-    // The SNICallback value shape: (servername: string, cb) => void where
-    // cb is (err: Error | null, ctx?: SecureContext) => void — cb may
-    // declare fewer params (the emitted answer thunk matches its ABI),
-    // but what it does declare must carry the arms the thunk decodes.
-    const sniShapeOk = (t: IrType): boolean => {
-      if (t.kind !== "func" || t.ret.kind !== "void" || t.params.length !== 2) return false;
-      if (t.params[0]!.kind !== "string") return false;
-      const cbT = t.params[1]!;
-      if (cbT.kind !== "func" || cbT.ret.kind !== "void" || cbT.params.length > 2) return false;
-      const armKinds = (u: IrType): string[] =>
-        u.kind === "union" ? (lowerer.unions.get(u.unionId)?.arms ?? []).map((a) => a.kind) : [];
-      const p0 = cbT.params[0];
-      if (p0 !== undefined && !armKinds(p0).includes("nullT")) return false;
-      const p1 = cbT.params[1];
-      if (p1 !== undefined && !armKinds(p1).includes("secureCtx")) return false;
-      return true;
-    };
     const lowerSniValue = (node: ts.Expression, blame: ts.Node): void => {
-      const v = lowerer.lowerExpr(node);
-      const funcArm =
-        v.type.kind === "func"
-          ? v.type
-          : v.type.kind === "union"
-            ? (lowerer.unions.get(v.type.unionId)?.arms ?? []).find((a) => a.kind === "func")
-            : undefined;
-      const unionOk =
-        v.type.kind !== "union" ||
-        ((lowerer.unions.get(v.type.unionId)?.arms ?? []).length === 2 &&
-          (lowerer.unions.get(v.type.unionId)?.arms ?? []).some((a) => a.kind === "undefinedT"));
-      if (funcArm === undefined || !unionOk || !sniShapeOk(funcArm)) {
-        lowerer.noLowering(
-          `a createSecureServer SNICallback of '${lowerer.fmt(v.type)}' values`,
-          blame,
-          SNI_HINT,
-        );
-      }
-      sni = v;
+      sni = lowerSniCallbackValue(lowerer, node, blame, "createSecureServer");
     };
     const lowerOption = (prop: ts.ObjectLiteralElementLike): void => {
       if (ts.isSpreadAssignment(prop)) {

@@ -397,6 +397,7 @@ ScrBytes *scr_buffer_from_bytes(const ScrBytes *src); /* a copy of any typed arr
 ScrBytes *scr_buffer_from_arr(const ScrArr *arr);     /* number[] */
 ScrBytes *scr_buffer_from_dyn_pooled(const ScrDyn *value, const ScrStr *encoding);
 ScrBytes *scr_buffer_from_dyn_ref_pooled(const ScrDyn *value, const ScrStr *encoding);
+ScrBytes *scr_buffer_from_dyn_offset_pooled(const ScrDyn *value, const ScrDyn *second);
 ScrBytes *scr_buffer_concat(const ScrArr *list);
 ScrBytes *scr_buffer_concat_len(const ScrArr *list, double total);
 /* The untyped-list forms: Node's ERR_INVALID_ARG_TYPE checks on the list

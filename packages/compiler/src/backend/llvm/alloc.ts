@@ -244,9 +244,12 @@ export function cycleAppendHelper(): string[] {
 }
 
 /** A collector header to install: the object type's constant ScrCycType
- * descriptor (its trace and teardown; see cycTypeDescriptor). */
+ * descriptor (its trace and teardown; see cycTypeDescriptor). `acyclic`:
+ * the descriptor's trace is scr_cyc_no_children, and `buf` starts out
+ * SCR_CYC_ACYCLIC (scr_cyc_alloc does the same on its path). */
 export interface CycHeader {
   type: string;
+  acyclic?: boolean;
 }
 
 /** The first collector statistics index of an emitted ScrCycType
@@ -391,7 +394,9 @@ function allocLines(
       `  %sa.cgp = getelementptr inbounds i8, ptr %sa.blk, i64 2`,
       `  store i16 0, ptr %sa.cgp ; ScrCycHdr.color, gen`,
       `  %sa.bufp = getelementptr inbounds i8, ptr %sa.blk, i64 ${CYC_BUF}`,
-      `  store i32 0, ptr %sa.bufp ; ScrCycHdr.buf`,
+      cyc.acyclic === true
+        ? `  store i32 -1, ptr %sa.bufp ; ScrCycHdr.buf = SCR_CYC_ACYCLIC`
+        : `  store i32 0, ptr %sa.bufp ; ScrCycHdr.buf`,
       `  %sa.live = load i64, ptr @scr_cyc_live`,
       `  %sa.live1 = add i64 %sa.live, 1`,
       `  store i64 %sa.live1, ptr @scr_cyc_live`,

@@ -98,6 +98,10 @@ export class LlClassMeta {
   compactElems: { offset: number; size: number; align: number; type: string; field: number }[] = [];
   /** Compact classes: each field's GEP index, by its index in def.fields. */
   compactSlots: number[] = [];
+  /** Compact classes: whether each field (by its index in def.fields) holds
+   * a compact class instance as a 32-bit index (COMPACT_REF) rather than a
+   * pointer: compactRefLoadLines decodes it, compactRefStoreLines encodes it. */
+  compressed: boolean[] = [];
 
   constructor(readonly def: IrClassDef) {
     this.root = this;
@@ -395,13 +399,24 @@ export function classEnvironmentIndex(meta: LlClassMeta): number {
 
 /** A field's GEP index inside its class struct: rc at 0, the vtable word
  * at 1 on hierarchy members, then the flattened field list. */
-export function classFieldIndex(meta: LlClassMeta, field: string): { index: number; type: IrType } {
+export function classFieldIndex(
+  meta: LlClassMeta,
+  field: string,
+  refs: "pointer" | "compressed" = "pointer",
+): { index: number; type: IrType; compressed: boolean } {
   const idx = meta.def.fields.findIndex((f) => f.name === field);
   if (idx < 0)
     throw new InternalCompilerError(
       `llvm emitter bug: unknown field ${field} on class ${meta.def.name}`,
     );
-  return { index: classFieldSlot(meta, idx), type: meta.def.fields[idx]!.type };
+  const compressed = meta.compressed[idx] === true;
+  // Callers that read or write a field's storage as a pointer must not see
+  // a compressed one; callers that decode and encode pass "compressed".
+  if (compressed && refs === "pointer")
+    throw new InternalCompilerError(
+      `llvm emitter bug: field ${field} of ${meta.def.name} holds a 32-bit reference`,
+    );
+  return { index: classFieldSlot(meta, idx), type: meta.def.fields[idx]!.type, compressed };
 }
 
 /** The GEP index of the field at `idx` in `meta.def.fields`. */
@@ -590,6 +605,75 @@ export function compactHeaderWord(meta: LlClassMeta): number {
   return COMPACT_HEADER_TAG | (meta.hierarchy ? meta.pre + 1 : 0);
 }
 
+/** Lines that decode the 32-bit reference `idx` (an i32) of a compressed
+ * field into the pointer `out`. The program-lifetime region lies below
+ * 32 GiB (LlvmTargetOptions.lowRegion), so a reference is the instance's
+ * address over 8 and 0 is NULL: one shift, which x86-64 folds into the
+ * address of the next load. `t` names the temporaries. */
+export function compactRefLoadLines(idx: string, out: string, t: string): string[] {
+  return [
+    `  ${t}.z = zext i32 ${idx} to i64`,
+    `  ${t}.o = shl nuw nsw i64 ${t}.z, 3`,
+    `  ${out} = inttoptr i64 ${t}.o to ptr`,
+  ];
+}
+
+/** Lines that encode the pointer `ptr` (NULL or a compact class instance)
+ * as the 32-bit reference `out` (an i32) a compressed field stores. */
+export function compactRefStoreLines(ptr: string, out: string, t: string): string[] {
+  return [
+    `  ${t}.pi = ptrtoint ptr ${ptr} to i64`,
+    `  ${t}.s = lshr i64 ${t}.pi, 3`,
+    `  ${out} = trunc i64 ${t}.s to i32`,
+  ];
+}
+
+/** The storage type of a compressed field (LlClassMeta.compressed): a
+ * 32-bit index into the program-lifetime region. */
+export const COMPACT_REF = "i32";
+
+/** Lines that allocate `%o`, `size` zeroed bytes in the program-lifetime
+ * region: a bump of the calling thread's chunk (scr_rc.h ScrPlrChunk,
+ * thread-local in worker programs), and scr_plr_alloc when the chunk is
+ * exhausted or the target has no inline allocation. The lines end in an
+ * open block. */
+function plrAllocLines(host: ClassHost, size: string): string[] {
+  const S = host.sizeType;
+  host.declare(`declare ptr @scr_plr_alloc(${S})`);
+  host.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
+  if (host.inlineAlloc !== true) return [`  %o = call ptr @scr_plr_alloc(${S} ${size})`];
+  const chunk: string[] = [];
+  if (host.threadLocalAlloc === true) {
+    host.declare(`@scr_plr_chunk = external thread_local global { ptr, ptr }`);
+    host.declare(`declare nonnull ptr @llvm.threadlocal.address.p0(ptr nonnull)`);
+    chunk.push(`  %plr.c = call ptr @llvm.threadlocal.address.p0(ptr @scr_plr_chunk)`);
+  } else {
+    host.declare(`@scr_plr_chunk = external dso_local global { ptr, ptr }`);
+    chunk.push(`  %plr.c = getelementptr inbounds i8, ptr @scr_plr_chunk, i64 0`);
+  }
+  // A thread without a chunk has NULL for both, so nothing fits.
+  return [
+    ...chunk,
+    `  %plr.lp = getelementptr inbounds i8, ptr %plr.c, i64 8`,
+    `  %plr.next = load ptr, ptr %plr.c`,
+    `  %plr.lim = load ptr, ptr %plr.lp`,
+    `  %plr.n7 = add ${S} ${size}, 7`,
+    `  %plr.n = and ${S} %plr.n7, -8`,
+    `  %plr.end = getelementptr i8, ptr %plr.next, ${S} %plr.n`,
+    `  %plr.fits = icmp ule ptr %plr.end, %plr.lim`,
+    `  %plr.fitsx = call i1 @llvm.expect.i1(i1 %plr.fits, i1 true)`,
+    `  br i1 %plr.fitsx, label %plr.bump, label %plr.slow`,
+    `plr.bump:`,
+    `  store ptr %plr.end, ptr %plr.c`,
+    `  br label %plr.done`,
+    `plr.slow:`,
+    `  %plr.o = call ptr @scr_plr_alloc(${S} ${size})`,
+    `  br label %plr.done`,
+    `plr.done:`,
+    `  %o = phi ptr [ %plr.next, %plr.bump ], [ %plr.o, %plr.slow ]`,
+  ];
+}
+
 /** Byte size and alignment of a class field's LLVM storage type. */
 function fieldStorage(type: string): { size: number; align: number } {
   switch (type) {
@@ -628,7 +712,16 @@ export function assignCompactLayouts(
   metaMap: ReadonlyMap<string, LlClassMeta>,
   compact: (root: LlClassMeta) => boolean,
   fieldTypes: (cls: IrClassDef) => string[],
+  compressedRef?: (
+    cls: IrClassDef,
+    field: number,
+    isCompact: (className: string) => boolean,
+  ) => boolean,
 ): void {
+  const isCompact = (className: string): boolean => {
+    const target = metaMap.get(className);
+    return target !== undefined && target.def.runtime !== true && compact(target.root);
+  };
   const byPre = [...metaMap.values()].sort((a, b) => a.pre - b.pre);
   for (const meta of byPre) {
     if (meta.def.runtime === true || !compact(meta.root)) continue;
@@ -642,7 +735,22 @@ export function assignCompactLayouts(
         `llvm emitter bug: compact class ${meta.def.name} does not extend its base's layout`,
       );
     const elems = inherited.map((e) => ({ ...e }));
-    const types = fieldTypes(meta.def);
+    // A reference to a compact class instance is a 32-bit index into the
+    // program-lifetime region (compactRefLoadLines); inherited fields keep the
+    // base's choice.
+    const compressed = meta.def.fields.map((_, i) =>
+      i < baseCount
+        ? base!.compressed[i]!
+        : compressedRef !== undefined && compressedRef(meta.def, i, isCompact),
+    );
+    const types = fieldTypes(meta.def).map((t, i) => {
+      if (!compressed[i]) return t;
+      if (t !== "ptr")
+        throw new InternalCompilerError(
+          `llvm emitter bug: compressed field ${meta.def.fields[i]!.name} of ${meta.def.name} is stored as ${t}`,
+        );
+      return COMPACT_REF;
+    });
     const own = types
       .map((type, field) => ({ type, field, ...fieldStorage(type) }))
       .slice(baseCount)
@@ -679,6 +787,7 @@ export function assignCompactLayouts(
     meta.compact = true;
     meta.compactElems = elems;
     meta.compactSlots = slots;
+    meta.compressed = compressed;
   }
 }
 
@@ -705,7 +814,10 @@ function undefFieldInits(
     if (f.name === "%cause") return;
     // A nullable-pointer field's zeroed slot already is its unit arm.
     if (nullable?.get(meta.def.name, f.name)) return;
-    const { index } = classFieldIndex(meta, f.name);
+    // Only union and dyn fields get a store here; a compressed field is a
+    // class reference, which starts NULL.
+    const { index, compressed } = classFieldIndex(meta, f.name, "compressed");
+    if (compressed) return;
     if (f.type.kind === "union" && host.inlineUnions.classField(meta.def.name, f.name)) {
       // An inline field starts at the undefined arm's tag with zero bits.
       const tag = undefinedArmTag(f.type, host.unionsById);
@@ -748,6 +860,9 @@ export function emitClassShapes(
   nullable?: NullableRefFields,
   int32?: Int32Slots,
 ): { typeDefs: string[]; defs: string[] } {
+  // Whether compact instances live in the program-lifetime region (any
+  // field holds a 32-bit reference to one; emitter.ts assignCompactLayouts).
+  const regionRefs = [...metaMap.values()].some((m) => m.compressed.some(Boolean));
   const typeDefs: string[] = [];
   const defs: string[] = [];
   const emitted = (mod.classes ?? []).filter((c) => !c.runtime);
@@ -897,15 +1012,28 @@ export function emitClassShapes(
     const fieldIndex = (i: number): number => classFieldSlot(meta, i);
     // Teardown, trace and gcFree see each slot's storage type: a nullable
     // class field holds the instance pointer (NULL for the unit arm), and
-    // every class retain/release/visit entry point is NULL-tolerant.
+    // every class retain/release/visit entry point is NULL-tolerant. A
+    // compressed field refers to a compact instance, which nothing releases
+    // or traces, so they skip it.
     const indexedFields = [
-      ...ownedFields(cls).map(({ field, i }) => ({
-        name: field.name,
-        type: storedFieldType(cls, field),
-        index: fieldIndex(i),
-      })),
+      ...ownedFields(cls)
+        .filter(({ i }) => meta.compressed[i] !== true)
+        .map(({ field, i }) => ({
+          name: field.name,
+          type: storedFieldType(cls, field),
+          index: fieldIndex(i),
+        })),
     ];
     const refFields = indexedFields.filter((f) => isRefCounted(f.type));
+    const tracedFields = traced
+      ? indexedFields.filter((f) => traceAdapter(host, f.type) !== null)
+      : [];
+    // A traced class whose trace visits nothing carries the collector header
+    // only because its hierarchy is traced: it is never on a cycle. Its
+    // descriptor names scr_cyc_no_children and its objects start out
+    // SCR_CYC_ACYCLIC, so releases never buffer them.
+    const acyclic =
+      traced && runtimePrefix === null && !isStreamRooted && tracedFields.length === 0;
     const bounded =
       runtimePrefix !== null ||
       isStreamRooted ||
@@ -1089,11 +1217,12 @@ export function emitClassShapes(
       `entry:`,
     ];
     const cycType = `@${mangleClassTrace(cls.name)}.cyctype`;
+    if (acyclic) host.declare(`declare void @scr_cyc_no_children(ptr, ptr, ptr)`);
     if (traced)
       defs.push(
         cycTypeDescriptor(
           cycType,
-          `@${mangleClassTrace(cls.name)}`,
+          acyclic ? "@scr_cyc_no_children" : `@${mangleClassTrace(cls.name)}`,
           `@${mangleClassGcFree(cls.name)}`,
           host.nextCycKind?.() ?? 0,
         ),
@@ -1108,12 +1237,17 @@ export function emitClassShapes(
     if (regions !== null) {
       nw.push(...regions.newAlloc(cls.name, sizeOf));
       defs.push(...regions.classDefinitions(cls, sizeOf));
+    } else if (meta.compact && regionRefs) {
+      // Compressed fields refer to compact instances by their index in the
+      // program-lifetime region, so every compact instance lives there:
+      // zeroed, 8-byte aligned and never freed.
+      nw.push(...plrAllocLines(host, sizeOf));
     } else
       nw.push(
         ...emitObjectAlloc(
           host,
           sizeOf,
-          traced && !lifetime ? { type: cycType } : null,
+          traced && !lifetime ? { type: cycType, acyclic } : null,
           storedHeaderBytes(meta),
         ),
       );
@@ -1188,7 +1322,6 @@ export function emitClassShapes(
       // exactly the complement, then free (the trace/teardown complement
       // contract in scr_runtime.h).
       const indexed = indexedFields;
-      const tracedFields = indexed.filter((f) => traceAdapter(host, f.type) !== null);
       const untracedRefFields = indexed.filter(
         (f) => isRefCounted(f.type) && traceAdapter(host, f.type) === null,
       );

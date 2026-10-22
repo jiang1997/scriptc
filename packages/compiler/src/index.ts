@@ -67,7 +67,11 @@ import {
   mobileTargetRefusal,
   resolveCc,
 } from "./backend/external-c.js";
-import { emitLlvmModuleSource, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
+import {
+  emitLlvmModuleSource,
+  LlvmUnsupportedError,
+  lowRegionTarget,
+} from "./backend/llvm/emitter.js";
 import { inlineRcOption } from "./backend/llvm/shapes.js";
 import {
   emitNativeArtifact,
@@ -157,6 +161,7 @@ import {
   type EarlyExecutableNativeFeatures,
 } from "./executable/executable-cache.js";
 import { compilerImplementationIdentity } from "./library/compiler-self-identity.js";
+import { isPerformanceCode } from "./diagnostics/dynamic-tier.js";
 
 export const VERSION = "0.0.1";
 
@@ -452,6 +457,15 @@ export async function compile(
 interface CompileWarningSink {
   warnings: ScrDiagnostic[];
   sourceTexts: Map<string, string> | null;
+}
+
+/** The build's performance warnings (SC61xx), stored with its cache entry
+ * so a cache hit repeats them. */
+function performanceWarnings(sink: CompileWarningSink | undefined): {
+  performance?: ScrDiagnostic[];
+} {
+  const performance = (sink?.warnings ?? []).filter((d) => isPerformanceCode(d.code));
+  return performance.length === 0 ? {} : { performance };
 }
 
 function withCompileWarnings<T extends CompileRequestResult>(
@@ -773,6 +787,7 @@ async function prepareExecutableInput(
         wasi: buildPlatform === "wasi",
         runtimeAbiMarker: outputKind === "obj",
         objectAudit: opts.sanitize === true,
+        lowRegion: lowRegionTarget(buildPlatform, opts.sanitize === true),
         ...(opts.sanitize === true ? { wasmBoundsChecks: true } : {}),
         ...inlineRcOption(opts.optimization, opts.sanitize === true),
       });
@@ -839,6 +854,7 @@ async function prepareExecutableInput(
       wasi: buildPlatform === "wasi",
       runtimeAbiMarker: useRuntimePack,
       objectAudit: opts.sanitize === true,
+      lowRegion: lowRegionTarget(buildPlatform, opts.sanitize === true),
       ...(opts.sanitize === true ? { wasmBoundsChecks: true } : {}),
       ...inlineRcOption(opts.optimization, opts.sanitize === true),
       ...(opts.detachedExit === true ? { detachedExit: true } : {}),
@@ -1407,6 +1423,12 @@ async function compileTracked(
     if (earlyCacheOptions === null) {
       throw new InternalCompilerError("executable cache hit without executable cache options");
     }
+    // A cached build repeats its performance warning (SC6101): the code it
+    // names is just as untyped as when it was built.
+    if (warningSink !== undefined && earlyHit.performance !== undefined) {
+      warningSink.warnings = earlyHit.performance;
+      warningSink.sourceTexts = new Map();
+    }
     const executableCacheOptions = earlyCacheOptions;
     // Route/proof metadata is independently evictable. A full-compiler
     // fallback that still finds the validated payload repairs that lightweight
@@ -1596,6 +1618,7 @@ async function compileTracked(
               nativeDependencies: dependencies,
               frontend: frontendInputs.snapshot(),
               ...(irPath === undefined ? {} : { irPath }),
+              ...performanceWarnings(warningSink),
             });
             publishedExecutable = true;
           },
@@ -1637,6 +1660,7 @@ async function compileTracked(
       executableRestored: false,
       frontend: frontendInputs.snapshot(),
       ...(irPath === undefined ? {} : { irPath }),
+      ...performanceWarnings(warningSink),
     }).catch(() => undefined);
   }
   await pruneBuildCache(cacheRoot);

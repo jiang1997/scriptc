@@ -12,6 +12,7 @@ import {
   mayRequireBuiltinAlias,
   rewriteBuiltinAliasRequires,
 } from "./npm-static-builtin-aliases.js";
+import { mayHoldUmdWrapper, unwrapUmdFactory } from "./npm-static-umd.js";
 import { mayHoldEnumIife, rewriteEnumIifes } from "./npm-static-enum-iife.js";
 import { mayHoldTscBuiltinImport, unwrapTscBuiltinImports } from "./npm-static-tsc-helpers.js";
 import { builtinPackageAliasFor } from "./package-shims.js";
@@ -113,6 +114,13 @@ export class FrontendServices {
     this.ensureOpen();
     if (!mayHoldTscBuiltinImport(source)) return null;
     return unwrapTscBuiltinImports(this.parse(path, source, "js"));
+  }
+  /** A package module written as TypeScript's UMD wrapper with its
+   * factory body at the top level (null: not one). */
+  umdFactory(source: string, path: string): string | null {
+    this.ensureOpen();
+    if (!mayHoldUmdWrapper(source)) return null;
+    return unwrapUmdFactory(this.parse(path, source, "js"));
   }
   /** A package module with its literal-valued TypeScript enum IIFEs
    * respelled as object literals (null: none). */

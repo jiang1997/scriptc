@@ -1,6 +1,7 @@
 import { dynUndefinedExpr, boolLit, numLit, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
+import { lowerFsPath } from "./fs-paths.js";
 import { locOf } from "../../program.js";
 import {
   type BuiltinModuleFn,
@@ -231,7 +232,7 @@ export function lowerFsNumericOpenCall(
       "use an inline bitwise OR of fs.constants.O_RDONLY/O_WRONLY/O_RDWR/O_CREAT/O_EXCL/O_NOFOLLOW/O_NONBLOCK/O_TRUNC/O_APPEND",
     );
   }
-  const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+  const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
   const mode = expr.arguments.nodes[2]
     ? lowerer.lowerExprExpecting(expr.arguments.nodes[2]!, F64)
     : ({ kind: "numLit", value: 0o666, type: F64, loc } satisfies IrExpr);
@@ -640,7 +641,9 @@ export function lowerFsEncodedRead(
       return null;
   }
   const sourceType = descriptor ? F64 : STRING;
-  const source = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, sourceType);
+  const source = descriptor
+    ? lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, sourceType)
+    : lowerFsPath(lowerer, expr.arguments.nodes[0]!);
   const encoding: IrExpr =
     optionsType.kind === "string"
       ? lowerer.lowerExprExpecting(options, STRING)
@@ -742,7 +745,7 @@ export function lowerFsOpendirCall(
   ) {
     lowerer.noLowering(`${member} with ${expr.arguments.nodes.length} arguments`, expr);
   }
-  const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+  const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
   let bufferSize: IrExpr = { kind: "numLit", value: 32, type: F64, loc };
   const optsNode = expr.arguments.nodes[1];
   if (optsNode && !(ts.isIdentifier(optsNode) && optsNode.text === "undefined")) {
@@ -812,7 +815,7 @@ export function lowerFsMkdirSyncCall(
     );
   }
   const { recursive, modeNode } = options;
-  const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+  const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
   const mode: IrExpr | null = modeNode ? lowerer.lowerExprExpecting(modeNode, F64) : null;
   if (!recursive) {
     return mode
@@ -891,7 +894,7 @@ export function lowerFsRemoveCall(
       "the recursive/force flags must be boolean literals; maxRetries/retryDelay are numbers; other options have no lowering",
     );
   }
-  const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+  const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
 
   const recursive = boolLit(opts.bools["recursive"] === true, loc);
   const force = boolLit(opts.bools["force"] === true, loc);
@@ -949,7 +952,7 @@ export function lowerFsWriteBytesCall(
         "byte writes take Uint8Array/Buffer data",
       );
     }
-    const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+    const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
     const data = lowerer.lowerExprExpecting(expr.arguments.nodes[1]!, BYTES_U8);
     if (bi.module === "fs/promises") {
       return {
@@ -989,7 +992,7 @@ export function lowerFsWriteOptionsCall(
   // values in object-literal order before issuing the write; otherwise a
   // call/getter statically typed as the accepted utf8 literal can vanish.
   const finishWrite = (optionValues: WriteOptionValue[]): IrExpr => {
-    const path = lowerer.lowerExprExpecting(expr.arguments.nodes[0]!, STRING);
+    const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
     const data = lowerer.lowerExprExpecting(expr.arguments.nodes[1]!, STRING);
     const pathLocal = lowerer.declareHiddenLocal("%writePath", STRING);
     const dataLocal = lowerer.declareHiddenLocal("%writeData", STRING);

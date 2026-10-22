@@ -91,6 +91,26 @@ test("finds replaced blocks and references appended to an existing body in a lat
   expect(functions[0]!.body).toEqual([{ kind: "block", body: [value(7)], loc }]);
 });
 
+test("reuses the scan of an unchanged body while only bindings are pending", () => {
+  const { initializers, pending, lowerer } = fixture();
+  const placeholder = block(loc);
+  const functions = [fn("init", [placeholder]), fn("use", [value(1)])];
+  pending.set("registry", [{ loc, lower: () => [value(7)] }]);
+  expect(initializers.process(lowerer, functions)).toBe(false);
+  const walk = vi.spyOn(traversal, "everyStmtList");
+  try {
+    expect(initializers.process(lowerer, functions)).toBe(false);
+    expect(walk).not.toHaveBeenCalled();
+    // A statement added to the same list is found.
+    functions[1]!.body.push(read("registry"));
+    expect(initializers.process(lowerer, functions)).toBe(true);
+    expect(walk.mock.calls.filter(([body]) => body === functions[0]!.body)).toHaveLength(0);
+  } finally {
+    walk.mockRestore();
+  }
+  expect(placeholder.body).toEqual([value(7)]);
+});
+
 test("indexes new subtrees for other demanded initializers in the same pass", () => {
   const { initializers, pending, lowerer } = fixture();
   const nestedLoc = { ...loc, start: 10, end: 11 };

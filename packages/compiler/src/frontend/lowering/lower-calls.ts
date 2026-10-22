@@ -1542,9 +1542,10 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       lowerer.fenceStaticReadableStreamMember(expr.expression, "call") ??
       lowerDisposableStackUseCall(lowerer, expr, expr.expression) ??
       lowerer.lowerStdlibMethodCall(expr, expr.expression) ??
-      // crypto.getRandomValues on the WebCrypto global (untyped in
-      // fallback builds, so before the dyn receiver path) or webcrypto.
-      lowerWebCryptoGetRandomValues(lowerer, expr, expr.expression) ??
+      // crypto.getRandomValues / randomUUID on the WebCrypto global
+      // (untyped in fallback builds, so before the dyn receiver path) or
+      // webcrypto.
+      lowerWebCryptoMethodCall(lowerer, expr, expr.expression) ??
       // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
 
       lowerDynReceiverMethodCall(lowerer, expr, expr.expression) ??
@@ -3198,6 +3199,20 @@ function lowerStringPrototypeCall(
     methodAccess,
     () => receiver,
     call.arguments.nodes.slice(1),
+  );
+}
+
+/** ToNumber of a union of strings, numbers, booleans, null and undefined, as
+ * `Number(value)` converts it; null for other types. Unary `+` takes it too:
+ * the two conversions differ only for BigInt, which such unions don't hold. */
+export function lowerPrimitiveUnionNumber(
+  lowerer: Lowerer,
+  arg: IrExpr,
+  node: ts.Expression,
+  loc: SrcLoc,
+): IrExpr | null {
+  return (
+    lowerOptionalStringNumber(lowerer, arg, loc) ?? lowerScalarUnionNumber(lowerer, arg, node, loc)
   );
 }
 
@@ -7668,6 +7683,10 @@ function lowerObjectStaticCall(
         const target = lowerer.lowerExpr(call.arguments.nodes[0]!);
         const rawSource = lowerer.lowerExpr(call.arguments.nodes[1]!);
         fenceSymbolFieldCopy(lowerer, call.arguments.nodes[1]!, rawSource.type);
+        let targetNode: ts.Expression = call.arguments.nodes[0]!;
+        while (ts.isParenthesizedExpression(targetNode)) targetNode = targetNode.expression;
+        if (ts.isObjectLiteralExpression(targetNode))
+          fenceClassCopyIntoFreshObject(lowerer, call, call.arguments.nodes[1]!, rawSource);
         const source = lowerer.coerceToExpected(rawSource, DYN);
         if (target.type.kind === "dyn" && source.type.kind === "dyn") {
           return { kind: "libCall", fn: "dyn.assign", args: [target, source], type: DYN, loc };
@@ -7821,25 +7840,8 @@ function lowerObjectStaticCall(
             const srcNode = spread ? argNode.expression : argNode;
             const rawSource = lowerer.lowerExpr(srcNode);
             fenceSymbolFieldCopy(lowerer, srcNode, rawSource.type, spread);
-            // A class instance copied into a fresh object
-            // (`Object.assign({}, instance)`): the result is a plain
-            // object holding the instance's own fields, never an
-            // instance, so a result the checker types as the class has
-            // no representation (the checked cast would throw).
-            if (
-              rawSource.type.kind === "object" &&
-              freshLiteralTarget &&
-              !ts.isExpressionStatement(call.parent)
-            ) {
-              const resultT = lowerer.mapTypeOf(lowerer.typeOf(call));
-              if (resultT !== null && resultT.kind === "object") {
-                lowerer.unsupported(
-                  "SC1090",
-                  srcNode,
-                  `Object.assign copying a '${lowerer.fmt(rawSource.type)}' instance into a fresh object typed as the class (the copy is a plain object holding the instance's own fields, not an instance — build the object literal from the fields you need)`,
-                );
-              }
-            }
+            if (freshLiteralTarget)
+              fenceClassCopyIntoFreshObject(lowerer, call, srcNode, rawSource);
             const src = lowerer.coerceToExpected(rawSource, DYN);
             if (src.type.kind !== "dyn") {
               ok = false;
@@ -10491,20 +10493,40 @@ export function lowerStaticNumberGlobal(
   return null;
 }
 
-/** `crypto.getRandomValues(view)` on the WebCrypto global or webcrypto. */
-function lowerWebCryptoGetRandomValues(
+/** `crypto.getRandomValues(view)` and `crypto.randomUUID()` on the
+ * WebCrypto global or webcrypto. Other argument counts (JavaScript only)
+ * invoke the dynamic object's method, which ignores extra arguments and
+ * throws Node's missing-argument TypeError. */
+function lowerWebCryptoMethodCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
   access: ts.PropertyAccessExpression,
 ): IrExpr | null {
+  const member = access.name.text;
   if (
-    access.name.text !== "getRandomValues" ||
+    (member !== "getRandomValues" && member !== "randomUUID") ||
     call.questionDotToken ||
     access.questionDotToken ||
     !isWebCryptoReceiver(lowerer, access.expression)
   )
     return null;
-  return lowerCryptoGetRandomValues(lowerer, call);
+  const args = call.arguments.nodes;
+  if (member === "getRandomValues" && args.length === 1) {
+    return lowerCryptoGetRandomValues(lowerer, call);
+  }
+  if (member === "randomUUID" && args.length === 0) {
+    return { kind: "libCall", fn: "crypto.randomUUID", args: [], type: STRING, loc: locOf(call) };
+  }
+  if (args.some(ts.isSpreadElement)) return null;
+  return {
+    kind: "dynInvoke",
+    recv: lowerer.lowerExprExpecting(access.expression, DYN),
+    method: member,
+    calleeName: v8CalleeText(access),
+    args: args.map((arg) => lowerer.lowerExprExpecting(arg, DYN)),
+    type: DYN,
+    loc: locOf(call),
+  };
 }
 
 /** A then handler's promise-armed result (`.then(() => cached ?? load())`
@@ -10684,4 +10706,24 @@ function functionIntegrity(
     type: value.type,
     loc,
   };
+}
+
+/** A class instance copied into a fresh object (`Object.assign({},
+ * instance)`): the result is a plain object holding the instance's own
+ * fields, never an instance, so a result the checker types as the class has
+ * no representation (the checked cast would throw). */
+function fenceClassCopyIntoFreshObject(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  srcNode: ts.Expression,
+  rawSource: IrExpr,
+): void {
+  if (rawSource.type.kind !== "object" || ts.isExpressionStatement(call.parent)) return;
+  const resultT = lowerer.mapTypeOf(lowerer.typeOf(call));
+  if (resultT === null || resultT.kind !== "object") return;
+  lowerer.unsupported(
+    "SC1090",
+    srcNode,
+    `Object.assign copying a '${lowerer.fmt(rawSource.type)}' instance into a fresh object typed as the class (the copy is a plain object holding the instance's own fields, not an instance — build the object literal from the fields you need)`,
+  );
 }

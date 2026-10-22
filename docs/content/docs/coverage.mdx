@@ -62,6 +62,25 @@ Code that operates on values whose types are known only at runtime, such as `any
 
 `--tier=static-only` keeps every unsupported construct a blocker instead of moving it to the dynamic tier; code that already operates on runtime-typed values compiles as before. Today `auto`, the default, behaves the same way.
 
+### Untyped code that likely runs often
+
+When functions of the program's own files use untyped values and likely run often, `scriptc build` and coverage report them as an `SC6101` warning. For the Benchmarks Game n-body program in plain JavaScript:
+
+```console
+$ scriptc build nbody.js -o nbody
+warning SC6101: 3 functions that likely run often use untyped values, which runs slower than typed code:
+  advance (nbody.js:22): untyped JavaScript file, in a loop
+  energy (nbody.js:40): untyped JavaScript file, in a loop
+  offsetMomentum (nbody.js:12): untyped JavaScript file, in a loop
+  hint: add types to compile these statically; see scriptc coverage --explain-dynamic
+
+The program compiled. Adding types to these functions lets scriptc compile them to faster code.
+```
+
+Without a profile, a dynamic-tier function counts as likely to run often when a dynamic operation runs on every iteration of one of its loops (a `for` loop's initializer and a `for...of` loop's iterable run once), when a loop calls it, or when it calls itself. A function is named only when its source says why its values are untyped: a value typed `any` (for a `for...of` variable, the value it iterates), an untyped `JSON.parse` result, or an untyped JavaScript file. Dynamic code that runs once, such as setup code that reads an `any` configuration, is not reported, and neither are functions that are dynamic for an operation with no static lowering, which more types would not change.
+
+The warning names at most five functions, most likely to run often first, and gives the total. A function expression is named by its own name, else by the variable, property or class field it is assigned to, else as `anonymous function`. Dynamic-tier code in npm packages is summarized on one line with each package's function count. A build that comes from the cache repeats the warning. `--no-dynamic-tier-warning` leaves it out, and `--fail-on=dynamic` fails a coverage run on it.
+
 ## Diagnostic codes
 
 Coverage and `scriptc build` report the same diagnostic codes. Common ones include:
@@ -88,7 +107,7 @@ By default, `scriptc coverage` exits with status 0 whenever the program type-che
 $ scriptc coverage src/main.ts --fail-on=blockers
 ```
 
-`--fail-on=blockers` exits with status 1 when the program has blockers that would fail `scriptc build`. Blockers in unreached code and deferred operations don't count. `--fail-on=divergences` also fails on Node divergences. A program that doesn't type-check always exits with status 1.
+`--fail-on=blockers` exits with status 1 when the program has blockers that would fail `scriptc build`. Blockers in unreached code and deferred operations don't count. `--fail-on=divergences` also fails on Node divergences, and `--fail-on=dynamic` also fails on the `SC6101` warning for [untyped code that likely runs often](#untyped-code-that-likely-runs-often). A program that doesn't type-check always exits with status 1.
 
 Coverage caches its result. Running it again on an unchanged program, or after edits that only touch comments, reuses the previous verdict. Set `SCRIPTC_NO_CACHE=1` to turn the cache off.
 
@@ -174,7 +193,7 @@ For editors, CI annotations, and other tools, `scriptc coverage --print=diagnost
     </tr>
     <tr>
       <td><code>category</code></td>
-      <td><code>invalid-source</code> (the program has a TypeScript or JSON error), <code>unsupported</code> (valid code scriptc cannot compile yet), <code>divergence</code> (compiles, but can behave differently from Node.js), <code>environment</code> (project configuration, scriptc's type world, toolchain, or target), or <code>internal</code> (a compiler bug).</td>
+      <td><code>invalid-source</code> (the program has a TypeScript or JSON error), <code>unsupported</code> (valid code scriptc cannot compile yet), <code>divergence</code> (compiles, but can behave differently from Node.js), <code>performance</code> (compiles and behaves as under Node.js, but runs slower than typed code would), <code>environment</code> (project configuration, scriptc's type world, toolchain, or target), or <code>internal</code> (a compiler bug).</td>
     </tr>
     <tr>
       <td><code>severity</code></td>

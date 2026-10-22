@@ -6,7 +6,7 @@ import { byteNumberAccess } from "../../ir/byte-numbers.js";
 import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 import { emitCountedLoopLimit, emitCountedLoopSafety } from "./counted-loops.js";
-import { emitBytesHeaderLength } from "./expr-bytes.js";
+import { emitBytesHeaderLength, emitBytesSharedStorage } from "./expr-bytes.js";
 
 type Node = IrExpr | IrStmt;
 type VarRef = IrExpr & { kind: "varRef" };
@@ -41,8 +41,13 @@ interface AffineCheck {
 export interface BytesLoopVersion {
   /** Typed-array accesses that are in bounds whenever the guard holds. */
   bounds: ReadonlySet<Node>;
+  /** Worker programs: typed-array accesses whose views the guard proves
+   * thread-owned (no shared storage). */
+  owned: ReadonlySet<Node>;
   /** Root receiver bindings, read once before the loop. */
   receivers: { ref: VarRef; global: boolean }[];
+  /** Receivers the guard requires to have no shared storage. */
+  ownedReceivers: number[];
   fixed: FixedCheck[];
   affine: AffineCheck[];
   /** The counted loop whose iteration space the affine checks cover. */
@@ -66,6 +71,11 @@ export interface BytesLoopFacts {
   initialized: ReadonlySet<string>;
   /** Accesses already proved in bounds without a guard. */
   proven: ReadonlySet<Node>;
+  /** Worker programs: an access of a view that may be shared tests the
+   * view's shared storage first. */
+  workers: boolean;
+  /** Accesses already proved thread-owned by an enclosing version. */
+  owned: ReadonlySet<Node>;
 }
 
 const MAX_COST = 400;
@@ -86,6 +96,11 @@ const INVARIANT_OPS = new Set(["+", "-", "*", "&", "|", "^", "<<", ">>", ">>>"])
  * - an index `k * counter + invariant + c` of a counted loop needs its first
  *   and last values in bounds, such as `out[base + i]` for `i < n` or
  *   `view.getUint32(i * 4)`.
+ *
+ * In worker programs, every access of a view that may be shared tests its
+ * shared storage. A view's storage is also fixed at construction, so the
+ * same guard tests each invariant receiver once, and the fast copy reads
+ * and writes thread-owned views directly.
  *
  * Only small synchronous loops are versioned (nested loops included), and
  * the emitter bounds how deeply versions nest. The checked loop runs
@@ -314,10 +329,19 @@ export function matchBytesLoopVersion(
     }
     return index;
   };
+  // Worker programs: accesses through invariant receivers, proven or not,
+  // become thread-owned when the guard finds no shared storage.
+  const owned = new Map<number, Node[]>();
   const access = (node: Node, array: IrExpr, index: IrExpr, width: number): void => {
-    if (facts.proven.has(node)) return;
     const ref = root(array);
     if (!ref) return;
+    if (facts.workers && !facts.owned.has(node)) {
+      const receiver = receiverOf(ref);
+      const nodes = owned.get(receiver);
+      if (nodes) nodes.push(node);
+      else owned.set(receiver, [node]);
+    }
+    if (facts.proven.has(node)) return;
     const shape = counter !== null ? affine(index) : null;
     if (shape && shape.counter !== 0) {
       const operands = new Set<IrExpr>();
@@ -383,9 +407,15 @@ export function matchBytesLoopVersion(
   });
   const fixedKept = [...fixed.values()].slice(0, MAX_CHECKS);
   const affineKept = affineGroups.slice(0, MAX_CHECKS - fixedKept.length);
-  if (fixedKept.length === 0 && affineKept.length === 0) return null;
+  const ownedKept = [...owned.entries()].slice(0, MAX_CHECKS);
+  if (fixedKept.length === 0 && affineKept.length === 0 && ownedKept.length === 0) return null;
   const bounds = new Set<Node>();
+  const ownedNodes = new Set<Node>();
   const used = new Set<number>();
+  for (const [receiver, nodes] of ownedKept) {
+    used.add(receiver);
+    for (const node of nodes) ownedNodes.add(node);
+  }
   const ranges = new Map<IrExpr, IntegerRange>();
   const counterLow = Math.max(counted?.range.min ?? 0, -bound),
     counterHigh = Math.min(counted?.range.max ?? 0, bound);
@@ -397,7 +427,6 @@ export function matchBytesLoopVersion(
     used.add(group.check.receiver);
     for (const node of group.nodes) bounds.add(node);
     for (const operand of group.operands) {
-      if (facts.ranges.get(operand)) continue;
       const shape = shapes.get(operand)!;
       const a = shape.counter * counterLow,
         b = shape.counter * counterHigh;
@@ -408,7 +437,14 @@ export function matchBytesLoopVersion(
         min += term.sign > 0 ? r.min : -r.max;
         max += term.sign > 0 ? r.max : -r.min;
       }
-      if (counterLow <= counterHigh) ranges.set(operand, { min, max });
+      if (counterLow > counterHigh) continue;
+      // The guard's bound on the counter can narrow a range the operand
+      // already has (a loop to a length proves only `i < 2^53`), so that
+      // `i * 4` in the fast copy is exact integer arithmetic.
+      const known = facts.ranges.get(operand);
+      if (!known) ranges.set(operand, { min, max });
+      else if (min > known.min || max < known.max)
+        ranges.set(operand, { min: Math.max(min, known.min), max: Math.min(max, known.max) });
     }
   }
   // Renumber the receivers the kept checks use.
@@ -420,7 +456,9 @@ export function matchBytesLoopVersion(
     (counted.range.min < -bound || counted.range.max > bound);
   return {
     bounds,
+    owned: ownedNodes,
     receivers: order.map((index) => receivers[index]!),
+    ownedReceivers: ownedKept.map(([receiver]) => renumber.get(receiver)!),
     fixed: fixedKept.map((g) => ({
       receiver: renumber.get(g.check.receiver)!,
       end: g.check.end,
@@ -439,7 +477,8 @@ export function matchBytesLoopVersion(
 }
 
 /** Branches to `fast` when every access the version proves is in bounds for
- * every iteration, and to `slow` otherwise (including a counted loop whose
+ * every iteration and every view it proves thread-owned has no shared
+ * storage, and to `slow` otherwise (including a counted loop whose
  * integer form is not established, or a module receiver not yet set). */
 export function emitBytesLoopVersionGuard(
   host: LlvmEmitterContext,
@@ -473,6 +512,11 @@ export function emitBytesLoopVersionGuard(
     return wide;
   });
   const conditions: string[] = [];
+  for (const index of version.ownedReceivers) {
+    const owned = B.tmp();
+    B.line(`${owned} = icmp eq ptr ${emitBytesSharedStorage(host, receivers[index]!)}, null`);
+    conditions.push(owned);
+  }
   for (const check of version.fixed) {
     const ok = B.tmp();
     B.line(`${ok} = icmp ugt i64 ${lengths[check.receiver]}, ${check.end}`);

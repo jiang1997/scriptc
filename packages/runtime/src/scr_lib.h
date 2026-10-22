@@ -238,7 +238,8 @@ double scr_process_memory_usage_field(double k);
 double scr_process_rss(void);
 /* The runtime heap's footprint (scr_alloc.c): bytes held from the system
  * and bytes in live allocations, for the calling thread's allocator plus
- * the system allocator where it reports them. */
+ * the system allocator where it reports them, plus the program-lifetime
+ * region's chunks (compact class instances). */
 void scr_heap_stats(double *total, double *used);
 /* process.ppid: the parent's pid at the time of the read. */
 double scr_process_ppid(void);
@@ -365,6 +366,9 @@ typedef struct ScrBytes ScrBytes;
 ScrStr *scr_atomics_wait(ScrBytes *, double, double, double);
 double scr_atomics_notify(ScrBytes *, double, double);
 double scr_atomics_op(ScrBytes *, double, double, double, double);
+double scr_atomics_op_dyn(const ScrDyn *, double, double, double, double);
+ScrStr *scr_atomics_wait_dyn(const ScrDyn *, double, double, double);
+double scr_atomics_notify_dyn(const ScrDyn *, double, double);
 
 /* isatty(3) over an fd (0/1/2): a real boolean — false where Node's
  * non-TTY streams expose undefined (SEMANTICS.md). stdin_destroy is a

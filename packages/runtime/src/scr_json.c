@@ -311,9 +311,10 @@ void scr_jb_put_f64(ScrJsonBuf *b, double v) {
 
 /* Find the next quote, backslash or control byte. memcpy keeps the word
  * loads unaligned-safe, and the length guard never reads past the input.
- * The masks only decide whether to inspect a word byte by byte: borrow
- * propagation may mark extra lanes, so it must not determine a byte index.
- * High UTF-8 bytes are ordinary data, independent of host byte order. */
+ * Borrow propagation can mark extra lanes, but only above a lane that
+ * holds a special byte, so on little-endian hosts the lowest marked lane
+ * is the answer; other hosts inspect the marked word byte by byte. High
+ * UTF-8 bytes are ordinary data. */
 static size_t scr_json_plain_bytes(const char *data, size_t len) {
   const uint64_t ones = UINT64_C(0x0101010101010101);
   const uint64_t high = UINT64_C(0x8080808080808080);
@@ -326,8 +327,40 @@ static size_t scr_json_plain_bytes(const char *data, size_t len) {
     uint64_t special = ((quotes - ones) & ~quotes) |
                        ((slashes - ones) & ~slashes) |
                        ((word - ones * 0x20) & ~word);
-    if (special & high) break;
+    special &= high;
+    if (special) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+      /* A borrow only marks lanes above a lane that really matched, so
+       * the lowest marked lane is the first special byte. */
+      return i + (size_t)__builtin_ctzll(special) / 8;
+#else
+      break;
+#endif
+    }
     i += sizeof word;
+  }
+  /* The last 1..7 bytes as one word: two overlapping 4-byte loads, or the
+   * first, middle and last byte of a shorter rest with the remaining lanes
+   * filled with a plain byte. A plain rest (the common case: most strings
+   * are short) ends the scan; otherwise the bytes are inspected one by one. */
+  size_t rest = len - i;
+  if (rest) {
+    uint64_t word;
+    if (rest >= 4) {
+      uint32_t lo, hi;
+      memcpy(&lo, data + i, sizeof lo);
+      memcpy(&hi, data + len - 4, sizeof hi);
+      word = (uint64_t)lo | (uint64_t)hi << 32;
+    } else {
+      word = (uint64_t)(unsigned char)data[i] | (uint64_t)(unsigned char)data[i + rest / 2] << 8 |
+             (uint64_t)(unsigned char)data[len - 1] << 16 | UINT64_C(0x4141414141000000);
+    }
+    uint64_t quotes = word ^ (ones * '"');
+    uint64_t slashes = word ^ (ones * '\\');
+    uint64_t special = ((quotes - ones) & ~quotes) |
+                       ((slashes - ones) & ~slashes) |
+                       ((word - ones * 0x20) & ~word);
+    if (!(special & high)) return len;
   }
   while (i < len) {
     unsigned char c = (unsigned char)data[i];
@@ -673,6 +706,17 @@ void scr_dyn_from_leave(void) {
  * strict alloc/free balance.
  */
 static SCR_TL ScrDyn *scr_builtin_array_prototype;
+
+bool scr_dyn_is_array_prototype(const ScrDyn *d) {
+  return d && d == scr_builtin_array_prototype;
+}
+
+bool scr_dyn_array_prototype_element_fence(const ScrDyn *recv) {
+  if (!scr_dyn_is_array_prototype(recv)) return false;
+  static const char message[] = "Elements on Array.prototype are not supported yet";
+  scr_throw_error_msg_code(SCR_ERR_ERROR, message, sizeof message - 1, "SC2020");
+  return true;
+}
 
 /* Property names are immutable and often repeated across simultaneously live
  * objects. Entries own references to their bytes; this fixed weak table owns
@@ -2680,18 +2724,22 @@ bool scr_record_source_has(const void *rec) {
   return scr_record_source_count && scr_record_source_find(rec) != NULL;
 }
 
-static void scr_record_source_disposed(void *rec) {
-  size_t bit = scr_record_source_filter_bit(rec);
-  if (!(scr_record_source_filter[bit >> 6] & (UINT64_C(1) << (bit & 63)))) return;
-  ScrRecordSource *found = scr_record_source_find(rec);
-  if (!found) return;
+/* Drops the entry at `found` from the table, releasing its view. The table
+ * no longer refers to the view first, so a nested disposal that re-enters
+ * the dispose hook sees a consistent table. */
+static void scr_record_source_drop(ScrRecordSource *found) {
   ScrDyn *view = found->view;
   *found = (ScrRecordSource){ .rec = SCR_RECORD_SOURCE_DELETED };
   scr_record_source_count--;
   scr_record_source_deleted++;
-  /* The table no longer refers to the view, so a nested disposal that
-   * re-enters this hook sees a consistent table. */
   scr_dyn_release(view);
+}
+
+static void scr_record_source_disposed(void *rec) {
+  size_t bit = scr_record_source_filter_bit(rec);
+  if (!(scr_record_source_filter[bit >> 6] & (UINT64_C(1) << (bit & 63)))) return;
+  ScrRecordSource *found = scr_record_source_find(rec);
+  if (found) scr_record_source_drop(found);
 }
 
 /* The single native dispose hook serves weak collections and the table
@@ -2834,6 +2882,20 @@ void scr_record_source_note(void *rec, const ScrDyn *src, const char *const *nam
   scr_record_source_put(&probe);
 }
 
+void scr_record_source_move(void *from, void *to) {
+  if (!scr_record_source_count) return;
+  ScrRecordSource *old = scr_record_source_find(to);
+  if (old) scr_record_source_drop(old);
+  ScrRecordSource *found = scr_record_source_find(from);
+  if (!found) return;
+  ScrRecordSource moved = *found;
+  *found = (ScrRecordSource){ .rec = SCR_RECORD_SOURCE_DELETED };
+  scr_record_source_count--;
+  scr_record_source_deleted++;
+  moved.rec = to;
+  scr_record_source_put(&moved);
+}
+
 /* Refreshes a retained record view: the view's own-key order, declared
  * values from the native snapshot (a declared key the record no longer has
  * drops), every other property as the view holds it, then declared fields
@@ -2917,6 +2979,44 @@ static bool scr_jb_put_source_field(ScrJsonBuf *b, void *rec, const ScrRecordSou
 
 /* The same in one lookup: writes the record and answers true when it kept
  * a source, otherwise writes nothing and answers false. */
+static bool scr_dyn_key_is_index(const char *key, size_t len, double *out);
+
+typedef struct {
+  double index;
+  size_t entry;
+} ScrRecordSourceIntegerKey;
+
+static int scr_record_source_integer_cmp(const void *a, const void *b) {
+  double x = ((const ScrRecordSourceIntegerKey *)a)->index;
+  double y = ((const ScrRecordSourceIntegerKey *)b)->index;
+  return (x > y) - (x < y);
+}
+
+/* The entry indexes of `view` in JavaScript's own-key order: integer keys
+ * ascending, then the other keys in insertion order. `out` holds len. */
+static void scr_record_source_key_order(const ScrDyn *view, size_t *out) {
+  size_t len = view->v.obj.len;
+  ScrRecordSourceIntegerKey small[64];
+  ScrRecordSourceIntegerKey *keys = len <= 64 ? small : malloc(len * sizeof *keys);
+  if (!keys) scr_json_oom();
+  size_t integers = 0, next = 0;
+  for (size_t i = 0; i < len; i++) {
+    const ScrDynEntry *entry = &view->v.obj.entries[i];
+    double index;
+    if (scr_dyn_key_is_index(entry->key, entry->key_len, &index))
+      keys[integers++] = (ScrRecordSourceIntegerKey){ index, i };
+  }
+  /* Integer keys are distinct, so the order is total. */
+  qsort(keys, integers, sizeof *keys, scr_record_source_integer_cmp);
+  for (size_t i = 0; i < integers; i++) out[next++] = keys[i].entry;
+  for (size_t i = 0; i < len; i++) {
+    const ScrDynEntry *entry = &view->v.obj.entries[i];
+    double index;
+    if (!scr_dyn_key_is_index(entry->key, entry->key_len, &index)) out[next++] = i;
+  }
+  if (keys != small) free(keys);
+}
+
 bool scr_jb_try_record_source(ScrJsonBuf *b, void *rec,
                               bool (*field)(ScrJsonBuf *, void *, size_t, bool)) {
   ScrRecordSource *found = scr_record_source_find(rec);
@@ -2937,13 +3037,24 @@ bool scr_jb_try_record_source(ScrJsonBuf *b, void *rec,
   bool small[64] = { false };
   bool *seen = count <= 64 ? small : calloc(count, sizeof *seen);
   if (!seen) scr_json_oom();
+  /* Integer keys come first in JavaScript's own-key order; a view without
+   * any walks in insertion order. */
+  size_t order_small[64];
+  size_t *order = NULL;
+  for (size_t k = 0; k < view->v.obj.len && !order; k++) {
+    double index;
+    if (!scr_dyn_key_is_index(view->v.obj.entries[k].key, view->v.obj.entries[k].key_len, &index)) continue;
+    order = view->v.obj.len <= 64 ? order_small : malloc(view->v.obj.len * sizeof *order);
+    if (!order) scr_json_oom();
+    scr_record_source_key_order(view, order);
+  }
   /* Members whose writing cannot run program code are written in place.
    * The first member that can (an accessor, a toJSON method, a getter below
    * it) ends that loop: the remaining keys are taken first, as
    * SerializeJSONObject takes them before reading any value. */
   size_t i = 0;
   for (; i < view->v.obj.len && !scr_exc_pending(); i++) {
-    const ScrDynEntry *entry = &view->v.obj.entries[i];
+    const ScrDynEntry *entry = &view->v.obj.entries[order ? order[i] : i];
     size_t index = scr_record_source_index(&source, entry->key, entry->key_len);
     if (index < count) {
       if (!seen[index] && scr_jb_put_source_field(b, rec, &source, index, first, on_stack, field))
@@ -2963,7 +3074,7 @@ bool scr_jb_try_record_source(ScrJsonBuf *b, void *rec,
   if (i < view->v.obj.len && !scr_exc_pending()) {
     ScrDyn *rest = scr_dyn_new_arr();
     for (size_t j = i; j < view->v.obj.len; j++) {
-      const ScrDynEntry *entry = &view->v.obj.entries[j];
+      const ScrDynEntry *entry = &view->v.obj.entries[order ? order[j] : j];
       if (!entry->enumerable && !scr_record_source_declared(&source, entry->key, entry->key_len)) continue;
       ScrStr *name = scr_str_new(entry->key, entry->key_len);
       scr_dyn_arr_push(rest, scr_dyn_new_str(name));
@@ -2988,6 +3099,7 @@ bool scr_jb_try_record_source(ScrJsonBuf *b, void *rec,
       first = false;
   }
   if (seen != small) free(seen);
+  if (order && order != order_small) free(order);
   scr_dyn_release(view);
   scr_jb_putc(b, '}');
   if (entered) scr_jb_leave(b);
@@ -4508,7 +4620,6 @@ bool scr_dyn_same_value(const ScrDyn *left, const ScrDyn *right) {
 static void scr_dyn_descriptor_fields_drop(ScrDyn **fields) {
   for (size_t i = 0; i < 6; i++) scr_dyn_release(fields[i]);
 }
-static bool scr_dyn_key_is_index(const char *key, size_t len, double *out);
 static void scr_error_sync_cause(ScrDyn *view, const ScrStr *key);
 static void scr_error_sync_slots(const ScrDyn *view, ScrDyn *obj, const ScrStr *key);
 
@@ -4625,6 +4736,24 @@ static void scr_dyn_named_prototypes_cleanup(void) {
   scr_dyn_named_count = scr_dyn_named_cap = 0;
 }
 
+/* Stamps prototype `p` with a copy of `name` (len bytes) and keeps it alive. */
+static void scr_dyn_stamp_prototype_name(ScrDyn *p, const char *name, size_t len) {
+  if (scr_dyn_named_count == scr_dyn_named_cap) {
+    if (scr_dyn_named_cap == 0) scr_atexit(scr_dyn_named_prototypes_cleanup);
+    size_t cap = scr_dyn_named_cap ? scr_dyn_named_cap * 2 : 8;
+    ScrDynNamedPrototype *grown = realloc(scr_dyn_named_prototypes, cap * sizeof *grown);
+    if (!grown) scr_json_oom();
+    scr_dyn_named_prototypes = grown;
+    scr_dyn_named_cap = cap;
+  }
+  char *copy = malloc(len + 1);
+  if (!copy) scr_json_oom();
+  memcpy(copy, name, len);
+  copy[len] = '\0';
+  p->v.obj.class_name = copy;
+  scr_dyn_named_prototypes[scr_dyn_named_count++] = (ScrDynNamedPrototype){ scr_dyn_retain(p), copy };
+}
+
 static void scr_dyn_name_prototype_chain(const ScrDyn *object) {
   for (ScrDyn *p = object->prototype; p; p = p->prototype) {
     if (p->kind != SCR_DYN_OBJ || p->v.obj.class_name) return;
@@ -4632,22 +4761,14 @@ static void scr_dyn_name_prototype_chain(const ScrDyn *object) {
     if (!entry || entry->accessor || !entry->value || entry->value->kind != SCR_DYN_FUNC) continue;
     const char *name = entry->value->v.fn.name;
     if (!name || !name[0]) continue;
-    if (scr_dyn_named_count == scr_dyn_named_cap) {
-      if (scr_dyn_named_cap == 0) scr_atexit(scr_dyn_named_prototypes_cleanup);
-      size_t cap = scr_dyn_named_cap ? scr_dyn_named_cap * 2 : 8;
-      ScrDynNamedPrototype *grown = realloc(scr_dyn_named_prototypes, cap * sizeof *grown);
-      if (!grown) scr_json_oom();
-      scr_dyn_named_prototypes = grown;
-      scr_dyn_named_cap = cap;
-    }
-    size_t len = strlen(name);
-    char *copy = malloc(len + 1);
-    if (!copy) scr_json_oom();
-    memcpy(copy, name, len + 1);
-    p->v.obj.class_name = copy;
-    scr_dyn_named_prototypes[scr_dyn_named_count++] = (ScrDynNamedPrototype){ scr_dyn_retain(p), copy };
+    scr_dyn_stamp_prototype_name(p, name, strlen(name));
     return;
   }
+}
+
+void scr_dyn_name_class_prototype(ScrDyn *prototype, const ScrStr *name) {
+  if (prototype->kind != SCR_DYN_OBJ || prototype->v.obj.class_name || name->len == 0) return;
+  scr_dyn_stamp_prototype_name(prototype, name->data, name->len);
 }
 
 /* Ordinary native function constructors retain their live prototype table.
@@ -8527,6 +8648,7 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
       else idx = idx * 10 + (size_t)(key->data[i] - '0');
     }
     if (is_index && idx < 4294967295ULL) {
+      if (scr_dyn_array_prototype_element_fence(recv)) return;
       if (recv->v.arr.frozen && idx < recv->v.arr.len) {
         static const char message[] = "Cannot assign to read only property";
         scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
@@ -8996,6 +9118,11 @@ typedef struct {
   ScrDynRegion *region; /* tags completed containers (ScrDynRegion); may be NULL */
   struct ScrJsonShape *shapes; /* key-sequence transitions (scr_json_object) */
   uint32_t nshapes, shape_cap;
+  /* Schema records whose plain field names are known (scr_jschema_plain):
+   * bit i of the mask is set when field i's name holds no byte JSON text
+   * would escape. */
+  const struct ScrJsonSchema *plain_schema[4];
+  uint64_t plain_mask[4];
 } ScrJsonP;
 
 static void scr_json_throw(const ScrJsonP *p, const char *msg) {
@@ -9003,7 +9130,10 @@ static void scr_json_throw(const ScrJsonP *p, const char *msg) {
   scr_throw_error_msg(SCR_ERR_SYNTAX, msg, strlen(msg));
 }
 
-static void scr_json_throw_pos(const ScrJsonP *p, const char *what, size_t pos) {
+/* Errors stay out of line so the scanners that report them keep their
+ * registers for the common path. */
+static __attribute__((noinline, cold)) void scr_json_throw_pos(const ScrJsonP *p, const char *what,
+                                                               size_t pos) {
   if (p->quiet) return;
   char buf[128];
   int n = snprintf(buf, sizeof buf, "%s in JSON at position %zu", what, pos);
@@ -9024,11 +9154,15 @@ static void scr_json_throw_token(const ScrJsonP *p) {
 }
 
 static void scr_json_ws(ScrJsonP *p) {
-  while (p->pos < p->len) {
-    char c = p->s[p->pos];
-    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->pos++;
+  /* A local cursor, as in scr_json_number_value. */
+  const char *s = p->s;
+  size_t pos = p->pos;
+  while (pos < p->len) {
+    char c = s[pos];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') pos++;
     else break;
   }
+  p->pos = pos;
 }
 
 /* Append the WTF-8 encoding of a code point or lone surrogate unit; a low
@@ -9179,7 +9313,14 @@ static const double scr_json_pow10[23] = {
  * (thrown unless quiet). Shared by the dyn tree and the schema parser so
  * both produce bit-identical values. */
 static bool scr_json_number_value(ScrJsonP *p, double *out) {
-  size_t start = p->pos;
+  /* The cursor and text stay in locals: the runtime builds without strict
+   * aliasing, so a byte read through p->s could alias p->pos, and a loop
+   * on p->pos would store it on every digit. p->pos is written once, when
+   * the token ends. */
+  const char *s = p->s;
+  const size_t len = p->len;
+  const size_t start = p->pos;
+  size_t pos = start;
   /* Grammar validation and value accumulation in one pass. Clinger's fast
    * path: with at most 15 significant digits the mantissa is exact in a
    * double, and scaling by an exact power of ten (|exp| <= 22) rounds
@@ -9188,35 +9329,37 @@ static bool scr_json_number_value(ScrJsonP *p, double *out) {
   int ndig = 0;   /* significant digits folded into mant */
   int exp10 = 0;  /* decimal exponent (fraction shift + explicit exponent) */
   bool neg = false, precise = true;
-  if (p->s[p->pos] == '-') {
+  if (s[pos] == '-') {
     neg = true;
-    p->pos++;
-    if (p->pos >= p->len || p->s[p->pos] < '0' || p->s[p->pos] > '9') {
-      scr_json_throw_pos(p, "No number after minus sign", p->pos);
+    pos++;
+    if (pos >= len || s[pos] < '0' || s[pos] > '9') {
+      p->pos = pos;
+      scr_json_throw_pos(p, "No number after minus sign", pos);
       return false;
     }
   }
-  if (p->s[p->pos] == '0') {
-    p->pos++;
+  if (s[pos] == '0') {
+    pos++;
   } else {
-    while (p->pos < p->len && p->s[p->pos] >= '0' && p->s[p->pos] <= '9') {
+    while (pos < len && s[pos] >= '0' && s[pos] <= '9') {
       if (ndig < 15) {
-        mant = mant * 10 + (uint64_t)(p->s[p->pos] - '0');
+        mant = mant * 10 + (uint64_t)(s[pos] - '0');
         ndig++;
       } else {
         precise = false;
       }
-      p->pos++;
+      pos++;
     }
   }
-  if (p->pos < p->len && p->s[p->pos] == '.') {
-    p->pos++;
-    if (p->pos >= p->len || p->s[p->pos] < '0' || p->s[p->pos] > '9') {
-      scr_json_throw_pos(p, "Unterminated fractional number", p->pos);
+  if (pos < len && s[pos] == '.') {
+    pos++;
+    if (pos >= len || s[pos] < '0' || s[pos] > '9') {
+      p->pos = pos;
+      scr_json_throw_pos(p, "Unterminated fractional number", pos);
       return false;
     }
-    while (p->pos < p->len && p->s[p->pos] >= '0' && p->s[p->pos] <= '9') {
-      unsigned digit = (unsigned)(p->s[p->pos] - '0');
+    while (pos < len && s[pos] >= '0' && s[pos] <= '9') {
+      unsigned digit = (unsigned)(s[pos] - '0');
       if (mant == 0 && digit == 0) {
         exp10--; /* leading fractional zeros scale without a digit */
       } else if (ndig < 15) {
@@ -9226,29 +9369,33 @@ static bool scr_json_number_value(ScrJsonP *p, double *out) {
       } else {
         precise = false;
       }
-      p->pos++;
+      pos++;
     }
   }
-  if (p->pos < p->len && (p->s[p->pos] == 'e' || p->s[p->pos] == 'E')) {
-    p->pos++;
+  if (pos < len && (s[pos] == 'e' || s[pos] == 'E')) {
+    pos++;
     bool eneg = false;
-    if (p->pos < p->len && (p->s[p->pos] == '+' || p->s[p->pos] == '-')) {
-      eneg = p->s[p->pos] == '-';
-      p->pos++;
+    if (pos < len && (s[pos] == '+' || s[pos] == '-')) {
+      eneg = s[pos] == '-';
+      pos++;
     }
-    if (p->pos >= p->len || p->s[p->pos] < '0' || p->s[p->pos] > '9') {
-      scr_json_throw_pos(p, "Exponent part is missing a number", p->pos);
+    if (pos >= len || s[pos] < '0' || s[pos] > '9') {
+      p->pos = pos;
+      scr_json_throw_pos(p, "Exponent part is missing a number", pos);
       return false;
     }
     int ev = 0;
-    while (p->pos < p->len && p->s[p->pos] >= '0' && p->s[p->pos] <= '9') {
-      if (ev < 100000) ev = ev * 10 + (p->s[p->pos] - '0');
-      p->pos++;
+    while (pos < len && s[pos] >= '0' && s[pos] <= '9') {
+      if (ev < 100000) ev = ev * 10 + (s[pos] - '0');
+      pos++;
     }
     exp10 += eneg ? -ev : ev;
   }
+  p->pos = pos;
   if (precise && exp10 >= -22 && exp10 <= 22) {
-    double v = (double)mant; /* exact: mant < 10^15 < 2^53 */
+    /* exact: mant < 10^15 < 2^53; the signed conversion is one
+     * instruction on x86-64, the unsigned one a sequence */
+    double v = (double)(int64_t)mant;
     if (exp10 > 0) v *= scr_json_pow10[exp10];
     else if (exp10 < 0) v /= scr_json_pow10[-exp10];
     *out = neg ? -v : v;
@@ -9258,7 +9405,7 @@ static bool scr_json_number_value(ScrJsonP *p, double *out) {
    * grammar above is a strict subset of what strtod accepts). The ScrStr
    * data is NUL-terminated, and strtod stops at the first non-number char,
    * so parsing from `start` reads exactly the validated token. */
-  *out = strtod(p->s + start, NULL);
+  *out = strtod(s + start, NULL);
   return true;
 }
 
@@ -9855,26 +10002,38 @@ static __attribute__((noinline)) bool scr_jschema_absent(const ScrJsonSchema *s,
   return true;
 }
 
-/* The quoted key at p->pos when it is exactly `f`'s name, written without
- * escapes: the bytes consumed (name length + 2), else 0. Names of more
- * than eight bytes, and names holding a byte JSON text would escape,
- * take the general key scan. */
+/* Bit i set when field i's name (at most eight bytes) holds no quote,
+ * backslash or control byte, so text that spells it unescaped is exactly
+ * that key. Names are schema constants: each record schema computes its
+ * mask once per parse, in a four-entry table. */
+static uint64_t scr_jschema_plain(ScrJsonP *p, const ScrJsonSchema *s) {
+  size_t slot = ((uintptr_t)s >> 4) & 3;
+  if (p->plain_schema[slot] == s) return p->plain_mask[slot];
+  uint64_t mask = 0;
+  for (size_t i = 0; i < s->nfields && i < 64; i++) {
+    const ScrJsonSchemaField *f = &s->fields[i];
+    bool plain = f->name_len > 0 && f->name_len <= 8;
+    for (size_t k = 0; plain && k < f->name_len; k++) {
+      unsigned char c = (unsigned char)f->name[k];
+      plain = c >= 0x20 && c != '"' && c != '\\';
+    }
+    if (plain) mask |= (uint64_t)1 << i;
+  }
+  p->plain_schema[slot] = s;
+  p->plain_mask[slot] = mask;
+  return mask;
+}
+
+/* The quoted key at p->pos when it is exactly `f`'s name, a plain name of
+ * at most eight bytes (scr_jschema_plain): the bytes consumed (name
+ * length + 2), else 0. Other names take the general key scan. */
 static inline size_t scr_jschema_key_direct(const ScrJsonP *p, const ScrJsonSchemaField *f) {
   size_t len = f->name_len;
   size_t at = p->pos + 1;
-  if (len == 0 || len > 8 || len >= p->len - at) return 0;
+  if (len >= p->len - at) return 0;
   const char *text = p->s + at;
-  uint64_t word = scr_key_short_word(f->name, len);
-  if (text[len] != '"' || scr_key_short_word(text, len) != word) return 0;
-  /* The packed word holds every name byte (lengths one to three use its
-   * low three bytes). A quote, backslash or control byte sends the key to
-   * the general scan, as in scr_json_plain_bytes. */
-  const uint64_t ones = UINT64_C(0x0101010101010101), high = UINT64_C(0x8080808080808080);
-  uint64_t quotes = word ^ (ones * '"'), slashes = word ^ (ones * '\\');
-  uint64_t special = ((quotes - ones) & ~quotes) | ((slashes - ones) & ~slashes) |
-                     ((word - ones * 0x20) & ~word);
-  uint64_t bytes = len >= 4 ? ~UINT64_C(0) : UINT64_C(0xffffff);
-  return (special & high & bytes) ? 0 : len + 2;
+  if (text[len] != '"' || scr_key_short_word(text, len) != scr_key_short_word(f->name, len)) return 0;
+  return len + 2;
 }
 
 /* An undeclared member of a record with an index signature, after its
@@ -10002,6 +10161,7 @@ static bool scr_jschema_record(ScrJsonP *p, const ScrJsonSchema *s, ScrJsonSlot 
   const uint64_t all = n == 64 ? ~(uint64_t)0 : (((uint64_t)1 << n) - 1);
   uint64_t seen = 0;
   size_t guess = 0;
+  const uint64_t plain = scr_jschema_plain(p, s);
   scr_json_ws(p);
   if (p->pos < p->len && p->s[p->pos] == '}') {
     p->pos++;
@@ -10013,7 +10173,8 @@ static bool scr_jschema_record(ScrJsonP *p, const ScrJsonSchema *s, ScrJsonSlot 
     /* Members usually arrive in declaration order: try the successor of
      * the previous match, directly against the text, before scanning. */
     size_t idx = n;
-    size_t direct = guess < n ? scr_jschema_key_direct(p, &s->fields[guess]) : 0;
+    size_t direct =
+        guess < n && (plain >> guess & 1) ? scr_jschema_key_direct(p, &s->fields[guess]) : 0;
     if (direct) {
       idx = guess;
       p->pos += direct;
@@ -10092,13 +10253,21 @@ static bool scr_jschema_array(ScrJsonP *p, const ScrJsonSchema *s, ScrJsonSlot *
     out->ptr = arr;
     return true;
   }
+  /* Elements gather in a local run and append in bulk (scr_arr_push_many,
+   * which moves references in as scr_arr_push_ref does). */
+  uint64_t run[32];
+  size_t n = 0;
   for (;;) {
     ScrJsonSlot v;
     if (!scr_jschema_member(p, elem, &v)) goto fail;
     switch (elem->kind) {
-    case SCR_JSCHEMA_F64: scr_arr_push_f64(arr, v.f); break;
-    case SCR_JSCHEMA_BOOL: scr_arr_push_bool(arr, v.b); break;
-    default: scr_arr_push_ref(arr, v.ptr); break; /* moves in */
+    case SCR_JSCHEMA_F64: memcpy(&run[n++], &v.f, sizeof v.f); break;
+    case SCR_JSCHEMA_BOOL: run[n++] = v.b ? 1 : 0; break;
+    default: run[n++] = (uint64_t)(uintptr_t)v.ptr; break;
+    }
+    if (n == sizeof run / sizeof run[0]) {
+      scr_arr_push_many(arr, n, run);
+      n = 0;
     }
     scr_json_ws(p);
     if (p->pos >= p->len) goto fail;
@@ -10108,10 +10277,12 @@ static bool scr_jschema_array(ScrJsonP *p, const ScrJsonSchema *s, ScrJsonSlot *
     }
     if (p->s[p->pos] != ']') goto fail;
     p->pos++;
+    scr_arr_push_many(arr, n, run);
     out->ptr = arr;
     return true;
   }
 fail:
+  scr_arr_push_many(arr, n, run); /* the array releases what it holds */
   s->release(arr);
   return false;
 }
@@ -10268,6 +10439,40 @@ void scr_dyn_key_delete(ScrDyn *recv, const ScrStr *key, bool strict) {
       }
     }
     return;
+  }
+  /* A live native array keeps the noncanonical numeric properties written
+   * natively ("-1", "1.5") in its property table, and named properties,
+   * including numeric-looking keys written through a view, in its metadata,
+   * which the view and its commit hold. Deleting such a key removes it from
+   * both. Elements and `length` keep the boundary below. */
+  size_t element;
+  if (recv->kind == SCR_DYN_TYPED_REF && scr_dyn_typed_ref_array_ops(recv) &&
+      !scr_typed_ref_is_length(key) && !scr_typed_ref_canonical_index(key->data, key->len, &element)) {
+    double number;
+    bool numeric = scr_arr_numeric_key(key->data, key->len, &number);
+    if (recv->v.typed_ref.commit) {
+      ScrDyn *view = scr_dyn_typed_ref_materialize(recv);
+      if (!scr_exc_pending() && view->kind == SCR_DYN_ARR) {
+        ScrDynEntry *own = view->v.arr.properties ? scr_dyn_entry(view->v.arr.properties, key) : NULL;
+        /* A non-configurable property refuses the delete before either
+         * store changes. */
+        if (own && !own->configurable) {
+          scr_dyn_key_delete(view, key, strict);
+        } else {
+          if (numeric) scr_arr_delete(recv->v.typed_ref.ptr, number);
+          if (own) scr_dyn_key_delete(view, key, strict);
+          if (own && !scr_exc_pending()) scr_dyn_typed_ref_commit(recv);
+        }
+        scr_dyn_release(view);
+        return;
+      }
+      scr_dyn_release(view);
+      if (scr_exc_pending()) return;
+    }
+    if (numeric) {
+      scr_arr_delete(recv->v.typed_ref.ptr, number);
+      return;
+    }
   }
   if (recv->kind == SCR_DYN_FUNC) {
     if (scr_dyn_fn_property_fence(key)) return;
@@ -13860,7 +14065,8 @@ static int scr_weak_key(const ScrDyn *key, void **ptr, unsigned *kind) {
     if (key->v.handle.tag != SCR_DYNH_ARRAY_BUFFER && key->v.handle.tag != SCR_DYNH_SHARED_ARRAY_BUFFER && key->v.handle.tag != SCR_DYNH_WEAK_MAP &&
         key->v.handle.tag != SCR_DYNH_WEAK_SET && key->v.handle.tag != SCR_DYNH_STDIO &&
         key->v.handle.tag != SCR_DYNH_FETCH_REQUEST && key->v.handle.tag != SCR_DYNH_FETCH_RESPONSE &&
-        key->v.handle.tag != SCR_DYNH_MAP && key->v.handle.tag != SCR_DYNH_SET) return -1;
+        key->v.handle.tag != SCR_DYNH_MAP && key->v.handle.tag != SCR_DYNH_SET &&
+        key->v.handle.tag != SCR_DYNH_NET_SOCKET && key->v.handle.tag != SCR_DYNH_NET_SERVER) return -1;
     *ptr = key->v.handle.ptr; *kind = 4 + key->v.handle.tag; return 1;
   case SCR_DYN_TYPED_REF:
     if (!key->v.typed_ref.observed) return -1;

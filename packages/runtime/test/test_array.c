@@ -398,6 +398,8 @@ static MockRec *mock_cyc_new(int value) {
 
 static ScrArrOps mock_ops = { &mock_retain, &mock_release, NULL };
 static ScrArrOps mock_cyc_ops = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
+/* First used after test_ops_overflow fills the registry: its arrays keep the ops in their ext. */
+static ScrArrOps mock_cyc_ops_late = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
 
 static void test_ref_elements(void) {
 #ifdef SCR_RC_AUDIT
@@ -511,6 +513,38 @@ static void test_ref_cycle(void) {
   check(mock_live == 0, "cycle collected through the array element");
 #ifdef SCR_RC_AUDIT
   check(scr_arr_live_count() == arrays0, "cycle: no arrays leaked");
+#endif
+}
+
+static void test_ref_known_count_cycle(ScrArrOps *ops) {
+#ifdef SCR_RC_AUDIT
+  long arrays0 = scr_arr_live_count();
+#endif
+  /* A known-count construction of cycle-capable elements keeps its slots
+   * after the collector header: the collector traces them, and both the
+   * collected array and one released by its count free the one block. */
+  ScrArr *arr = scr_arr_new_ops(ops, 2);
+  bool in_block = arr->data == (uint64_t *)((char *)arr + ((sizeof(ScrArr) + 7) & ~(size_t)7));
+  /* Ops past the registry (once test_ops_overflow has filled it) live in
+   * the ext, which moves the slots to their own allocation. */
+  bool overflow = (arr->spare >> SCR_ARR_OPS_SHIFT) == SCR_ARR_OPS_OVERFLOW;
+  check(arr->cap >= 2 && in_block == !overflow && scr_arr_ops(arr) == ops,
+        "known-count cycle-capable construction is inline unless its ops need the ext");
+  MockRec *first = mock_cyc_new(1);
+  first->owner = (ScrArr *)scr_arr_retain(arr);
+  scr_arr_push_ref(arr, first);
+  scr_arr_push_ref(arr, mock_cyc_new(2));
+  scr_arr_release(arr);
+  scr_collect_cycles();
+  check(mock_live == 0, "cycle through an inline array collected");
+  ScrArr *plain = scr_arr_new_ops(ops, 3);
+  for (int i = 0; i < 4; i++) scr_arr_push_ref(plain, mock_cyc_new(i));
+  check(scr_arr_len(plain) == 4, "a cycle-capable inline array grows out of its block");
+  scr_arr_release(plain);
+  scr_collect_cycles();
+  check(mock_live == 0, "released inline cycle-capable array frees its elements");
+#ifdef SCR_RC_AUDIT
+  check(scr_arr_live_count() == arrays0, "known-count cycle: no arrays leaked");
 #endif
 }
 
@@ -1543,9 +1577,33 @@ static void test_inline_slots(void) {
   long strings0 = scr_str_live_count();
   long arrays0 = scr_arr_live_count();
 #endif
-  ScrArr *plain = scr_arr_new(SCR_ELEM_F64, 4);
-  check(!inline_slots(plain), "plain constructions keep separate storage");
+  ScrArr *plain = scr_arr_new(SCR_ELEM_F64, 0);
+  check(!inline_slots(plain) && plain->data == NULL, "empty plain constructions allocate no slots");
   scr_arr_release(plain);
+  /* A construction with a known count up to 16 slots keeps them in its own
+   * block; growth past them moves them out like any inline array. */
+  ScrArr *known = scr_arr_new(SCR_ELEM_F64, 4);
+  check(inline_slots(known) && known->cap >= 4 && known->len == 0 && !scr_arr_has(known, 0) &&
+            scr_arr_states_end(known) == (uint8_t *)(known->data + known->cap) + known->cap,
+        "a known-count construction places its slots in the array block");
+  size_t known_cap = known->cap;
+  for (size_t i = 0; i <= known_cap; i++) scr_arr_push_f64(known, (double)i);
+  check(!inline_slots(known) && scr_arr_len(known) == known_cap + 1 && scr_arr_get_f64(known, 0) == 0 &&
+            scr_arr_get_f64(known, (double)known_cap) == (double)known_cap,
+        "growth past a known-count construction moves the slots out");
+  scr_arr_release(known);
+  ScrArr *sixteen = scr_arr_new(SCR_ELEM_STR, 16);
+  for (int i = 0; i < 16; i++) scr_arr_push_ref(sixteen, scr_str_new("s", 1));
+  check(inline_slots(sixteen) && scr_arr_len(sixteen) == 16, "sixteen known slots stay inline");
+  scr_arr_release(sixteen);
+  ScrArr *large = scr_arr_new(SCR_ELEM_F64, 17);
+  check(!inline_slots(large) && large->cap >= 17, "larger known counts keep separate storage");
+  scr_arr_release(large);
+  ScrArr *known_flags = scr_arr_new(SCR_ELEM_BOOL, 5);
+  scr_arr_push_bool(known_flags, true);
+  check(inline_slots(known_flags) && known_flags->cap >= 5 && scr_arr_get_bool(known_flags, 0),
+        "known-count boolean constructions are inline too");
+  scr_arr_release(known_flags);
   ScrArr *a = scr_arr_new_small(SCR_ELEM_F64);
   check(inline_slots(a) && a->cap >= 4 && a->len == 0 &&
             scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
@@ -2205,7 +2263,9 @@ int main(int argc, char **argv) {
   test_nested_rc();
   test_index_of_includes();
   test_ref_elements();
+  test_ref_known_count_cycle(&mock_cyc_ops);
   test_ops_overflow();
+  test_ref_known_count_cycle(&mock_cyc_ops_late);
   test_ext_through_storage_changes();
   test_ref_cycle();
   test_ref_truncate_cycle();

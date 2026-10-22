@@ -10,6 +10,13 @@
 static bool owned(const void *p) { return (uintptr_t)p - scr_sa.base < scr_sa.span; }
 #endif
 
+/* The allocator unit needs only scr_trap from the rest of the runtime: the
+ * program-lifetime region stops the program through it. */
+_Noreturn void scr_trap(const char *msg) {
+  fputs(msg, stderr);
+  abort();
+}
+
 static void fill(unsigned char *p, size_t n, unsigned char seed) {
   for (size_t i = 0; i < n; i++) p[i] = (unsigned char)(seed + i * 7);
 }
@@ -962,6 +969,60 @@ static void check_discard(void) {
 }
 #endif
 
+#if defined(__linux__) && SCR_SMALL_ALLOC
+/* The program-lifetime region hands out zeroed, 8-byte aligned blocks below
+ * 32 GiB, in order from the calling thread's chunk; a block larger than a
+ * chunk gets chunks of its own. Heap statistics count the chunks. Builds
+ * with AddressSanitizer have no region (its shadow memory takes the range),
+ * and scriptc builds with sanitizers keep pointers instead. */
+static void check_program_lifetime_region(void) {
+  double total0, used0, total1, used1;
+  scr_heap_stats(&total0, &used0);
+  scr_plr_init();
+  unsigned char *a = scr_plr_alloc(20), *b = scr_plr_alloc(40);
+  assert(((uintptr_t)a & 7) == 0 && b == a + 24);
+  assert((uintptr_t)a >= ((uintptr_t)4 << 30) && (uintptr_t)b + 40 <= ((uintptr_t)32 << 30));
+  for (size_t i = 0; i < 40; i++) assert(b[i] == 0);
+  size_t n = (size_t)3 << 20;
+  unsigned char *big = scr_plr_alloc(n);
+  assert(((uintptr_t)big & 7) == 0 && (uintptr_t)big + n <= ((uintptr_t)32 << 30));
+  for (size_t i = 0; i < n; i += 4096) assert(big[i] == 0);
+  fill(big, n, 3);
+  verify(big, n, 3);
+  scr_heap_stats(&total1, &used1);
+  assert(total1 - total0 >= (double)n && used1 - used0 >= (double)n && used1 <= total1);
+}
+
+#ifdef SCR_WORKERS
+/* Threads carve the region concurrently: every block is zeroed and keeps
+ * what its thread wrote. */
+#define REGION_THREADS 4u
+#define REGION_BLOCKS 20000u
+static unsigned char *region_blocks[REGION_THREADS][REGION_BLOCKS];
+
+static void *region_alloc(void *arg) {
+  unsigned t = (unsigned)(uintptr_t)arg;
+  for (unsigned i = 0; i < REGION_BLOCKS; i++) {
+    unsigned char *p = scr_plr_alloc(24);
+    for (size_t k = 0; k < 24; k++) assert(p[k] == 0);
+    fill(p, 24, (unsigned char)(t * 31 + i));
+    region_blocks[t][i] = p;
+  }
+  return NULL;
+}
+
+static void check_program_lifetime_region_threads(void) {
+  pthread_t threads[REGION_THREADS];
+  for (unsigned t = 0; t < REGION_THREADS; t++)
+    assert(pthread_create(&threads[t], NULL, region_alloc, (void *)(uintptr_t)t) == 0);
+  for (unsigned t = 0; t < REGION_THREADS; t++) assert(pthread_join(threads[t], NULL) == 0);
+  for (unsigned t = 0; t < REGION_THREADS; t++)
+    for (unsigned i = 0; i < REGION_BLOCKS; i++)
+      verify(region_blocks[t][i], 24, (unsigned char)(t * 31 + i));
+}
+#endif
+#endif
+
 int main(void) {
 #if SCR_SMALL_ALLOC
   check_slice_growth(); /* first: its class must be untouched */
@@ -974,6 +1035,12 @@ int main(void) {
   check_free_order();
 #if SCR_SMALL_ALLOC && defined(__linux__) && defined(__GLIBC__)
   check_heap_huge_pages();
+#endif
+#if defined(__linux__) && SCR_SMALL_ALLOC
+  check_program_lifetime_region();
+#ifdef SCR_WORKERS
+  check_program_lifetime_region_threads();
+#endif
 #endif
 #if defined(SCR_WORKERS) && SCR_SMALL_ALLOC
   /* A short discard delay, which stays at its start until check_discard_delay_grows. */

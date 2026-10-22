@@ -5,6 +5,7 @@ import {
   DYN,
   type IrExpr,
   type IrFunction,
+  type IrStmt,
   type IrType,
   type SrcLoc,
 } from "../../ir/ir.js";
@@ -59,28 +60,48 @@ export class CaughtValueDispatch {
         loc,
       };
       lowerer.liftedFns.push(this.helper);
+      lowerer.shareHelper(this.helper);
       changed = true;
     }
     const helper = this.helper;
+    let added = false;
     for (const className of this.thrownClasses) {
       if (this.convertedClasses.has(className)) continue;
       this.convertedClasses.add(className);
+      added = true;
+    }
+    if (added) {
+      // A subclass is tested before its ancestors, and classes of one depth
+      // by name, so the tests do not depend on the order the census met them.
+      const depth = (className: string): number => {
+        let count = 0;
+        for (let info = lowerer.classes.get(className)?.base; info; info = info.base) count++;
+        return count;
+      };
+      const ordered = [...this.convertedClasses].sort(
+        (left, right) => depth(right) - depth(left) || (left < right ? -1 : left > right ? 1 : 0),
+      );
       const loc = helper.loc;
       const value = varRef("caught", CAUGHT, loc);
-      const type: IrType = { kind: "object", className };
-      helper.body.unshift({
-        kind: "if",
-        cond: { kind: "caughtTest", value, test: "instanceof", className, type: BOOL, loc },
-        then: [
-          {
-            kind: "return",
-            value: lowerer.coerceToExpected({ kind: "caughtNarrow", value, type, loc }, DYN),
+      helper.body = [
+        ...ordered.map((className): IrStmt => {
+          const type: IrType = { kind: "object", className };
+          return {
+            kind: "if",
+            cond: { kind: "caughtTest", value, test: "instanceof", className, type: BOOL, loc },
+            then: [
+              {
+                kind: "return",
+                value: lowerer.coerceToExpected({ kind: "caughtNarrow", value, type, loc }, DYN),
+                loc,
+              },
+            ],
+            else_: null,
             loc,
-          },
-        ],
-        else_: null,
-        loc,
-      });
+          };
+        }),
+        helper.body[helper.body.length - 1]!,
+      ];
       changed = true;
     }
     for (const fn of consumers) {

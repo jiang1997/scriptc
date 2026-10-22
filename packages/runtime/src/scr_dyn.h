@@ -892,6 +892,11 @@ void scr_dyn_typed_ref_bind_record(ScrDyn *d, const ScrDynTypedRecordOps *ops);
 void scr_record_source_note(void *rec, const ScrDyn *src, const char *const *names,
                             const size_t *lens, size_t count);
 bool scr_record_source_has(const void *rec);
+/* The commit of a live record view converts the view into a new record
+ * `from`, whose conversion keeps the view's undeclared properties, then
+ * moves its fields into `to`: this moves the kept properties to `to` too,
+ * replacing any `to` had. */
+void scr_record_source_move(void *from, void *to);
 ScrDyn *scr_record_source_view(const void *rec);
 ScrDyn *scr_record_source_apply(ScrDyn *snapshot, const void *rec);
 /* Attach the prototype member names of a class instance capsule
@@ -997,6 +1002,14 @@ ScrDyn *scr_dyn_get_own_property_descriptor(ScrDyn *target, ScrDyn *key);
 ScrDyn *scr_dyn_array_proto_call(ScrDyn *target, ScrStr *method, ScrDyn *args);
 ScrDyn *scr_dyn_array_prototype(void); /* +1, installs native method adapters */
 ScrDyn *scr_dyn_array_prototype_base(void); /* +1, shared native array identity */
+/* Names the prototype object of a compiled class `name` for util.inspect
+ * (Node prints the constructor's name), unless it already has a name. */
+void scr_dyn_name_class_prototype(ScrDyn *prototype, const ScrStr *name);
+/* Native arrays read their holes as undefined without consulting
+ * Array.prototype, so storing an element on Array.prototype raises SC2020.
+ * True (with the error pending) when `recv` is Array.prototype. */
+bool scr_dyn_array_prototype_element_fence(const ScrDyn *recv);
+bool scr_dyn_is_array_prototype(const ScrDyn *d);
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets
  * the member (JS: later writes win, insertion order); undefined/null and
  * non-object kinds throw Node's catchable TypeErrors (strict-mode

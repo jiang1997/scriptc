@@ -1,13 +1,15 @@
 import { expect, test } from "vitest";
 import { DYN, F64, STRING, VOID, type IrModule } from "../../ir/ir.js";
 import {
+  assignCompactLayouts,
   buildClassGraph,
+  classFieldIndex,
   classIdLoadLines,
   classMembershipIntervals,
   emitClassMembershipHelper,
   type LlClassMeta,
 } from "./classes.js";
-import { emitLlvmModule } from "./emitter.js";
+import { emitLlvmModule, lowRegionTarget } from "./emitter.js";
 import {
   mangleClassNew,
   mangleClassReleaseDirect,
@@ -157,12 +159,48 @@ test("ProgramLifetime hierarchies are never freed and take no reference counts",
   expect(body(mangleClassRelease("Owner"))).toContain("load i32, ptr %bufp");
 });
 
+test("classes whose trace visits nothing start acyclic in a traced hierarchy", () => {
+  const mapper = { kind: "object" as const, className: "Mapper" };
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
+    classes: [
+      { name: "Mapper", fields: [], methods: [], loc },
+      // A dyn field can reach anything: the hierarchy carries collector headers.
+      {
+        name: "Linked",
+        base: "Mapper",
+        fields: [
+          { name: "next", type: mapper },
+          { name: "hook", type: DYN },
+        ],
+        methods: [],
+        loc,
+      },
+      { name: "Simple", base: "Mapper", fields: [{ name: "value", type: F64 }], methods: [], loc },
+    ],
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  const body = (name: string): string =>
+    new RegExp(`^define internal [a-z]+ @${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(llvm)?.[0] ?? "";
+  const descriptor = (cls: string): string =>
+    llvm.split("\n").find((line) => line.startsWith(`@${mangleClassTrace(cls)}.cyctype = `)) ?? "";
+  expect(descriptor("Simple")).toContain("{ ptr @scr_cyc_no_children, ");
+  expect(body(mangleClassNew("Simple"))).toContain("store i32 -1, ptr %sa.bufp");
+  expect(descriptor("Linked")).toContain(`{ ptr @${mangleClassTrace("Linked")}, `);
+  expect(body(mangleClassNew("Linked"))).toContain("store i32 0, ptr %sa.bufp");
+  // Releases share the hierarchy's possible-root step, which skips the
+  // call for SCR_CYC_ACYCLIC, and a death unbuffers only below -1.
+  expect(body(mangleClassRelease("Simple"))).toContain("icmp slt i32 %buf, 0");
+  expect(body(mangleClassReleaseDirect("Simple"))).toContain("icmp slt i32 %dbuf, -1");
+});
+
 test("ProgramLifetime classes pack their fields after a 32-bit header", () => {
-  const node = { kind: "object" as const, className: "Node" };
-  const leaf = { kind: "object" as const, className: "Leaf" };
   const BOOL = { kind: "bool" as const };
   const nodeFields = [
-    { name: "parent", type: node },
+    { name: "parent", type: STRING },
     { name: "flag", type: BOOL },
     { name: "weight", type: F64 },
   ];
@@ -176,7 +214,7 @@ test("ProgramLifetime classes pack their fields after a 32-bit header", () => {
       {
         name: "Leaf",
         base: "Node",
-        fields: [...nodeFields, { name: "next", type: leaf }, { name: "mark", type: BOOL }],
+        fields: [...nodeFields, { name: "next", type: STRING }, { name: "mark", type: BOOL }],
         methods: [],
         loc,
       },
@@ -193,6 +231,105 @@ test("ProgramLifetime classes pack their fields after a 32-bit header", () => {
   // Without the contract, the layout is the declared one.
   const mortal = emitLlvmModule({ ...mod, contracts: {} }, { pointerBits: 64 });
   expect(mortal).toContain(`%${mangleClassStruct("Leaf")} = type { i64, ptr, i8, i32, ptr, i8 }`);
+});
+
+test("references between ProgramLifetime instances are 32-bit indexes into their region", () => {
+  const node = { kind: "object" as const, className: "Node" };
+  const leaf = { kind: "object" as const, className: "Leaf" };
+  const root = { localId: "root", name: "root", type: leaf };
+  const nodeFields = [{ name: "parent", type: node }];
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [
+      {
+        name: "main",
+        params: [root],
+        returnType: VOID,
+        locals: [{ id: "root", name: "root", type: leaf, mutable: false }],
+        body: [
+          {
+            kind: "fieldSet",
+            obj: { kind: "varRef", localId: "root", type: leaf, loc },
+            className: "Leaf",
+            field: "parent",
+            value: {
+              kind: "fieldGet",
+              obj: { kind: "varRef", localId: "root", type: leaf, loc },
+              className: "Leaf",
+              field: "next",
+              type: leaf,
+              loc,
+            },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+    classes: [
+      { name: "Node", fields: nodeFields, methods: [], loc },
+      {
+        name: "Leaf",
+        base: "Node",
+        fields: [...nodeFields, { name: "next", type: leaf }, { name: "label", type: STRING }],
+        methods: [],
+        loc,
+      },
+    ],
+    contracts: { programLifetime: ["Node"] },
+  };
+  // Linux executables without sanitizers (lowRegionTarget).
+  const llvm = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false, lowRegion: true });
+  // parent and next take 4 bytes each; the string keeps its pointer.
+  expect(llvm).toContain(`%${mangleClassStruct("Node")} = type { i32, i32 }`);
+  expect(llvm).toContain(`%${mangleClassStruct("Leaf")} = type { i32, i32, ptr, i32 }`);
+  // Instances come from the region, reserved below 32 GiB before compiled
+  // code runs: a bump of the thread's chunk, and the runtime when it is used
+  // up.
+  const nw =
+    new RegExp(`^define internal ptr @${mangleClassNew("Leaf")}\\([^]*?^}`, "m").exec(llvm)?.[0] ??
+    "";
+  expect(nw).toContain("%plr.end = getelementptr i8, ptr %plr.next");
+  expect(nw).toContain("store ptr %plr.end, ptr %plr.c");
+  expect(nw).toMatch(/%plr.o = call ptr @scr_plr_alloc\(i64 /);
+  expect(llvm).toMatch(/call void @scr_init\(\)\n {2}call void @scr_plr_init\(\)/);
+  // A reference is the instance's address over 8 (0 is NULL): a read
+  // shifts the loaded word, a write shifts the pointer.
+  const main = llvm.split(/^define /m).find((fn) => fn.includes("; main\n")) ?? "";
+  expect(main).toMatch(/= load i32, ptr %\S+, !tbaa/);
+  expect(main).toMatch(/= shl nuw nsw i64 %\S+, 3\n\s+%\S+ = inttoptr i64 %\S+ to ptr/);
+  expect(main).toMatch(/= ptrtoint ptr %\S+ to i64\n\s+%\S+ = lshr i64 %\S+, 3/);
+  expect(main).toMatch(/store i32 %\S+, ptr %\S+/);
+  expect(main).not.toContain("select");
+  expect(lowRegionTarget("linux", false)).toBe(true);
+  expect(lowRegionTarget("linux", true)).toBe(false);
+  expect(lowRegionTarget("darwin", false)).toBe(false);
+  expect(lowRegionTarget("win32", false)).toBe(false);
+  // Other targets, 32-bit targets and mortal classes keep pointers.
+  const elsewhere = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false });
+  expect(elsewhere).toContain(`%${mangleClassStruct("Leaf")} = type { i32, ptr, ptr, ptr }`);
+  expect(elsewhere).not.toContain("scr_plr");
+  const llvm32 = emitLlvmModule(mod, { pointerBits: 32, lowRegion: true });
+  expect(llvm32).not.toContain("scr_plr");
+  const mortal = emitLlvmModule({ ...mod, contracts: {} }, { pointerBits: 64, lowRegion: true });
+  expect(mortal).not.toContain("scr_plr");
+  // Field accessors that read the storage as a pointer are refused.
+  const metas = buildClassGraph(mod, new Map());
+  assignCompactLayouts(
+    metas,
+    () => true,
+    (cls) => cls.fields.map(() => "ptr"),
+    (cls, i, isCompact) => {
+      const t = cls.fields[i]!.type;
+      return t.kind === "object" && isCompact(t.className);
+    },
+  );
+  const leafMeta = metas.get("Leaf")!;
+  expect(() => classFieldIndex(leafMeta, "next")).toThrow(/holds a 32-bit reference/);
+  expect(classFieldIndex(leafMeta, "next", "compressed").compressed).toBe(true);
+  expect(classFieldIndex(leafMeta, "label").compressed).toBe(false);
 });
 
 test("a recycled block is cleared from the end of a ProgramLifetime instance's 32-bit header", () => {

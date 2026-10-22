@@ -546,9 +546,17 @@ export function paramShapes(
 
 /** A declared type that is (or is a union over) a bare type parameter
  * or an instantiation of a generic alias/interface over type arguments. */
-function mentionsTypeParameter(lowerer: Lowerer, t: ts.Type): boolean {
+function mentionsTypeParameter(
+  lowerer: Lowerer,
+  t: ts.Type,
+  seen: Set<ts.Type> = new Set(),
+): boolean {
   if (t.flags & ts.TypeFlags.TypeParameter) return true;
-  const mentions = (part: ts.Type): boolean => mentionsTypeParameter(lowerer, part);
+  // A recursive alias (`type Child = string | Child[]`) reaches itself
+  // through its own type arguments; a type already on the walk adds nothing.
+  if (seen.has(t)) return false;
+  seen.add(t);
+  const mentions = (part: ts.Type): boolean => mentionsTypeParameter(lowerer, part, seen);
   if (t.isUnionType()) return ts.constituentTypes(t).some(mentions);
   if (t.getAliasTypeArguments().some(mentions)) return true;
   return (

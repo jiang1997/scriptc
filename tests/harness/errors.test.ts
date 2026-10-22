@@ -1634,14 +1634,14 @@ console.log(typeof promisePrototype, typeof promisePrototype.then, promiseProtot
   });
 });
 
-// WebCrypto's native slice is HMAC importKey('raw'), sign and verify, and
-// the SHA-1/SHA-2 digests. Algorithms Node recognizes outside that slice
-// reject with a coded SC2020 Error instead of a Node-shaped success, and a
-// JavaScript call with the 'jwk' format meets its named fence when it runs.
+// WebCrypto's native slice is crypto.subtle's secret-key methods.
+// Algorithms Node recognizes outside that slice reject with a coded SC2020
+// Error instead of a Node-shaped success, and a JavaScript call of a
+// method outside it meets its named fence when it runs.
 // Node's own rejections (unknown names, bad usages) are corpus-pinned
 // (6292, 6294); these refusals have no Node twin, so they live here.
 describe("WebCrypto refusals (JS lane)", () => {
-  test("recognized algorithms outside the HMAC slice reject with SC2020", async () => {
+  test("recognized algorithms outside the secret-key slice reject with SC2020", async () => {
     const r = await compileAndRun(
       "webcrypto-unsupported-algorithms",
       `const bytes = new TextEncoder().encode("secret");
@@ -1662,10 +1662,10 @@ await attempt("sha3", () => crypto.subtle.digest("SHA3-256", bytes));
 await attempt("sha3 hmac", () =>
   crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA3-256" }, false, ["sign"]),
 );
-const format = JSON.parse('"jwk"');
-await attempt("computed jwk", () =>
-  crypto.subtle.importKey(format, { kty: "oct", k: "c2VjcmV0" }, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]),
-);
+await attempt("ed25519 key", () => crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign"]));
+const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 128 }, false, ["encrypt"]);
+await attempt("aes-ocb", () => crypto.subtle.encrypt({ name: "AES-OCB", iv: new Uint8Array(12) }, aes, bytes));
+await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key, 256));
 `,
       "mjs",
     );
@@ -1676,22 +1676,25 @@ await attempt("computed jwk", () =>
         "ecdsa Error SC2020 crypto.subtle.sign with the ECDSA algorithm is not supported yet\n" +
         "sha3 Error SC2020 crypto.subtle.digest with the SHA3-256 algorithm is not supported yet\n" +
         "sha3 hmac Error SC2020 crypto.subtle.importKey with the SHA3-256 algorithm is not supported yet\n" +
-        "computed jwk Error SC2020 crypto.subtle.importKey with the 'jwk' key format is not supported yet\n",
+        "ed25519 key Error SC2020 crypto.subtle.generateKey with the Ed25519 algorithm is not supported yet\n" +
+        "aes-ocb Error SC2020 crypto.subtle.encrypt with the AES-OCB algorithm is not supported yet\n" +
+        "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n",
     );
   });
 
-  test("a literal 'jwk' import is a named fence where it runs", async () => {
+  test("a method outside the slice is a named fence where it runs", async () => {
     const r = await compileAndRun(
-      "webcrypto-jwk-literal",
+      "webcrypto-wrap-key",
       `console.log("before");
-await crypto.subtle.importKey("jwk", { kty: "oct", k: "c2VjcmV0" }, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+const key = await crypto.subtle.generateKey({ name: "AES-KW", length: 128 }, true, ["wrapKey"]);
+await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
 `,
       "mjs",
     );
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
-      /^Uncaught Error: 'crypto\.subtle\.importKey with the 'jwk' key format' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+      /^Uncaught Error: 'crypto\.subtle\.wrapKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
     );
   });
 });
@@ -1724,6 +1727,56 @@ console.log(util.inspect(extra));
     expect(r.stdout).toBe("[Conditional [Error]: plain]\n");
     expect(r.stderr).toMatch(
       /^Uncaught Error: inspecting a 'Conditional' error with properties created at run time is not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+  });
+});
+
+describe("elements on Array.prototype", () => {
+  // Holes of native arrays read undefined without consulting
+  // Array.prototype, so storing an element there refuses instead of
+  // letting later hole reads diverge from Node. Named members stay
+  // writable.
+  test("an index write is a named fence (TS lane)", async () => {
+    const r = await compileAndRun(
+      "array-prototype-element-ts",
+      `const proto = Array.prototype as unknown as Record<string, unknown>;
+proto.label = "named";
+console.log(proto.label);
+(Array.prototype as unknown as Record<number, unknown>)[1] = "proto";
+console.log("unreachable");
+`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("named\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+  });
+
+  test("an index write and a mutating method are named fences (JS lane)", async () => {
+    const write = await compileAndRun(
+      "array-prototype-element-js",
+      `Array.prototype[0] = "proto";
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(write.exitCode).toBe(1);
+    expect(write.stdout).toBe("");
+    expect(write.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+    const push = await compileAndRun(
+      "array-prototype-push-js",
+      `Array.prototype.push("proto");
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(push.exitCode).toBe(1);
+    expect(push.stdout).toBe("");
+    expect(push.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
     );
   });
 });

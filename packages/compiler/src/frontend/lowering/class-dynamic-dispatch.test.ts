@@ -33,6 +33,7 @@ function context() {
     classes: new Map(),
     liftedFns,
     liftedFnNamed: (name: string | undefined) => liftedFns.find((fn) => fn.name === name),
+    shareHelper: () => {},
     subclassLinks: 0,
     constructedClassCount: () => -1,
     diags: [],
@@ -473,5 +474,87 @@ test("normalizes base capsules before dispatching each derived member once", () 
         ],
       },
     ],
+  });
+});
+
+test("class branches read their exact class's bag, also for classes with subclasses", () => {
+  const { lowerer, liftedFns } = context();
+  const base = {
+    def: { name: "Base", fields: [{ name: "value", type: F64 }], tracksOwnFields: true },
+    fields: new Map([["value", F64]]),
+    methods: new Map(),
+    base: null,
+    subclasses: [],
+  } as unknown as ClassInfo;
+  const child = {
+    def: {
+      name: "Child",
+      base: "Base",
+      fields: [{ name: "value", type: F64 }],
+      tracksOwnFields: true,
+    },
+    fields: new Map([["value", F64]]),
+    methods: new Map(),
+    base,
+    subclasses: [],
+  } as unknown as ClassInfo;
+  base.subclasses.push(child);
+  lowerer.classes.set("Base", base);
+  lowerer.classes.set("Child", child);
+  lowerer.classCanBeConstructed = () => true;
+  lowerer.isSubclassOf = (name, parent) => name === "Child" && parent === "Base";
+  lowerer.coerceToExpected = (value, type) =>
+    type.kind === "dyn" ? { kind: "dynFrom", value, type, loc } : value;
+  const boxes = fn(
+    "boxes",
+    [base, child].map((info) =>
+      statement({
+        kind: "dynFrom",
+        value: {
+          kind: "varRef",
+          localId: info.def.name,
+          type: { kind: "object", className: info.def.name },
+          loc,
+        },
+        type: DYN,
+        loc,
+      }),
+    ),
+  );
+  const read = fn("read", [
+    statement({
+      kind: "dynKeyGet",
+      value: variable("value"),
+      key: literal("value"),
+      type: DYN,
+      loc,
+    }),
+  ]);
+  const dispatch = new ClassDynamicDispatch();
+  for (let pass = 0; pass < 4 && dispatch.process(lowerer, [boxes, read, ...liftedFns]); pass++);
+  dispatch.finalize(lowerer);
+  const property = liftedFns.find((helper) => helper.name.startsWith("%dyn.class.property."))!;
+  // The class branches; the fallback for other receivers keeps the
+  // dispatch over every class.
+  const branches = property.body.filter(
+    (statement) =>
+      statement.kind === "if" &&
+      statement.cond.kind === "libCall" &&
+      statement.cond.fn === "dyn.typedRefIs",
+  );
+  expect(branches).toHaveLength(2);
+  const text = JSON.stringify(branches);
+  expect(text).toContain('"callee":"%class.branchPropertiesOrEmpty:Base"');
+  expect(text).toContain('"callee":"%class.branchPropertiesOrEmpty:Child"');
+  expect(text).not.toContain('"callee":"%dyn.class.readPropertiesOrEmpty"');
+  const bag = liftedFns.find((helper) => helper.name === "%class.branchPropertiesOrEmpty:Base")!;
+  // The bag is the receiver's own field; an absent bag reads as a fresh,
+  // unstored empty object.
+  expect(bag.params[0]!.type).toEqual({ kind: "object", className: "Base" });
+  expect(JSON.stringify(bag.body)).toContain('"className":"Base","field":"%dynProperties"');
+  expect(JSON.stringify(bag.body)).not.toContain('"kind":"fieldSet"');
+  expect(bag.body[0]).toMatchObject({
+    kind: "if",
+    then: [{ kind: "return", value: { kind: "dynObjLit", fields: [] } }],
   });
 });

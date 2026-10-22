@@ -1,6 +1,7 @@
 import { dynUndefinedExpr, boolLit, numLit, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, ladderFenceExpr } from "../lowerer.js";
+import { lowerFsPath } from "./fs-paths.js";
 import { isJsSourceFile, locOf } from "../../program.js";
 import {
   builtinModuleFnOf,
@@ -513,7 +514,7 @@ export function lowerStringOrBytesWrite(
     kind: "call",
     callee: helper,
     args: [
-      lowerer.lowerExprExpecting(call.arguments.nodes[0]!, STRING),
+      lowerFsPath(lowerer, call.arguments.nodes[0]!),
       lowerer.lowerExprExpecting(call.arguments.nodes[1]!, dataType),
     ],
     type: VOID,
@@ -1376,7 +1377,7 @@ export function lowerFsReaddirTypesCall(
   ) {
     fence();
   }
-  const path = lowerer.lowerExprExpecting(call.arguments.nodes[0]!, STRING);
+  const path = lowerFsPath(lowerer, call.arguments.nodes[0]!);
   return {
     kind: "libCall",
     fn: promiseForm ? "fsp.readdirTypes" : "fs.readdirTypesSync",
@@ -1405,7 +1406,7 @@ export function lowerFsStatOptionsCall(
   const spelling = noFollow ? "lstatSync" : "statSync";
   const plainFn: IrLibFn = noFollow ? "fs.lstatSync" : "fs.statSync";
   const optsNode = call.arguments.nodes[1]!;
-  const path = lowerer.lowerExprExpecting(call.arguments.nodes[0]!, STRING);
+  const path = lowerFsPath(lowerer, call.arguments.nodes[0]!);
   // The path binds first, then the options' effects, then the stat runs.
   const plainAfter = (effect: IrExpr | null): IrExpr => {
     if (effect === null) return { kind: "libCall", fn: plainFn, args: [path], type: STATS_T, loc };

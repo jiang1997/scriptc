@@ -370,7 +370,7 @@ export class Client extends DispatcherBase {
       localAddress: this.__localAddress,
     };
     if (channels.beforeConnect.hasSubscribers) {
-      channels.beforeConnect.publish({ connectParams });
+      channels.beforeConnect.publish({ connectParams, connector: this.__connector });
     }
     let settled = false;
     const onConnected = (err: Error | null, socket: Socket | null): void => {
@@ -428,7 +428,7 @@ export class Client extends DispatcherBase {
       if (this.__socket === socket) this.__onSocketClose(socket);
     });
     if (channels.connected.hasSubscribers) {
-      channels.connected.publish({ connectParams });
+      channels.connected.publish({ connectParams, connector: this.__connector, socket });
     }
     this.emit("connect", this.__url, [this as Dispatcher]);
     this.__resume(false);
@@ -447,7 +447,7 @@ export class Client extends DispatcherBase {
   ): void {
     this.__connecting = false;
     if (channels.connectError.hasSubscribers) {
-      channels.connectError.publish({ connectParams, error: err });
+      channels.connectError.publish({ connectParams, connector: this.__connector, error: err });
     }
     this.__onError(err);
     this.emit("connectionError", this.__url, [this as Dispatcher], err);
@@ -658,7 +658,7 @@ export class Client extends DispatcherBase {
     }
     header += request.headers;
     if (channels.sendHeaders.hasSubscribers) {
-      channels.sendHeaders.publish({ request: request.diagnosticView(), headers: header });
+      channels.sendHeaders.publish({ request: request.diagnosticView(), headers: header, socket });
     }
     if (body === null) {
       if (contentLength === 0) socket.write(`${header}content-length: 0\r\n\r\n`);

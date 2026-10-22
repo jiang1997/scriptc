@@ -409,13 +409,15 @@ SCR_TL ScrError *scr_event_error_payload = NULL;
 
 /* The code Node attaches to the runtime's event-error messages whose text
  * carries no errno name: connResetException's "socket hang up" and
- * "aborted", the HTTP parser's header overflow, and the TLS verification
- * failures (the openssl reason Node reports as the code). NULL for any
+ * "aborted", the TLS client's disconnect before the handshake completes,
+ * the HTTP parser's header overflow, and the TLS verification failures (the openssl reason Node reports as the code). NULL for any
  * other message. */
 const char *scr_error_message_code(const ScrStr *msg) {
   static const struct { const char *prefix; bool whole; const char *code; } known[] = {
     { "socket hang up", true, "ECONNRESET" },
     { "aborted", true, "ECONNRESET" },
+    { "Client network socket disconnected before secure TLS connection was established", true,
+      "ECONNRESET" },
     { "Parse Error: Header overflow", true, "HPE_HEADER_OVERFLOW" },
     { "certificate has expired", true, "CERT_HAS_EXPIRED" },
     { "self-signed certificate in certificate chain", true, "SELF_SIGNED_CERT_IN_CHAIN" },

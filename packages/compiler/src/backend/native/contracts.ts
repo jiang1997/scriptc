@@ -243,8 +243,9 @@ export interface CcOptions {
    * The unit also compiles whenever `tls` does — scr_tls.c consults its
    * default-set override and shared Windows-certificate enumerator. */
   tlsCa?: boolean;
-  /** crypto.createCipheriv/createDecipheriv: compiles scr_cipher.c and links
-   * the mbedTLS archive (shared with tls). */
+  /** crypto.createCipheriv/createDecipheriv and WebCrypto's encrypt and
+   * decrypt: compiles scr_cipher.c (and, with webcrypto,
+   * scr_webcrypto_aes.c) and links the mbedTLS archive (shared with tls). */
   cipher?: boolean;
   /** crypto.createECDH and ECDH.convertKey: compiles scr_ecdh.c and links
    * the mbedTLS archive (shared with tls). */

@@ -2128,8 +2128,12 @@ function ensureEmitSpec(lowerer: Lowerer, info: ClassInfo, event: string, tuple:
       params: tuple.map((t) => ({ type: t, mode: "required" as const })),
       ret: BOOL,
     });
-    if (info.def.methods) info.def.methods.push(mName);
-    else info.def.methods = [mName];
+    // Specializations sit in the method list sorted by event name, so the
+    // class table does not depend on which body asked for one first.
+    const methods = (info.def.methods ??= []);
+    const after = methods.findIndex((m) => m.startsWith("emit:") && m > mName);
+    if (after < 0) methods.push(mName);
+    else methods.splice(after, 0, mName);
   }
   const ordinal = lowerer.emitSpecQueue.filter((q) => q.info === info).length;
   lowerer.emitSpecQueue.push({ info, event, tuple, ordinal });
