@@ -13,7 +13,8 @@ import {
   type IrType,
   type SrcLoc,
 } from "../../ir/ir.js";
-import { everyStmtList, transformExpr, transformStmtList } from "../../ir/traverse.js";
+import { transformExpr, transformStmtList } from "../../ir/traverse.js";
+import type { DispatchSites } from "./dispatch-sites.js";
 import type { Lowerer } from "./lowerer.js";
 import type { ParamShape } from "./call-signatures.js";
 import { classPrototypeData } from "./class-prototypes.js";
@@ -254,22 +255,17 @@ export class ClassConstructionDispatch {
   private prototypeHelper: IrFunction | null = null;
   private readonly prototypes = new Set<string>();
 
-  process(lowerer: Lowerer, functions: readonly IrFunction[]): boolean {
+  process(lowerer: Lowerer, functions: readonly IrFunction[], sites: DispatchSites): boolean {
     const discover = (type: IrType): void => {
       if (type.kind === "classval") this.constructors.add(type.className);
       else if (type.kind === "union") lowerer.unions.get(type.unionId)?.arms.forEach(discover);
     };
     const prototypeReads = new Set<IrFunction>();
-    for (const fn of functions)
-      everyStmtList(fn.body, {
-        stmt: () => true,
-        expr: (expr) => {
-          if (expr.kind === "dynFrom") discover(expr.value.type);
-          if (expr.kind === "libCall" && expr.fn === "dyn.classBasePrototype")
-            prototypeReads.add(fn);
-          return true;
-        },
-      });
+    for (const fn of functions) {
+      const found = sites.of(fn);
+      found.values.forEach(discover);
+      if (found.basePrototypes) prototypeReads.add(fn);
+    }
     let changed = false;
     for (const fn of functions) {
       if (fn === this.prototypeHelper || !prototypeReads.has(fn)) continue;

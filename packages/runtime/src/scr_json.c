@@ -3591,6 +3591,10 @@ static const ScrDynTypedRecordOps *scr_typed_ref_record_ops(const ScrDyn *d) {
   return (const ScrDynTypedRecordOps *)(const void *)d->v.typed_ref.array;
 }
 
+const ScrDynTypedRecordOps *scr_dyn_typed_ref_live_record(const ScrDyn *d) {
+  return d->kind == SCR_DYN_TYPED_REF ? scr_typed_ref_record_ops(d) : NULL;
+}
+
 static bool scr_typed_ref_record_field(const ScrDynTypedRecordOps *ops, const ScrStr *key,
                                        size_t *out) {
   /* Compiled reads pass the interned literal the field names also use. */
@@ -4122,7 +4126,14 @@ ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, con
   /* A signature adapter reports the length of the function it adapts. */
   d->v.fn.arity = clo->identity != NULL ? clo->identity_length : arity;
   d->v.fn.class_obj = NULL;
+  d->v.fn.message = NULL;
   return d;
+}
+
+void scr_dyn_func_set_message(ScrDyn *fn, ScrDynThunk thunk, ScrDynMessageListener listener) {
+  /* scr_dyn_new_func answers an adapted function's original box, whose
+   * closure has other parameter types. */
+  if (fn && fn->kind == SCR_DYN_FUNC && fn->v.fn.thunk == thunk) fn->v.fn.message = listener;
 }
 
 /* A class is function-shaped for typeof and identity, but calling it without

@@ -835,6 +835,37 @@ export function f(input: number): number {
   expect(panics).toBe(warmPanics);
 });
 
+test("a batch method the server answers as unknown is asked once, then node by node", () => {
+  const w = buildTwoWorlds(RICH_TS, host);
+  worlds.push(w);
+  const sf = w.p7.getSourceFile(w.files[0]!)!;
+  const raw = w.p7.project.checker;
+  const requests: Record<string, number> = {};
+  // A server without the batch methods, as tsgo is.
+  const older = new Proxy(raw, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (prop === "getContextualTypes" || prop === "getResolvedSignatures") {
+        return () => {
+          requests[prop] = (requests[prop] ?? 0) + 1;
+          throw new Error(`unknown API method "${prop}"`);
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as Checker;
+  const facade = new CheckerFacade(older);
+
+  facade.prefetchRoots([sf]);
+  expect(requests).toEqual({ getContextualTypes: 1, getResolvedSignatures: 1 });
+  facade.prefetchRoots(sf.statements.nodes);
+  facade.prefetchContextualTypes(collectNodes(w));
+  expect(requests).toEqual({ getContextualTypes: 1, getResolvedSignatures: 1 });
+  // The node-by-node queries still answer.
+  const call = collectNodes(w).find(ad.isCallExpression)!;
+  expect(facade.getResolvedSignature(call)).toBe(raw.getResolvedSignature(call));
+});
+
 test("autoPrefetch: false degrades to per-call queries (the escape hatch works)", () => {
   const w = buildTwoWorlds(RICH_TS, host);
   worlds.push(w);

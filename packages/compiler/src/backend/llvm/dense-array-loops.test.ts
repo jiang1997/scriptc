@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { BOOL, F64, arrayOf, type IrExpr, type IrLocal, type IrStmt } from "../../ir/ir.js";
+import type { IntegerCountedForLoop } from "../../ir/integer-loops.js";
 import {
   countedDenseShape,
   matchDenseArrayLoop,
@@ -111,16 +112,24 @@ test("loops that may resize, rebind or move storage keep the ordinary copy only"
   expect([...rebound!.arrays.keys()]).toEqual(["a"]);
 });
 
+const counted = (
+  fields: Pick<IntegerCountedForLoop, "start" | "limit" | "step" | "inclusive" | "range">,
+): IntegerCountedForLoop => ({
+  localId: "i",
+  guarded: false,
+  limitGuarded: false,
+  startGuarded: false,
+  guardLimit: 0,
+  followers: [],
+  ...fields,
+});
+
 test("counted shapes need a non-negative counter strictly below the length", () => {
   const ascending = (limit: IrExpr, inclusive: boolean, min = 0) =>
-    countedDenseShape(loop([]), {
-      localId: "i",
-      start: num(min),
-      limit,
-      step: 1,
-      inclusive,
-      range: { min, max: 100 },
-    });
+    countedDenseShape(
+      loop([]),
+      counted({ start: num(min), limit, step: 1, inclusive, range: { min, max: 100 } }),
+    );
   const minus = (offset: number): IrExpr => ({
     kind: "bin",
     op: "-",
@@ -129,19 +138,58 @@ test("counted shapes need a non-negative counter strictly below the length", () 
     type: F64,
     loc,
   });
-  expect(ascending(method("a", "length"), false)?.length.localId).toBe("a");
-  expect(ascending(minus(1), true)?.length.localId).toBe("a");
+  expect(ascending(method("a", "length"), false)?.length?.localId).toBe("a");
+  expect(ascending(minus(1), true)?.length?.localId).toBe("a");
   expect(ascending(method("a", "length"), true)).toBeNull();
   expect(ascending(minus(1), false, -1)).toBeNull();
+  // Another invariant limit bounds the counter itself; the entry test
+  // compares it with every indexed array's hole-free prefix.
+  const limited = ascending(ref("n"), false);
+  expect(limited?.length).toBeNull();
+  expect(limited?.limit?.limit).toEqual(ref("n"));
+  expect(ascending(ref("n"), false, -1)).toBeNull();
   const descending = (offset: number) =>
-    countedDenseShape(loop([]), {
-      localId: "i",
-      start: minus(offset),
-      limit: num(0),
-      step: -1,
-      inclusive: true,
-      range: { min: 0, max: 100 },
-    });
-  expect(descending(1)?.length.localId).toBe("a");
+    countedDenseShape(
+      loop([]),
+      counted({
+        start: minus(offset),
+        limit: num(0),
+        step: -1,
+        inclusive: true,
+        range: { min: 0, max: 100 },
+      }),
+    );
+  expect(descending(1)?.length?.localId).toBe("a");
   expect(descending(0)).toBeNull();
+});
+
+test("a loop to another invariant limit covers each array whose length it keeps", () => {
+  const limited: DenseLoopShape = {
+    counter: "i",
+    length: null,
+    limit: counted({
+      start: num(0),
+      limit: ref("n"),
+      step: 1,
+      inclusive: false,
+      range: { min: 0, max: 100 },
+    }),
+    range: { min: 0, max: 100 },
+  };
+  const matchLimited = (body: IrStmt[], unaliased = new Set<string>()) =>
+    matchDenseArrayLoop(loop(body), limited, locals, unaliased, new Set(["a", "b"]));
+  const copy = write("b", read("a"));
+  const dense = matchLimited([copy]);
+  expect([...dense!.arrays.keys()].sort()).toEqual(["a", "b"]);
+  expect(dense!.length).toBeNull();
+  expect(dense!.limit?.limit).toEqual(ref("n"));
+  // An array the loop may resize is not covered; neither is one it may
+  // share storage with.
+  const resizing = [
+    { kind: "exprStmt" as const, expr: read("a"), loc },
+    { kind: "exprStmt" as const, expr: method("b", "getNumber", [ref("i")]), loc },
+    { kind: "exprStmt" as const, expr: method("b", "push", [num(1)]), loc },
+  ];
+  expect([...matchLimited(resizing, new Set(["b"]))!.arrays.keys()]).toEqual(["a"]);
+  expect(matchLimited(resizing)).toBeNull();
 });

@@ -86,12 +86,19 @@ function batchAnswers<I, O>(
   items: readonly I[],
   fetch: (chunk: readonly I[]) => readonly (O | undefined)[],
   store: (item: I, answer: O | undefined) => void,
-): void {
+  unknown: (error: unknown) => boolean = () => false,
+): boolean {
+  let known = true;
   const answer = (chunk: readonly I[]): void => {
+    if (!known) return;
     let answers: readonly (O | undefined)[];
     try {
       answers = fetch(chunk);
-    } catch {
+    } catch (error) {
+      if (unknown(error)) {
+        known = false;
+        return;
+      }
       if (chunk.length === 1) return;
       const mid = chunk.length >> 1;
       answer(chunk.slice(0, mid));
@@ -101,6 +108,13 @@ function batchAnswers<I, O>(
     chunk.forEach((item, index) => store(item, answers[index]));
   };
   for (let i = 0; i < items.length; i += BATCH_CHUNK) answer(items.slice(i, i + BATCH_CHUNK));
+  return known;
+}
+
+/** Whether a request failed because the server has no such method: tsgo,
+ * and tsc-ts before 0.0.7, answer the batch methods this way. */
+function unknownMethod(error: unknown, method: string): boolean {
+  return error instanceof Error && error.message.includes(`unknown API method "${method}"`);
 }
 
 function chunked<T, R>(items: readonly T[], fetch: (chunk: readonly T[]) => readonly R[]): R[] {
@@ -239,6 +253,9 @@ function collectNodes(roots: readonly Node[], walk: PrefetchWalk = "all"): Node[
 
 export class CheckerFacade {
   private readonly cache = new CheckerCache();
+  /** Batch methods the server answered as unknown. Lowering asks those
+   * node by node from then on, without a failed request per prefetch. */
+  private readonly unknownBatchMethods = new Set<string>();
 
   constructor(
     /** The underlying 7.0.2 sync checker — exposed for methods the facade
@@ -374,7 +391,8 @@ export class CheckerFacade {
     if (!NODE_BATCH_QUERIES) return;
     this.ensureActive();
     const missing = [...new Set(nodes)].filter((node) => !this.cache.contextualType.has(node));
-    batchAnswers(
+    this.batchNodes(
+      "getContextualTypes",
       missing,
       (chunk) => this.raw.getContextualTypes(chunk),
       (node, type) => this.cache.contextualType.set(node, type),
@@ -386,11 +404,25 @@ export class CheckerFacade {
     if (!NODE_BATCH_QUERIES) return;
     this.ensureActive();
     const missing = [...new Set(nodes)].filter((node) => !this.cache.resolvedSignature.has(node));
-    batchAnswers(
+    this.batchNodes(
+      "getResolvedSignatures",
       missing,
       (chunk) => this.raw.getResolvedSignatures(chunk),
       (node, signature) => this.cache.resolvedSignature.set(node, signature),
     );
+  }
+
+  /** Answers a node batch method's chunks (batchAnswers), unless the server
+   * has answered the method as unknown. */
+  private batchNodes<O>(
+    method: string,
+    nodes: readonly Node[],
+    fetch: (chunk: readonly Node[]) => readonly (O | undefined)[],
+    store: (node: Node, answer: O | undefined) => void,
+  ): void {
+    if (nodes.length === 0 || this.unknownBatchMethods.has(method)) return;
+    if (!batchAnswers(nodes, fetch, store, (error) => unknownMethod(error, method)))
+      this.unknownBatchMethods.add(method);
   }
 
   /** Batches symbol queries for every identifier under roots without the

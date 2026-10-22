@@ -99,9 +99,10 @@ static bool scr_worker_stats(void) {
 
 static ScrMailEvent *scr_worker_event(unsigned kind, uint64_t source,
                                      int code, ScrMessage *message) {
-  ScrMailEvent *event = calloc(1, sizeof(*event));
+  ScrMailEvent *event = message ? scr_message_mail_event(message) : calloc(1, sizeof(*event));
   if (!event) scr_trap("scriptc: out of memory\n");
-  *event = (ScrMailEvent){.kind = kind, .source = source, .code = code, .message = message};
+  *event = (ScrMailEvent){
+      .kind = kind, .source = source, .code = code, .message = message, .in_message = message != NULL};
   return event;
 }
 

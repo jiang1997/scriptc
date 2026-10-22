@@ -586,6 +586,24 @@ export function emitBorrowedArrayRead(
   const B = host.B;
   const array = host.emitStableReceiver(read.arr, [read.index]);
   const loopIndex = host.emitIntegerLoopIndex(read.index);
+  if (loopIndex !== null && host.provenDenseIndex(read.arr, read.index)) {
+    // In a dense array loop's fast copy, the entry test proved the counter
+    // below the array's hole-free prefix: the slot holds a present value.
+    const dataPtr = B.tmp(),
+      data = B.tmp(),
+      valuePtr = B.tmp(),
+      value = B.tmp();
+    B.line(
+      `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
+    );
+    host.markMemoryPointer(dataPtr, "array:header");
+    B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
+    B.line(`${valuePtr} = getelementptr inbounds i64, ptr ${data}, ${host.sizeType} ${loopIndex}`);
+    host.markMemoryPointer(valuePtr, "array:elements");
+    B.line(`${value} = load ptr, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+    B.line(`store ptr ${value}, ptr ${slot}`);
+    return;
+  }
   const index = host.emitExpr(read.index);
   // A proven integer index (an int32 local, say) needs no double
   // round-trip; a negative one compares above the capacity as unsigned.

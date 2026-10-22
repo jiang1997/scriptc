@@ -1,6 +1,7 @@
 /* scriptc runtime — dynamic values: the checked-dynamic tree, native handles,
  * dyn promises, the ambient receiver and listener adapters (scr_json.c,
- * scr_dyn_handle.c, scr_async_dyn.c). Included by scr_runtime.h, which says
+ * scr_dyn_handle.c, scr_async_dyn.c), and the message readers of typed
+ * 'message' listeners (scr_message.c). Included by scr_runtime.h, which says
  * where new declarations go. */
 #ifndef SCR_DYN_H
 #define SCR_DYN_H
@@ -143,6 +144,7 @@ typedef enum {
   X(ABORT_CONTROLLER, 15) /* native static-fetch AbortController */ \
   X(ABORT_SIGNAL, 8) /* native static-fetch AbortSignal */ \
   X(ARRAY_BUFFER, 18) /* fixed-length ArrayBuffer storage */ \
+  X(ASYMMETRIC_CRYPTO_KEY, 69) /* WebCrypto ECDSA and RSA CryptoKey (scr_webcrypto_pki.c) */ \
   X(BLOB, 41) /* ScrBlob — new Blob() and Blob#slice() */ \
   X(BROADCAST_CHANNEL, 51) /* worker_threads BroadcastChannel (scr_worker_events.c) */ \
   X(BUILTIN_MODULE, 21) /* native builtin export object */ \
@@ -160,11 +162,6 @@ typedef enum {
   X(DIR, 44) /* fs.Dir (scr_lib.c) */ \
   X(DISPOSABLE_STACK, 49) /* DisposableStack (scr_symbol.c) */ \
   X(ECDH, 64) /* node:crypto ECDH (scr_ecdh.c) */ \
-  X(PRIVATE_KEY, 65) /* node:crypto PrivateKeyObject (scr_pki.c) */ \
-  X(PUBLIC_KEY, 66) /* node:crypto PublicKeyObject (scr_pki.c) */ \
-  X(SIGN, 67) /* node:crypto Sign (scr_pki.c) */ \
-  X(VERIFY, 68) /* node:crypto Verify (scr_pki.c) */ \
-  X(ASYMMETRIC_CRYPTO_KEY, 69) /* WebCrypto ECDSA and RSA CryptoKey (scr_webcrypto_pki.c) */ \
   X(EVENT, 14) /* ScrEvent — new Event() and AbortSignal's abort events */ \
   X(EVENT_TARGET, 39) /* ScrEventTarget — new EventTarget() */ \
   X(FETCH_HEADERS, 13) /* native static-fetch response Headers */ \
@@ -192,14 +189,18 @@ typedef enum {
   X(NET_SERVER, 3) /* ScrNetServer — net.Server (http.Server rides the same handle) */ \
   X(NET_SOCKET, 2) /* ScrNetSocket — net.Socket */ \
   X(NET_SOCKET_ADDRESS, 47) /* net.SocketAddress (scr_net.c) */ \
+  X(PRIVATE_KEY, 65) /* node:crypto PrivateKeyObject (scr_pki.c) */ \
+  X(PUBLIC_KEY, 66) /* node:crypto PublicKeyObject (scr_pki.c) */ \
   X(REGEXP, 26) /* native RegExp, shared compiled pattern */ \
   X(SEARCH_PARAMS, 33) /* live WHATWG URLSearchParams */ \
   X(SEGMENTER, 19) /* default Unicode grapheme segmentation */ \
   X(SEGMENTS, 20) /* iterable immutable segmentation result */ \
   X(SET, 25) /* native Set<unknown>, shared backing map */ \
   X(SHARED_ARRAY_BUFFER, 37) \
+  X(SIGN, 67) /* node:crypto Sign (scr_pki.c) */ \
   X(STDIO, 27) /* stable process stdin/stdout/stderr values */ \
   X(URL, 28) /* native WHATWG URL */ \
+  X(VERIFY, 68) /* node:crypto Verify (scr_pki.c) */ \
   X(WASM_GLOBAL, 61) /* WebAssembly.Global */ \
   X(WASM_INSTANCE, 58) /* WebAssembly.Instance */ \
   X(WASM_MEMORY, 59) /* WebAssembly.Memory */ \
@@ -253,6 +254,55 @@ typedef struct ScrDynTypedCast {
  * with the exception pending), calls through the closure, and returns the
  * result as an owned (+1) dyn value. `args` entries are BORROWED. */
 typedef ScrDyn *(*ScrDynThunk)(ScrClosure *clo, ScrDyn *const *args, size_t argc);
+
+/* A compiled 'message' listener's typed entry: builds the closure's
+ * parameter from the message's nodes (the readers below) and calls
+ * the closure. Answers false, without calling it, when the message does
+ * not have the parameter's layout; the caller then decodes the message
+ * and calls the thunk. */
+struct ScrMessage;
+typedef bool (*ScrDynMessageListener)(ScrClosure *clo, const struct ScrMessage *message);
+
+/* The kinds of a message's nodes (scr_message.c). */
+typedef enum {
+  SCR_MESSAGE_UNDEFINED,
+  SCR_MESSAGE_NULL,
+  SCR_MESSAGE_BOOL,
+  SCR_MESSAGE_NUMBER,
+  SCR_MESSAGE_STRING,
+  SCR_MESSAGE_BIGINT,
+  SCR_MESSAGE_ARRAY,
+  SCR_MESSAGE_OBJECT,
+  SCR_MESSAGE_STORAGE,
+  SCR_MESSAGE_BYTES,
+  SCR_MESSAGE_ARRAY_BUFFER,
+  SCR_MESSAGE_ERROR,
+  /* A deeply frozen plain-data graph shared by pointer (see publication). */
+  SCR_MESSAGE_PUBLISHED,
+  /* A typed value published with @scriptc/threads (immortal), delivered as
+   * a fresh typed-ref capsule over the same pointer. */
+  SCR_MESSAGE_TYPED_REF,
+  /* A transferred MessagePort: its channel end (+1) and side. */
+  SCR_MESSAGE_PORT,
+  /* A native handle cloned through its unit's ScrDynHandleTransfer. */
+  SCR_MESSAGE_HANDLE,
+} ScrMessageKind;
+
+/* Readers for compiled 'message' listeners (ScrDynMessageListener), which
+ * build their typed parameter from the nodes. Node 0 is the root, and a
+ * node's values have higher numbers. scr_message_readable answers whether
+ * the message can reach these listeners: no node is reached twice, and it
+ * holds no ports or native handles, which the receiver adopts when it
+ * decodes the message. kind answers a ScrMessageKind; number reads a
+ * NUMBER or BOOL node, string a STRING node (+1). fields answers whether an
+ * OBJECT node has exactly the given keys, in order, and writes their value
+ * nodes. */
+bool scr_message_readable(const struct ScrMessage *message);
+int32_t scr_message_kind(const struct ScrMessage *message, size_t node);
+double scr_message_number(const struct ScrMessage *message, size_t node);
+ScrStr *scr_message_string(const struct ScrMessage *message, size_t node);
+bool scr_message_fields(const struct ScrMessage *message, size_t node, const char *const *names,
+                        const size_t *lengths, size_t count, size_t *values);
 
 /* Object member. Keys own shared immutable UTF-8 bytes (NUL-terminated for
  * convenience; key_len excludes the NUL) — duplicate keys were already
@@ -314,6 +364,9 @@ typedef struct ScrDynTypedRecordOps {
    * for-in over a record with every field present (atomic slot). */
   ScrArr *keys;
 } ScrDynTypedRecordOps;
+/* A record capsule's ops while it answers from the native record (no view
+ * created yet), or NULL. */
+const ScrDynTypedRecordOps *scr_dyn_typed_ref_live_record(const ScrDyn *d);
 
 /* Prototype members of a compiled class seen as `unknown`, emitted per
  * class by the compiler: the string names of methods, getters and setters
@@ -391,7 +444,7 @@ struct ScrDyn {
      * and `name` are static compiler-emitted literals (never freed); name
      * may be NULL (anonymous — inspect prints [Function (anonymous)]).
      * The dyn→closure ownership edge is traced by the cycle collector. */
-    struct { ScrClosure *clo; ScrDynThunk thunk; const char *sig; const char *name; uint32_t arity; ScrClassObj *class_obj; } fn;
+    struct { ScrClosure *clo; ScrDynThunk thunk; const char *sig; const char *name; uint32_t arity; ScrClassObj *class_obj; ScrDynMessageListener message; } fn;
     /* Native handles normally keep conservative ownership edges. Sets
      * backed by cycle-capable maps expose their edge to the collector.
      * Cache that allocation property: during collection the map may be
@@ -1246,6 +1299,9 @@ ScrDyn *scr_dyn_define_prototype_props(ScrDyn *target, ScrDyn *descs, ScrDyn *pr
  * (callers retain first when they keep their own reference); `sig`/`name`
  * must be static literals (the box never frees them; name may be NULL). */
 ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, const char *sig, const char *name);
+/* Gives a function box made with thunk its typed message entry (an
+ * EventEmitter listener registered from it keeps the entry). */
+void scr_dyn_func_set_message(ScrDyn *fn, ScrDynThunk thunk, ScrDynMessageListener listener);
 ScrDyn *scr_dyn_new_class(ScrClassObj *cls, const char *type_key);
 /* EventEmitter and the stream constructors as untyped constructor values,
  * and instanceof over untyped constructor functions

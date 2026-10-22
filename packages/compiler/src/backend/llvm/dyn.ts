@@ -108,6 +108,15 @@ const DYN_HANDLE_UNBOX_FN: Record<string, string> = {
   dgramSocket: "scr_dgram_from_dyn",
 };
 
+/** ScrMessageKind (scr_message.h): the node kinds message readers test. */
+const MESSAGE_KIND = {
+  UNDEFINED: 0,
+  NULL: 1,
+  BOOL: 2,
+  NUMBER: 3,
+  STRING: 4,
+} as const;
+
 export const DYN_KIND = {
   NULL: 0,
   BOOL: 1,
@@ -173,6 +182,8 @@ export class LlDyn {
   private readonly dynFuncThunks = new Map<string, string>();
   private readonly dynFuncBoxes = new Map<string, string>();
   private readonly dynFuncAdapters = new Map<string, string>();
+  private readonly messageListeners = new Map<string, string | null>();
+  private readonly messageReaders = new Map<string, string>();
   private readonly promiseDynAdapters = new Map<string, string>();
   private readonly mapDynOps = new Map<string, string>();
   private dynToStrFn: string | null = null;
@@ -4604,6 +4615,297 @@ export class LlDyn {
       `  %c = call ptr @scr_closure_retain_v(ptr %v)`,
       `  %r = call ptr @scr_dyn_new_func(ptr %c, ptr @${thunk}, i32 ${t.params.length - (t.restAbi === "typed" ? 1 : 0)}, ptr ${sigLit}, ptr %fname)`,
       `  ret ptr %r`,
+      `}`,
+      ``,
+    );
+    return name;
+  }
+
+  /** `sc_dml_<n>(ptr c, ptr message) -> i1`, the typed message entry of a
+   * closure registered as a 'message' listener (ScrDynMessageListener):
+   * builds the closure's parameter from the message's nodes and calls the
+   * closure. It answers false, without calling it, when the message does
+   * not have the parameter's exact layout, and the listener then runs
+   * through its thunk on the decoded message, as before. Null when the
+   * signature's parameter has no message reader (messageReadable). */
+  messageListenerHelper(t: IrType & { kind: "func" }): string | null {
+    const key = typeKey(t);
+    const existing = this.messageListeners.get(key);
+    if (existing !== undefined) return existing;
+    const param = t.params[0];
+    const supported =
+      t.params.length === 1 &&
+      t.rest !== true &&
+      param !== undefined &&
+      (t.ret.kind === "void" || t.ret.kind === "f64" || t.ret.kind === "bool") &&
+      this.messageReadable(param, new Set());
+    if (!supported) {
+      this.messageListeners.set(key, null);
+      return null;
+    }
+    const name = `sc_dml_${this.messageListeners.size}`;
+    this.messageListeners.set(key, name);
+    const B = new BlockBuilder();
+    B.entryAllocas.push(`%fail = alloca i1`);
+    B.line(`store i1 false, ptr %fail`);
+    const value = B.tmp();
+    B.line(
+      `${value} = call ${this.valTy(param)} @${this.messageReaderHelper(param)}(ptr %m, ${this.host.sizeType} 0, ptr %fail)`,
+    );
+    const failed = B.tmp();
+    B.line(`${failed} = load i1, ptr %fail`);
+    const lMiss = B.newLabel("dml.miss");
+    const lCall = B.newLabel("dml.call");
+    B.condBr(failed, lMiss, lCall);
+    B.startBlock(lMiss);
+    B.terminate(`ret i1 false`);
+    B.startBlock(lCall);
+    // The closure consumes its parameter; a pending exception stays for
+    // the emitter, as after the thunk.
+    const fnp = B.tmp();
+    const fn = B.tmp();
+    B.line(`${fnp} = getelementptr inbounds %ScrClosure, ptr %c, i64 0, i32 1`);
+    B.line(`${fn} = load ptr, ptr ${fnp}`);
+    const args = `ptr %c, ${this.valTy(param)} ${value}`;
+    if (t.ret.kind === "void") B.line(`call void ${fn}(${args})`);
+    else B.line(`${B.tmp()} = call ${this.valTy(t.ret)} ${fn}(${args})`);
+    B.terminate(`ret i1 true`);
+    this.defs.push(
+      `define internal zeroext i1 @${name}(ptr %c, ptr %m) ${FN_ATTRS} { ; message entry for ${llvmCommentText(key)}`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return name;
+  }
+
+  /** Whether a message reader can build T: numbers, booleans and strings;
+   * records of them with only declared fields, none of union type; and
+   * boxed unions of those arms and null or undefined without a literal
+   * discriminator, with at most one number, boolean and string arm. */
+  private messageReadable(t: IrType, seen: Set<string>): boolean {
+    switch (t.kind) {
+      case "f64":
+      case "bool":
+      case "string":
+        return true;
+      case "record": {
+        const shape = this.host.recordsById.get(t.shapeId);
+        if (!shape || shape.tuple || shape.indexValue || shape.fields.length === 0) return false;
+        if (seen.has(t.shapeId) || this.isRecursiveShape(t)) return false;
+        seen.add(t.shapeId);
+        const readable = shape.fields.every(
+          (f) =>
+            !f.name.startsWith("%") &&
+            f.type.kind !== "union" &&
+            llFieldType(f.type, this.host.inlineUnions.record(f.type)) !== INLINE_UNION_FIELD &&
+            this.messageReadable(f.type, seen),
+        );
+        seen.delete(t.shapeId);
+        return readable;
+      }
+      case "union": {
+        const def = this.host.unionsById.get(t.unionId);
+        // A discriminated union's checked conversion also tests the arm's
+        // literal discriminator, which the readers do not.
+        if (!def || def.discriminant || this.host.nullableUnions.has(t.unionId)) return false;
+        const scalars = new Set<string>();
+        for (const arm of def.arms) {
+          if (arm.kind === "nullT" || arm.kind === "undefinedT") continue;
+          if (arm.kind === "f64" || arm.kind === "bool" || arm.kind === "string") {
+            if (scalars.has(arm.kind)) return false;
+            scalars.add(arm.kind);
+            continue;
+          }
+          if (arm.kind !== "record" || !this.messageReadable(arm, seen)) return false;
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  /** `sc_dmr_<n>(ptr message, size node, ptr fail) -> T`: T (+1) built
+   * from a message node, for a type messageReadable accepts. Sets *fail
+   * and returns a dummy when the node does not have T's layout: the arm
+   * the checked conversion would choose, a record's declared keys in
+   * declaration order and no others. */
+  private messageReaderHelper(t: IrType): string {
+    const key = typeKey(t);
+    const existing = this.messageReaders.get(key);
+    if (existing) return existing;
+    const name = `sc_dmr_${this.messageReaders.size}`;
+    this.messageReaders.set(key, name);
+    const host = this.host;
+    const S = host.sizeType;
+    if (t.kind !== "record") host.declare(`declare i32 @scr_message_kind(ptr, ${S})`);
+    const retTy = this.valTy(t);
+    const dummy = retTy === "double" ? f64Lit(0) : retTy === "i1" ? "false" : "null";
+    const B = new BlockBuilder();
+    const lFail = B.newLabel("dmr.fail");
+    // scr_message_fields tests a record's kind itself.
+    const kind = B.tmp();
+    if (t.kind !== "record") B.line(`${kind} = call i32 @scr_message_kind(ptr %m, ${S} %n)`);
+    const requireKind = (want: number): void => {
+      const ok = B.tmp();
+      B.line(`${ok} = icmp eq i32 ${kind}, ${want}`);
+      const lOk = B.newLabel("dmr.kind");
+      B.condBr(ok, lOk, lFail);
+      B.startBlock(lOk);
+    };
+    switch (t.kind) {
+      case "f64":
+      case "bool": {
+        host.declare(`declare double @scr_message_number(ptr, ${S})`);
+        requireKind(t.kind === "f64" ? MESSAGE_KIND.NUMBER : MESSAGE_KIND.BOOL);
+        const n = B.tmp();
+        B.line(`${n} = call double @scr_message_number(ptr %m, ${S} %n)`);
+        if (t.kind === "f64") B.terminate(`ret double ${n}`);
+        else {
+          const b = B.tmp();
+          B.line(`${b} = fcmp une double ${n}, ${f64Lit(0)}`);
+          B.terminate(`ret i1 ${b}`);
+        }
+        break;
+      }
+      case "string": {
+        host.declare(`declare ptr @scr_message_string(ptr, ${S})`);
+        requireKind(MESSAGE_KIND.STRING);
+        const str = B.tmp();
+        B.line(`${str} = call ptr @scr_message_string(ptr %m, ${S} %n)`);
+        B.terminate(`ret ptr ${str}`);
+        break;
+      }
+      case "record": {
+        const shape = host.recordsById.get(t.shapeId)!;
+        const order = recordSourceFieldOrder(shape);
+        const fields = new Map(shape.fields.map((f, i) => [f.name, { field: f, index: i }]));
+        const base = host.nullableUnions.fieldBase(t.shapeId);
+        const struct = mangleRecordStruct(t.shapeId);
+        const names = this.recordNameTable(t.shapeId, shape);
+        host.declare(`declare zeroext i1 @scr_message_fields(ptr, ${S}, ptr, ptr, ${S}, ptr)`);
+        B.entryAllocas.push(`%kids = alloca [${order.length} x ${S}]`);
+        const matched = B.tmp();
+        B.line(
+          `${matched} = call zeroext i1 @scr_message_fields(ptr %m, ${S} %n, ptr ${names.names}, ptr ${names.lens}, ${S} ${order.length}, ptr %kids)`,
+        );
+        const lBuild = B.newLabel("dmr.build");
+        B.condBr(matched, lBuild, lFail);
+        B.startBlock(lBuild);
+        B.line(`%r0 = call ptr @${mangleRecordNew(t.shapeId)}()`);
+        order.forEach((fieldName, i) => {
+          const { field, index } = fields.get(fieldName)!;
+          const kidp = B.tmp();
+          const kid = B.tmp();
+          B.line(
+            `${kidp} = getelementptr inbounds [${order.length} x ${S}], ptr %kids, i64 0, i64 ${i}`,
+          );
+          B.line(`${kid} = load ${S}, ptr ${kidp}`);
+          const v = B.tmp();
+          B.line(
+            `${v} = call ${this.valTy(field.type)} @${this.messageReaderHelper(field.type)}(ptr %m, ${S} ${kid}, ptr %fail)`,
+          );
+          const failed = B.tmp();
+          B.line(`${failed} = load i1, ptr %fail`);
+          const lDrop = B.newLabel("dmr.drop");
+          const lStore = B.newLabel("dmr.store");
+          B.condBr(failed, lDrop, lStore);
+          B.startBlock(lDrop);
+          B.line(`call void ${releaseSym(host, t)}(ptr %r0)`);
+          B.terminate(`ret ptr null`);
+          B.startBlock(lStore);
+          const p = B.tmp();
+          B.line(
+            `${p} = getelementptr inbounds %${struct}, ptr %r0, i64 0, i32 ${index + base} ; .${llvmCommentText(fieldName)}`,
+          );
+          const fieldTy = llFieldType(field.type, host.inlineUnions.record(field.type));
+          if (fieldTy === "i8") {
+            const z = B.tmp();
+            B.line(`${z} = zext i1 ${v} to i8`);
+            B.line(`store i8 ${z}, ptr ${p}`);
+          } else {
+            B.line(`store ${fieldTy} ${v}, ptr ${p}`);
+          }
+        });
+        B.terminate(`ret ptr %r0`);
+        break;
+      }
+      case "union": {
+        const def = host.unionsById.get(t.unionId)!;
+        def.arms.forEach((arm, i) => {
+          const lNext = B.newLabel("dmr.next");
+          if (arm.kind === "nullT" || arm.kind === "undefinedT") {
+            const hit = B.tmp();
+            B.line(
+              `${hit} = icmp eq i32 ${kind}, ${arm.kind === "nullT" ? MESSAGE_KIND.NULL : MESSAGE_KIND.UNDEFINED}`,
+            );
+            const lHit = B.newLabel("dmr.unit");
+            B.condBr(hit, lHit, lNext);
+            B.startBlock(lHit);
+            B.terminate(`ret ptr ${host.unitInstanceRef(t.unionId, i)}`);
+            B.startBlock(lNext);
+            return;
+          }
+          if (arm.kind !== "record") {
+            const want =
+              arm.kind === "f64"
+                ? MESSAGE_KIND.NUMBER
+                : arm.kind === "bool"
+                  ? MESSAGE_KIND.BOOL
+                  : MESSAGE_KIND.STRING;
+            const hit = B.tmp();
+            B.line(`${hit} = icmp eq i32 ${kind}, ${want}`);
+            const lHit = B.newLabel("dmr.arm");
+            B.condBr(hit, lHit, lNext);
+            B.startBlock(lHit);
+          }
+          // A record arm that does not match leaves *fail clear for the
+          // next arm, like the checked conversion's next-arm match.
+          const v = B.tmp();
+          B.line(
+            `${v} = call ${this.valTy(arm)} @${this.messageReaderHelper(arm)}(ptr %m, ${S} %n, ptr %fail)`,
+          );
+          if (arm.kind === "record") {
+            const failed = B.tmp();
+            B.line(`${failed} = load i1, ptr %fail`);
+            const lHit = B.newLabel("dmr.arm");
+            const lMiss = B.newLabel("dmr.miss");
+            B.condBr(failed, lMiss, lHit);
+            B.startBlock(lMiss);
+            B.line(`store i1 false, ptr %fail`);
+            B.br(lNext);
+            B.startBlock(lHit);
+          }
+          const u = B.tmp();
+          if (arm.kind === "f64") {
+            host.declare(`declare ptr @scr_union_new_f64(i32, double)`);
+            B.line(`${u} = call ptr @scr_union_new_f64(i32 ${i}, double ${v})`);
+          } else if (arm.kind === "bool") {
+            host.declare(`declare ptr @scr_union_new_bool(i32, i1 zeroext)`);
+            B.line(`${u} = call ptr @scr_union_new_bool(i32 ${i}, i1 ${v})`);
+          } else {
+            const rc = vAdapters(host, arm);
+            host.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
+            B.line(
+              `${u} = call ptr @scr_union_new_ref(i32 ${i}, ptr ${v}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(host, arm)})`,
+            );
+          }
+          B.terminate(`ret ptr ${u}`);
+          B.startBlock(lNext);
+        });
+        B.br(lFail);
+        break;
+      }
+      default:
+        throw new InternalCompilerError(`llvm emitter bug: message reader of ${key}`);
+    }
+    B.startBlock(lFail);
+    B.line(`store i1 true, ptr %fail`);
+    B.terminate(`ret ${retTy} ${dummy}`);
+    this.defs.push(
+      `define internal ${retTy === "i1" ? "zeroext i1" : retTy} @${name}(ptr %m, ${S} %n, ptr %fail) ${FN_ATTRS} { ; message reader for ${llvmCommentText(key)}`,
+      B.render(),
       `}`,
       ``,
     );

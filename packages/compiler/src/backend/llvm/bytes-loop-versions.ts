@@ -7,6 +7,7 @@ import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 import { emitCountedLoopLimit, emitCountedLoopSafety } from "./counted-loops.js";
 import { emitBytesHeaderLength, emitBytesSharedStorage } from "./expr-bytes.js";
+import { f64Lit } from "./common.js";
 
 type Node = IrExpr | IrStmt;
 type VarRef = IrExpr & { kind: "varRef" };
@@ -50,6 +51,9 @@ export interface BytesLoopVersion {
   ownedReceivers: number[];
   fixed: FixedCheck[];
   affine: AffineCheck[];
+  /** Keys of affine terms the guard tests at run time: exact integers
+   * within GUARDED_TERM. */
+  guarded: ReadonlySet<string>;
   /** The counted loop whose iteration space the affine checks cover. */
   counted: IntegerCountedForLoop | null;
   /** The guard also requires every counter value within [-bound, bound]. */
@@ -83,6 +87,9 @@ const MAX_FIXED_END = 2 ** 32;
 const MAX_CHECKS = 8;
 const MAX_OFFSET = 2 ** 31;
 const SAFE = Number.MAX_SAFE_INTEGER;
+/** The range the guard requires of an invariant index term without a
+ * proven one: every index of a typed array of at most 2^32 elements. */
+const GUARDED_TERM: IntegerRange = { min: -(2 ** 32), max: 2 ** 32 };
 const INVARIANT_OPS = new Set(["+", "-", "*", "&", "|", "^", "<<", ">>", ">>>"]);
 
 /** Loop versioning for typed-array bounds. A typed array's length and data
@@ -95,7 +102,9 @@ const INVARIANT_OPS = new Set(["+", "-", "*", "&", "|", "^", "<<", ">>", ">>>"])
  *   `hi < length`, such as `table[x & 0xff]` or a constant-trip counter;
  * - an index `k * counter + invariant + c` of a counted loop needs its first
  *   and last values in bounds, such as `out[base + i]` for `i < n` or
- *   `view.getUint32(i * 4)`.
+ *   `view.getUint32(i * 4)`. An invariant without a proven integer range,
+ *   such as `base` for `const base = r * cols`, must also be an exact
+ *   integer between -2^32 and 2^32, which the guard tests.
  *
  * In worker programs, every access of a view that may be shared tests its
  * shared storage. A view's storage is also fixed at construction, so the
@@ -198,9 +207,8 @@ export function matchBytesLoopVersion(
     }
     return invariant(e.localId) ? e : null;
   };
-  // A pure integer operand evaluated again before the loop.
-  const invariantKey = (e: IrExpr): string | null => {
-    if (!facts.ranges.get(e)) return null;
+  // A pure loop-invariant number, evaluated again before the loop.
+  const pureKey = (e: IrExpr): string | null => {
     if (e.kind === "numLit") return Number.isSafeInteger(e.value) ? `n${e.value}` : null;
     if (e.kind === "varRef")
       return invariant(e.localId) ? `v${e.localId.length}:${e.localId}` : null;
@@ -210,12 +218,27 @@ export function matchBytesLoopVersion(
       e.left.type.kind === "f64" &&
       e.right.type.kind === "f64"
     ) {
-      const left = invariantKey(e.left),
-        right = invariantKey(e.right);
+      const left = pureKey(e.left),
+        right = pureKey(e.right);
       return left !== null && right !== null ? `(${e.op} ${left} ${right})` : null;
     }
     return null;
   };
+  // Invariant terms without a proven range, such as `base` in
+  // `w[base + j]` with `const base = r * cols` for a parameter `cols`. The
+  // guard tests each one: an exact integer (not -0) within GUARDED_TERM.
+  const guardedRanges = new Map<IrExpr, IntegerRange>();
+  const guardedNodes = new Map<IrExpr, string>();
+  // The key of a loop-invariant index term, with a proven range or guarded.
+  const invariantKey = (e: IrExpr): string | null => {
+    const key = pureKey(e);
+    if (key === null || facts.ranges.get(e)) return key;
+    if (e.kind === "numLit") return null;
+    guardedRanges.set(e, GUARDED_TERM);
+    guardedNodes.set(e, key);
+    return key;
+  };
+  const termRange = (e: IrExpr): IntegerRange => facts.ranges.get(e) ?? guardedRanges.get(e)!;
   interface Affine {
     /** The counter's coefficient; 0 when the value is loop-invariant. */
     counter: number;
@@ -223,9 +246,10 @@ export function matchBytesLoopVersion(
     offset: number;
   }
   // Every operand of an affine index is `counter * k + Σ terms + offset`.
-  // Invariant terms need proven ranges. Operands that involve the counter
-  // need none: the guard bounds the counter so that each of them is a safe
-  // integer, which makes the index's double arithmetic exact.
+  // Invariant terms need proven ranges or the guard's test (guarded terms).
+  // Operands that involve the counter need none: the guard bounds the
+  // counter so that each of them is a safe integer, which makes the index's
+  // double arithmetic exact.
   const shapes = new Map<IrExpr, Affine | null>();
   const affine = (e: IrExpr): Affine | null => {
     if (shapes.has(e)) return shapes.get(e)!;
@@ -309,7 +333,7 @@ export function matchBytesLoopVersion(
   };
   const termMagnitude = (terms: Term[]): number =>
     terms.reduce((sum, t) => {
-      const r = facts.ranges.get(t.expr)!;
+      const r = termRange(t.expr);
       return sum + Math.max(Math.abs(r.min), Math.abs(r.max));
     }, 0);
 
@@ -433,7 +457,7 @@ export function matchBytesLoopVersion(
       let min = Math.min(a, b) + shape.offset,
         max = Math.max(a, b) + shape.offset;
       for (const term of shape.terms) {
-        const r = facts.ranges.get(term.expr)!;
+        const r = termRange(term.expr);
         min += term.sign > 0 ? r.min : -r.max;
         max += term.sign > 0 ? r.max : -r.min;
       }
@@ -447,6 +471,12 @@ export function matchBytesLoopVersion(
         ranges.set(operand, { min: Math.max(min, known.min), max: Math.min(max, known.max) });
     }
   }
+  // Guarded terms of the kept checks, and the range the guard proves for
+  // every node of each in the fast copy.
+  const guarded = new Set<string>();
+  for (const group of affineKept)
+    for (const term of group.check.terms) if (guardedRanges.has(term.expr)) guarded.add(term.key);
+  for (const [node, key] of guardedNodes) if (guarded.has(key)) ranges.set(node, GUARDED_TERM);
   // Renumber the receivers the kept checks use.
   const order = [...used].sort((a, b) => a - b);
   const renumber = new Map(order.map((old, index) => [old, index]));
@@ -470,6 +500,7 @@ export function matchBytesLoopVersion(
       minOffset: g.check.minOffset,
       maxEnd: g.check.maxEnd,
     })),
+    guarded,
     counted: affineKept.length > 0 ? counted : null,
     counterBound: needsBound ? bound : null,
     ranges,
@@ -567,6 +598,14 @@ export function emitBytesLoopVersionGuard(
       let base = "0";
       for (const term of check.terms) {
         const value = host.emitExpr(term.expr);
+        if (version.guarded.has(term.key)) {
+          const tested = emitGuardedTerm(host, value.name);
+          conditions.push(tested.ok);
+          const sum = B.tmp();
+          B.line(`${sum} = ${term.sign > 0 ? "add" : "sub"} i64 ${base}, ${tested.integer}`);
+          base = sum;
+          continue;
+        }
         const integer = exactInteger(host, value, term.expr);
         if (!integer) {
           // Unreachable: every term has a proven range. Stay checked.
@@ -612,6 +651,34 @@ export function emitBytesLoopVersionGuard(
   }
   if (valid === "true") B.br(fast);
   else B.condBr(valid, fast, slow);
+}
+
+/** Tests that a guarded term is an exact integer within GUARDED_TERM (not
+ * -0; NaN fails the ordered comparisons) and gives its i64. The integer is
+ * frozen, so it is a fixed value even when the test fails. */
+function emitGuardedTerm(host: LlvmEmitterContext, value: string): { ok: string; integer: string } {
+  const B = host.B;
+  const low = B.tmp(),
+    high = B.tmp(),
+    inRange = B.tmp(),
+    raw = B.tmp(),
+    integer = B.tmp(),
+    back = B.tmp(),
+    bits = B.tmp(),
+    backBits = B.tmp(),
+    exact = B.tmp(),
+    ok = B.tmp();
+  B.line(`${low} = fcmp oge double ${value}, ${f64Lit(GUARDED_TERM.min)}`);
+  B.line(`${high} = fcmp ole double ${value}, ${f64Lit(GUARDED_TERM.max)}`);
+  B.line(`${inRange} = and i1 ${low}, ${high}`);
+  B.line(`${raw} = fptosi double ${value} to i64`);
+  B.line(`${integer} = freeze i64 ${raw}`);
+  B.line(`${back} = sitofp i64 ${integer} to double`);
+  B.line(`${bits} = bitcast double ${value} to i64`);
+  B.line(`${backBits} = bitcast double ${back} to i64`);
+  B.line(`${exact} = icmp eq i64 ${bits}, ${backBits}`);
+  B.line(`${ok} = and i1 ${inRange}, ${exact}`);
+  return { ok, integer };
 }
 
 function scaleCounter(host: LlvmEmitterContext, value: string, scale: number): string {

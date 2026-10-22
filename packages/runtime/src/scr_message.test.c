@@ -250,6 +250,52 @@ static void check_large(void) {
   scr_message_free(message);
 }
 
+/* The readers compiled 'message' listeners use: node kinds and values, a
+ * record's keys in order, and which messages they may read. */
+static void check_readers(void) {
+  ScrDyn *root = scr_dyn_new_obj();
+  put_number(root, "id", 7);
+  ScrStr *text = scr_str_new("seven", 5);
+  scr_dyn_obj_set(root, "name", 4, scr_dyn_new_str(text));
+  scr_str_release(text);
+  scr_dyn_obj_set(root, "done", 4, scr_dyn_new_bool(true));
+  ScrMessage *message = scr_message_encode(root);
+  assert(message && scr_message_readable(message));
+  assert(scr_message_kind(message, 0) == SCR_MESSAGE_OBJECT);
+  static const char *const names[] = {"id", "name", "done"};
+  static const size_t lengths[] = {2, 4, 4};
+  size_t values[3];
+  assert(scr_message_fields(message, 0, names, lengths, 3, values));
+  assert(scr_message_kind(message, values[0]) == SCR_MESSAGE_NUMBER);
+  assert(scr_message_number(message, values[0]) == 7);
+  assert(scr_message_kind(message, values[1]) == SCR_MESSAGE_STRING);
+  ScrStr *name = scr_message_string(message, values[1]);
+  assert(name->len == 5 && !memcmp(name->data, "seven", 5));
+  scr_str_release(name);
+  assert(scr_message_kind(message, values[2]) == SCR_MESSAGE_BOOL);
+  assert(scr_message_number(message, values[2]) == 1);
+  /* Another order, a missing key or an extra key does not match. */
+  static const char *const reordered[] = {"name", "id", "done"};
+  static const size_t reordered_lengths[] = {4, 2, 4};
+  assert(!scr_message_fields(message, 0, reordered, reordered_lengths, 3, values));
+  assert(!scr_message_fields(message, 0, names, lengths, 2, values));
+  assert(!scr_message_fields(message, values[0], names, lengths, 3, values));
+  scr_message_free(message);
+  put_number(root, "extra", 1);
+  message = scr_message_encode(root);
+  assert(!scr_message_fields(message, 0, names, lengths, 3, values));
+  scr_message_free(message);
+  /* A value reached twice makes the message unreadable. */
+  ScrDyn *shared = scr_dyn_new_obj();
+  scr_dyn_obj_set(root, "first", 5, scr_dyn_retain(shared));
+  scr_dyn_obj_set(root, "second", 6, shared);
+  message = scr_message_encode(root);
+  assert(message && !scr_message_readable(message));
+  scr_message_free(message);
+  scr_dyn_release(root);
+  scr_collect_cycles();
+}
+
 /* A link-gated unit's handle crosses threads through the transfer hooks in
  * its ops: share on the sender, adopt on the receiver, drop with the
  * message. The test borrows the last capacity slot, which no unit uses, so
@@ -376,6 +422,7 @@ int main(void) {
   check_rejection();
   check_documents();
   check_large();
+  check_readers();
   check_handle_transfer();
   scr_context_cleanup();
   puts("message graphs preserve identity, sparse values, byte aliases and getter order");

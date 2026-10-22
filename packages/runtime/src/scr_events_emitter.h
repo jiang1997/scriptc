@@ -154,6 +154,14 @@ ScrEmitter *scr_emitter_remove_all(ScrEmitter *em, ScrStr *name, bool all);
  * emit('error', err): no listener ⇒ THROWS err (borrowed; +1 taken). */
 bool scr_emitter_emit(ScrEmitter *em, ScrStr *name, ...);
 bool scr_emitter_emit_flex(ScrEmitter *em, ScrStr *name, ScrDyn *const *args, size_t argc);
+/* An untyped emit of one message: a listener registered from a function
+ * box with a typed message entry (scr_dyn_func_set_message) reads the
+ * message itself while no listener has needed the decoded value; from the
+ * first listener without an entry on, every listener gets decode(message),
+ * made once. */
+struct ScrMessage;
+bool scr_emitter_emit_message(ScrEmitter *em, ScrStr *name, const struct ScrMessage *message,
+                              ScrDyn *(*decode)(const struct ScrMessage *));
 /* An untyped emit of an event with a fixed tuple: the arguments as given
  * for dynamic listeners, plus the tuple converted by the caller as
  * scr_emitter_emit's variadics for typed listeners. has_typed answers

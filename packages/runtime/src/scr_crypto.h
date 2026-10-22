@@ -252,6 +252,13 @@ typedef ScrBytes *(*ScrWebCryptoAesFn)(const char *name, bool decrypt, const uns
 ScrPromise *scr_webcrypto_cipher(ScrDyn *args, bool decrypt, ScrWebCryptoAesFn aes);
 ScrPromise *scr_webcrypto_encrypt(ScrDyn *args);
 ScrPromise *scr_webcrypto_decrypt(ScrDyn *args);
+/* wrapKey and unwrapKey run the same way (AES-KW wrapping, or the AES
+ * ciphers): wrapKey fulfills with an ArrayBuffer and unwrapKey with a
+ * CryptoKey on a later loop turn. */
+ScrPromise *scr_webcrypto_wrap(ScrDyn *args, ScrWebCryptoAesFn aes);
+ScrPromise *scr_webcrypto_unwrap(ScrDyn *args, ScrWebCryptoAesFn aes);
+ScrPromise *scr_webcrypto_wrap_key(ScrDyn *args);
+ScrPromise *scr_webcrypto_unwrap_key(ScrDyn *args);
 /* deriveBits and deriveKey (PBKDF2 and HKDF) over node:crypto's KDF core:
  * deriveBits fulfills with an ArrayBuffer (at once for a zero length) and
  * deriveKey with a CryptoKey of the derived key type, on a later loop

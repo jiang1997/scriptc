@@ -11,6 +11,7 @@ import {
 } from "../../ir/ir.js";
 import { everyStmtList, transformStmtList } from "../../ir/traverse.js";
 import { classInstanceOf } from "./class-dynamic-dispatch.js";
+import type { DispatchSites } from "./dispatch-sites.js";
 import type { ClassInfo } from "./lower-classes.js";
 import type { Lowerer } from "./lowerer.js";
 
@@ -26,25 +27,16 @@ export class CaughtValueDispatch {
   private readonly payloadHelpers = new Map<string, IrFunction>();
   private readonly payloadHelperFns = new Set<IrFunction>();
 
-  process(lowerer: Lowerer, functions: readonly IrFunction[]): boolean {
+  process(lowerer: Lowerer, functions: readonly IrFunction[], sites: DispatchSites): boolean {
     const consumers: IrFunction[] = [];
     for (const fn of functions) {
       if (fn === this.helper) continue;
-      let consumes = false;
-      everyStmtList(fn.body, {
-        stmt: (stmt) => {
-          if (stmt.kind === "throw" && stmt.value.type.kind === "object") {
-            const info = lowerer.classes.get(stmt.value.type.className);
-            if (info) this.thrownClasses.add(info.def.name);
-          }
-          return true;
-        },
-        expr: (expr) => {
-          if (expr.kind === "caughtToDyn") consumes = true;
-          return true;
-        },
-      });
-      if (consumes) consumers.push(fn);
+      const found = sites.of(fn);
+      for (const className of found.thrown) {
+        const info = lowerer.classes.get(className);
+        if (info) this.thrownClasses.add(info.def.name);
+      }
+      if (found.caughtValues) consumers.push(fn);
     }
     if (!this.helper && consumers.length === 0) return false;
     let changed = false;

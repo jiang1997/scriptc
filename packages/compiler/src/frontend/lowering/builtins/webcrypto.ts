@@ -10,8 +10,8 @@ import { isWebCryptoReceiver } from "./crypto.js";
 /* WebCrypto (scr_webcrypto.c, with encrypt and decrypt in
  * scr_webcrypto_aes.c and the ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS
  * algorithms in scr_webcrypto_pki.c): `crypto.subtle`'s `importKey`,
- * `generateKey`, `exportKey`, `encrypt`, `decrypt`, `deriveBits`,
- * `deriveKey`, `sign`, `verify` and `digest`
+ * `generateKey`, `exportKey`, `encrypt`, `decrypt`, `wrapKey`,
+ * `unwrapKey`, `deriveBits`, `deriveKey`, `sign`, `verify` and `digest`
  * called on the crypto global (also through
  * globalThis, node:crypto's webcrypto and node:crypto's subtle) lower to
  * runtime entry points that take the argument vector as one dyn array and
@@ -26,6 +26,8 @@ const SUBTLE_LOWERED: ReadonlyMap<string, IrLibFn> = new Map([
   ["exportKey", "webcrypto.exportKey"],
   ["encrypt", "webcrypto.encrypt"],
   ["decrypt", "webcrypto.decrypt"],
+  ["wrapKey", "webcrypto.wrapKey"],
+  ["unwrapKey", "webcrypto.unwrapKey"],
   ["deriveBits", "webcrypto.deriveBits"],
   ["deriveKey", "webcrypto.deriveKey"],
   ["sign", "webcrypto.sign"],
@@ -34,7 +36,7 @@ const SUBTLE_LOWERED: ReadonlyMap<string, IrLibFn> = new Map([
 ]);
 
 const SUBTLE_HINT =
-  "the native WebCrypto surface is crypto.subtle's importKey, generateKey and exportKey for HMAC and AES keys (importKey also for PBKDF2 and HKDF keys), encrypt and decrypt with AES-GCM, AES-CBC or AES-CTR, deriveBits and deriveKey with PBKDF2 or HKDF, sign and verify with HMAC, generateKey, importKey, exportKey, sign and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and digest with SHA-1, SHA-256, SHA-384 or SHA-512, each called directly on crypto.subtle";
+  "the native WebCrypto surface is crypto.subtle's importKey, generateKey and exportKey for HMAC and AES keys (importKey also for PBKDF2 and HKDF keys), encrypt and decrypt with AES-GCM, AES-CBC or AES-CTR, wrapKey and unwrapKey of secret keys with AES-KW or those ciphers, deriveBits and deriveKey with PBKDF2 or HKDF, sign and verify with HMAC, generateKey, importKey, exportKey, sign and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and digest with SHA-1, SHA-256, SHA-384 or SHA-512, each called directly on crypto.subtle";
 
 /** Whether `node` is a SubtleCrypto object: `subtle` on a WebCrypto
  * Crypto object (the global, globalThis.crypto or node:crypto's

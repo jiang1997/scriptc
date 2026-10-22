@@ -13,16 +13,20 @@ import {
   type IrStmt,
   type IrType,
 } from "../../ir/ir.js";
-import { everyStmtList, transformStmtList } from "../../ir/traverse.js";
+import { transformStmtList } from "../../ir/traverse.js";
 import { genResultRecord } from "../type-mapper.js";
+import type { DispatchSites } from "./dispatch-sites.js";
 import type { Lowerer } from "./lowerer.js";
 
 type GeneratorType = Extract<IrType, { kind: "generator" }>;
 type Invoke = Extract<IrExpr, { kind: "dynInvoke" }>;
 type KeyGet = Extract<IrExpr, { kind: "dynKeyGet" }>;
 
+/** The generator methods a dynamic call or read steps. */
+export const GENERATOR_STEP_METHODS = new Set(["next", "return", "throw"]);
+
 /** The iterator helper methods the runtime answers on checked iterators. */
-const HELPER_METHODS = new Set([
+export const HELPER_METHODS = new Set([
   "map",
   "filter",
   "take",
@@ -101,6 +105,7 @@ export class GeneratorDynamicDispatch {
     lowerer: Lowerer,
     functions: readonly IrFunction[],
     classHelpers: ReadonlySet<IrFunction>,
+    sites: DispatchSites,
   ): boolean {
     const seen = new Set<string>();
     const rewrite = new Set<IrFunction>();
@@ -117,34 +122,14 @@ export class GeneratorDynamicDispatch {
         lowerer.shapes.get(type.shapeId)?.fields.forEach((field) => discover(field.type));
       else if (type.kind === "union") lowerer.unions.get(type.unionId)?.arms.forEach(discover);
     };
-    for (const fn of functions)
-      everyStmtList(fn.body, {
-        stmt: () => true,
-        expr: (expr) => {
-          if (expr.kind === "dynFrom") discover(expr.value.type);
-          if (expr.kind === "dynInvoke" && ["next", "return", "throw"].includes(expr.method))
-            rewrite.add(fn);
-          // The runtime steps the values iterator helpers and destructuring
-          // receive.
-          if (
-            (expr.kind === "dynInvoke" && HELPER_METHODS.has(expr.method)) ||
-            (expr.kind === "dynKeyGet" &&
-              expr.key.kind === "strLit" &&
-              HELPER_METHODS.has(expr.key.value)) ||
-            expr.kind === "dynIterN" ||
-            (expr.kind === "libCall" && expr.fn === "dyn.destructureRest")
-          )
-            runtimeSteps = true;
-          if (
-            expr.kind === "dynKeyGet" &&
-            expr.key.kind === "strLit" &&
-            (["next", "return", "throw"].includes(expr.key.value) ||
-              HELPER_METHODS.has(expr.key.value))
-          )
-            rewrite.add(fn);
-          return true;
-        },
-      });
+    for (const fn of functions) {
+      const found = sites.of(fn);
+      found.values.forEach(discover);
+      // The runtime steps the values iterator helpers and destructuring
+      // receive.
+      if (found.runtimeSteps) runtimeSteps = true;
+      if (found.generatorSteps) rewrite.add(fn);
+    }
     let changed = false;
     for (const fn of functions) {
       // The generator helper's fallback may itself dispatch native classes.
@@ -159,7 +144,7 @@ export class GeneratorDynamicDispatch {
           if (
             expr.kind === "dynKeyGet" &&
             expr.key.kind === "strLit" &&
-            (["next", "return", "throw"].includes(expr.key.value) ||
+            (GENERATOR_STEP_METHODS.has(expr.key.value) ||
               (HELPER_METHODS.has(expr.key.value) && this.generators.size > 0))
           ) {
             const method = expr.key.value;
@@ -173,8 +158,7 @@ export class GeneratorDynamicDispatch {
               loc: expr.loc,
             };
           }
-          if (expr.kind !== "dynInvoke" || !["next", "return", "throw"].includes(expr.method))
-            return expr;
+          if (expr.kind !== "dynInvoke" || !GENERATOR_STEP_METHODS.has(expr.method)) return expr;
           const key = JSON.stringify([expr.method, expr.args.length, expr.calleeName]);
           let dispatch = this.dispatches.get(key);
           if (!dispatch) {

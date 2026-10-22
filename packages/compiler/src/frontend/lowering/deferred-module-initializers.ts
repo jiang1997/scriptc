@@ -129,7 +129,14 @@ export class DeferredModuleInitializers {
     return block;
   }
 
-  process(lowerer: Lowerer, functions: readonly IrFunction[]): boolean {
+  /** Materializes the initializers that reached bodies observe. `filled`
+   * receives each function whose body changes inside an unchanged statement
+   * list. */
+  process(
+    lowerer: Lowerer,
+    functions: readonly IrFunction[],
+    filled?: (fn: IrFunction) => void,
+  ): boolean {
     if (this.pending.size === 0) return false;
     // Scans keep only the reads of deferred bindings.
     for (const key of this.pending.keys()) {
@@ -192,7 +199,10 @@ export class DeferredModuleInitializers {
         }
         if (holders.length === 0) continue;
         // These bodies changed inside unchanged statement lists.
-        for (const fn of holders) this.scans.delete(fn);
+        for (const fn of holders) {
+          this.scans.delete(fn);
+          filled?.(fn);
+        }
         // An inserted body can introduce a placeholder needed by another
         // action in this pass. Unattached bodies are not part of the live IR.
         for (const nested of scanStatements(body).placeholders) add(nested, holders);

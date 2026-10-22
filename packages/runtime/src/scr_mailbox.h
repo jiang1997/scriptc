@@ -12,7 +12,12 @@ typedef struct ScrMailEvent {
   unsigned char *data; /* raw bytes (a worker's captured stdout or stderr), owned */
   size_t length;
   struct ScrMailEvent *next;
+  bool in_message; /* the event is the one message's block holds (scr_message_mail_event) */
 } ScrMailEvent;
+
+/* The event that carries `message`, in the message's own block: a queued
+ * message is then one allocation. Freeing the event frees the message. */
+ScrMailEvent *scr_message_mail_event(ScrMessage *message);
 
 ScrMailbox *scr_mailbox_new(void);
 ScrMailbox *scr_mailbox_retain(ScrMailbox *mailbox);

@@ -264,6 +264,15 @@ export function preservesArrayLength(
         );
       case "return":
         return s.value === null || expr(s.value);
+      case "fieldSet":
+        // A number or boolean stored into a class field: accessors are
+        // calls, not field writes, and the old value holds no reference to
+        // release, so the write runs no user code.
+        return (
+          (s.value.type.kind === "f64" || s.value.type.kind === "bool") &&
+          expr(s.obj) &&
+          expr(s.value)
+        );
       default:
         if (!PLAIN_STATEMENTS.has(s.kind)) return false;
     }

@@ -134,6 +134,39 @@ test("a counted loop's affine accesses get one guard and exact operand ranges", 
   expect(version.ranges.get(shifted)).toEqual({ min: 1, max: Number.MAX_SAFE_INTEGER });
 });
 
+test("invariant terms without a range are tested by the guard", () => {
+  // for (let i = 0; i < n; i++) out[i] = src[k + i], with `k` a parameter
+  const shifted = bin("+", ref("k"), ref("i"));
+  const loop = counted([set(ref("out", f64s), ref("i"), get(ref("src", f64s), shifted))]);
+  const kernel = fn([loop]);
+  const version = match(kernel, loop)!;
+  expect([...version.guarded]).toEqual(["v1:k"]);
+  expect(version.affine.map((c) => c.terms.map((t) => t.key))).toEqual([[], ["v1:k"]]);
+  // In the fast copy the term has the range the guard tests.
+  expect(version.ranges.get(shifted.kind === "bin" ? shifted.left : shifted)).toEqual({
+    min: -(2 ** 32),
+    max: 2 ** 32,
+  });
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      kernel,
+    ],
+  };
+  const body = /^define internal [^\n]*@sc_bf_kernel[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  const guard = body.slice(0, body.search(/^bytes\.version\.(fast|slow)\d+:$/m));
+  // -2^32 <= k <= 2^32, and k is the double of its frozen integer.
+  expect(guard).toMatch(/fcmp oge double %\S+, 0xC1F0000000000000/);
+  expect(guard).toMatch(/fcmp ole double %\S+, 0x41F0000000000000/);
+  expect(guard).toMatch(/freeze i64/);
+  const fast = /^bytes\.version\.fast\d+:$[^]*?^bytes\.version\.done\d+:$/m.exec(body)![0];
+  expect(fast).not.toContain("bytes.index");
+  expect(body.slice(0, body.indexOf(fast))).toContain("bytes.index.invalid");
+});
+
 test("statically ranged indices compare one constant with the length", () => {
   const masked = bin("&", bin("^", ref("i"), ref("k")), num(255));
   const loop = counted([set(ref("out", f64s), num(0), get(ref("table", i32s), masked))]);

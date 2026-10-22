@@ -289,6 +289,7 @@ function lowerStreamCallback(
   node: ts.MethodDeclaration | ts.FunctionExpression | ts.ArrowFunction,
   thisType: IrType,
   fullTuple: IrType[],
+  chunkValues = true,
 ): IrExpr {
   const loc = locOf(node);
   const { shapes, funcType } = lowerer.lambdaSignature(node);
@@ -309,11 +310,15 @@ function lowerStreamCallback(
     // callable dyn whose glue dispatches to the runtime's *_done).
     if (funcType.params[i]!.kind === "dyn") continue;
     // A write or transform chunk of another type converts from the
-    // chunk's value when the callback runs (an object-mode side's value,
-    // or the Buffer), or throws a TypeError there; an encoding of another
-    // type (`string | null | undefined`) from the encoding argument's.
+    // chunk's value when the callback runs (an object-mode side's value),
+    // or throws a TypeError there — on a side known to be byte mode the
+    // chunk is a Buffer, so the declared type must be Node's or a
+    // supertype of it (`Buffer | string`); an encoding of another type
+    // (`string | null | undefined`) converts from the encoding argument's
+    // value.
     if (
-      (i === 0 || i === 1) &&
+      ((i === 0 && (chunkValues || widensInto(lowerer, fullTuple[0]!, funcType.params[0]!, loc))) ||
+        i === 1) &&
       (which === "write" || which === "transform") &&
       funcType.params[i]!.kind !== "func" &&
       canConvertToDyn(
@@ -463,6 +468,20 @@ function streamObjectModes(
     }
   }
   return out;
+}
+
+/** Whether an options literal sets the writable side's object mode with a
+ * `true` literal (objectMode, or writableObjectMode on a duplex stream).
+ * Reports nothing: streamObjectModes fences the other value forms. */
+function literalWritesValues(opts: ts.ObjectLiteralExpression, duplexish: boolean): boolean {
+  for (const prop of opts.properties?.nodes ?? []) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const name =
+      ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+    if (name !== "objectMode" && !(duplexish && name === "writableObjectMode")) continue;
+    if (prop.initializer.kind !== ts.SyntaxKind.FalseKeyword) return true;
+  }
+  return false;
 }
 
 /** The full Node parameter tuples of the option callbacks, given the
@@ -802,7 +821,10 @@ function parseStreamOptions(
           }
           return declared ?? funcOf([], VOID);
         });
-        present.set(name, lowerStreamCallback(lowerer, name, fnNode, thisType, tuple));
+        present.set(
+          name,
+          lowerStreamCallback(lowerer, name, fnNode, thisType, tuple, out.writableObject),
+        );
       } finally {
         if (pinned) lowerer.stageSourceTypes.delete(pinned);
       }
@@ -1151,6 +1173,7 @@ function streamMethodWrapper(
   thisType: IrType,
   loc: SrcLoc,
   blame: ts.Node,
+  chunkValues = true,
 ): IrExpr | null {
   const found = lowerer.findMethodOn(info, methodName);
   if (!found) {
@@ -1235,10 +1258,11 @@ function streamMethodWrapper(
         continue;
       }
       // A write or transform chunk of another type converts from the
-      // chunk's value when the method runs (an object-mode side's value,
-      // or the Buffer), or throws a TypeError there.
+      // chunk's value when the method runs (an object-mode side's value),
+      // or throws a TypeError there; a byte-mode side's chunk is a Buffer.
       if (
         i === 0 &&
+        chunkValues &&
         (which === "write" || which === "transform") &&
         got.type.kind !== "func" &&
         canConvertToDyn(
@@ -1343,10 +1367,22 @@ export function lowerStreamSuperCall(
     );
   }
   const shape = streamCtorShape(cls);
+  // Whether the writable side holds values: options read at run time may
+  // set objectMode, and a literal says so with objectMode (or a Duplex's
+  // writableObjectMode) true; otherwise _write and _transform receive
+  // Buffers.
+  // super(undefined) and super(null) pass no options (followOptionsArg
+  // answers null), so their sides are byte mode too.
+  const optsNode = argNodes[0] !== undefined ? followOptionsArg(lowerer, argNodes[0]) : null;
+  const chunkValues =
+    optsNode !== null &&
+    optsNode !== undefined &&
+    (!ts.isObjectLiteralExpression(optsNode) ||
+      literalWritesValues(optsNode, cls !== "%Readable" && cls !== "%Writable"));
   const fallback = (name: string): IrExpr | null => {
     const methodName = UNDERSCORE_METHODS.get(name);
     return methodName
-      ? streamMethodWrapper(lowerer, info, name, methodName, thisType, loc, blame)
+      ? streamMethodWrapper(lowerer, info, name, methodName, thisType, loc, blame, chunkValues)
       : null;
   };
   const thisRef = (): IrExpr => ({ kind: "varRef", localId: thisLocal.id, type: thisType, loc });

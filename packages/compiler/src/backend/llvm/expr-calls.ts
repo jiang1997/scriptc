@@ -29,7 +29,6 @@ import {
   mangleClassStruct,
   mangleFnClosure,
   mangleFunction,
-  mangleWrapper,
   mangleVtStruct,
   mangleAsyncDirectSpawn,
 } from "../mangle.js";
@@ -839,21 +838,9 @@ export function emitCallExpr(
         host.declare("declare void @scr_dyn_this_push_dyn(ptr)");
         B.line(`call void @scr_dyn_this_push_dyn(ptr ${receiver?.name ?? "null"})`);
       };
-      const knownName =
-        e.callee.kind === "closure"
-          ? e.callee.fnName
-          : e.callee.kind === "varRef"
-            ? host.currentConstantCallbacks.get(e.callee.localId)
-            : undefined;
-      const candidate = knownName ? host.fnByName.get(knownName) : undefined;
-      const known = candidate && !candidate.async && !candidate.generator ? candidate : undefined;
-      let direct: string | undefined;
-      if (known) {
-        if (known.captures === undefined) {
-          host.fnValues.add(known.name);
-          direct = `@${mangleWrapper(known.name)}`;
-        } else direct = `@${host.callTarget(known.name)}`;
-      }
+      const target = host.knownCallbackTarget(e.callee);
+      const known = target?.known;
+      const direct = target?.direct;
       // A known closure body that borrows reference parameters is entered
       // directly with lent arguments, as a direct call to a borrowing body
       // is: an argument is read without a reference when neither a later
@@ -939,7 +926,13 @@ export function emitCallExpr(
       let pending = host.indirectMayThrow;
       let pendingGuard: string | undefined;
       let t: string;
-      if (direct && e.callee.kind === "closure") {
+      // A literal closure, or a binding an enclosing callback loop version
+      // proved to hold its known function, enters it directly.
+      if (
+        direct &&
+        (e.callee.kind === "closure" ||
+          (e.callee.kind === "varRef" && host.knownCallbacks.has(e.callee.localId)))
+      ) {
         t = invoke(lending ?? direct, !host.receiverReaders.ignores(known!));
         if (quiet) pending = false;
       } else {

@@ -546,8 +546,9 @@ declare var DOMException: {
 
 /* WebCrypto (scr_webcrypto.c): crypto.subtle's importKey, generateKey and
  * exportKey for HMAC and AES keys (importKey also for PBKDF2 and HKDF
- * keys), AES-GCM/CBC/CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits
- * and deriveKey, HMAC sign/verify, generateKey, importKey, exportKey, sign
+ * keys), AES-GCM/CBC/CTR encrypt and decrypt, wrapKey and unwrapKey of
+ * secret keys (AES-KW or those ciphers), PBKDF2 and HKDF deriveBits and
+ * deriveKey, HMAC sign/verify, generateKey, importKey, exportKey, sign
  * and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and the
  * SHA-1/SHA-2 digests, typed as exactly that surface (the declarations
  * mirror @types/node's webcrypto shapes), plus the global's randomUUID and
@@ -753,12 +754,27 @@ interface SubtleCrypto {
     key: CryptoKey,
     data: BufferSource,
   ): Promise<ArrayBuffer>;
+  unwrapKey(
+    format: KeyFormat,
+    wrappedKey: BufferSource,
+    unwrappingKey: CryptoKey,
+    unwrapAlgorithm: AlgorithmIdentifier | AesGcmParams | AesCbcParams | AesCtrParams,
+    unwrappedKeyAlgorithm: AlgorithmIdentifier | HmacImportParams,
+    extractable: boolean,
+    keyUsages: readonly KeyUsage[],
+  ): Promise<CryptoKey>;
   verify(
     algorithm: AlgorithmIdentifier | EcdsaParams | RsaPssParams,
     key: CryptoKey,
     signature: BufferSource,
     data: BufferSource,
   ): Promise<boolean>;
+  wrapKey(
+    format: KeyFormat,
+    key: CryptoKey,
+    wrappingKey: CryptoKey,
+    wrapAlgorithm: AlgorithmIdentifier | AesGcmParams | AesCbcParams | AesCtrParams,
+  ): Promise<ArrayBuffer>;
 }
 interface Crypto {
   readonly subtle: SubtleCrypto;

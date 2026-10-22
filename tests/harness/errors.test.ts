@@ -1806,6 +1806,16 @@ await attempt("sha3 hmac", () =>
 const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 128 }, false, ["encrypt"]);
 await attempt("aes-ocb", () => crypto.subtle.encrypt({ name: "AES-OCB", iv: new Uint8Array(12) }, aes, bytes));
 await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key, 256));
+await attempt("rsa-oaep wrap", () => crypto.subtle.wrapKey("raw", key, key, { name: "RSA-OAEP" }));
+const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+const kw = await crypto.subtle.generateKey({ name: "AES-KW", length: 128 }, false, ["wrapKey", "unwrapKey"]);
+await attempt("wrap an ecdsa key", () => crypto.subtle.wrapKey("spki", pair.publicKey, kw, "AES-KW"));
+await attempt("wrap with an ecdsa key", () => crypto.subtle.wrapKey("raw", aes, pair.privateKey, "AES-KW"));
+await attempt("unwrap an ecdsa key", () =>
+  crypto.subtle.unwrapKey("spki", new Uint8Array(24), kw, "AES-KW", { name: "ECDSA", namedCurve: "P-256" }, true, [
+    "verify",
+  ]),
+);
 `,
       "mjs",
     );
@@ -1817,23 +1827,27 @@ await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key,
         "sha3 Error SC2020 crypto.subtle.digest with the SHA3-256 algorithm is not supported yet\n" +
         "sha3 hmac Error SC2020 crypto.subtle.importKey with the SHA3-256 algorithm is not supported yet\n" +
         "aes-ocb Error SC2020 crypto.subtle.encrypt with the AES-OCB algorithm is not supported yet\n" +
-        "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n",
+        "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n" +
+        "rsa-oaep wrap Error SC2020 crypto.subtle.wrapKey with the RSA-OAEP algorithm is not supported yet\n" +
+        "wrap an ecdsa key Error SC2020 crypto.subtle.wrapKey with an ECDSA, Ed25519 or RSA key is not supported yet\n" +
+        "wrap with an ecdsa key InvalidAccessError 15 Key algorithm mismatch\n" +
+        "unwrap an ecdsa key Error SC2020 crypto.subtle.unwrapKey with the ECDSA algorithm is not supported yet\n",
     );
   });
 
   test("a method outside the slice is a named fence where it runs", async () => {
     const r = await compileAndRun(
-      "webcrypto-wrap-key",
+      "webcrypto-get-public-key",
       `console.log("before");
-const key = await crypto.subtle.generateKey({ name: "AES-KW", length: 128 }, true, ["wrapKey"]);
-await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
+const key = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, true, ["sign"]);
+await crypto.subtle.getPublicKey(key, ["verify"]);
 `,
       "mjs",
     );
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
-      /^Uncaught Error: 'crypto\.subtle\.wrapKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+      /^Uncaught Error: 'crypto\.subtle\.getPublicKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
     );
   });
 });

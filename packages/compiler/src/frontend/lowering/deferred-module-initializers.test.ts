@@ -159,6 +159,15 @@ test("fills every empty copy with the exact file and span while preserving popul
   for (const untouched of [otherFile, otherStart, otherEnd]) expect(untouched.body).toEqual([]);
 });
 
+test("reports the functions whose placeholders it fills", () => {
+  const { initializers, pending, lowerer } = fixture();
+  const functions = [fn("init", [block(loc)]), fn("use", [read("registry")])];
+  pending.set("registry", [{ loc, lower: () => [value(4)] }]);
+  const filled: IrFunction[] = [];
+  expect(initializers.process(lowerer, functions, (f) => filled.push(f))).toBe(true);
+  expect(filled).toEqual([functions[0]]);
+});
+
 test("an update of the binding demands its initializer", () => {
   const { initializers, pending, lowerer } = fixture();
   const updated = block(loc),

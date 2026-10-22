@@ -181,7 +181,7 @@ export { newFnCtx, type FnCtx } from "./function-context.js";
  * - Lexical scoping is resolved here: locals get function-unique ids
  *   ("x.0", "x.1" for shadowing); the IR is scope-flat.
  */
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { bindingSource } from "../binding-source.js";
 import { tsgoPath } from "../dts-paths.js";
 import * as ts from "../ts7/adapter.js";
@@ -3192,12 +3192,14 @@ export class Lowerer {
   errorPropertyDispatchRevision: string | null = null;
   /** Structural source positions (structural-positions.ts) for names that
    * stay the same when unrelated code moves. */
-  /** Default library files are named by their base name: two checkers
-   * install them in different directories. */
+  /** Files are named by their path relative to the entry's directory, so
+   * names do not depend on where the program sits, and default library
+   * files by their base name: two checkers install them in different
+   * directories. */
   readonly positions = new StructuralPositions((sf) =>
     this.program.isSourceFileDefaultLibrary(sf)
       ? `lib:${sf.fileName.slice(sf.fileName.lastIndexOf("/") + 1)}`
-      : sf.fileName,
+      : relative(dirname(this.entry.fileName), sf.fileName),
   );
 
   /** The outermost node whose token span is exactly `loc`, or null. */
@@ -8231,13 +8233,17 @@ export class Lowerer {
     for (;;) {
       drainInstances();
       const declared = unitsInOrder();
-      const initializerChanged = this.deferredModuleInitializers.process(this, [
-        ...declared,
-        ...initFunctions,
-        ...instanceFunctions,
-        ...byName(this.liftedFns),
-        ...byName(this.implicitFns),
-      ]);
+      const initializerChanged = this.deferredModuleInitializers.process(
+        this,
+        [
+          ...declared,
+          ...initFunctions,
+          ...instanceFunctions,
+          ...byName(this.liftedFns),
+          ...byName(this.implicitFns),
+        ],
+        (fn) => classDispatch.sites.forget(fn),
+      );
       const dispatchChanged = classDispatch.process(this, [
         ...declared,
         ...initFunctions,

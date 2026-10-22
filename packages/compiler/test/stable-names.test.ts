@@ -110,3 +110,10 @@ console.log(box.value);
   expect(locals).toHaveLength(2);
   expect(locals[0]!.name).not.toBe(locals[1]!.name);
 });
+
+test("names do not depend on the directory the program sits in", async () => {
+  // Each call lowers in its own temporary directory.
+  const [first] = await lower(recursive);
+  const [second] = await lower(recursive);
+  expect(names(second!)).toEqual(names(first!));
+});

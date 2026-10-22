@@ -122,11 +122,74 @@ static ScrBytes *scr_wc_aes_ctr(const unsigned char *key, size_t key_len,
   return out;
 }
 
+/* RFC 3394 AES key wrap with the default IV: wrapping takes a multiple of
+ * 8 bytes, at least 16; unwrapping a multiple of 8, at least 24, and fails
+ * when the integrity check value does not match (compared in constant
+ * time). */
+static ScrBytes *scr_wc_aes_kw(bool unwrap, const unsigned char *key, size_t key_len,
+                               const unsigned char *in, size_t len) {
+  static const unsigned char iv[8] = {0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6};
+  if (len % 8 != 0 || len < (unwrap ? 24u : 16u)) return NULL;
+  size_t n = unwrap ? len / 8 - 1 : len / 8;
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  int rc = unwrap ? mbedtls_aes_setkey_dec(&aes, key, (unsigned)(key_len * 8))
+                  : mbedtls_aes_setkey_enc(&aes, key, (unsigned)(key_len * 8));
+  if (rc != 0) {
+    mbedtls_aes_free(&aes);
+    return NULL;
+  }
+  ScrBytes *out = scr_bytes_new(SCR_BYTES_U8, (double)(unwrap ? len - 8 : len + 8));
+  unsigned char a[8], block[16];
+  unsigned char *r = unwrap ? out->data : out->data + 8;
+  if (unwrap) {
+    memcpy(a, in, 8);
+    memcpy(r, in + 8, len - 8);
+    for (int j = 5; j >= 0; j--) {
+      for (size_t i = n; i >= 1; i--) {
+        uint64_t t = (uint64_t)n * (uint64_t)j + i;
+        for (int k = 0; k < 8; k++) block[k] = (unsigned char)(a[k] ^ (t >> (56 - 8 * k)));
+        memcpy(block + 8, r + 8 * (i - 1), 8);
+        mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, block, block);
+        memcpy(a, block, 8);
+        memcpy(r + 8 * (i - 1), block + 8, 8);
+      }
+    }
+  } else {
+    memcpy(a, iv, 8);
+    memcpy(r, in, len);
+    for (int j = 0; j <= 5; j++) {
+      for (size_t i = 1; i <= n; i++) {
+        memcpy(block, a, 8);
+        memcpy(block + 8, r + 8 * (i - 1), 8);
+        mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, block, block);
+        uint64_t t = (uint64_t)n * (uint64_t)j + i;
+        for (int k = 0; k < 8; k++) a[k] = (unsigned char)(block[k] ^ (t >> (56 - 8 * k)));
+        memcpy(r + 8 * (i - 1), block + 8, 8);
+      }
+    }
+    memcpy(out->data, a, 8);
+  }
+  mbedtls_platform_zeroize(block, sizeof block);
+  mbedtls_aes_free(&aes);
+  if (unwrap) {
+    unsigned char diff = 0;
+    for (int k = 0; k < 8; k++) diff |= (unsigned char)(a[k] ^ iv[k]);
+    if (diff) {
+      mbedtls_platform_zeroize(out->data, len - 8);
+      scr_bytes_release(out);
+      return NULL;
+    }
+  }
+  return out;
+}
+
 /* The cipher scr_webcrypto_cipher runs: +1 output bytes, or NULL when the
  * operation fails (Node's OperationError). */
 static ScrBytes *scr_wc_aes(const char *name, bool decrypt, const unsigned char *key,
                             size_t key_len, const ScrWebCryptoAesParams *p,
                             const unsigned char *in, size_t len) {
+  if (strcmp(name, "AES-KW") == 0) return scr_wc_aes_kw(decrypt, key, key_len, in, len);
   if (strcmp(name, "AES-GCM") == 0) return scr_wc_aes_gcm(decrypt, key, key_len, p, in, len);
   if (strcmp(name, "AES-CBC") == 0) return scr_wc_aes_cbc(decrypt, key, key_len, p, in, len);
   return scr_wc_aes_ctr(key, key_len, p, in, len);
@@ -135,3 +198,7 @@ static ScrBytes *scr_wc_aes(const char *name, bool decrypt, const unsigned char 
 ScrPromise *scr_webcrypto_encrypt(ScrDyn *args) { return scr_webcrypto_cipher(args, false, scr_wc_aes); }
 
 ScrPromise *scr_webcrypto_decrypt(ScrDyn *args) { return scr_webcrypto_cipher(args, true, scr_wc_aes); }
+
+ScrPromise *scr_webcrypto_wrap_key(ScrDyn *args) { return scr_webcrypto_wrap(args, scr_wc_aes); }
+
+ScrPromise *scr_webcrypto_unwrap_key(ScrDyn *args) { return scr_webcrypto_unwrap(args, scr_wc_aes); }
