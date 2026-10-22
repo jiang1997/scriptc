@@ -265,10 +265,77 @@ static void ni_trampoline(void) {
   }
 }
 
+/* Whether `sp` lies on Node's stack. */
+static bool ni_stack_has(uintptr_t sp) {
+  return ni_stack != NULL && sp > (uintptr_t)ni_stack && sp <= (uintptr_t)ni_stack + NI_STACK;
+}
+
+/* The lowest address of Node's stack its frames use while runtime code
+ * they called runs (a host callback below), 0 outside them. Runtime code
+ * may resume an async fiber there, and the fiber may call into Node again:
+ * that entry runs on Node's stack below this mark, so every frame of Node
+ * stays on the one stack V8 scans (heap::base::Stack, bounded by
+ * ni_stack_start), never on a fiber's stack beyond its bound. */
+static uintptr_t ni_mark = 0;
+
+/* Host callbacks run runtime code from Node's frames: each records the
+ * mark for its duration. */
+#define NI_MARK_BEGIN                                                    \
+  uintptr_t ni_saved_mark = ni_mark;                                     \
+  do {                                                                   \
+    uintptr_t ni_here = (uintptr_t)__builtin_frame_address(0);           \
+    if (ni_stack_has(ni_here)) ni_mark = ni_here;                        \
+  } while (0)
+#define NI_MARK_END (ni_mark = ni_saved_mark)
+
+/* A nested entry: job(arg) on Node's stack below the mark, from a fiber. */
+static void (*ni_nested_job)(void *) = NULL;
+static void *ni_nested_arg = NULL;
+static ucontext_t *ni_nested_return = NULL;
+
+static void ni_nested_trampoline(void) {
+  void (*job)(void *) = ni_nested_job;
+  void *arg = ni_nested_arg;
+  ucontext_t *back = ni_nested_return;
+  job(arg);
+  setcontext(back);
+}
+
+static void ni_on_node_stack_below_mark(void (*job)(void *), void *arg) {
+  ucontext_t nested, caller;
+  char *lo = ni_stack + NI_GUARD;
+  /* Below the red zone and 16-byte aligned, as makecontext expects. */
+  uintptr_t hi = (ni_mark - 512) & ~(uintptr_t)15;
+  if (getcontext(&nested) != 0) scr_trap("scriptc: getcontext failed\n");
+  nested.uc_stack.ss_sp = lo;
+  nested.uc_stack.ss_size = hi - (uintptr_t)lo;
+  nested.uc_link = NULL;
+  makecontext(&nested, ni_nested_trampoline, 0);
+  ni_nested_job = job;
+  ni_nested_arg = arg;
+  ni_nested_return = &caller;
+  uintptr_t guard = scr_stack_guard;
+  SCR_STACK_GUARD_SET(scr_stack_guard_for((uintptr_t)lo, hi - (uintptr_t)lo));
+#ifdef NI_ASAN
+  void *caller_fake = NULL;
+  __sanitizer_start_switch_fiber(&caller_fake, lo, hi - (uintptr_t)lo);
+#endif
+  swapcontext(&caller, &nested);
+#ifdef NI_ASAN
+  const void *bottom;
+  size_t size;
+  __sanitizer_finish_switch_fiber(caller_fake, &bottom, &size);
+#endif
+  SCR_STACK_GUARD_SET(guard);
+}
+
 /* Runs job(arg) on Node's stack (directly when already there). */
 static void ni_on_node_stack(void (*job)(void *), void *arg) {
   if (ni_on_stack) {
-    job(arg);
+    if (ni_mark != 0 && !ni_stack_has((uintptr_t)__builtin_frame_address(0)))
+      ni_on_node_stack_below_mark(job, arg);
+    else
+      job(arg);
     return;
   }
   if (ni_stack == NULL) {
@@ -339,8 +406,7 @@ static uintptr_t ni_stack_limit(void) {
   /* The frame address, not a local's: under ASan's use-after-return
    * detection locals live on a fake stack elsewhere in memory. */
   uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
-  if (ni_stack != NULL && sp > (uintptr_t)ni_stack && sp <= (uintptr_t)ni_stack + NI_STACK)
-    return (uintptr_t)(ni_stack + NI_GUARD) + NI_STACK / 8;
+  if (ni_stack_has(sp)) return (uintptr_t)(ni_stack + NI_GUARD) + NI_STACK / 8;
   if (sp > ni_main_lo && sp <= ni_main_hi) {
     uintptr_t limit = ni_main_hi > 984 * 1024 ? ni_main_hi - 984 * 1024 : 0;
     return limit > ni_main_lo ? limit : ni_main_lo + 64 * 1024;
@@ -349,15 +415,60 @@ static uintptr_t ni_stack_limit(void) {
   return 0;
 }
 
+/* The start of Node's stack for callers on it (V8's stack-scan bound). */
+static uintptr_t ni_stack_start(void) {
+  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+  return ni_stack_has(sp) ? (uintptr_t)ni_stack + NI_STACK : 0;
+}
+
+/* The host callbacks that run runtime code, with the mark recorded. */
+static void ni_host_settle(uint32_t id, const char *outcome, size_t len) {
+  NI_MARK_BEGIN;
+  ni_settle(id, outcome, len);
+  NI_MARK_END;
+}
+
+static void ni_host_exit(int code) {
+  NI_MARK_BEGIN; /* never returns */
+  (void)ni_saved_mark;
+  ni_exit(code);
+}
+
+static void ni_host_run(uint32_t kind, uint32_t token) {
+  NI_MARK_BEGIN;
+  scr_loop_hosted_run(kind, token);
+  NI_MARK_END;
+}
+
+static void ni_host_io(void) {
+  NI_MARK_BEGIN;
+  scr_loop_hosted_io();
+  NI_MARK_END;
+}
+
+static void ni_host_microtasks_done(void) {
+  NI_MARK_BEGIN;
+  scr_loop_hosted_microtasks_done();
+  NI_MARK_END;
+}
+
+static void ni_host_listen(uint32_t event, const char *name, uint32_t listener, int add,
+                           int once) {
+  NI_MARK_BEGIN;
+  ni_listen(event, name, listener, add, once);
+  NI_MARK_END;
+}
+
 static const ScrNodeBridgeHost ni_host = {
-    &ni_settle,
-    &ni_exit,
-    &scr_loop_hosted_run,
+    &ni_host_settle,
+    &ni_host_exit,
+    &ni_host_run,
     &scr_loop_hosted_io_state,
-    &scr_loop_hosted_io,
-    &scr_loop_hosted_microtasks_done,
-    &ni_listen,
+    &ni_host_io,
+    &ni_host_microtasks_done,
+    &ni_host_listen,
     &ni_stack_limit,
+    &ni_stack_start,
 };
 
 void scr_node_island_emit(uint32_t event, uint32_t listener, ScrStr *name, int arg) {
