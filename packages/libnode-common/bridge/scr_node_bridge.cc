@@ -1004,9 +1004,10 @@ uint64_t NowNs() {
                                    .count());
 }
 
-// Exports native roots held in this many analyses in a row are tenured:
-// analyzed again only at every kTenuredEvery-th analysis, roots meanwhile
-// (a bounded cost for long-lived exports, and their cycles found later).
+// Exports found stable (held natively, or reaching nothing across the
+// boundary) in this many analyses in a row are tenured: analyzed again
+// only at every kTenuredEvery-th analysis, roots meanwhile (a bounded cost
+// for long-lived exports; their cycles are found at the next full one).
 constexpr uint8_t kTenure = 2;
 constexpr uint64_t kTenuredEvery = 8;
 
@@ -1063,7 +1064,10 @@ void Analyze() {
     ExportGc &x = *g_export_gc[ids[i]];
     x.rooted = r.rooted[i] != 0;
     if (x.rooted) g_gc_cycle.rooted++;
-    x.tenure = x.rooted ? (x.tenure < 255 ? x.tenure + 1 : 255) : 0;
+    // Stable: held natively, or reaching nothing across the boundary
+    // (rooting such an export only delays freeing its representative).
+    bool stable = x.rooted || r.reach_len[i] == 0;
+    x.tenure = stable ? (x.tenure < 255 ? x.tenure + 1 : 255) : 0;
     x.reach.assign(r.reach + r.reach_start[i], r.reach + r.reach_start[i] + r.reach_len[i]);
     g_gc_cycle.reach += r.reach_len[i];
   }
