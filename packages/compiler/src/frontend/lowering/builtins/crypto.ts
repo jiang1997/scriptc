@@ -1,6 +1,7 @@
 import { lowerBuiltinByteInput, errorFirstBytesCallback, errorFirstCallback } from "./arguments.js";
 import { isKeyObjectValue } from "./key-object.js";
 import { lowerCreateEcdh } from "./ecdh.js";
+import { lowerCreateDiffieHellman, lowerGetDiffieHellman } from "./dh.js";
 import { boolLit, dynUndefinedExpr, nodeThrowExpr, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, own } from "../lowerer.js";
@@ -411,6 +412,9 @@ export function lowerCryptoModuleCall(
     };
   }
   if (bi.member === "createECDH") return lowerCreateEcdh(lowerer, expr);
+  if (bi.member === "createDiffieHellman") return lowerCreateDiffieHellman(lowerer, expr);
+  if (bi.member === "getDiffieHellman" || bi.member === "createDiffieHellmanGroup")
+    return lowerGetDiffieHellman(lowerer, expr);
   if (bi.member === "createHmac") {
     if (args.length < 1 || args.length > 3 || args.some(ts.isSpreadElement)) {
       lowerer.noLowering(

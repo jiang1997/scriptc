@@ -11177,9 +11177,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Supports the modp groups, explicit primes and generators, and generated safe primes up to 8192 bits with Node's argument, generator and modulus errors.",
+        "verification": "test-backed"
       }
     },
     {
@@ -11200,9 +11200,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Supports the modp groups, explicit primes and generators, and generated safe primes up to 8192 bits with Node's argument, generator and modulus errors.",
+        "verification": "test-backed"
       }
     },
     {
@@ -11223,9 +11223,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Supports the modp groups, explicit primes and generators, and generated safe primes up to 8192 bits with Node's argument, generator and modulus errors.",
+        "verification": "test-backed"
       }
     },
     {
@@ -11247,7 +11247,7 @@
       },
       "static": {
         "status": "partial",
-        "detail": "Implemented for the call shapes accepted by the compiler lowering.",
+        "detail": "Supports prime192v1, secp224r1, prime256v1, secp384r1, secp521r1, secp192k1, secp224k1, secp256k1, brainpoolP256r1, brainpoolP384r1 and brainpoolP512r1 with Node's curve, key, point, format and encoding errors; other curves Node knows are refused.",
         "verification": "test-backed"
       }
     },
@@ -11729,9 +11729,9 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "detail": "Explicitly rejected by a named compiler diagnostic.",
-        "verification": "explicit-refusal"
+        "status": "partial",
+        "detail": "Supports the modp groups, explicit primes and generators, and generated safe primes up to 8192 bits with Node's argument, generator and modulus errors.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12856,9 +12856,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12879,9 +12879,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12902,9 +12902,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12925,9 +12925,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12948,9 +12948,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12971,9 +12971,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -12994,9 +12994,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13017,9 +13017,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13040,9 +13040,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13063,9 +13063,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -13086,9 +13086,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Matches Node's private key lengths, DH_check results, public key range checks, secret padding and errors; primes longer than 8192 bits, property writes and property reads other than verifyError are refused.",
+        "verification": "test-backed"
       }
     },
     {
@@ -18880,9 +18880,9 @@
       "anchor": "err_crypto_invalid_keylen",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -19006,9 +19006,9 @@
       "anchor": "err_crypto_invalid_state",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -19276,9 +19276,9 @@
       "anchor": "err_crypto_unknown_dh_group",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented by a dedicated static compiler/runtime path.",
+        "verification": "test-backed"
       }
     },
     {
@@ -67806,9 +67806,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {
@@ -68565,9 +68565,9 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "detail": "No static compiler lowering is registered for this API yet.",
-        "verification": "registry-gap"
+        "status": "partial",
+        "detail": "Implemented for the documented scriptc module-loader subset.",
+        "verification": "test-backed"
       }
     },
     {

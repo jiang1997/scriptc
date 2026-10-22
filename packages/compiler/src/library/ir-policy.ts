@@ -52,6 +52,8 @@ const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   ["tls.", "the node:tls surface"],
   ["crypto.cipherNew", "crypto.createCipheriv and createDecipheriv"],
   ["crypto.ecdh", "crypto.createECDH and ECDH.convertKey"],
+  ["crypto.dhNew", "crypto.createDiffieHellman"],
+  ["crypto.dhGroupNew", "crypto.getDiffieHellman and createDiffieHellmanGroup"],
   ["crypto.createPrivateKey", "asymmetric KeyObjects, generateKeyPair, sign and verify"],
   ["crypto.createPublicKey", "asymmetric KeyObjects, generateKeyPair, sign and verify"],
   ["crypto.createSign", "asymmetric KeyObjects, generateKeyPair, sign and verify"],

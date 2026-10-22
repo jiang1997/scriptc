@@ -9,6 +9,7 @@ import { compile } from "@scriptc/compiler";
 import { npmCases } from "./npm-cases.js";
 import { normalizeNodeTestOutput } from "./node-test-normalize.js";
 import { eventLoopCases, type StdinScript } from "./event-loop-cases.js";
+import { tscJsxOracleEntry, wantsTscJsx } from "./jsx-oracle.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.env["SCRIPTC_LINUX"] === "1";
@@ -55,6 +56,7 @@ function wantsTscDecorators(file: string): boolean {
  * programs) its deterministic ES2022 downlevel — differential.test.ts's
  * nodeOracleFile, with the identical transform and cache key. */
 function nodeOracleFile(file: string): string {
+  if (wantsTscJsx(directiveHead(file))) return tscJsxOracleEntry(file, cacheDir);
   if (!wantsTscDecorators(file)) return file;
   const src = readFileSync(file, "utf8");
   const out = ts5.transpileModule(src, {
@@ -212,7 +214,7 @@ async function runLinuxNode(file: string): Promise<RunResult> {
 function programInputs(file: string): string[] {
   if (!/\/main\.(ts|js|mjs|cjs)$/.test(file)) return [file];
   return [
-    ...ENTRY_EXTS.flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
+    ...[...ENTRY_EXTS, "tsx", "jsx"].flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
     ...globSync(join(file, "../**/tsconfig.json")),
     ...globSync(join(file, "../**/package.json")),
   ].sort();

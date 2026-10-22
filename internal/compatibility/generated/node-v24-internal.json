@@ -19315,6 +19315,12 @@
           "tests/corpus/6703-ecdh-private-keys.ts",
           "tests/corpus/6704-ecdh-set-public-key.cjs",
           "tests/corpus/6705-ecdh-handles.ts",
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
           "tests/corpus/6936-x509-certificate-fields.ts",
           "tests/corpus/7055-cipher-streams.ts",
           "tests/corpus/7056-cipher-stream-errors.ts",
@@ -19330,6 +19336,7 @@
           "tests/corpus/node24-crypto-kdf.ts",
           "tests/corpus/node24-crypto-sha2.ts",
           "tests/fixtures/node-types/cipher.ts",
+          "tests/fixtures/node-types/dh.ts",
           "tests/fixtures/node-types/ecdh.ts",
           "tests/fixtures/node-types/keys.ts",
           "tests/harness/npm-static.test.ts"
@@ -19778,8 +19785,17 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createDiffieHellman"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.createDiffieHellman",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -19801,8 +19817,17 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createDiffieHellman"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.createDiffieHellman",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -19824,8 +19849,17 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createDiffieHellmanGroup"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.createDiffieHellmanGroup",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20448,8 +20482,17 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.getDiffieHellman"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.getDiffieHellman",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22272,8 +22315,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:DiffieHellman",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22295,8 +22347,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.computeSecret",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22318,8 +22379,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.generateKeys",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22341,8 +22411,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.getGenerator",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22364,8 +22443,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.getPrime",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22387,8 +22475,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.getPrivateKey",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22410,8 +22507,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.getPublicKey",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22433,8 +22539,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.setPrivateKey",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22456,8 +22571,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.setPublicKey",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22479,8 +22603,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:diffieHellman.verifyError",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -22502,8 +22635,17 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "compiler-dedicated:DiffieHellmanGroup",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -27628,8 +27770,17 @@
       "anchor": "dep0167-weak-diffiehellmangroup-instances-modp1-modp2-modp5",
       "nodeStability": null,
       "static": {
-        "status": "not-applicable",
-        "evidence": "compiler-chapter-policy:deprecations"
+        "status": "partial",
+        "evidence": "compiler-dedicated:DiffieHellmanGroup",
+        "tests": [
+          "tests/corpus/6706-dh-groups.ts",
+          "tests/corpus/6707-dh-explicit-params.ts",
+          "tests/corpus/6708-dh-errors.js",
+          "tests/corpus/6709-dh-generate.ts",
+          "tests/corpus/6710-dh-encodings.cjs",
+          "tests/corpus/6711-dh-handles.ts",
+          "tests/fixtures/node-types/dh.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -32371,6 +32522,7 @@
         "evidence": "derived:descendants",
         "tests": [
           "tests/corpus/6702-ecdh-errors.js",
+          "tests/corpus/6708-dh-errors.js",
           "tests/corpus/caught-system-error-fields.ts",
           "tests/corpus/error-stack-frames.ts",
           "tests/corpus/error-stack-limit.ts",
@@ -33781,8 +33933,11 @@
       "anchor": "err_crypto_invalid_keylen",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:errors"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ERR_CRYPTO_INVALID_KEYLEN",
+        "tests": [
+          "tests/corpus/6708-dh-errors.js"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -33907,8 +34062,11 @@
       "anchor": "err_crypto_invalid_state",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:errors"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ERR_CRYPTO_INVALID_STATE",
+        "tests": [
+          "tests/corpus/6708-dh-errors.js"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -34177,8 +34335,11 @@
       "anchor": "err_crypto_unknown_dh_group",
       "nodeStability": null,
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:errors"
+        "status": "partial",
+        "evidence": "compiler-dedicated:ERR_CRYPTO_UNKNOWN_DH_GROUP",
+        "tests": [
+          "tests/corpus/6708-dh-errors.js"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -95546,7 +95707,10 @@
           "tests/corpus/2557-tls-ca-store.ts",
           "tests/corpus/2596-net-arg-ladders.cjs",
           "tests/corpus/6721-tls-alpn-protocols.ts",
-          "tests/corpus/6722-tls-min-max-version.ts"
+          "tests/corpus/6722-tls-min-max-version.ts",
+          "tests/corpus/7087-tls-socket-wrap.ts",
+          "tests/corpus/7088-tls-socket-connect-tunnel.ts",
+          "tests/fixtures/node-types/tls-socket-wrap.ts"
         ]
       },
       "anchorSource": "chapter"
@@ -96248,8 +96412,13 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:tls"
+        "status": "partial",
+        "evidence": "compiler-feature:tls.tls.TLSSocket",
+        "tests": [
+          "tests/corpus/7087-tls-socket-wrap.ts",
+          "tests/corpus/7088-tls-socket-connect-tunnel.ts",
+          "tests/fixtures/node-types/tls-socket-wrap.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -97036,8 +97205,13 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:tls"
+        "status": "partial",
+        "evidence": "compiler-feature:tls.'secure'",
+        "tests": [
+          "tests/corpus/7087-tls-socket-wrap.ts",
+          "tests/corpus/7088-tls-socket-connect-tunnel.ts",
+          "tests/fixtures/node-types/tls-socket-wrap.ts"
+        ]
       },
       "anchorSource": "exact"
     },

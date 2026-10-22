@@ -96,6 +96,13 @@ export interface SemanticCompletion {
   symbol: SemanticSymbol | undefined;
 }
 
+/** Whether lowering asks the checker for contextual types and resolved
+ * signatures in batches (`getContextualTypes`, `getResolvedSignatures`).
+ * Off until scriptc depends on a tsc-ts release that answers them: the
+ * batch prefetches (checker.ts) then do nothing and lowering asks node by
+ * node. */
+export const NODE_BATCH_QUERIES = false;
+
 /** The pinned checker's request surface over native objects. Every query
  * converges on the same snapshot/project registries, including batch and
  * lazy-object queries. No SDK object is constructed or consulted here. */
@@ -201,6 +208,10 @@ export class SemanticChecker {
   getContextualType(node: AstNode): SemanticType | undefined {
     return this.type("getContextualType", { location: node.id });
   }
+  /** getContextualType for each node. */
+  getContextualTypes(nodes: readonly AstNode[]): (SemanticType | undefined)[] {
+    return this.optionalTypes("getContextualTypes", { locations: nodes.map((node) => node.id) });
+  }
   getTypeFromTypeNode(node: AstNode): SemanticType | undefined {
     return this.type("getTypeFromTypeNode", { location: node.id });
   }
@@ -212,6 +223,12 @@ export class SemanticChecker {
   }
   getResolvedSignature(node: AstNode): SemanticSignature | undefined {
     return this.signature("getResolvedSignature", { location: node.id });
+  }
+  /** getResolvedSignature for each node. */
+  getResolvedSignatures(nodes: readonly AstNode[]): (SemanticSignature | undefined)[] {
+    return this.project.requestSignatures("getResolvedSignatures", {
+      locations: nodes.map((node) => node.id),
+    });
   }
   getSignatureFromDeclaration(node: AstNode): SemanticSignature | undefined {
     return this.signature("getSignatureFromDeclaration", { location: node.id });

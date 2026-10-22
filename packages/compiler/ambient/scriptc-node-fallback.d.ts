@@ -3273,6 +3273,68 @@ declare module "crypto" {
     setPrivateKey(privateKey: string, encoding: BinaryToTextEncoding): void;
   }
   export function createECDH(curveName: string): ECDH;
+  export class DiffieHellman {
+    private constructor();
+    generateKeys(): Buffer;
+    generateKeys(encoding: BinaryToTextEncoding): string;
+    computeSecret(
+      otherPublicKey: ArrayBufferView,
+      inputEncoding?: null,
+      outputEncoding?: null,
+    ): Buffer;
+    computeSecret(
+      otherPublicKey: string,
+      inputEncoding: BinaryToTextEncoding,
+      outputEncoding?: null,
+    ): Buffer;
+    computeSecret(
+      otherPublicKey: ArrayBufferView,
+      inputEncoding: null,
+      outputEncoding: BinaryToTextEncoding,
+    ): string;
+    computeSecret(
+      otherPublicKey: string,
+      inputEncoding: BinaryToTextEncoding,
+      outputEncoding: BinaryToTextEncoding,
+    ): string;
+    getPrime(): Buffer;
+    getPrime(encoding: BinaryToTextEncoding): string;
+    getGenerator(): Buffer;
+    getGenerator(encoding: BinaryToTextEncoding): string;
+    getPublicKey(): Buffer;
+    getPublicKey(encoding: BinaryToTextEncoding): string;
+    getPrivateKey(): Buffer;
+    getPrivateKey(encoding: BinaryToTextEncoding): string;
+    setPublicKey(publicKey: ArrayBufferView): void;
+    setPublicKey(publicKey: string, encoding: BufferEncoding): void;
+    setPrivateKey(privateKey: ArrayBufferView): void;
+    setPrivateKey(privateKey: string, encoding: BufferEncoding): void;
+    verifyError: number;
+  }
+  export type DiffieHellmanGroup = Omit<DiffieHellman, "setPublicKey" | "setPrivateKey">;
+  export function createDiffieHellman(primeLength: number, generator?: number): DiffieHellman;
+  export function createDiffieHellman(
+    prime: ArrayBuffer | ArrayBufferView,
+    generator?: number | ArrayBuffer | ArrayBufferView,
+  ): DiffieHellman;
+  export function createDiffieHellman(
+    prime: ArrayBuffer | ArrayBufferView,
+    generator: string,
+    generatorEncoding: BinaryToTextEncoding,
+  ): DiffieHellman;
+  export function createDiffieHellman(
+    prime: string,
+    primeEncoding: BinaryToTextEncoding,
+    generator?: number | ArrayBuffer | ArrayBufferView,
+  ): DiffieHellman;
+  export function createDiffieHellman(
+    prime: string,
+    primeEncoding: BinaryToTextEncoding,
+    generator: string,
+    generatorEncoding: BinaryToTextEncoding,
+  ): DiffieHellman;
+  export function getDiffieHellman(groupName: string): DiffieHellmanGroup;
+  export function createDiffieHellmanGroup(name: string): DiffieHellmanGroup;
   export interface ScryptOptions {
     N?: number;
     r?: number;
@@ -5095,8 +5157,8 @@ declare module "net" {
      * unshift — read answers exactly n buffered bytes or null. */
     read(size?: number): Buffer | null;
     unshift(chunk: Uint8Array): void;
-    /* secureConnect/session are TLS-socket events declared on the shared
-     * socket surface (the lowering collapses TLSSocket onto this kind):
+    /* secureConnect/secure/session are TLS-socket events declared on the
+     * shared socket surface (the lowering collapses TLSSocket onto this kind):
      * the runtime gates on the transport, so a plain socket's
      * registration never fires — Node's exact split. 'session' fires
      * once with the serialized session (the received-ticket event). */
@@ -5104,7 +5166,15 @@ declare module "net" {
     /* After setEncoding the chunk is a string. */
     on(event: "data", listener: (chunk: string) => void): void;
     on(
-      event: "end" | "connect" | "ready" | "timeout" | "readable" | "finish" | "secureConnect",
+      event:
+        | "end"
+        | "connect"
+        | "ready"
+        | "timeout"
+        | "readable"
+        | "finish"
+        | "secureConnect"
+        | "secure",
       listener: () => void,
     ): void;
     on(event: "close", listener: (hadError: boolean) => void): void;
@@ -5120,7 +5190,15 @@ declare module "net" {
     /* After setEncoding the chunk is a string. */
     addListener(event: "data", listener: (chunk: string) => void): void;
     addListener(
-      event: "end" | "connect" | "ready" | "timeout" | "readable" | "finish" | "secureConnect",
+      event:
+        | "end"
+        | "connect"
+        | "ready"
+        | "timeout"
+        | "readable"
+        | "finish"
+        | "secureConnect"
+        | "secure",
       listener: () => void,
     ): void;
     addListener(event: "close", listener: (hadError: boolean) => void): void;
@@ -5135,7 +5213,15 @@ declare module "net" {
     /* After setEncoding the chunk is a string. */
     once(event: "data", listener: (chunk: string) => void): void;
     once(
-      event: "end" | "connect" | "ready" | "timeout" | "readable" | "finish" | "secureConnect",
+      event:
+        | "end"
+        | "connect"
+        | "ready"
+        | "timeout"
+        | "readable"
+        | "finish"
+        | "secureConnect"
+        | "secure",
       listener: () => void,
     ): void;
     once(event: "close", listener: (hadError: boolean) => void): void;
@@ -5186,9 +5272,10 @@ declare module "net" {
     on(event: "timeout", listener: (socket: Socket) => void): void;
     on(event: "error", listener: (err: Error) => void): void;
     /* The WebSocket handover: fires INSTEAD of 'request' for
-     * Connection: upgrade requests, with the raw socket + head bytes. */
+     * Connection: upgrade requests, with the raw socket + head bytes;
+     * 'connect' is its twin for CONNECT requests (HTTP tunneling). */
     on(
-      event: "upgrade",
+      event: "upgrade" | "connect",
       listener: (req: import("http").IncomingMessage, socket: Socket, head: Buffer) => void,
     ): void;
     /* http.createServer(handler)'s event twin (a no-parser net server
@@ -5204,7 +5291,7 @@ declare module "net" {
     addListener(event: "timeout", listener: (socket: Socket) => void): void;
     addListener(event: "error", listener: (err: Error) => void): void;
     addListener(
-      event: "upgrade",
+      event: "upgrade" | "connect",
       listener: (req: import("http").IncomingMessage, socket: Socket, head: Buffer) => void,
     ): void;
     addListener(
@@ -5217,7 +5304,7 @@ declare module "net" {
     once(event: "timeout", listener: (socket: Socket) => void): void;
     once(event: "error", listener: (err: Error) => void): void;
     once(
-      event: "upgrade",
+      event: "upgrade" | "connect",
       listener: (req: import("http").IncomingMessage, socket: Socket, head: Buffer) => void,
     ): void;
     once(
@@ -5688,6 +5775,7 @@ declare module "tls" {
    * split — authorizationError is the verify-failure CODE STRING
    * (DEPTH_ZERO_SELF_SIGNED_CERT, ...), or null. */
   export interface TLSSocket extends Socket {
+    readonly encrypted: true;
     authorized: boolean;
     authorizationError: string | null;
     /* null before the handshake, then the negotiated protocol or false */
@@ -5699,6 +5787,21 @@ declare module "tls" {
     /* whether the handshake resumed a cached session */
     isSessionReused(): boolean;
   }
+  /** new tls.TLSSocket(socket, options): the server-mode wrap of an open
+   * socket (a server connection or an http CONNECT socket). The options
+   * record reads at runtime; isServer, cert, key, secureContext,
+   * ALPNProtocols, minVersion and maxVersion are implemented. */
+  export interface TLSSocketOptions {
+    isServer?: boolean;
+    cert?: string | Uint8Array;
+    key?: string | Uint8Array;
+    secureContext?: SecureContext;
+    ALPNProtocols?: string[] | Uint8Array;
+    minVersion?: string;
+    maxVersion?: string;
+    [option: string]: unknown;
+  }
+  export const TLSSocket: new (socket: Socket, options: TLSSocketOptions) => TLSSocket;
   export interface CipherNameAndProtocol {
     name: string;
     standardName: string;
@@ -5707,12 +5810,14 @@ declare module "tls" {
   export const DEFAULT_MIN_VERSION: string;
   export const DEFAULT_MAX_VERSION: string;
   /** tls.connect options — the RUNTIME options record (members read at
-   * runtime; port/host/rejectUnauthorized/ca/servername are the
+   * runtime; port/host/socket/rejectUnauthorized/ca/servername are the
    * honestly-implemented set, every other documented member throws the
    * runtime fence — the options-record stance's divergence-66 shape). */
   export interface ConnectionOptions {
     port?: number;
     host?: string;
+    /* an open socket to run the client handshake over */
+    socket?: Socket;
     rejectUnauthorized?: boolean;
     ca?: string | Uint8Array | ReadonlyArray<string | Uint8Array>;
     servername?: string;
@@ -6947,11 +7052,10 @@ declare module "node:events" {
  * write(chunk, enc, cb) {} })`, Duplex/Transform/PassThrough, push/read,
  * flowing vs paused, write/end backpressure + 'drain', pipe/unpipe, and
  * destroy — with Node's event orderings. Chunks are BYTES (Buffer), with
- * utf8 strings converted at push/write like Node; objectMode and
- * setEncoding are declared so uses fence at their sites with their own
- * words. `class My extends Readable` (the _read override form) is a
- * separate feature and fences at the class declaration. The runtime-fired
- * events carry per-class FORCED argument tuples ('data' is one Buffer,
+ * strings converted at push/write like Node, and any value on an
+ * object-mode side (objectMode, readableObjectMode, writableObjectMode —
+ * the object-mode constructor overloads come first). The runtime-fired
+ * events carry per-class FORCED argument tuples ('data' is one chunk,
  * 'error' one Error, 'pipe'/'unpipe' one Readable, the rest empty) — the
  * overloads below hand tsc the same contract so unannotated listener
  * parameters contextually type in .js sources. */
@@ -7057,6 +7161,51 @@ declare module "stream" {
     signal?: AbortSignal;
   }
 
+  /* Object-mode options (objectMode: true, or a Duplex's or Transform's
+   * readableObjectMode / writableObjectMode): chunks and completion data
+   * are any values, and an object-mode write's encoding argument reaches
+   * write/transform as passed (undefined when absent, null when a
+   * callback took its place). The constructors take these before the
+   * byte-mode options, so a byte-mode stream's callbacks keep Buffer
+   * chunks. */
+  type ObjectModeEncoding = string | null | undefined;
+  type ObjectModeFlag =
+    | { objectMode: true }
+    | { readableObjectMode: true }
+    | { writableObjectMode: true };
+  interface ObjectWritableOptions extends Omit<WritableOptions, "objectMode" | "write"> {
+    objectMode: true;
+    write?(
+      this: Writable,
+      chunk: any,
+      encoding: ObjectModeEncoding,
+      callback: (error?: Error | null) => void,
+    ): void;
+  }
+  type ObjectDuplexOptions = Omit<DuplexOptions, "write"> & {
+    write?(
+      this: Duplex,
+      chunk: any,
+      encoding: ObjectModeEncoding,
+      callback: (error?: Error | null) => void,
+    ): void;
+  } & ObjectModeFlag;
+  type ObjectTransformOptions = Omit<TransformOptions, "transform" | "flush" | "write"> & {
+    transform?(
+      this: Transform,
+      chunk: any,
+      encoding: ObjectModeEncoding,
+      callback: (error?: Error | null, data?: any) => void,
+    ): void;
+    flush?(this: Transform, callback: (error?: Error | null, data?: any) => void): void;
+    write?(
+      this: Transform,
+      chunk: any,
+      encoding: ObjectModeEncoding,
+      callback: (error?: Error | null) => void,
+    ): void;
+  } & ObjectModeFlag;
+
   /* The operators' options: concurrency and highWaterMark bound map's
    * in-flight callbacks and queued results. */
   interface ArrayOptions {
@@ -7076,7 +7225,10 @@ declare module "stream" {
     [Symbol.asyncIterator](): AsyncIterableIterator<any>;
     iterator(options?: { destroyOnReturn?: boolean }): AsyncIterableIterator<any>;
     push(chunk: Buffer | string | null, encoding?: string): boolean;
+    /* An object-mode stream's values. */
+    push(chunk: any, encoding?: string): boolean;
     unshift(chunk: Buffer | string, encoding?: string): void;
+    unshift(chunk: any, encoding?: string): void;
     read(size?: number): Buffer | null;
     pause(): this;
     resume(): this;
@@ -7183,6 +7335,7 @@ declare module "stream" {
   }
 
   class Writable extends EventEmitter {
+    constructor(opts: ObjectWritableOptions);
     constructor(opts?: WritableOptions);
     /* The underscore-method surface (see Readable). */
     _write(chunk: any, encoding: string, callback: (error?: Error | null) => void): void;
@@ -7198,9 +7351,19 @@ declare module "stream" {
       encoding: string,
       callback?: (error?: Error | null) => void,
     ): boolean;
+    /* An object-mode stream's values (the encoding argument reaches
+     * _write as passed). */
+    write(chunk: any, callback?: (error?: Error | null) => void): boolean;
+    write(
+      chunk: any,
+      encoding: ObjectModeEncoding,
+      callback?: (error?: Error | null) => void,
+    ): boolean;
     end(callback?: () => void): this;
     end(chunk: Buffer | string, callback?: () => void): this;
     end(chunk: Buffer | string, encoding: string, callback?: () => void): this;
+    end(chunk: any, callback?: () => void): this;
+    end(chunk: any, encoding: ObjectModeEncoding, callback?: () => void): this;
     cork(): void;
     uncork(): void;
     setDefaultEncoding(encoding: string): this;
@@ -7250,6 +7413,7 @@ declare module "stream" {
    * mirrors @types/node: extends Readable, the writable half declared
    * again. The lowering treats both halves as first-class. */
   class Duplex extends Readable {
+    constructor(opts: ObjectDuplexOptions);
     constructor(opts?: DuplexOptions);
     /* The underscore-method surface (see Readable). */
     _write(chunk: any, encoding: string, callback: (error?: Error | null) => void): void;
@@ -7264,9 +7428,19 @@ declare module "stream" {
       encoding: string,
       callback?: (error?: Error | null) => void,
     ): boolean;
+    /* An object-mode stream's values (the encoding argument reaches
+     * _write as passed). */
+    write(chunk: any, callback?: (error?: Error | null) => void): boolean;
+    write(
+      chunk: any,
+      encoding: ObjectModeEncoding,
+      callback?: (error?: Error | null) => void,
+    ): boolean;
     end(callback?: () => void): this;
     end(chunk: Buffer | string, callback?: () => void): this;
     end(chunk: Buffer | string, encoding: string, callback?: () => void): this;
+    end(chunk: any, callback?: () => void): this;
+    end(chunk: any, encoding: ObjectModeEncoding, callback?: () => void): this;
     cork(): void;
     uncork(): void;
     setDefaultEncoding(encoding: string): this;
@@ -7338,16 +7512,18 @@ declare module "stream" {
   }
 
   class Transform extends Duplex {
+    constructor(opts: ObjectTransformOptions);
     constructor(opts?: TransformOptions);
     /* The underscore-method surface (see Readable). */
     _transform(
       chunk: any,
       encoding: string,
-      callback: (error?: Error | null, data?: Buffer | string) => void,
+      callback: (error?: Error | null, data?: any) => void,
     ): void;
-    _flush(callback: (error?: Error | null, data?: Buffer | string) => void): void;
+    _flush(callback: (error?: Error | null, data?: any) => void): void;
   }
   class PassThrough extends Transform {
+    constructor(opts: ObjectTransformOptions);
     constructor(opts?: TransformOptions);
   }
 

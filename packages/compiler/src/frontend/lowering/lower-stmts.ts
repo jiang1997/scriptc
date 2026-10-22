@@ -139,6 +139,8 @@ import {
   bindingGenericFnAliasInfoOf,
   bindingGenericFnInfoOf,
   bindingGenericFnNodeOf,
+  genericBindingPresenceStore,
+  genericBindingStoredValue,
   implicitLocalFnInfoOf,
   implicitLocalFnNodeOf,
   implicitMethodCallInfersReturn,
@@ -3889,6 +3891,9 @@ function stdlibGlobalTokenDestructure(
   if (decl.initializer === undefined || !isJsSourceFile(ts.getSourceFileOfNode(decl))) return null;
   const globalName = stdlibGlobalNameOf(lowerer, decl.initializer);
   if (globalName === null) return null;
+  // `workerData` is a value (the data the worker was started with), not an
+  // API surface: its members destructure as any untyped value's do.
+  if (globalName === "workerData") return null;
   if (!ts.isObjectBindingPattern(decl.name)) {
     lowerer.unsupported(
       "SC1031",
@@ -5113,8 +5118,19 @@ export function lowerVarDecl(
   {
     const gfnNode = bindingGenericFnNodeOf(decl) ?? bindingContextualGenericFnNodeOf(lowerer, decl);
     if (gfnNode) {
-      bindingGenericFnInfoOf(lowerer, decl, gfnNode);
-      return null;
+      const info = bindingGenericFnInfoOf(lowerer, decl, gfnNode);
+      // A nested function that lowered before this declaration read the
+      // binding as an ordinary TDZ box (predeclareForwardCapture); the
+      // declaration initializes it, so those reads see the function once
+      // it runs and a ReferenceError before.
+      const symbol = lowerer.checker.getSymbolAtLocation(decl.name);
+      const pre = symbol ? lowerer.ctx.tdzPredeclared.get(symbol) : undefined;
+      if (pre) {
+        lowerer.ctx.tdzPredeclared.delete(symbol!);
+        const value = genericBindingStoredValue(lowerer, decl, info);
+        return { kind: "assign", localId: pre.id, value, initializes: true, loc: locOf(decl) };
+      }
+      return genericBindingPresenceStore(info, decl);
     }
   }
 

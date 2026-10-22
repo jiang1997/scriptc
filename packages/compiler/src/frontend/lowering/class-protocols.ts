@@ -101,6 +101,8 @@ export class ClassProtocols {
     const sites: {
       source: ts.Expression;
       target: () => ts.Type | undefined;
+      /** The node whose contextual type `target` answers. */
+      contextual?: ts.Expression;
       assertion?: true;
     }[] = [];
     /** Expressions whose values are observed as whole objects. */
@@ -122,7 +124,8 @@ export class ClassProtocols {
     const callbackParams: { fn: ts.SignatureDeclaration; index: number; name: ts.Node }[] = [];
     const contextual = (expr: ts.Expression) => () => this.checker.getContextualType(expr);
     const flow = (expr: ts.Expression | undefined): void => {
-      if (expr !== undefined) sites.push({ source: expr, target: contextual(expr) });
+      if (expr !== undefined)
+        sites.push({ source: expr, target: contextual(expr), contextual: expr });
     };
     const write = (target: ts.Expression): void => {
       while (ts.isParenthesizedExpression(target) || ts.isNonNullExpression(target))
@@ -329,7 +332,11 @@ export class ClassProtocols {
         facts.loose.push({ node: looseArguments[i]!, call: looseCalls[i]!, symbols });
     }
     this.facts = facts;
-    const pending: { sourceType: ts.Type; target: () => ts.Type | undefined }[] = [];
+    const pending: {
+      sourceType: ts.Type;
+      target: () => ts.Type | undefined;
+      contextual?: ts.Expression;
+    }[] = [];
     /** Views a value of unknown origin is asserted to and that expose a
      * method of a class the view accepts (see methodViewSources). */
     const methodViews = new Set<ts.Symbol>();
@@ -352,7 +359,11 @@ export class ClassProtocols {
           }
         continue;
       }
-      pending.push({ sourceType, target: site.target });
+      pending.push(
+        site.contextual === undefined
+          ? { sourceType, target: site.target }
+          : { sourceType, target: site.target, contextual: site.contextual },
+      );
     }
     for (const { fn, index, name } of callbackParams) {
       attempt(() => {
@@ -377,6 +388,19 @@ export class ClassProtocols {
     // flows and origins are complete.
     const before = new Set(marked);
     const targets = new Map<number, ts.Type | undefined>();
+    // The fixpoint asks the target of each site whose source carries
+    // identity: one batch asks those of the sites that carry it now, and a
+    // site that starts to as marks grow asks its own.
+    attempt(() =>
+      this.checker.prefetchContextualTypes(
+        pending.flatMap((entry) =>
+          entry.contextual !== undefined &&
+          attempt(() => this.carriesIdentity(entry.sourceType, marked)) === true
+            ? [entry.contextual]
+            : [],
+        ),
+      ),
+    );
     let changed = true;
     while (changed) {
       changed = false;

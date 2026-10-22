@@ -305,7 +305,7 @@ static ScrPromise *src_next(OpSrc *src) {
 }
 
 static bool src_done(const OpSrc *src, const ScrDyn *v) {
-  return src->s ? v->kind == SCR_DYN_UNDEF : v == op_k_done;
+  return src->s ? scr_stream_chunk_done(v) : v == op_k_done;
 }
 
 /* The Readable iterator's return(): the iterator generator resumes at its
@@ -1492,16 +1492,6 @@ static void op_from_step_k(void *self, ScrDyn *v) {
   }
   int pushed = scr_stream_push_object(out, v);
   scr_dyn_release(v);
-  if (pushed == -2) {
-    op_from_destroy_with(out, op_unsupported(
-        "a stream operator output that mixes strings and Buffers"));
-    return;
-  }
-  if (pushed < 0) {
-    op_from_destroy_with(out, op_unsupported(
-        "a stream operator value that is not a string or Buffer (object-mode streams of other values)"));
-    return;
-  }
   if (pushed) {
     from_next(f, out);
     return;

@@ -623,6 +623,10 @@ struct ScrFiber {
    * awaiter destroys the record when it takes the result. */
   bool direct;
   struct ScrFiber *direct_awaiter;
+  /* While an async body runs its synchronous prefix (until its first await
+   * or its end), the AsyncLocalStorage slot of the execution that spawned
+   * it; NULL afterwards (scr_als_prefix_end). */
+  ScrAlsCtx **prefix_slot;
 #ifdef SCR_ASAN_FIBERS
   void *fake_stack;
   /* Live stackless async fibers (scr_async_spawn_stackless) form a list
@@ -668,6 +672,61 @@ void scr_als_ctx_release(ScrAlsCtx *c) {
   if (!c || --c->rc != 0) return;
   for (size_t i = 0; i < c->len; i++) scr_dyn_release(c->entries[i].value);
   free(c);
+}
+
+/* enterWith on the main stack lasts until that code returns to the loop,
+ * so the store does not reach callbacks scheduled without it: the loop
+ * clears the main slot when the main module's body returns, and an
+ * enterWith inside a callback the loop runs puts a tick that clears it at
+ * the front of the tick queue, so it runs as soon as that callback
+ * returns. A store that an async callee's prefix or a generator step
+ * enters becomes the caller's at scr_als_prefix_end and is cleared the
+ * same way. */
+static SCR_TL bool scr_loop_started = false;
+
+static void scr_als_main_clear(void) {
+  scr_als_ctx_release(scr_als_main_slot);
+  scr_als_main_slot = NULL;
+}
+
+static void scr_next_tick_raw_first(void (*fn)(void));
+
+/* A new store on the main slot: one a loop callback enters ends with it. */
+static void scr_als_main_entered(void) {
+  if (scr_loop_started) scr_next_tick_raw_first(scr_als_main_clear);
+}
+
+void scr_als_entered_with(void) {
+  if (SCR_ALS_SLOT() == &scr_als_main_slot) scr_als_main_entered();
+}
+
+/* The end of an async body's synchronous prefix: its first await, or its
+ * end. Node runs that prefix inside the caller's execution, so a store it
+ * entered (enterWith) is still the caller's store after the call; the body
+ * keeps its own copy of the context for what runs after its await. */
+static void scr_als_prefix_end(ScrFiber *f) {
+  ScrAlsCtx **slot = f->prefix_slot;
+  if (slot == NULL) return;
+  f->prefix_slot = NULL;
+  if (*slot != f->als) {
+    scr_als_ctx_release(*slot);
+    *slot = scr_als_ctx_retain(f->als);
+    if (f->als != NULL && slot == &scr_als_main_slot) scr_als_main_entered();
+  }
+}
+
+/* A synchronous generator has no context of its own: each step runs in its
+ * resumer's execution, as Node runs it. A fiber-backed one switches to its
+ * own slot, so its step starts from the resumer's store and a store it
+ * enters is the resumer's after the step (scr_als_prefix_end on the way
+ * back); a stackless one runs in the resumer's slot (scr_gen_coro_hop). */
+static void scr_als_step_begin(ScrFiber *f) {
+  ScrAlsCtx **slot = SCR_ALS_SLOT();
+  if (f->als != *slot) {
+    scr_als_ctx_release(f->als);
+    f->als = scr_als_ctx_retain(*slot);
+  }
+  f->prefix_slot = slot;
 }
 
 /* The lifetime region a new async fiber carries (ScrFiber.region). */
@@ -724,26 +783,6 @@ ScrDyn *scr_als_peek(double id) {
     }
   }
   return NULL;
-}
-
-/* enterWith on the main stack lasts until that code returns to the loop,
- * so the store does not reach callbacks scheduled without it: the loop
- * clears the main slot when the main module's body returns, and an
- * enterWith inside a callback the loop runs puts a tick that clears it at
- * the front of the tick queue, so it runs as soon as that callback
- * returns. */
-static SCR_TL bool scr_loop_started = false;
-
-static void scr_als_main_clear(void) {
-  scr_als_ctx_release(scr_als_main_slot);
-  scr_als_main_slot = NULL;
-}
-
-static void scr_next_tick_raw_first(void (*fn)(void));
-
-void scr_als_entered_with(void) {
-  if (scr_loop_started && SCR_ALS_SLOT() == &scr_als_main_slot)
-    scr_next_tick_raw_first(scr_als_main_clear);
 }
 
 static SCR_TL ScrCtx scr_loop_ctx; /* the main stack (scheduler home) */
@@ -1889,6 +1928,7 @@ static void scr_trampoline(void) {
   ScrFiber *self = scr_current;
   self->entry(self, self->argpack);
   scr_fiber_finish(self);
+  scr_als_prefix_end(self);
   /* The loop reaps the fiber that comes back to it finished, which need
    * not be the one it resumed: a fiber that continued in place for the
    * awaiters it parked (scr_await_yield) returns to the loop too. */
@@ -2010,6 +2050,7 @@ static ScrPromise *scr_async_spawn_impl(void (*entry)(ScrFiber *, void *), void 
   /* AsyncLocalStorage: the child runs in the SPAWNER's context (Node's
    * init-time capture); snapshots are immutable, so a retain suffices. */
   f->als = scr_als_ctx_retain(*SCR_ALS_SLOT());
+  f->prefix_slot = SCR_ALS_SLOT();
   f->region = scr_fiber_region_capture();
   scr_fibers_live++;
 
@@ -2023,13 +2064,15 @@ static ScrPromise *scr_async_spawn_impl(void (*entry)(ScrFiber *, void *), void 
 #elif defined(__wasi__)
   (void)awaiter;
   ScrFiber *spawner = scr_current;
+  ScrAlsCtx **spawner_slot = scr_als_active;
   scr_current = f;
   scr_exc_swap_cell(&f->exc);
   scr_als_active = &f->als;
   entry(f, argpack); /* eager prefix; returns at suspend/final suspend */
+  scr_als_prefix_end(f);
   scr_current = spawner;
   scr_exc_swap_cell(spawner ? &spawner->exc : NULL);
-  scr_als_active = spawner ? &spawner->als : &scr_als_main_slot;
+  scr_als_active = spawner_slot;
   ScrPromise *result = scr_promise_retain(f->promise);
   if (f->done) {
     scr_promise_release(f->promise);
@@ -2057,6 +2100,7 @@ static ScrPromise *scr_async_spawn_impl(void (*entry)(ScrFiber *, void *), void 
 #endif
   f->return_to = home;
   ScrFiber *spawner = scr_current;
+  ScrAlsCtx **spawner_slot = scr_als_active;
   scr_switch(home, &f->ctx, f);
   /* back: the fiber suspended or finished. The switch back targeted NULL
    * (the child doesn't know who spawned it), which pointed both the current
@@ -2066,7 +2110,7 @@ static ScrPromise *scr_async_spawn_impl(void (*entry)(ScrFiber *, void *), void 
    * `undefined` rejection while the real payload leaks). */
   scr_current = spawner;
   scr_exc_swap_cell(spawner ? &spawner->exc : NULL);
-  scr_als_active = spawner ? &spawner->als : &scr_als_main_slot;
+  scr_als_active = spawner_slot;
   if (awaited != NULL) {
     /* Parked by the child: the loop owns (and may have reaped) it. */
     if (awaiter->await_parked) return awaited;
@@ -2172,6 +2216,7 @@ static ScrFiber *scr_spawn_stackless_fiber(void (*entry)(ScrFiber *, void *), vo
   scr_fiber_track(f);
   f->stackless = true;
   f->als = scr_als_ctx_retain(*SCR_ALS_SLOT());
+  f->prefix_slot = SCR_ALS_SLOT();
   /* The lifetime region the eager prefix runs in, which every later step
    * resumes in (scr_resume_fiber), as a fiber's body does. */
   f->region = scr_fiber_region_capture();
@@ -2183,6 +2228,7 @@ static ScrFiber *scr_spawn_stackless_fiber(void (*entry)(ScrFiber *, void *), vo
   scr_stackless_fibers = f;
 #endif
   ScrFiber *spawner = scr_current;
+  ScrAlsCtx **spawner_slot = scr_als_active;
 #ifndef _WIN32
   uintptr_t guard = scr_stack_guard;
   if (guard != 0 && (uintptr_t)__builtin_frame_address(0) < guard + SCR_STACKLESS_PREFIX_ROOM) {
@@ -2195,9 +2241,10 @@ static ScrFiber *scr_spawn_stackless_fiber(void (*entry)(ScrFiber *, void *), vo
     scr_als_active = &f->als;
     entry(f, argpack); /* the eager prefix: returns at a suspension or the end */
   }
+  scr_als_prefix_end(f);
   scr_current = spawner;
   scr_exc_swap_cell(spawner ? &spawner->exc : NULL);
-  scr_als_active = spawner ? &spawner->als : &scr_als_main_slot;
+  scr_als_active = spawner_slot;
   return f;
 }
 
@@ -2303,8 +2350,10 @@ void *scr_async_spawn_await_ref(void (*entry)(ScrFiber *, void *), void *argpack
  * settled promise is created and settled in the same order, rejections
  * enter the unhandled ledger through the same settle path, and the frame
  * isolates what a fresh fiber would — the Error.stack frame chain
- * (cell->stack) and the AsyncLocalStorage context (enterWith inside the
- * body stays inside it). The caller's exception cell is clean at any call
+ * (cell->stack). The AsyncLocalStorage context is the caller's throughout:
+ * the whole body is the synchronous prefix Node runs in the caller's
+ * execution, so a store it enters stays entered after the call
+ * (scr_als_prefix_end). The caller's exception cell is clean at any call
  * (try/finally stashes in-flight exceptions), so a pending exception
  * after the body is the body's own throw. */
 static void scr_inline_park_trap(void) {
@@ -2321,21 +2370,12 @@ void scr_async_inline_enter(ScrAsyncInline *frame) {
   ScrExcCell *cell = scr_exc_current_cell();
   frame->stack = cell->stack;
   cell->stack = NULL;
-  frame->als = scr_als_ctx_retain(*SCR_ALS_SLOT());
   if (scr_current != NULL) scr_current->inline_depth++;
 }
 
 void scr_async_inline_exit(ScrAsyncInline *frame) {
   if (scr_current != NULL) scr_current->inline_depth--;
   scr_exc_current_cell()->stack = (ScrStackFrame *)frame->stack;
-  ScrAlsCtx *saved = (ScrAlsCtx *)frame->als;
-  ScrAlsCtx **slot = SCR_ALS_SLOT();
-  if (*slot != saved) {
-    scr_als_ctx_release(*slot);
-    *slot = saved; /* the frame's reference moves back in */
-  } else {
-    scr_als_ctx_release(saved);
-  }
 }
 
 ScrPromise *scr_async_inline_leave(ScrAsyncInline *frame) {
@@ -2379,11 +2419,14 @@ ScrPromise *scr_async_spawn_after(ScrPromise *dependency,
  * switch to its own resumer: park it here, for each such awaiter up the
  * chain, and switch there directly. Nothing runs in between either way. */
 static ScrCtx *scr_fiber_park_awaiters(ScrFiber *self) {
+  scr_als_prefix_end(self);
   ScrCtx *to = self->return_to;
 #ifdef SCR_SPAWN_AWAIT
   for (ScrFiber *cur = self; cur->awaiter != NULL;) {
     ScrFiber *aw = cur->awaiter;
     cur->awaiter = NULL;
+    /* The awaiter's await is its own suspension: its prefix ends here. */
+    scr_als_prefix_end(aw);
     scr_promise_add_waiter(cur->promise, aw);
     aw->await_parked = true;
     to = aw->return_to;
@@ -5675,9 +5718,13 @@ __attribute__((always_inline)) static inline void scr_gen_coro_hop(ScrGen *g, bo
   if (retain) scr_gen_retain(g);
   g->state = SCR_GEN_RUNNING;
   f->resumer = scr_current;
+  ScrAlsCtx **resumer_slot = scr_als_active;
   scr_current = f;
   scr_exc_swap_cell(&f->exc);
-  scr_als_active = &f->als;
+  /* A synchronous generator has no AsyncLocalStorage context of its own:
+   * its step runs in the resumer's slot, as Node runs it in the execution
+   * that called next(). An async generator's step runs in its own. */
+  if (g->is_async) scr_als_active = &f->als;
   if (f->coro == NULL) f->entry(f, f->argpack);
   else scr_coro_resume(f->coro);
   /* A running generator cannot be resumed again, so neither its fiber nor
@@ -5686,7 +5733,7 @@ __attribute__((always_inline)) static inline void scr_gen_coro_hop(ScrGen *g, bo
   ScrFiber *me = f->resumer;
   scr_current = me;
   scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
-  scr_als_active = me != NULL ? &me->als : &scr_als_main_slot;
+  scr_als_active = resumer_slot;
   scr_gen_switched_back(g, f, retain, true);
 }
 
@@ -5708,6 +5755,7 @@ static void scr_gen_switch_in(ScrGen *g) {
 #endif
   scr_gen_retain(g);
   g->state = SCR_GEN_RUNNING;
+  if (!g->is_async) scr_als_step_begin(f);
 #ifdef _WIN32
   ScrCtx here = scr_win_self();
 #elif defined(__wasi__)
@@ -5717,6 +5765,7 @@ static void scr_gen_switch_in(ScrGen *g) {
 #endif
   f->return_to = &here;
   ScrFiber *me = scr_current;
+  ScrAlsCtx **resumer_slot = scr_als_active;
 #ifdef __wasi__
   scr_current = f;
   scr_exc_swap_cell(&f->exc);
@@ -5725,14 +5774,17 @@ static void scr_gen_switch_in(ScrGen *g) {
   else scr_wasi_coro_resume(f->coro);
   scr_current = me;
   scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
-  scr_als_active = me != NULL ? &me->als : &scr_als_main_slot;
+  scr_als_active = resumer_slot;
 #else
   scr_switch(&here, &f->ctx, f);
-  /* Back on the consumer: restore identity + the consumer's cell (the
-   * yield/finish switch targeted NULL — main's cell). */
+  /* Back on the consumer: restore identity, the consumer's cell and its
+   * AsyncLocalStorage slot (the yield/finish switch targeted NULL — main's
+   * cell and slot). */
   scr_current = me;
   scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
+  scr_als_active = resumer_slot;
 #endif
+  scr_als_prefix_end(f);
   scr_gen_switched_back(g, f, true, false);
 }
 

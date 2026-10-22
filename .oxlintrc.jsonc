@@ -241,6 +241,7 @@
         "packages/compiler/src/frontend/comptime-node.ts",
         "packages/compiler/src/frontend/ts7/world-check.ts",
         "packages/compiler/src/frontend/ts7/source-parser.test.ts",
+        "packages/compiler/src/frontend/jsx-source.test.ts",
         "packages/compiler/src/frontend/npm-static-rewrite.ts",
         "packages/compiler/src/frontend/npm-static-bundled-cjs.ts",
         "packages/compiler/src/library/semantic-source.ts",

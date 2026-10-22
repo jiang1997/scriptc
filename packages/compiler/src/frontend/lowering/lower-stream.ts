@@ -308,6 +308,21 @@ function lowerStreamCallback(
     // boxes each position by kind (the completion callback arrives as a
     // callable dyn whose glue dispatches to the runtime's *_done).
     if (funcType.params[i]!.kind === "dyn") continue;
+    // A write or transform chunk of another type converts from the
+    // chunk's value when the callback runs (an object-mode side's value,
+    // or the Buffer), or throws a TypeError there; an encoding of another
+    // type (`string | null | undefined`) from the encoding argument's.
+    if (
+      (i === 0 || i === 1) &&
+      (which === "write" || which === "transform") &&
+      funcType.params[i]!.kind !== "func" &&
+      canConvertToDyn(
+        funcType.params[i]!,
+        (id) => lowerer.shapes.get(id),
+        (id) => lowerer.unions.get(id),
+      )
+    )
+      continue;
     if (!typeEquals(funcType.params[i]!, fullTuple[i]!)) {
       lowerer.noLowering(
         `a '${which}' callback whose parameter ${i} is '${lowerer.fmt(funcType.params[i]!)}' where Node passes '${lowerer.fmt(fullTuple[i]!)}'`,
@@ -404,9 +419,50 @@ interface StreamOptions {
    * right after construction (Node's constructors call addAbortSignal
    * once the state exists), or null when absent. */
   signal: IrExpr | null;
+  /** The objectMode option's sides (a Duplex's readableObjectMode and
+   * writableObjectMode set one side): applied with stream.objectMode
+   * right after construction. */
+  readableObject: boolean;
+  writableObject: boolean;
   /** Present callbacks in canonical order with their flag bits. */
   flags: number;
   cbs: IrExpr[];
+}
+
+/** The objectMode, readableObjectMode and writableObjectMode members of a
+ * stream options literal (boolean literals; the sided keys count only on
+ * a Duplex, Transform or PassThrough, as in Node). */
+function streamObjectModes(
+  lowerer: Lowerer,
+  ctorName: string,
+  optsLit: ts.ObjectLiteralExpression | undefined,
+): { readable: boolean; writable: boolean } {
+  const out = { readable: false, writable: false };
+  const duplexish = ctorName !== "Readable" && ctorName !== "Writable";
+  for (const prop of optsLit?.properties?.nodes ?? []) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const name =
+      ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+    if (name !== "objectMode" && name !== "readableObjectMode" && name !== "writableObjectMode")
+      continue;
+    const value = prop.initializer;
+    if (value.kind === ts.SyntaxKind.FalseKeyword) continue;
+    if (value.kind !== ts.SyntaxKind.TrueKeyword) {
+      lowerer.noLowering(
+        `${ctorName} with a runtime '${name}' value`,
+        prop,
+        `write '${name}: true' or '${name}: false'`,
+      );
+    }
+    if (name === "objectMode") {
+      out.readable = true;
+      out.writable = true;
+    } else if (duplexish) {
+      if (name === "readableObjectMode") out.readable = true;
+      else out.writable = true;
+    }
+  }
+  return out;
 }
 
 /** The full Node parameter tuples of the option callbacks, given the
@@ -657,6 +713,8 @@ function parseStreamOptions(
     badEncoding: null,
     pushEncoding: null,
     signal: null,
+    readableObject: false,
+    writableObject: false,
     flags: 0,
     cbs: [],
   };
@@ -669,6 +727,18 @@ function parseStreamOptions(
       "the options must be an object literal, inline or through const-initialized bindings (the callbacks lower as compile-time closures)",
     );
   }
+  // Read before the callbacks lower: an object-mode readable side keeps a
+  // completion callback's `data: any` (its values are not only strings and
+  // Buffers). An object-mode side's high-water mark defaults to 16.
+  const objectModes = streamObjectModes(
+    lowerer,
+    ctorName,
+    optsLit !== undefined && ts.isObjectLiteralExpression(optsLit) ? optsLit : undefined,
+  );
+  out.readableObject = objectModes.readable;
+  out.writableObject = objectModes.writable;
+  if (out.readableObject) out.hwmR = numLit(16, loc);
+  if (out.writableObject) out.hwmW = numLit(16, loc);
   const tuples = cbTuples(lowerer);
   const present = new Map<string, IrExpr>();
   for (const prop of optsLit?.properties?.nodes ?? []) {
@@ -715,7 +785,7 @@ function parseStreamOptions(
         continue;
       }
       const full = tuples[name]!.map((t) => (t === "fn" ? null : t));
-      const pinned = pinAnyDataCompletion(lowerer, name, fnNode);
+      const pinned = out.readableObject ? null : pinAnyDataCompletion(lowerer, name, fnNode);
       try {
         // The completion-callback tail: typed by the checker contextually;
         // accept the user's declared func type as the tuple's entry so the
@@ -776,16 +846,9 @@ function parseStreamOptions(
         break;
       case "objectMode":
       case "readableObjectMode":
-      case "writableObjectMode": {
-        // `objectMode: false` is the byte default — admit the literal.
-        if (value.kind === ts.SyntaxKind.FalseKeyword) break;
-        lowerer.noLowering(
-          `${ctorName} in objectMode`,
-          prop,
-          "object-mode streams have no static chunk type yet — chunks are Buffers (utf8 strings convert at push/write)",
-        );
+      case "writableObjectMode":
+        // read up front (streamObjectModes)
         break;
-      }
       case "decodeStrings": {
         if (value.kind === ts.SyntaxKind.TrueKeyword) break; // Node's default
         lowerer.noLowering(
@@ -942,6 +1005,8 @@ function streamCtorArgs(
   badEncoding: string | null;
   pushEncoding: string | null;
   signal: IrExpr | null;
+  readableObject: boolean;
+  writableObject: boolean;
 } {
   const shape = streamCtorShape(cls);
   const o = parseStreamOptions(
@@ -971,6 +1036,8 @@ function streamCtorArgs(
     badEncoding: o.badEncoding,
     pushEncoding: o.pushEncoding,
     signal: o.signal,
+    readableObject: o.readableObject,
+    writableObject: o.writableObject,
   };
 }
 
@@ -1015,6 +1082,17 @@ export function lowerStreamNew(lowerer: Lowerer, expr: ts.NewExpression, info: C
     );
   }
   let built: IrExpr = { kind: "libCall", fn, args: parsed.args, type: thisType, loc };
+  if (parsed.readableObject || parsed.writableObject) {
+    // { objectMode }: applied before any other follow-up (answers the
+    // receiver +1).
+    built = {
+      kind: "libCall",
+      fn: "stream.objectMode",
+      args: [built, boolLit(parsed.readableObject, loc), boolLit(parsed.writableObject, loc)],
+      type: thisType,
+      loc,
+    };
+  }
   if (parsed.pushEncoding !== null) {
     // { defaultEncoding }: chain the push-side decode default (the
     // setEncoding chaining shape — answers the receiver +1).
@@ -1133,11 +1211,43 @@ function streamMethodWrapper(
         );
       }
     } else if (!typeEquals(got.type, want)) {
+      // A write or transform encoding of another type (`string | null |
+      // undefined`) converts from the encoding argument's value: an
+      // object-mode write passes undefined, null or the name.
+      if (
+        i === 1 &&
+        (which === "write" || which === "transform") &&
+        got.type.kind !== "func" &&
+        canConvertToDyn(
+          got.type,
+          (id) => lowerer.shapes.get(id),
+          (id) => lowerer.unions.get(id),
+        )
+      ) {
+        paramTypes.push(got.type);
+        continue;
+      }
       // A declared supertype of what Node passes (`chunk: Buffer | string`)
       // is sound: the wrapper takes Node's value and widens it into the
       // declared parameter.
       if (widensInto(lowerer, want, got.type, loc)) {
         paramTypes.push(want);
+        continue;
+      }
+      // A write or transform chunk of another type converts from the
+      // chunk's value when the method runs (an object-mode side's value,
+      // or the Buffer), or throws a TypeError there.
+      if (
+        i === 0 &&
+        (which === "write" || which === "transform") &&
+        got.type.kind !== "func" &&
+        canConvertToDyn(
+          got.type,
+          (id) => lowerer.shapes.get(id),
+          (id) => lowerer.unions.get(id),
+        )
+      ) {
+        paramTypes.push(got.type);
         continue;
       }
       lowerer.noLowering(
@@ -1301,6 +1411,19 @@ export function lowerStreamSuperCall(
       loc,
     },
   ];
+  if (parsed.readableObject || parsed.writableObject) {
+    out.push({
+      kind: "exprStmt",
+      expr: {
+        kind: "libCall",
+        fn: "stream.objectMode",
+        args: [thisRef(), boolLit(parsed.readableObject, loc), boolLit(parsed.writableObject, loc)],
+        type: thisType,
+        loc,
+      },
+      loc,
+    });
+  }
   if (parsed.pushEncoding !== null) {
     out.push({
       kind: "exprStmt",
@@ -1602,7 +1725,17 @@ export function lowerStreamStaticCall(
   }
   const anySrc =
     srcT?.kind === "dyn" ||
-    (srcT?.kind === "set" && typedElem(srcT.elem) !== null) ||
+    // a Set or Map (entry arrays) of other values: the checked-dynamic
+    // view iterates the collection itself
+    ((srcT?.kind === "set" || srcT?.kind === "map") &&
+      canConvertToDyn(
+        srcT,
+        (id) => lowerer.shapes.get(id),
+        (id) => lowerer.unions.get(id),
+      )) ||
+    // an array of other values: the object-mode entries come from its
+    // checked-dynamic copy
+    (srcT?.kind === "array" && fromGenChunk(lowerer, srcT.elem) && typedElem(srcT.elem) === null) ||
     (srcNode !== undefined &&
       srcT === null &&
       (lowerer.typeOf(srcNode).flags & ts.TypeFlags.Any) !== 0);
@@ -1623,20 +1756,24 @@ export function lowerStreamStaticCall(
   lowerer.noLowering(
     `Readable.from over a '${srcT ? lowerer.fmt(srcT) : "?"}' source`,
     srcNode ?? call,
-    "the supported sources are a string or Buffer, and arrays, Sets, generators and class iterables of strings or Buffers",
+    "the supported sources are a string or Buffer, and arrays, Sets, Maps, generators and class iterables of values that convert to checked-dynamic values",
   );
 }
 
-/** Whether a generator's yields are stream chunks: strings, Buffers, a
- * union of them (null included: the runtime destroys the stream with
- * ERR_STREAM_NULL_VALUES), or checked-dynamic values (checked when
- * pushed). */
+/** Whether a generator's yields can be stream chunks: values that box
+ * into checked-dynamic values (null included: the runtime destroys the
+ * stream with ERR_STREAM_NULL_VALUES). An object-mode stream takes any of
+ * them; a byte-mode one checks them when they are pushed or written. */
 function fromGenChunk(lowerer: Lowerer, t: IrType): boolean {
-  const chunk = (a: IrType): boolean =>
-    a.kind === "string" || (a.kind === "bytes" && a.elem === "u8") || a.kind === "nullT";
-  if (t.kind === "dyn" || (chunk(t) && t.kind !== "nullT")) return true;
-  if (t.kind !== "union") return false;
-  return lowerer.unions.get(t.unionId)?.arms.every(chunk) ?? false;
+  if (t.kind === "nullT" || t.kind === "void" || t.kind === "func") return false;
+  return (
+    t.kind === "dyn" ||
+    canConvertToDyn(
+      t,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  );
 }
 
 /** The helpers Readable.from pulls a compiled generator through, as
@@ -3587,14 +3724,6 @@ function lowerStreamOperator(
   throw new InternalCompilerError(`unknown stream operator ${member}`);
 }
 
-/** The literal 'buffer' encoding on write()/end(): Node 24 takes it for a
- * Buffer chunk and throws ERR_UNKNOWN_ENCODING for a string chunk. */
-function isBufferEncoding(lowerer: Lowerer, arg: ts.Expression | undefined): boolean {
-  if (arg === undefined) return false;
-  const t = lowerer.typeOf(arg);
-  return t.isStringLiteralType() && t.value === "buffer";
-}
-
 /** The one supported encoding argument: utf8 (Node's default), as a
  * compile-time literal or absent. */
 function checkUtf8Encoding(lowerer: Lowerer, member: string, arg: ts.Expression | undefined): void {
@@ -3925,10 +4054,24 @@ export function lowerStreamMethodCall(
       if (probed?.type.kind === "dyn") return "dyn";
       if (probed?.type.kind === "nullT") return "null";
     }
+    // Any other value is a checked-dynamic chunk: one entry on an
+    // object-mode side, Node's chunk type error on a byte-mode one
+    // (undefined, which a byte-mode push ignores, included).
+    if (t?.kind === "void" || t?.kind === "undefinedT") return "dyn";
+    if (
+      t !== null &&
+      t.kind !== "func" &&
+      canConvertToDyn(
+        t,
+        (id) => lowerer.shapes.get(id),
+        (id) => lowerer.unions.get(id),
+      )
+    )
+      return "dyn";
     lowerer.noLowering(
       `${member} with a '${t ? lowerer.fmt(t) : "?"}' chunk`,
       node,
-      "chunks are Buffers or utf8 strings — or unions of those with null (objectMode is not lowered)",
+      "chunks are values that convert to checked-dynamic values: Buffers, strings, numbers, records, arrays and class instances",
     );
   };
 
@@ -3973,11 +4116,17 @@ export function lowerStreamMethodCall(
     checkUtf8Encoding(lowerer, member, args[1]);
     const kind = chunkKind(args[0]!);
     if ((kind === "null" || kind === "union" || kind === "dyn") && member === "unshift") {
-      lowerer.noLowering(
-        kind === "null" ? "unshift(null)" : "unshift with a nullable or dynamic chunk",
-        call,
-        "EOF signals through push(null)",
-      );
+      // unshift(value): an object-mode stream's value at the front, null
+      // the end of the stream, as Node's readableAddChunk takes them
+      const receiver = lowerer.lowerExpr(access.expression);
+      const chunk = lowerer.lowerExprExpecting(args[0]!, DYN);
+      return {
+        kind: "libCall",
+        fn: "readable.unshiftDyn",
+        args: [receiver, chunk],
+        type: VOID,
+        loc,
+      };
     }
     const receiver = lowerer.lowerExpr(access.expression);
     if (kind === "null") {
@@ -4237,9 +4386,54 @@ export function lowerStreamMethodCall(
     }
     const kind = chunkKind(args[0]!);
     if (kind === "null") lowerer.noLowering("write(null)", call, "end() finishes a writable");
+    const lowerWriteCb = (cbArg: ts.Expression): IrExpr => {
+      const cb = callbackDeclaresParameters(cbArg)
+        ? null
+        : lowerer.lowerExprExpecting(cbArg, funcOf([], VOID));
+      if (cb === null || cb.type.kind !== "func" || cb.type.params.length > 0) {
+        lowerer.noLowering(
+          "write completion callbacks taking the error argument",
+          cbArg,
+          "() => void callbacks are supported (listen for 'error' to observe failures)",
+        );
+      }
+      return cb!;
+    };
+    // write(chunk, encoding[, cb]), and write(value, cb): the encoding
+    // argument reaches an object-mode side's _write as passed, null when
+    // the callback took its place (a byte-mode side encodes a string
+    // chunk with it).
+    const writeEnc = (encArg: ts.Expression | undefined, cbArg: ts.Expression | undefined) => {
+      const receiver = lowerer.lowerExpr(access.expression);
+      const chunk = lowerer.lowerExprExpecting(args[0]!, DYN);
+      const tail: IrExpr[] = [];
+      if (encArg !== undefined) tail.push(lowerer.lowerExprExpecting(encArg, DYN));
+      if (cbArg !== undefined) tail.push(lowerWriteCb(cbArg));
+      const flags = (encArg !== undefined ? 1 : 0) | (cbArg !== undefined ? 2 : 0);
+      return {
+        kind: "libCall",
+        fn: "writable.writeEnc",
+        args: [receiver, numLit(flags, loc), chunk, ...tail],
+        type: BOOL,
+        loc,
+      } satisfies IrExpr;
+    };
     if (kind === "dyn") {
-      if (args.length > 1)
-        lowerer.noLowering("write with a dynamic chunk and more arguments", call);
+      if (args.length === 3) return writeEnc(args[1], args[2]);
+      if (args.length === 2) {
+        // Node's write takes a function there as the callback, anything
+        // else as the encoding
+        const t = lowerer.mapTypeOf(lowerer.typeOf(args[1]!));
+        if (t?.kind === "func") return writeEnc(undefined, args[1]);
+        if (t === null || t === undefined || t.kind === "dyn") {
+          lowerer.noLowering(
+            "write with a dynamic second argument",
+            args[1]!,
+            "pass an encoding string or a completion callback",
+          );
+        }
+        return writeEnc(args[1], undefined);
+      }
       const receiver = lowerer.lowerExpr(access.expression);
       const chunk = lowerer.lowerExprExpecting(args[0]!, DYN);
       return { kind: "libCall", fn: "writable.writeDyn", args: [receiver, chunk], type: BOOL, loc };
@@ -4263,19 +4457,15 @@ export function lowerStreamMethodCall(
       return { kind: "libCall", fn, args: [receiver, chunk], type: BOOL, loc };
     }
     // Disambiguate (chunk, cb?) vs (chunk, encoding, cb?) by the second
-    // argument's static type.
+    // argument's static type. A write with an encoding runs through
+    // writeEnc, whose runtime checks and applies it as Node's _write does.
     let cbArg: ts.Expression | undefined;
-    if (args.length >= 2 && isBufferEncoding(lowerer, args[1])) {
-      if (kind !== "bytes")
-        return nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", "Unknown encoding: buffer", BOOL, loc);
-      cbArg = args[2];
-    } else if (args.length === 2) {
+    if (args.length === 3) return writeEnc(args[1], args[2]);
+    if (args.length === 2) {
       const t = lowerer.mapTypeOf(lowerer.typeOf(args[1]!));
-      if (t?.kind === "string") checkUtf8Encoding(lowerer, "write", args[1]);
-      else cbArg = args[1];
-    } else if (args.length === 3) {
-      checkUtf8Encoding(lowerer, "write", args[1]);
-      cbArg = args[2];
+      if (t?.kind === "string" || t?.kind === "nullT" || t?.kind === "undefinedT")
+        return writeEnc(args[1], undefined);
+      cbArg = args[1];
     }
     const receiver = lowerer.lowerExpr(access.expression);
     const chunk =
@@ -4284,16 +4474,7 @@ export function lowerStreamMethodCall(
         : lowerer.lowerExprExpecting(args[0]!, STRING);
     const fn = kind === "bytes" ? "writable.write" : "writable.writeStr";
     if (cbArg !== undefined) {
-      const cb = callbackDeclaresParameters(cbArg)
-        ? null
-        : lowerer.lowerExprExpecting(cbArg, funcOf([], VOID));
-      if (cb === null || cb.type.kind !== "func" || cb.type.params.length > 0) {
-        lowerer.noLowering(
-          "write completion callbacks taking the error argument",
-          cbArg,
-          "() => void callbacks are supported (listen for 'error' to observe failures)",
-        );
-      }
+      const cb = lowerWriteCb(cbArg);
       return { kind: "libCall", fn, args: [receiver, chunk, cb], type: BOOL, loc };
     }
     return { kind: "libCall", fn, args: [receiver, chunk], type: BOOL, loc };
@@ -4305,34 +4486,29 @@ export function lowerStreamMethodCall(
     // Forms: (), (cb), (chunk), (chunk, cb), (chunk, encoding, cb).
     let chunkNode: ts.Expression | undefined;
     let cbArg: ts.Expression | undefined;
+    let encNode: ts.Expression | undefined;
     if (args.length === 1) {
       const t = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
       if (t?.kind === "func") cbArg = args[0];
       else chunkNode = args[0];
-    } else if (args.length >= 2 && isBufferEncoding(lowerer, args[1])) {
-      chunkNode = args[0];
-      const endKind = chunkKind(args[0]!);
-      if (endKind === "string") {
-        const endT = lowerer.mapTypeOf(lowerer.typeOf(call)) ?? DYN;
-        return nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", "Unknown encoding: buffer", endT, loc);
-      }
-      if (endKind !== "bytes") checkUtf8Encoding(lowerer, "end", args[1]);
-      cbArg = args[2];
     } else if (args.length === 2) {
       chunkNode = args[0];
       const t = lowerer.mapTypeOf(lowerer.typeOf(args[1]!));
-      if (t?.kind === "string") checkUtf8Encoding(lowerer, "end", args[1]);
+      if (t?.kind === "string" || t?.kind === "nullT" || t?.kind === "undefinedT")
+        encNode = args[1];
       else cbArg = args[1];
     } else if (args.length === 3) {
       chunkNode = args[0];
-      checkUtf8Encoding(lowerer, "end", args[1]);
+      encNode = args[1];
       cbArg = args[2];
     }
     const receiver = lowerer.lowerExpr(access.expression);
     let flags = 0;
     const tail: IrExpr[] = [];
     if (chunkNode !== undefined) {
-      const kind = chunkKind(chunkNode);
+      // end(chunk, encoding[, cb]) writes the chunk with the encoding
+      // argument as passed (flags 16), through the dyn write
+      const kind = encNode !== undefined ? "dyn" : chunkKind(chunkNode);
       if (kind === "null" || kind === "union") lowerer.noLowering("end(null)", call);
       flags |= kind === "bytes" ? 1 : kind === "dyn" ? 8 : 2;
       tail.push(
@@ -4342,6 +4518,10 @@ export function lowerStreamMethodCall(
             ? lowerer.lowerExprExpecting(chunkNode, DYN)
             : lowerer.lowerExprExpecting(chunkNode, STRING),
       );
+      if (encNode !== undefined) {
+        flags |= 16;
+        tail.push(lowerer.lowerExprExpecting(encNode, DYN));
+      }
     }
     if (cbArg !== undefined) {
       const cb = callbackDeclaresParameters(cbArg)
@@ -4604,8 +4784,7 @@ export function lowerStreamProperty(
     return propCall(BOOL);
   }
   if (name === "writableObjectMode" && writableSide) {
-    // objectMode construction fences, so the answer is compile-time false.
-    return boolLit(false, loc);
+    return propCall(BOOL);
   }
   if (name === "allowHalfOpen" && sides === "rw") {
     return propCall(BOOL);

@@ -4109,6 +4109,7 @@ function validateFunction(
       e.fn === "writable.write" ||
       e.fn === "writable.writeStr" ||
       e.fn === "writable.writeU" ||
+      e.fn === "writable.writeEnc" ||
       e.fn === "writable.end" ||
       e.fn === "readable.unpipe" ||
       e.fn === "rl.create" ||
@@ -5492,6 +5493,7 @@ function validateFunction(
       e.fn.startsWith("passthrough.") ||
       e.fn === "stream.destroy" ||
       e.fn === "stream.destroyErr" ||
+      e.fn === "stream.objectMode" ||
       e.fn === "stream.iteratorClose" ||
       e.fn === "stream.prop" ||
       e.fn === "stream.errored" ||
@@ -5782,6 +5784,7 @@ function validateFunction(
         e.fn === "writable.end" ||
         e.fn === "readable.setEncoding" ||
         e.fn === "readable.pushEncoding" ||
+        e.fn === "stream.objectMode" ||
         e.fn === "stream.destroy" ||
         e.fn === "stream.destroyErr" ||
         e.fn === "stream.iteratorClose"
@@ -5898,8 +5901,10 @@ function validateFunction(
         const chunkT = e.args[2]?.type;
         const ok =
           chunkT !== undefined &&
-          ((chunkT.kind === "bytes" && chunkT.elem === "u8") || chunkT.kind === "string");
-        if (!ok) err(`libCall emitter.emitData chunk must be bytes<u8> or string`, e.loc);
+          ((chunkT.kind === "bytes" && chunkT.elem === "u8") ||
+            chunkT.kind === "string" ||
+            chunkT.kind === "dyn");
+        if (!ok) err(`libCall emitter.emitData chunk must be bytes<u8>, string or dyn`, e.loc);
         if (e.type.kind !== "bool") err(`libCall emitter.emitData must be bool`, e.loc);
         return true;
       }

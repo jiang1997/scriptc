@@ -3118,6 +3118,23 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   ) {
     return DYN;
   }
+  // node:crypto DiffieHellman values, and @types/node's DiffieHellmanGroup
+  // alias over them, are native handles carried by the checked-dynamic
+  // representation; lowerDiffieHellmanCall dispatches their methods.
+  {
+    const dhSym = widened.getAliasSymbol() ?? psym;
+    if (
+      dhSym !== undefined &&
+      (ts.symbolName(dhSym) === "DiffieHellman" || ts.symbolName(dhSym) === "DiffieHellmanGroup") &&
+      dhSym.declarations.some(
+        (d) =>
+          (ts.isClassDeclaration(d) || ts.isTypeAliasDeclaration(d)) &&
+          ctx.isStdlibFile(ts.getSourceFileOfNode(d)),
+      )
+    ) {
+      return DYN;
+    }
+  }
   // ReadonlyMap/ReadonlySet are the SAME runtime values as Map/Set — the
   // readonly-ness is a checker-only view (no mutating members on the
   // interface), so both map to the identical IR kinds and the read-side

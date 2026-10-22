@@ -227,6 +227,13 @@ export function moduleWasiUnavailableSurface(
         };
         return false;
       }
+      if (node.fn === "crypto.dhNew" || node.fn === "crypto.dhGroupNew") {
+        found = {
+          surface: "DiffieHellman (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
       if (PKI_LIB_FNS.has(node.fn)) {
         found = {
           surface:

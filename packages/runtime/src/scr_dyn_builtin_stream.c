@@ -34,8 +34,7 @@
  * receiver without a reference; the hook closures outlive the record.
  *
  * Not supported here (each throws the "not supported yet" Error where it
- * runs): objectMode and the other options scr_stream.c's dyn option walk
- * refuses, `_writev` and `_construct`, symbol event names, listeners() /
+ * runs): the options scr_stream.c's dyn option walk refuses, `_writev` and `_construct`, symbol event names, listeners() /
  * rawListeners(), `wrap()`, and pipes into values that are neither runtime
  * streams nor constructor-function streams. */
 #include "scr_runtime.h"
@@ -275,11 +274,10 @@ static ScrDyn *bcs_done_call(ScrClosure *closure, ScrDyn *const *args, size_t ar
     break;
   }
   default: {
+    /* the data is pushed as push(data) pushes it */
     ScrDyn *data = bcs_arg(args, argc, 1);
-    ScrBytes *bytes = data->kind == SCR_DYN_BYTES ? scr_bytes_raw_view(data->v.bytes) : NULL;
-    ScrStr *text = data->kind == SCR_DYN_STR ? scr_str_retain(data->v.str) : NULL;
-    if (which == BCS_DONE_TRANSFORM) scr_stream_transform_done(s, err, bytes, text);
-    else scr_stream_flush_done(s, err, bytes, text);
+    if (which == BCS_DONE_TRANSFORM) scr_stream_transform_done_value(s, err, data);
+    else scr_stream_flush_done_value(s, err, data);
     break;
   }
   }
@@ -362,13 +360,14 @@ static void bcs_read_inv(ScrClosure *cb, ScrStream *s, double size) {
   scr_dyn_release(object);
 }
 
-/* _write(chunk, 'buffer', cb) and _transform(chunk, 'buffer', cb): a
- * throw propagates to the write() caller, as in Node. */
+/* _write(chunk, 'buffer', cb) and _transform(chunk, 'buffer', cb), or the
+ * value and the write's encoding argument on an object-mode writable
+ * side: a throw propagates to the write() caller, as in Node. */
 static void bcs_chunk_call(ScrClosure *cb, ScrStream *s, ScrBytes *chunk, const char *method, int done) {
   ScrDyn *object = scr_box_get_ref(cb->caps[0]);
   ScrDyn *args[3];
-  args[0] = scr_dyn_new_buffer(chunk);
-  args[1] = bcs_str("buffer");
+  args[0] = scr_stream_chunk_value(s, chunk);
+  args[1] = scr_stream_chunk_encoding_value(s);
   args[2] = bcs_done(s, done);
   ScrDyn *result = bcs_invoke(object, method, args, 3);
   for (int i = 0; i < 3; i++) scr_dyn_release(args[i]);
@@ -488,8 +487,8 @@ static void bcs_listener0(ScrClosure *adapter) {
   bcs_listener_call(adapter, NULL, 0);
 }
 
-static void bcs_listener_data(ScrClosure *adapter, ScrBytes *bytes, ScrStr *text) {
-  ScrDyn *arg = text ? scr_dyn_new_str(text) : scr_dyn_new_buffer(bytes);
+static void bcs_listener_data(ScrClosure *adapter, ScrBytes *bytes, ScrStr *text, ScrDyn *value) {
+  ScrDyn *arg = value ? scr_dyn_retain(value) : text ? scr_dyn_new_str(text) : scr_dyn_new_buffer(bytes);
   bcs_listener_call(adapter, &arg, 1);
   scr_dyn_release(arg);
 }
@@ -583,7 +582,7 @@ static bool bcs_add_listener(ScrStream *s, ScrDyn *self, ScrDyn *type, ScrDyn *l
     break;
   case 1:
     chained = scr_emitter_on_dyn(em, name, listener, bcs_adapter(listener, self, (void *)bcs_listener_data),
-                                 scr_ee_inv_fixed2, once, prepend);
+                                 scr_ee_inv_fixed3, once, prepend);
     break;
   case 2:
     chained = scr_emitter_on_dyn(em, name, listener, bcs_adapter(listener, self, (void *)bcs_listener_error),
@@ -625,14 +624,15 @@ static ScrDyn *bcs_emit(ScrStream *s, ScrDyn *const *args, size_t argc) {
     had = scr_emitter_emit(em, name);
     break;
   case 1:
+    /* 'data' carries the bytes, string and value slots (scr_stream_emit_data) */
     if (first->kind == SCR_DYN_BYTES) {
       ScrBytes *bytes = scr_bytes_raw_view(first->v.bytes);
-      had = scr_emitter_emit(em, name, bytes, (ScrStr *)NULL);
+      had = scr_emitter_emit(em, name, bytes, (ScrStr *)NULL, first);
       scr_bytes_release(bytes);
     } else if (first->kind == SCR_DYN_STR) {
-      had = scr_emitter_emit(em, name, (ScrBytes *)NULL, first->v.str);
+      had = scr_emitter_emit(em, name, (ScrBytes *)NULL, first->v.str, first);
     } else {
-      bcs_unsupported("emit('data') with a chunk other than a Buffer or string on a constructor-function stream is not supported yet");
+      had = scr_emitter_emit(em, name, (ScrBytes *)NULL, (ScrStr *)NULL, first);
     }
     break;
   case 2:
@@ -1037,10 +1037,16 @@ static ScrDyn *bcs_write(ScrStream *s, ScrDyn *self, ScrDyn *const *args, size_t
   ScrDyn *cb = bcs_arg(args, argc, 2);
   if (scr_dyn_is_callable(encoding)) {
     cb = encoding;
-    encoding = scr_dyn_undefined();
+    encoding = scr_stream_writes_values(s) ? scr_dyn_new_null() : scr_dyn_undefined();
   }
-  if (chunk->kind == SCR_DYN_STR && !bcs_utf8_only(encoding)) return NULL;
-  bool below = scr_stream_write_dyn(s, chunk, bcs_callback(cb, self, s));
+  bool below;
+  if (scr_stream_writes_values(s)) {
+    /* an object-mode side hands the encoding argument to _write */
+    below = scr_stream_write_enc(s, chunk, encoding, bcs_callback(cb, self, s));
+  } else {
+    if (chunk->kind == SCR_DYN_STR && !bcs_utf8_only(encoding)) return NULL;
+    below = scr_stream_write_dyn(s, chunk, bcs_callback(cb, self, s));
+  }
   if (scr_exc_pending()) return NULL;
   return scr_dyn_new_bool(below);
 }
@@ -1055,11 +1061,17 @@ static ScrDyn *bcs_end(ScrStream *s, ScrDyn *self, ScrDyn *const *args, size_t a
     encoding = scr_dyn_undefined();
   } else if (scr_dyn_is_callable(encoding)) {
     cb = encoding;
-    encoding = scr_dyn_undefined();
+    encoding = scr_dyn_new_null();
   }
-  if (chunk->kind == SCR_DYN_STR && !bcs_utf8_only(encoding)) return NULL;
   ScrStream *chained = NULL;
-  if (bcs_nullish(chunk)) {
+  if (!bcs_nullish(chunk) && scr_stream_writes_values(s)) {
+    /* end(chunk) writes the value with the encoding argument */
+    scr_stream_write_enc(s, chunk, encoding, NULL);
+    if (scr_exc_pending()) return NULL;
+    chained = scr_stream_end(s, NULL, NULL, bcs_callback(cb, self, s));
+  } else if (chunk->kind == SCR_DYN_STR && !bcs_utf8_only(encoding)) {
+    return NULL;
+  } else if (bcs_nullish(chunk)) {
     chained = scr_stream_end(s, NULL, NULL, bcs_callback(cb, self, s));
   } else if (chunk->kind == SCR_DYN_STR) {
     chained = scr_stream_end(s, NULL, chunk->v.str, bcs_callback(cb, self, s));
@@ -1376,8 +1388,6 @@ static ScrDyn *bcs_getter_call(ScrClosure *closure, ScrDyn *const *args, size_t 
     return bcs_flowing(s);
   case BCS_P_ERRORED:
     return bcs_errored(s);
-  case BCS_P_WRITABLE_OBJECT_MODE:
-    return scr_dyn_new_bool(false);
   case BCS_P_READABLE_LENGTH:
   case BCS_P_READABLE_HWM:
   case BCS_P_WRITABLE_LENGTH:

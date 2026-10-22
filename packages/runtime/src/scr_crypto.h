@@ -101,6 +101,13 @@ ScrDyn *scr_crypto_cipher_new(bool decrypt, ScrDyn *cipher, ScrDyn *key, ScrDyn 
  * or result, or NULL with Node's error pending. */
 ScrDyn *scr_crypto_ecdh_new(ScrDyn *curve);
 ScrDyn *scr_crypto_ecdh_convert_key(ScrDyn *key, ScrDyn *curve, ScrDyn *in_enc, ScrDyn *out_enc, ScrDyn *format);
+/* crypto.createDiffieHellman(sizeOrKey, keyEncoding, generator,
+ * generatorEncoding) and crypto.getDiffieHellman(groupName) over
+ * checked-dynamic arguments (scr_dh.c, linked with the vendored mbedTLS
+ * archive). +1 DiffieHellman or DiffieHellmanGroup handle, or NULL with
+ * Node's error pending. */
+ScrDyn *scr_crypto_dh_new(ScrDyn *size_or_key, ScrDyn *key_encoding, ScrDyn *generator, ScrDyn *generator_encoding);
+ScrDyn *scr_crypto_dh_group_new(ScrDyn *name);
 ScrBytes *scr_crypto_pbkdf2(ScrBytes *password, ScrBytes *salt,
                             double iterations, double keylen, ScrStr *digest);
 ScrBytes *scr_crypto_pbkdf2_job(ScrBytes *password, ScrBytes *salt, double iterations,

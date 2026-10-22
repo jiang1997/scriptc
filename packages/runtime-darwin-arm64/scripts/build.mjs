@@ -173,6 +173,7 @@ async function build() {
               ...(unit.source === "scr_tls.c" ||
               unit.source === "scr_cipher.c" ||
               unit.source === "scr_ecdh.c" ||
+              unit.source === "scr_dh.c" ||
               unit.source === "scr_pki.c" ||
               unit.source === "scr_webcrypto_aes.c"
                 ? ["-I", join(mbedtls, "include")]
@@ -339,7 +340,7 @@ async function build() {
       package: packageManifest.name,
       version: packageManifest.version,
       target: RUNTIME_PACK_MATRIX.target,
-      runtime_abi: { version: 25, marker: "scr_runtime_abi_v25" },
+      runtime_abi: { version: 26, marker: "scr_runtime_abi_v26" },
       compiler: {
         command: compiler,
         identity: compilerVersion,

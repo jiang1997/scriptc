@@ -62,12 +62,14 @@ ScrPromise *scr_async_spawn_after(ScrPromise *dependency,
 /* Fiberless async call (native targets): the compiler proves an async body
  * can never park its execution context and runs it directly on the
  * caller's stack between enter and leave. The frame saves what a fresh
- * fiber would isolate — the Error.stack frame chain and the
- * AsyncLocalStorage context — and leave restores both, returning a fresh
- * pending promise (+1) the caller settles from the body's outcome. */
+ * fiber would isolate, the Error.stack frame chain, and leave restores it,
+ * returning a fresh pending promise (+1) the caller settles from the body's
+ * outcome. The body runs in the caller's AsyncLocalStorage context, as
+ * Node runs an async body's synchronous prefix. The second word is unused;
+ * emitted frames keep its size. */
 typedef struct ScrAsyncInline {
   void *stack;
-  void *als;
+  void *reserved;
 } ScrAsyncInline;
 void scr_async_inline_enter(ScrAsyncInline *frame);
 ScrPromise *scr_async_inline_leave(ScrAsyncInline *frame);

@@ -28,15 +28,16 @@ export function isEcdhType(lowerer: Lowerer, type: ts.Type): boolean {
   return !!symbol && ts.symbolName(symbol) === "ECDH" && lowerer.isStdlibSymbol(symbol);
 }
 
-/** The call's arguments as checked-dynamic values in hidden locals, the
- * first `count` of them padded with undefined, so every argument is
- * evaluated left to right before the runtime checks them. Surplus
- * arguments are evaluated and dropped. */
-function dynArguments(
+/** The call's arguments as checked-dynamic values in hidden locals named
+ * `local`, the first `count` of them padded with undefined, so every
+ * argument is evaluated left to right before the runtime checks them.
+ * Surplus arguments are evaluated and dropped. */
+export function dynArguments(
   lowerer: Lowerer,
   call: ts.CallExpression,
   count: number,
   stmts: IrStmt[],
+  local = "%ecdhInput",
 ): IrExpr[] {
   const args = call.arguments.nodes;
   const loc = locOf(call);
@@ -45,7 +46,7 @@ function dynArguments(
     const input: IrExpr = args[i]
       ? lowerer.lowerExprExpecting(args[i]!, DYN)
       : dynUndefinedExpr(loc);
-    const saved = lowerer.declareHiddenLocal("%ecdhInput", DYN);
+    const saved = lowerer.declareHiddenLocal(local, DYN);
     stmts.push({ kind: "varDecl", localId: saved.id, init: input, loc });
     values.push(varRef(saved.id, DYN, loc));
   }
@@ -137,7 +138,11 @@ function refuseViewKeyWithEncoding(lowerer: Lowerer, call: ts.CallExpression, na
  * not follow (getPublicKey("HEX") answers a string where the encoding-less
  * overload declares a Buffer), so the call is refused rather than checked
  * against that type at run time. Arguments typed any are accepted. */
-function refuseUnmatchedOverload(lowerer: Lowerer, call: ts.CallExpression, what: string): void {
+export function refuseUnmatchedOverload(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  what: string,
+): void {
   const signature = lowerer.checker.getResolvedSignature(call);
   if (signature === undefined) return;
   const params = signature.getParameters();

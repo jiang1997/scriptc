@@ -61,6 +61,7 @@ import { encodeBase64 } from "../../wasm/base64.js";
 import { resolveRequireRuntime } from "../runtime-resolve.js";
 import { lowerKeyObjectCall } from "./builtins/key-object.js";
 import { isEcdhType, lowerEcdhCall } from "./builtins/ecdh.js";
+import { isDiffieHellmanType, lowerDiffieHellmanCall } from "./builtins/dh.js";
 import { fenceWebCryptoMember, lowerWebCryptoCall } from "./builtins/webcrypto.js";
 import { valueStreamOf } from "./builtins/hash-stream.js";
 import { lowerNetAddressCall, lowerNetAddressNew } from "./builtins/net-address.js";
@@ -1914,6 +1915,9 @@ export class Lowerer {
    * pinned values resolve through genericFnOf exactly like top-level
    * generic function declarations (bindingGenericFnInfoOf). */
   readonly bindingGenericFns = new Map<ts.Node, GenericFnInfo>();
+  /** Identifiers by spelling, per file, for the generic bindings' use
+   * ordering (runsAfterDeclaration). */
+  readonly bindingIdentifiers = new Map<ts.SourceFile, Map<string, ts.Identifier[]>>();
   /** Per-symbol result of the never-reassigned file scan
    * (bindingNeverReassigned — object-literal generic-method receivers). */
   readonly neverReassignedCache = new Map<ts.Symbol, boolean>();
@@ -3740,9 +3744,9 @@ export class Lowerer {
    * is `unknown` or `object` (also with `null` or `undefined`, or an array
    * of those), names checked protocol identity, is an owned runtime
    * handle (a Worker or MessagePort, a fetch Headers/Request/Response, or
-   * a node:crypto ECDH), or is a WeakMap/WeakSet (native weak collections
-   * live in checked-dynamic storage, as locals of those types do); `any`
-   * fields stay refused. */
+   * a node:crypto ECDH, DiffieHellman or DiffieHellmanGroup), or is a
+   * WeakMap/WeakSet (native weak collections live in checked-dynamic
+   * storage, as locals of those types do); `any` fields stay refused. */
   classFieldStoresDyn(type: ts.Type): boolean {
     return (
       this.opaqueValueType(type) ||
@@ -3750,7 +3754,10 @@ export class Lowerer {
       isWorkerHandleType(type, this.typeCtx) ||
       isFetchHandleType(type, this.typeCtx) ||
       this.weakCollectionType(type) ||
-      this.stdlibHandleType(type, (part) => isEcdhType(this, part))
+      this.stdlibHandleType(
+        type,
+        (part) => isEcdhType(this, part) || isDiffieHellmanType(this, part),
+      )
     );
   }
 
@@ -12905,6 +12912,7 @@ export class Lowerer {
       lowerWebCryptoCall(this, expr) ??
       lowerKeyObjectCall(this, expr) ??
       lowerEcdhCall(this, expr) ??
+      lowerDiffieHellmanCall(this, expr) ??
       lowerNetAddressCall(this, expr) ??
       lowerFetchElementMethodCall(this, expr) ??
       lowerDynamicImportCall(this, expr) ??

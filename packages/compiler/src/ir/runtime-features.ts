@@ -216,6 +216,8 @@ const ABORT_SIGNAL_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
 /** Entry points that link the stream unit (with STREAM_LIB_PREFIXES). */
 const STREAM_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "child.stdioStream",
+  "stream.chunkDone",
+  "stream.objectMode",
   "console.bind",
   "crypto.hashStream",
   "crypto.hashStreamPiped",
@@ -808,6 +810,9 @@ const RUNTIME_FEATURE_RULES = {
    * process-warning unit, and unknown encodings and formats render through
    * the inspect unit. */
   ecdh: rule({ fns: ["crypto.ecdhNew", "crypto.ecdhConvertKey"] }),
+  /** scr_dh.c over the mbedTLS archive; unknown encodings render through
+   * the inspect unit. */
+  dh: rule({ fns: ["crypto.dhNew", "crypto.dhGroupNew"] }),
   emitter: rule({
     initial: (mod) =>
       mod.workers === true || (mod.classes ?? []).some((c) => c.name === RUNTIME_EMITTER_CLASS),
@@ -855,6 +860,8 @@ const RUNTIME_FEATURE_RULES = {
       "webcrypto.decrypt",
       "crypto.ecdhNew",
       "crypto.ecdhConvertKey",
+      "crypto.dhNew",
+      "crypto.dhGroupNew",
       ...BUILTIN_CLASS_LIB_FNS,
       ...UTIL_CALLABLE_LIB_FNS,
     ],
@@ -1001,6 +1008,7 @@ function noRuntimeFeatures(): RuntimeFeatures {
     dynTier: false,
     ecdh: false,
     x509: false,
+    dh: false,
     emitter: false,
     eventTarget: false,
     eventsOnceSignal: false,

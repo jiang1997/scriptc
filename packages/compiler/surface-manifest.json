@@ -496,17 +496,13 @@
       "id": "node-builtin.crypto.createDiffieHellman",
       "kind": "node-builtin",
       "name": "crypto.createDiffieHellman",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.createDiffieHellmanGroup",
       "kind": "node-builtin",
       "name": "crypto.createDiffieHellmanGroup",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.createECDH",
@@ -562,7 +558,7 @@
       "name": "crypto.diffieHellman",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "crypto.diffieHellman takes DH, EC or X25519 KeyObjects and has no lowering; the objects of createDiffieHellman, getDiffieHellman and createECDH compute shared secrets"
     },
     {
       "id": "node-builtin.crypto.generateKey",
@@ -600,9 +596,7 @@
       "id": "node-builtin.crypto.getDiffieHellman",
       "kind": "node-builtin",
       "name": "crypto.getDiffieHellman",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.getRandomValues",
@@ -646,7 +640,7 @@
       "name": "crypto.privateDecrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.privateEncrypt",
@@ -654,7 +648,7 @@
       "name": "crypto.privateEncrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.publicDecrypt",
@@ -662,7 +656,7 @@
       "name": "crypto.publicDecrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.publicEncrypt",
@@ -670,7 +664,7 @@
       "name": "crypto.publicEncrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.randomBytes",

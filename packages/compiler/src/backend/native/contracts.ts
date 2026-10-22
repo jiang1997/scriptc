@@ -254,6 +254,10 @@ export interface CcOptions {
   /** crypto.createECDH and ECDH.convertKey: compiles scr_ecdh.c and links
    * the mbedTLS archive (shared with tls). */
   ecdh?: boolean;
+  /** crypto.createDiffieHellman, getDiffieHellman and
+   * createDiffieHellmanGroup: compiles scr_dh.c and links the mbedTLS
+   * archive (shared with tls). */
+  dh?: boolean;
   /** Asymmetric KeyObjects and signatures: compiles scr_pki.c and links
    * the mbedTLS archive. */
   pki?: boolean;

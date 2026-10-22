@@ -13,6 +13,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // Node's curve, key, point, encoding and format errors.
   "crypto.ecdhNew",
   "crypto.ecdhConvertKey",
+  // Node's prime, generator, size, encoding and group-name errors.
+  "crypto.dhNew",
+  "crypto.dhGroupNew",
   // node:test's { timeout } and { concurrency } range checks.
   "test.register",
   "test.registerEmpty",
@@ -230,6 +233,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "http2.createSecureServerDynCb",
   "tls.connect",
   "tls.connectCb",
+  "tls.wrapSocket",
+  "tls.wrapSocketCtx",
   // The CA-store surface: an unknown getCACertificates type throws
   // Node's ERR_INVALID_ARG_VALUE TypeError; setDefaultCACertificates
   // throws Node's ERR_CRYPTO_OPERATION_FAILED on a certificate-free
@@ -358,6 +363,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "readable.pushU",
   "readable.pushDyn",
   "readable.unshift",
+  "readable.unshiftDyn",
   "readable.unshiftStr",
   "readable.read",
   "readable.readDyn",
@@ -370,6 +376,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "writable.writeStr",
   "writable.writeU",
   "writable.writeDyn",
+  "writable.writeEnc",
   "writable.end",
   "writable.uncork",
   "stream.destroy",

@@ -1584,6 +1584,12 @@ export const BUILTIN_MODULE_FNS: Record<
     // A checked-dynamic curve name; the result is a native ECDH handle
     // (lowerCreateEcdh).
     createECDH: { fn: "crypto.ecdhNew", params: [DYN], result: DYN },
+    // Checked-dynamic arguments; the result is a native DiffieHellman or
+    // DiffieHellmanGroup handle (lowerCreateDiffieHellman and
+    // lowerGetDiffieHellman).
+    createDiffieHellman: { fn: "crypto.dhNew", params: [DYN, DYN, DYN, DYN], result: DYN },
+    getDiffieHellman: { fn: "crypto.dhGroupNew", params: [DYN], result: DYN },
+    createDiffieHellmanGroup: { fn: "crypto.dhGroupNew", params: [DYN], result: DYN },
   },
   zlib: {
     // The default-options convenience family is special-cased in
@@ -3077,22 +3083,16 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
   },
   crypto: {
     ...Object.fromEntries(
-      [
-        "createDiffieHellman",
-        "createDiffieHellmanGroup",
-        "getDiffieHellman",
-        "diffieHellman",
-        "publicEncrypt",
-        "publicDecrypt",
-        "privateEncrypt",
-        "privateDecrypt",
-      ].map((m) => [
+      ["publicEncrypt", "publicDecrypt", "privateEncrypt", "privateDecrypt"].map((m) => [
         m,
-        "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is " +
+        "RSA encryption has no lowering — the asymmetric crypto surface is " +
           "RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, " +
-          "createSign, createVerify, and createECDH",
+          "createSign, createVerify, createECDH, and createDiffieHellman",
       ]),
     ),
+    diffieHellman:
+      "crypto.diffieHellman takes DH, EC or X25519 KeyObjects and has no lowering; " +
+      "the objects of createDiffieHellman, getDiffieHellman and createECDH compute shared secrets",
     ...Object.fromEntries(
       ["getCipherInfo"].map((m) => [
         m,

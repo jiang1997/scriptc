@@ -114,6 +114,7 @@ interface RuntimeUnitContext {
   tlsCa: boolean;
   cipher: boolean;
   ecdh: boolean;
+  dh: boolean;
   pki: boolean;
   lreObjects: readonly string[];
   zlibObjects: readonly string[];
@@ -314,6 +315,7 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
           ...(u.tls ? [u.rt(join(u.rtDir, "scr_tls.c"))] : []),
           ...(u.cipher ? [u.rt(join(u.rtDir, "scr_cipher.c"))] : []),
           ...(u.ecdh ? [u.rt(join(u.rtDir, "scr_ecdh.c"))] : []),
+          ...(u.dh ? [u.rt(join(u.rtDir, "scr_dh.c"))] : []),
           ...(u.pki ? [u.rt(join(u.rtDir, "scr_pki.c"))] : []),
           ...(u.cipher && u.opts.webcrypto ? [u.rt(join(u.rtDir, "scr_webcrypto_aes.c"))] : []),
           u.tlsArchive,
@@ -380,11 +382,13 @@ export async function compileCInternal(
   const http = (opts.http ?? false) || nativeFetch;
   const tls = (opts.tls ?? false) || nativeFetch;
   const tlsCa = (opts.tlsCa ?? false) || tls;
-  // Symmetric ciphers and ECDH link the same mbedTLS archive as TLS.
+  // Symmetric ciphers, ECDH and DiffieHellman link the same mbedTLS
+  // archive as TLS.
   const cipher = opts.cipher ?? false;
   const ecdh = opts.ecdh ?? false;
+  const dh = opts.dh ?? false;
   const pki = opts.pki ?? false;
-  const mbedtls = tls || cipher || ecdh || pki;
+  const mbedtls = tls || cipher || ecdh || dh || pki;
   const driver = resolveCc();
   const darwinDebugSymbols = needsDarwinDebugSymbols(
     targetPlatform(driver),
@@ -742,6 +746,7 @@ export async function compileCInternal(
       tlsCa,
       cipher,
       ecdh,
+      dh,
       pki,
       lreObjects,
       zlibObjects,

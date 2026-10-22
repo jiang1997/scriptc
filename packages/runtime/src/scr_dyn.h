@@ -155,6 +155,8 @@ typedef enum {
   X(DATE, 30) /* JavaScript Date with stable native identity */ \
   X(DECIPHER, 46) /* node:crypto Decipheriv (scr_cipher.c) */ \
   X(DGRAM_SOCKET, 62) /* dgram.Socket (scr_dgram.c) */ \
+  X(DIFFIE_HELLMAN, 70) /* node:crypto DiffieHellman (scr_dh.c) */ \
+  X(DIFFIE_HELLMAN_GROUP, 71) /* node:crypto DiffieHellmanGroup (scr_dh.c) */ \
   X(DIR, 44) /* fs.Dir (scr_lib.c) */ \
   X(DISPOSABLE_STACK, 49) /* DisposableStack (scr_symbol.c) */ \
   X(ECDH, 64) /* node:crypto ECDH (scr_ecdh.c) */ \
@@ -764,6 +766,9 @@ ScrDyn *scr_dyn_array_constructor(void);
 /* The interned builtin constructor `name` (Object, Date, RegExp, Map, Set,
  * Promise, WeakMap, WeakSet) as a dynamic function value: +1. */
 ScrDyn *scr_dyn_global_constructor(const ScrStr *name);
+/* The interned function value of an error constructor ("TypeError"), or
+ * NULL for other names. */
+ScrDyn *scr_dyn_error_constructor(const char *name);
 /* A builtin global function (setTimeout, setImmediate, process.nextTick, ...)
  * as an interned dynamic function value: +1. */
 ScrDyn *scr_dyn_builtin_function(const ScrStr *name);

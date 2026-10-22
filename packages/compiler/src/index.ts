@@ -630,6 +630,7 @@ async function compileExecutableNative(
     tlsCa: features.tlsCa,
     cipher: features.cipher,
     ecdh: features.ecdh,
+    dh: features.dh,
     pki: features.pki,
     ed25519: features.ed25519,
     x509: features.x509,

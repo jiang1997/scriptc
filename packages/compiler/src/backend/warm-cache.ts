@@ -67,6 +67,7 @@ export async function warmNativeCaches(
         tls: false,
         cipher: false,
         ecdh: false,
+        dh: false,
         pki: false,
         ed25519: false,
         x509: false,

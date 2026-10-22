@@ -419,10 +419,34 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     host.emitPendingCheck();
     return e.type.kind === "void" ? { name: "", type: e.type } : { name: t, type: e.type };
   }
+  if (e.fn === "writable.writeEnc") {
+    // (recv, flags, chunk[, encoding][, cb]) — flags: 1 encoding, 2
+    // callback (MOVES). Without an encoding the argument is undefined, or
+    // null when the callback took its place.
+    const flagsArg = e.args[1]!;
+    if (flagsArg.kind !== "numLit")
+      throw new InternalCompilerError("llvm emitter bug: writable.writeEnc flags not a literal");
+    const flags = flagsArg.value;
+    const args = e.args.map((a) => host.emitExpr(a));
+    let at = 3;
+    const enc = flags & 1 ? args[at++]!.name : writeEncNull(host, flags & 2 ? "null" : "undef");
+    let cb = "null";
+    if (flags & 2) {
+      host.toHeap(args[at]!);
+      cb = args[at]!.name;
+    }
+    host.declare(`declare zeroext i1 @scr_stream_write_enc(ptr, ptr, ptr, ptr)`);
+    const t = B.tmp();
+    B.line(
+      `${t} = call zeroext i1 @scr_stream_write_enc(ptr ${args[0]!.name}, ptr ${args[2]!.name}, ptr ${enc}, ptr ${cb})`,
+    );
+    host.emitPendingCheck();
+    return e.type.kind === "void" ? { name: "", type: e.type } : { name: t, type: e.type };
+  }
   if (e.fn === "writable.end") {
-    // (recv, flags[, chunk][, cb]) — flags: 1 bytes chunk, 2 string
-    // chunk, 8 dyn chunk (write first, Node's end(chunk) decomposition),
-    // 4 callback.
+    // (recv, flags[, chunk][, encoding][, cb]) — flags: 1 bytes chunk, 2
+    // string chunk, 8 dyn chunk (write first, Node's end(chunk)
+    // decomposition), 16 an encoding after the dyn chunk, 4 callback.
     const flagsArg = e.args[1]!;
     if (flagsArg.kind !== "numLit")
       throw new InternalCompilerError("llvm emitter bug: writable.end flags not a literal");
@@ -432,19 +456,27 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     let chunkB = "null";
     let chunkS = "null";
     let chunkD: string | null = null;
+    let encD = "null";
     if (flags & 1) chunkB = args[at++]!.name;
     else if (flags & 2) chunkS = args[at++]!.name;
     else if (flags & 8) chunkD = args[at++]!.name;
+    if (flags & 16) encD = args[at++]!.name;
+    else if (chunkD !== null && flags & 4) encD = writeEncNull(host, "null");
     let cbName = "null";
     if (flags & 4) {
       host.toHeap(args[at]!);
       cbName = args[at]!.name;
     }
     if (chunkD !== null) {
-      host.declare(`declare zeroext i1 @scr_stream_write_dyn(ptr, ptr, ptr)`);
+      // end(chunk, cb) writes with a null encoding argument (Node's end
+      // shifts the callback out of it)
+      host.declare(`declare zeroext i1 @scr_stream_write_enc(ptr, ptr, ptr, ptr)`);
       B.line(
-        `${B.tmp()} = call zeroext i1 @scr_stream_write_dyn(ptr ${args[0]!.name}, ptr ${chunkD}, ptr null)`,
+        `${B.tmp()} = call zeroext i1 @scr_stream_write_enc(ptr ${args[0]!.name}, ptr ${chunkD}, ptr ${encD}, ptr null)`,
       );
+      // a write that throws (an unknown encoding) leaves the stream as it
+      // was: Node's end() throws before it ends the stream
+      host.emitPendingCheck();
     }
     host.declare(`declare ptr @scr_stream_end(ptr, ptr, ptr, ptr)`);
     const t = B.tmp();
@@ -770,4 +802,14 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
   // their callbacks into the handle's registry with runtime-provided
   // adapters; the handful of union-wrapped reads use the envGet shapes.
   return host.emitGenericLibCall(e);
+}
+
+/** The encoding argument a write passes when the call has none: undefined
+ * (a null pointer), or the null value when a callback took its place. */
+function writeEncNull(host: LlvmEmitterContext, which: "null" | "undef"): string {
+  if (which === "undef") return "null";
+  host.declare(`declare ptr @scr_dyn_new_null()`);
+  const t = host.B.tmp();
+  host.B.line(`${t} = call ptr @scr_dyn_new_null()`);
+  return t;
 }

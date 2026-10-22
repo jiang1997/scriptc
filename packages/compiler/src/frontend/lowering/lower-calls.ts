@@ -7439,6 +7439,35 @@ function lowerObjectStaticCall(
   if (call.questionDotToken || access.questionDotToken) return null;
   if (!lowerer.isStdlibGlobal(access.expression, "Object")) return null;
   const member = access.name.text;
+  // `Object.getOwnPropertyDescriptor(Error, "stackTraceLimit")` (Effect's
+  // isStackTraceLimitWritable): Error's own writable, enumerable,
+  // configurable data property holding the current limit. The interned
+  // Error value models no other statics (builtinGlobalValueAt).
+  const [first, second] = call.arguments.nodes;
+  if (
+    member === "getOwnPropertyDescriptor" &&
+    call.arguments.nodes.length === 2 &&
+    lowerer.isStdlibGlobal(first!, "Error") &&
+    ts.isStringLiteralLike(second!) &&
+    second.text === "stackTraceLimit"
+  ) {
+    const loc = locOf(call);
+    const dyn = (value: IrExpr): IrExpr => ({ kind: "dynFrom", value, type: DYN, loc });
+    const yes = dyn({ kind: "boolLit", value: true, type: BOOL, loc });
+    const limit: IrExpr = { kind: "libCall", fn: "error.stackLimitGet", args: [], type: F64, loc };
+    return {
+      kind: "dynObjLit",
+      fields: [
+        { key: { kind: "strLit", value: "value", type: STRING, loc }, value: dyn(limit) },
+        ...["writable", "enumerable", "configurable"].map((key) => ({
+          key: { kind: "strLit" as const, value: key, type: STRING, loc },
+          value: yes,
+        })),
+      ],
+      type: DYN,
+      loc,
+    };
+  }
   if (
     (member === "getOwnPropertyNames" ||
       member === "getOwnPropertySymbols" ||

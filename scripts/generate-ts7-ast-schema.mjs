@@ -44,6 +44,7 @@ const enumNames = [
   "ModuleDetectionKind",
   "OuterExpressionKinds",
   "LanguageVariant",
+  "JsxEmit",
 ];
 const enumLines = [
   "/* eslint-disable @typescript-eslint/no-duplicate-enum-values -- TypeScript aliases are part of the protocol. */",
@@ -67,6 +68,7 @@ for (const name of enumNames) {
       "ModuleKind",
       "ModuleResolutionKind",
       "ModuleDetectionKind",
+      "JsxEmit",
     ].includes(name)
   ) {
     const values = require(join(packageRoot, "dist/enums", `${basename}.js`))[name];
