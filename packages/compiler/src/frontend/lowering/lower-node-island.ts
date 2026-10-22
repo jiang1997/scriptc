@@ -461,7 +461,7 @@ function islandBindingOf(lowerer: Lowerer, ident: ts.Identifier): IslandBinding 
     // `const { name } = require("pkg")`: a member of module.exports, read
     // at each use (shortcut: not copied once at the declaration).
     const property = requiredPropertyOf(decl);
-    if (property !== null) {
+    if (property !== null && islandPatternBindable(decl.parent as ts.ObjectBindingPattern)) {
       const spec = requireInitSpecOf(property.declaration);
       if (spec === null) return null;
       const file = ts.getSourceFileOfNode(decl).fileName;
@@ -1868,6 +1868,34 @@ function requiredPropertyOf(
   return name === null ? null : { name, declaration };
 }
 
+/** Whether every element of `const { … } = require("<island>")` binds a
+ * plain member (requiredPropertyOf): only then do the names read the
+ * module global; other patterns keep the ordinary lowering. */
+function islandPatternBindable(pattern: ts.ObjectBindingPattern): boolean {
+  return pattern.elements.nodes.every((e) => requiredPropertyOf(e) !== null);
+}
+
+/** The statement `const { a, b: c } = require("<island>")` at module top
+ * level: assigns the island module (deferred like any top-level require)
+ * to its module global at the statement's position; `a` and `c` read its
+ * members at each use. Null for any other declaration. */
+export function lowerIslandRequirePattern(
+  lowerer: Lowerer,
+  decl: ts.VariableDeclaration,
+): IrStmt | null {
+  const islands = lowerer.nodeIslands;
+  if (islands === null || !ts.isObjectBindingPattern(decl.name)) return null;
+  if (!islandPatternBindable(decl.name)) return null;
+  const spec = requireInitSpecOf(decl);
+  if (spec === null) return null;
+  const path = islandModuleFile(islands, ts.getSourceFileOfNode(decl).fileName, spec, "require");
+  const module = path === null ? undefined : lowerer.islandModules.get(path);
+  if (path === null || module === undefined) return null;
+  const loc = locOf(decl);
+  const load = runsAtModuleEvaluation(decl) ? deferIslandModule(path, loc) : loadIslandModule(path, loc);
+  return { kind: "assign", localId: module.global.id, value: load, loc };
+}
+
 /** The specifier of a variable declaration initialized with a literal
  * `require("spec")`, whatever its binding name or pattern, or null. */
 function requireInitSpecOf(decl: ts.VariableDeclaration): string | null {
@@ -1896,9 +1924,19 @@ export function collectIslandRequires(lowerer: Lowerer, sf: ts.SourceFile): void
   for (const stmt of sf.statements.nodes) {
     if (!ts.isVariableStatement(stmt)) continue;
     for (const decl of stmt.declarationList.declarations.nodes) {
-      const spec = ts.isObjectBindingPattern(decl.name)
-        ? requireInitSpecOf(decl)
-        : requireSpecOf(decl);
+      // `const { name } = require("<island>")`: the module global exists
+      // from here on; the statement itself loads the module at its
+      // position (lowerIslandRequirePattern).
+      if (ts.isObjectBindingPattern(decl.name)) {
+        const spec = requireInitSpecOf(decl);
+        const path = spec === null ? null : islandModuleFile(islands, sf.fileName, spec, "require");
+        if (path !== null && islandPatternBindable(decl.name)) {
+          lowerer.usesNodeIsland = true;
+          islandModuleGlobal(lowerer, path);
+        }
+        continue;
+      }
+      const spec = requireSpecOf(decl);
       if (spec === null) continue;
       const path = islandModuleFile(islands, sf.fileName, spec, "require");
       if (path === null) continue;

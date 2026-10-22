@@ -1,5 +1,10 @@
 import { lowerTupleAliasDecl, stripTypeWrappers } from "./typed-arguments.js";
-import { islandHandleBinding, lowerIslandExpr, lowerIslandSubclass } from "./lower-node-island.js";
+import {
+  islandHandleBinding,
+  lowerIslandExpr,
+  lowerIslandRequirePattern,
+  lowerIslandSubclass,
+} from "./lower-node-island.js";
 import { isIslandSubclassDecl } from "../../node-islands/boundary.js";
 import { declaredMemberOf, isPromisePrototypeRead } from "./expressions/property-access.js";
 import { hostsAll } from "./expressions/hosted-narrowing.js";
@@ -1865,6 +1870,10 @@ function lowerVarDeclarator(
     const spec = requireSpecOf(decl.initializer)!;
     if (lowerer.externalTypes.has(spec)) lowerer.externalHostFence(spec, decl, false);
     if (ts.isSourceFile(stmt.parent)) {
+      // `const { name } = require("<island>")`: the island module loads
+      // here, at the statement (lower-node-island.ts).
+      const island = lowerIslandRequirePattern(lowerer, decl);
+      if (island !== null) return [island];
       const init = lowerer.requireInitStmt(spec, decl);
       const out: IrStmt[] = init ? [init] : [];
       // Nested patterns destructure the named export's value right after
