@@ -115,6 +115,8 @@ export function lowerSpawnSyncCall(lowerer: Lowerer, expr: ts.CallExpression, lo
   // "pipe"`) — accepted when its TYPE proves every arm is a supported
   // literal; the runtime maps the value to the modes at the call.
   let stdioStr: IrExpr | null = null;
+  // The `env` option's [k,v,...] pairs, which replace the child's environment.
+  let envPairs: IrExpr | null = null;
   let plain = true; // no behavior-changing option: the historical libCall
 
   if (optsNode) {
@@ -227,17 +229,29 @@ export function lowerSpawnSyncCall(lowerer: Lowerer, expr: ts.CallExpression, lo
         case "windowsHide":
           lowerer.lowerExpr(m.value); // Node no-op on POSIX
           break;
+        case "env":
+          // A REPLACEMENT environment, as for spawn and execFileSync.
+          envPairs = recordToEnvPairs(lowerer, m.value);
+          plain = false;
+          break;
         default:
           lowerer.noLowering(
             `spawnSync option '${m.name}'`,
             p,
-            "encoding, timeout, killSignal, stdio, and windowsHide are the supported options",
+            "encoding, timeout, killSignal, stdio, env, and windowsHide are the supported options",
           );
       }
     }
   }
   if (plain) {
     return { kind: "libCall", fn: "cp.spawnSync", args: [cmd, argv], type: SPAWNRES_T, loc };
+  }
+  if (stdioStr !== null && envPairs !== null) {
+    lowerer.noLowering(
+      "spawnSync with a runtime stdio value and env",
+      optsNode!,
+      'pass stdio as a "pipe"/"ignore"/"inherit" literal when env is set',
+    );
   }
   if (stdioStr !== null) {
     return {
@@ -250,7 +264,7 @@ export function lowerSpawnSyncCall(lowerer: Lowerer, expr: ts.CallExpression, lo
   }
   return {
     kind: "libCall",
-    fn: "cp.spawnSyncOpts",
+    fn: envPairs !== null ? "cp.spawnSyncEnv" : "cp.spawnSyncOpts",
     args: [
       cmd,
       argv,
@@ -259,6 +273,7 @@ export function lowerSpawnSyncCall(lowerer: Lowerer, expr: ts.CallExpression, lo
       numLit(inMode, loc),
       numLit(outMode, loc),
       numLit(errMode, loc),
+      ...(envPairs !== null ? [envPairs] : []),
     ],
     type: SPAWNRES_T,
     loc,

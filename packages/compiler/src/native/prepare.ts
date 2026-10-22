@@ -7,7 +7,7 @@ import type {
   CompileLibraryOptions,
   CompileRequestOptions,
 } from "../compile-types.js";
-import { emitLlvmModule, lowRegionTarget } from "../backend/llvm/emitter.js";
+import { emitLlvmModule, type ForkPrimitives, lowRegionTarget } from "../backend/llvm/emitter.js";
 import { inlineRcOption } from "../backend/llvm/shapes.js";
 import { executableLinkFeatures } from "../backend/executable-features.js";
 import type { NativeLinkFeatures } from "../backend/native-link-info-core.js";
@@ -23,12 +23,13 @@ import {
   trackedReadFile,
 } from "../frontend/input-tracker.js";
 import { provenanceSources } from "../frontend/provenance-registry.js";
+import { processFork } from "../frontend/process-fork.js";
 import { prepareLibrary } from "../library/prepare.js";
 import type { LibraryProfile } from "../library/library-profile.js";
 import type { IrModule } from "../ir/ir.js";
 import { deserializeModuleBytes, serializeModuleParts } from "../ir/serialize.js";
 import { contentDigest, NATIVE_STRING_BYTES, type NativeCache } from "./cache.js";
-import { batchTextParts } from "./text-file.js";
+import { batchTextParts, textSlices } from "./text-file.js";
 import type { NativeToolchain } from "./toolchain.js";
 import { nativeFileIdentity } from "./file-identity.js";
 
@@ -57,37 +58,57 @@ interface FrontendCacheEntry {
   ir: string[] | null;
 }
 
-function frontendCacheParts(probes: FrontendInputSnapshot, input: NativeExecutableInput): string[] {
+/** The entry's JSON text, generated as it is written. The LLVM text is
+ * escaped in slices (`textSlices`), the same JSON string as escaping it
+ * whole, so a large module is never copied whole. */
+function* frontendCacheParts(
+  probes: FrontendInputSnapshot,
+  input: NativeExecutableInput,
+): Generator<string> {
   const metadata = JSON.stringify({
     schema: "scriptc.native-frontend.v3",
     probes,
     input: { ...input, llvm: "", ir: null },
   });
-  const parts = [metadata.slice(0, metadata.length - 1) + ',"llvm":', JSON.stringify(input.llvm)];
-  if (input.ir === null) parts.push(',"ir":null}');
+  yield metadata.slice(0, metadata.length - 1) + ',"llvm":"';
+  for (const slice of textSlices(input.llvm)) yield JSON.stringify(slice).slice(1, -1);
+  yield '"';
+  if (input.ir === null) yield ',"ir":null}';
   else {
-    parts.push(',"ir":[');
+    yield ',"ir":[';
     for (let index = 0; index < input.ir.length; index++) {
-      if (index > 0) parts.push(",");
-      parts.push(JSON.stringify(input.ir[index]!));
+      if (index > 0) yield ",";
+      yield JSON.stringify(input.ir[index]!);
     }
-    parts.push("]}");
+    yield "]}";
   }
-  return parts;
+}
+
+/** The parts while their total length stays within `limit`; past it, a
+ * throw abandons the write. */
+function* boundedParts(parts: Generator<string>, limit: number): Generator<string> {
+  let length = 0;
+  for (const part of parts) {
+    length += part.length;
+    if (length > limit) throw new Error("frontend cache entry exceeds one native string");
+    yield part;
+  }
 }
 
 /** Publish an entry only when a native reader can decode it as one string;
- * UTF-16 length never exceeds the UTF-8 byte length. */
+ * UTF-16 length never exceeds the UTF-8 byte length. A longer entry
+ * abandons its write, which writeParts discards. */
 function publishFrontendCache(
   cache: NativeCache,
   key: string,
   probes: FrontendInputSnapshot,
   input: NativeExecutableInput,
 ): void {
-  const parts = frontendCacheParts(probes, input);
-  let length = 0;
-  for (const part of parts) length += part.length;
-  if (length <= NATIVE_STRING_BYTES) cache.writeParts("frontend", key, parts);
+  cache.writeParts(
+    "frontend",
+    key,
+    boundedParts(frontendCacheParts(probes, input), NATIVE_STRING_BYTES),
+  );
 }
 
 function readFrontendCache(
@@ -161,6 +182,7 @@ function validFeatures(value: unknown): value is NativeLinkFeatures {
     "tlsCa",
     "cipher",
     "ecdh",
+    "dh",
     "pki",
     "ed25519",
     "webcrypto",
@@ -296,6 +318,8 @@ export function prepareNativeExecutable(
           runtimeAbiMarker: outputKind === "obj" || outputKind === "exe",
           objectAudit: options.sanitize === true,
           lowRegion: lowRegionTarget(toolchain.target.platform, options.sanitize === true),
+          functionWorkers: emitWorkers(),
+          forkPrimitives: emitForkPrimitives(),
           ...inlineRcOption(options.optimization, options.sanitize === true),
           ...(options.detachedExit === true && outputKind === "exe" ? { detachedExit: true } : {}),
           ...(options.optimization === "dev" && !options.strip
@@ -431,4 +455,23 @@ export function prepareNativeLibrary(
   }
   timing("frontend-cache-publish");
   return input;
+}
+
+/** Worker processes that emit function bodies at a time
+ * (SCRIPTC_EMIT_WORKERS; 0 or 1 emits in this process). */
+function emitWorkers(): number {
+  const value = Number(process.env["SCRIPTC_EMIT_WORKERS"] ?? "4");
+  return Number.isFinite(value) && value > 1 ? Math.floor(value) : 1;
+}
+
+/** The process primitives emission workers fork with, unless the host
+ * cannot fork or this process is a worker itself. */
+function emitForkPrimitives(): ForkPrimitives | undefined {
+  const primitives = processFork.primitives;
+  if (primitives === null || processFork.worker) return undefined;
+  return {
+    fork: () => primitives.fork(),
+    exit: (code) => primitives.exit(code),
+    wait: (pid) => primitives.wait(pid),
+  };
 }

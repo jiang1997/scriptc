@@ -730,6 +730,32 @@ function isCollectionValueKey(t: IrType): boolean {
   );
 }
 
+/** The element type of an ITERABLE union (`Iterable<T>`,
+ * iterableUnionType): its one generator arm — a synchronous generator over
+ * T that returns nothing and takes no `.next()` values — beside source arms
+ * (T[], Set<T>, a Map of [K, V] entries, a string), and the undefined and
+ * null arms of an optional Iterable. A generator arm is legal only in such
+ * a union. Null for every other union. */
+export function iterableArmsElem(arms: readonly IrType[]): IrType | null {
+  let elem: IrType | null = null;
+  for (const arm of arms) {
+    if (arm.kind !== "generator") continue;
+    if (elem !== null || arm.async || arm.retT.kind !== "void" || arm.nextT.kind !== "undefinedT")
+      return null;
+    elem = arm.yieldT;
+  }
+  if (elem === null) return null;
+  for (const arm of arms) {
+    if (arm.kind === "generator" || arm.kind === "undefinedT" || arm.kind === "nullT") continue;
+    if (arm.kind === "array" || arm.kind === "set") {
+      if (!typeEquals(arm.elem, elem)) return null;
+    } else if (arm.kind === "string") {
+      if (elem.kind !== "string") return null;
+    } else if (arm.kind !== "map") return null;
+  }
+  return elem;
+}
+
 /** Set elements and Map keys share storage, equality and ownership rules. */
 export function isSupportedSetElem(t: IrType, unionArms?: IrType[]): boolean {
   return isSupportedMapKey(t, unionArms);
@@ -1665,6 +1691,24 @@ export interface IrRecordShape {
    * an accessor property named once (see accessorSlotProp). The
    * checked-dynamic copy lists its keys in this order. */
   accessorOrder?: string[];
+  /** Every order the shape's values enumerate their keys in, when its
+   * object literals write the keys in more than one order (see
+   * key-order-witness.ts); declaredOrder is the first. Each value holds the
+   * index of its order in the hidden number field KEY_ORDER_FIELD: the
+   * literal that wrote it stores its order's index, a copy its source's,
+   * and every other construction leaves 0. Each key-order surface
+   * dispatches on that field. */
+  orderVariants?: string[][];
+}
+
+/** The hidden field of a shape with orderVariants: the index of the value's
+ * key order. */
+export const KEY_ORDER_FIELD = "%order";
+
+/** The orders a record shape's values enumerate their keys in: each order
+ * of a shape with orderVariants, or its one table. */
+export function shapeKeyOrders(shape: IrRecordShape): readonly (readonly string[])[] {
+  return shape.orderVariants ?? [shape.declaredOrder ?? shape.fields.map((f) => f.name)];
 }
 
 /** fs.Dirent rows: the hidden %dtype entry kind (libuv's UV_DIRENT
@@ -1943,8 +1987,18 @@ export type IrStmt =
    * RangeError from the runtime. `pop` marks the stores that implement
    * `pop()`: a frozen (published) array fails with pop's TypeError rather
    * than the length assignment's, and pop's `length = 0` store on an empty
-   * array is dropped unless the array may be frozen. */
-  | { kind: "arraySetLength"; arr: IrExpr; length: IrExpr; loc: SrcLoc; pop?: boolean }
+   * array is dropped unless the array may be frozen. `reserve` marks a
+   * capacity hint instead: dense storage for `length` elements of a fresh
+   * array that statements fill next, with no change to its length and no
+   * observable effect. */
+  | {
+      kind: "arraySetLength";
+      arr: IrExpr;
+      length: IrExpr;
+      loc: SrcLoc;
+      pop?: boolean;
+      reserve?: boolean;
+    }
   /** Write an explicit present `undefined` state without shrinking length. */
   | { kind: "arraySetUndefined"; arr: IrExpr; index: IrExpr; loc: SrcLoc }
   /** Delete an indexed/property slot without changing Array.length. */

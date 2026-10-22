@@ -240,12 +240,12 @@ export class AstWireFile {
   string(index: number): string {
     if (index >>> 0 !== index || index % 2 !== 0 || index >= this.stringCount * 2)
       throw new AstDecodeError(`invalid string index ${index}`);
-    const cached = this.stringCache[index / 2];
+    const cached = this.stringCache[index >>> 1];
     if (cached !== undefined) return cached;
     const start = astU32(this.bytes, this.stringOffsets + index * 4);
     const end = astU32(this.bytes, this.stringOffsets + (index + 1) * 4);
     const text = decodeAstString(this.bytes, this.strings + start, end - start);
-    this.stringCache[index / 2] = text;
+    this.stringCache[index >>> 1] = text;
     return text;
   }
 

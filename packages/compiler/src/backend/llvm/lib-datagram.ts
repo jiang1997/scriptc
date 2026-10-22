@@ -11,6 +11,7 @@ import {
   ptr,
 } from "./lib-abi.js";
 import { FN_ATTRS } from "./shapes.js";
+import { registerReplay } from "./emit-journal.js";
 
 function messageAdapter(host: LlvmEmitterContext, type: IrType): string {
   if (type.kind !== "record")
@@ -20,6 +21,7 @@ function messageAdapter(host: LlvmEmitterContext, type: IrType): string {
   if (previous !== undefined) return previous;
   const symbol = `sc_dgram_message_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, symbol);
+  host.journal?.allocated(symbol, "messageAdapter", [type]);
   const shape = host.recordsById.get(type.shapeId);
   if (shape === undefined) throw new InternalCompilerError("missing datagram remote info shape");
   const lines: string[] = [];
@@ -48,6 +50,7 @@ function messageAdapter(host: LlvmEmitterContext, type: IrType): string {
     "}",
     "",
   );
+  host.journal?.built();
   return symbol;
 }
 
@@ -67,6 +70,7 @@ function lookupAdapter(host: LlvmEmitterContext, cb: LlValue): string {
   if (previous !== undefined) return previous;
   const symbol = `sc_dns_lookup_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, symbol);
+  host.journal?.allocated(symbol, "lookupAdapter", [cb]);
   host.declare("declare ptr @scr_error_new(i32, ptr)");
   host.declare("declare ptr @scr_error_retain_v(ptr)");
   host.declare("declare void @scr_error_release_v(ptr)");
@@ -93,6 +97,7 @@ function lookupAdapter(host: LlvmEmitterContext, cb: LlValue): string {
     "}",
     "",
   );
+  host.journal?.built();
   return symbol;
 }
 
@@ -105,6 +110,10 @@ export function emitDatagramLibCall(host: LlvmEmitterContext, e: LibCallExpr): L
     "dgram.sendStr": "scr_dgram_send_str",
     "dgram.sendBytes": "scr_dgram_send_bytes",
     "dgram.sendChk": "scr_dgram_send_chk",
+    "dgram.unixSocket": "scr_dgram_unix_socket",
+    "dgram.unixConnect": "scr_dgram_unix_connect",
+    "dgram.unixSend": "scr_dgram_unix_send",
+    "dgram.unixClose": "scr_dgram_unix_close",
     "dgram.ref": "scr_dgram_ref",
     "dgram.unref": "scr_dgram_unref",
     "dgram.setBroadcast": "scr_dgram_set_broadcast",
@@ -250,3 +259,6 @@ export function emitDatagramLibCall(host: LlvmEmitterContext, e: LibCallExpr): L
       throw new InternalCompilerError(`unhandled datagram call ${e.fn}`);
   }
 }
+
+registerReplay("messageAdapter", (host, args) => messageAdapter(host, args[0] as IrType));
+registerReplay("lookupAdapter", (host, args) => lookupAdapter(host, args[0] as LlValue));

@@ -91,6 +91,9 @@ export interface NativeLinkFeatures {
   /** crypto.createECDH and ECDH.convertKey: scr_ecdh.c plus the mbedTLS
    * archive. */
   ecdh: boolean;
+  /** crypto.createDiffieHellman, getDiffieHellman and
+   * createDiffieHellmanGroup: scr_dh.c plus the mbedTLS archive. */
+  dh: boolean;
   /** Asymmetric KeyObjects, crypto.sign/verify and Sign/Verify: scr_pki.c
    * plus the mbedTLS archive. */
   pki: boolean;

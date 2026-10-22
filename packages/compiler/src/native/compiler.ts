@@ -56,7 +56,7 @@ import { clearFenceEvalCaches } from "../library/fence-eval.js";
 import { archiveNativeLibrary, localizeNativeLibrary, linkNativeWasmLibrary } from "./library.js";
 import type { NativeToolchain } from "./toolchain.js";
 import { evaluateNativeComptime } from "./comptime.js";
-import { contentDigest, type NativeCache } from "./cache.js";
+import { contentDigest, fileDigest, type NativeCache } from "./cache.js";
 import {
   nativeProfileKey,
   nativeProfileRefusal,
@@ -186,7 +186,7 @@ export class NativeCompiler {
         key = contentDigest(
           JSON.stringify({
             schema: 1,
-            llvm: contentDigest(readFileSync(input)),
+            llvm: fileDigest(input),
             outputKind,
             optimization,
             source,
@@ -361,7 +361,8 @@ export class NativeCompiler {
       const inputDirectory = join(stage, "input");
       mkdirSync(inputDirectory);
       const llvmInput = outputKind === "llvm" ? stagedOutput : join(inputDirectory, "program.ll");
-      writeFileSync(llvmInput, llvm);
+      // In slices: the module text is never encoded whole.
+      writeTextPartsSync(llvmInput, [llvm]);
       timing("llvm-write");
       if (outputKind === "llvm") {
         renameSync(stagedOutput, output);
@@ -495,7 +496,7 @@ export class NativeCompiler {
         renameSync(stagedOutput + ".dSYM", output + ".dSYM");
       }
       mkdirSync(options.outDir, { recursive: true });
-      writeFileSync(llvmPath, llvm);
+      writeTextPartsSync(llvmPath, [llvm]);
       let irPath: string | undefined;
       if (options.emitIr) {
         irPath = join(options.outDir, `${stem}.ir.json`);
@@ -583,7 +584,8 @@ export class NativeCompiler {
       stage = mkdtempSync(join(dirname(archivePath), ".scriptc-library-"));
       const llvm = prepared.llvm;
       const llvmInput = join(stage, "program.ll");
-      writeFileSync(llvmInput, llvm);
+      // In slices: the module text is never encoded whole.
+      writeTextPartsSync(llvmInput, [llvm]);
       timing("llvm-write");
       const features = prepared.features;
       const pack = selectNativeRuntimePack(
@@ -646,7 +648,7 @@ export class NativeCompiler {
         });
       }
       timing("native-archive");
-      writeFileSync(llvmPath, llvm);
+      writeTextPartsSync(llvmPath, [llvm]);
       let irPath: string | undefined;
       if (options.emitIr) {
         irPath = join(options.outDir, `${stem}.lib.ir.json`);

@@ -110,6 +110,25 @@ describe("regex literal matcher code", () => {
     expect(body("a\\d{1,3}")).not.toContain("<16 x i8>");
   });
 
+  test("fixed leading characters filter 16 start positions at once", () => {
+    // Both alternatives' first characters are tested at every offset and
+    // combined, and the reads reach seven characters past the block.
+    const text = body("agggtaaa|tttaccct", "gi");
+    expect(text.match(/load <16 x i8>/g)!.length).toBeGreaterThanOrEqual(16);
+    expect(text).toMatch(/and i16 /);
+    expect(text).toMatch(/or i16 /);
+    expect(text).toMatch(/add i32 %t\d+, 7\n/);
+    // A class sequence with a fixed count extends the filter.
+    expect(body("[cg]x{3}y")).toMatch(/and i16 /);
+    // An optional first character, a single first character and a
+    // variable-length start keep the first-character search.
+    expect(body("[ab]?cd")).not.toMatch(/and i16 /);
+    expect(body("[ab]*cd")).not.toMatch(/and i16 /);
+    expect(body("xy|zw")).toMatch(/and i16 /);
+    expect(body("[ab]|cd")).not.toMatch(/and i16 /);
+    expect(body("agggtaaa|tttaccct", "gi", false)).not.toContain("<16 x i8>");
+  });
+
   test("loops no continuation can share push no backtrack entries", () => {
     // \d+ then a dot; [^\]]+ then ]; the run at the end of the pattern.
     expect(body("\\d+\\.\\d+")).not.toContain("@scr_regex_stack_grow");

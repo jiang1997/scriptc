@@ -724,6 +724,11 @@ function keyOrderFinding(
   written: readonly string[],
   assignedNames: ReadonlySet<string>,
 ): { native: string; node: string; detail: "reordered" | "added-later" } | null {
+  // Values of a shape with orderVariants enumerate in the order their
+  // literal wrote (key-order-witness.ts).
+  const mapped = safely(() => lowerer.mapTypeOf(contextual));
+  if (mapped?.kind === "record" && lowerer.shapes.get(mapped.shapeId)?.orderVariants !== undefined)
+    return null;
   // A shape whose table the witness pass re-chose (key-order-witness.ts)
   // enumerates that table, not the checker's declaration order.
   const table = witnessTable(lowerer, contextual);

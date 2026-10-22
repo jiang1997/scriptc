@@ -7,7 +7,7 @@ import { F64_INF, exactIndexLines, f64Lit, sizeToDouble } from "./common.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 import { byteNumberAccess } from "../../ir/byte-numbers.js";
 import { emitByteNumber } from "./byte-numbers.js";
-import { integerOrNaNRange } from "./wrapping-sums.js";
+import { integerOrNaNIndex, integerOrNaNRange } from "./wrapping-sums.js";
 import { bytesElementAlias, bytesHeaderAlias } from "./bytes-alias.js";
 
 const BYTES_NUM_KIND: Record<string, { kind: number; le: boolean } | undefined> = {
@@ -119,12 +119,28 @@ export function emitBytesIndex(
     B.line(`${narrow} = trunc i64 ${wideIndex} to ${host.sizeType}`);
     return narrow;
   }
-  const exact = exactIndexLines(index, len, host.sizeType, () => B.tmp());
-  for (const line of exact.lines) B.line(line);
+  let ok: string;
+  let wide: string;
+  const nanIndex = integerOrNaNIndex(host, value, expr);
+  if (nanIndex) {
+    // An exact integer or NaN: in range when ordered and below the length.
+    const wideLength = host.sizeType === "i64" ? len : B.tmp();
+    if (host.sizeType !== "i64") B.line(`${wideLength} = zext ${host.sizeType} ${len} to i64`);
+    const below = B.tmp();
+    ok = B.tmp();
+    B.line(`${below} = icmp ult i64 ${nanIndex.wide}, ${wideLength}`);
+    B.line(`${ok} = and i1 ${nanIndex.ordered}, ${below}`);
+    wide = nanIndex.wide;
+  } else {
+    const exact = exactIndexLines(index, len, host.sizeType, () => B.tmp());
+    for (const line of exact.lines) B.line(line);
+    ok = exact.ok;
+    wide = exact.wide;
+  }
   const invalid = B.newLabel("bytes.index.invalid");
   const valid = B.newLabel("bytes.index.valid");
-  B.condBr(exact.ok, valid, invalid);
-  let idx = exact.wide;
+  B.condBr(ok, valid, invalid);
+  let idx = wide;
 
   B.startBlock(invalid);
   if (skipInvalid) B.br(skipInvalid);
@@ -138,7 +154,7 @@ export function emitBytesIndex(
   B.startBlock(valid);
   if (host.sizeType !== "i64") {
     idx = B.tmp();
-    B.line(`${idx} = trunc i64 ${exact.wide} to ${host.sizeType}`);
+    B.line(`${idx} = trunc i64 ${wide} to ${host.sizeType}`);
   }
   return idx;
 }
@@ -455,11 +471,13 @@ export function emitToUint32(
     B.line(`${out} = select i1 ${ordered}, i32 ${low}, i32 0`);
     return out;
   }
+  // Below 2^63 in magnitude, the i64 conversion truncates exactly (every
+  // double above 2^53 is an integer), and its low 32 bits are ToUint32.
   const aboveMin = B.tmp();
   const belowMax = B.tmp();
   const fast = B.tmp();
-  B.line(`${aboveMin} = fcmp oge double ${value}, ${f64Lit(-9007199254740992)}`);
-  B.line(`${belowMax} = fcmp ole double ${value}, ${f64Lit(9007199254740992)}`);
+  B.line(`${aboveMin} = fcmp oge double ${value}, ${f64Lit(-9223372036854775808)}`);
+  B.line(`${belowMax} = fcmp olt double ${value}, ${f64Lit(9223372036854775808)}`);
   B.line(`${fast} = and i1 ${aboveMin}, ${belowMax}`);
 
   const fastLabel = B.newLabel("uint32.coerce.fast");
@@ -475,8 +493,8 @@ export function emitToUint32(
   B.br(done);
 
   B.startBlock(slowLabel);
-  // Only NaN, the infinities and magnitudes above 2^53 reach this block.
-  // Such a finite double is the integer mantissa * 2^shift with shift >= 1,
+  // Only NaN, the infinities and magnitudes from 2^63 reach this block.
+  // Such a finite double is the integer mantissa * 2^shift with shift >= 11,
   // so its low 32 bits are the shifted mantissa's (none once shift >= 64),
   // negated for a negative value. NaN and the infinities have the maximum
   // exponent, a shift of 972, and convert to 0 like ToUint32. Integer

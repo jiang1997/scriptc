@@ -847,8 +847,9 @@ try {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe(
       "Error SC2020 The cipher 'aes-128-ccm' has no native implementation; the supported ciphers are " +
-        "aes-128-cbc, aes-192-cbc, aes-256-cbc, aes-128-ctr, aes-192-ctr, aes-256-ctr, aes-128-gcm, " +
-        "aes-192-gcm, aes-256-gcm and chacha20-poly1305\n" +
+        "aes-128, aes-192 and aes-256 in cbc, ctr, gcm, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede3 in " +
+        "cbc, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede in cbc, ecb, cfb and ofb modes, chacha20 and " +
+        "chacha20-poly1305\n" +
         "Error ERR_CRYPTO_UNKNOWN_CIPHER Unknown cipher\n",
     );
     expect(r.stderr).toBe("");
@@ -1010,6 +1011,53 @@ for (const run of [() => ecdh.getPublicKey.name, () => { ecdh.custom = 1; }]) {
     );
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe("Error SC2020\nError SC2020\n");
+  });
+});
+
+// DiffieHellman primes past mbedTLS's 8192-bit limit throw a coded SC2020
+// error, as do property reads other than verifyError, property writes, and
+// Object.prototype method calls on an untyped DiffieHellman.
+describe("DiffieHellman runtime refusals", () => {
+  test("primes longer than 8192 bits throw SC2020", async () => {
+    const r = await compileAndRun(
+      "dh-long-prime",
+      `import { createDiffieHellman } from "node:crypto";
+const prime = Buffer.alloc(1025, 0xff);
+for (const run of [() => createDiffieHellman(prime), () => createDiffieHellman(8193)]) {
+  try {
+    run();
+  } catch (error) {
+    const e = error as Error & { code?: string };
+    console.log(e.name, e.code, e.message);
+  }
+}
+console.log(createDiffieHellman(Buffer.alloc(1024, 0xff)).verifyError);
+`,
+    );
+    expect(r.exitCode).toBe(0);
+    const message = "DiffieHellman primes longer than 8192 bits have no native implementation";
+    expect(r.stdout).toBe(`Error SC2020 ${message}\nError SC2020 ${message}\n1\n`);
+    expect(r.stderr).toBe("");
+  });
+
+  test("DiffieHellman property reads, writes and Object.prototype calls throw SC2020", async () => {
+    const r = await compileAndRun(
+      "dh-properties",
+      `const crypto = require("node:crypto");
+const dh = crypto.getDiffieHellman("modp1");
+console.log(dh.verifyError);
+for (const run of [() => dh.getPrime.name, () => { dh.verifyError = 1; }, () => dh.hasOwnProperty("verifyError")]) {
+  try {
+    run();
+  } catch (e) {
+    console.log(e.name, e.code);
+  }
+}
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("0\nError SC2020\nError SC2020\nError SC2020\n");
   });
 });
 
@@ -1759,6 +1807,16 @@ await attempt("sha3 hmac", () =>
 const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 128 }, false, ["encrypt"]);
 await attempt("aes-ocb", () => crypto.subtle.encrypt({ name: "AES-OCB", iv: new Uint8Array(12) }, aes, bytes));
 await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key, 256));
+await attempt("rsa-oaep wrap", () => crypto.subtle.wrapKey("raw", key, key, { name: "RSA-OAEP" }));
+const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+const kw = await crypto.subtle.generateKey({ name: "AES-KW", length: 128 }, false, ["wrapKey", "unwrapKey"]);
+await attempt("wrap an ecdsa key", () => crypto.subtle.wrapKey("spki", pair.publicKey, kw, "AES-KW"));
+await attempt("wrap with an ecdsa key", () => crypto.subtle.wrapKey("raw", aes, pair.privateKey, "AES-KW"));
+await attempt("unwrap an ecdsa key", () =>
+  crypto.subtle.unwrapKey("spki", new Uint8Array(24), kw, "AES-KW", { name: "ECDSA", namedCurve: "P-256" }, true, [
+    "verify",
+  ]),
+);
 `,
       "mjs",
     );
@@ -1770,23 +1828,27 @@ await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key,
         "sha3 Error SC2020 crypto.subtle.digest with the SHA3-256 algorithm is not supported yet\n" +
         "sha3 hmac Error SC2020 crypto.subtle.importKey with the SHA3-256 algorithm is not supported yet\n" +
         "aes-ocb Error SC2020 crypto.subtle.encrypt with the AES-OCB algorithm is not supported yet\n" +
-        "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n",
+        "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n" +
+        "rsa-oaep wrap Error SC2020 crypto.subtle.wrapKey with the RSA-OAEP algorithm is not supported yet\n" +
+        "wrap an ecdsa key Error SC2020 crypto.subtle.wrapKey with an ECDSA, Ed25519 or RSA key is not supported yet\n" +
+        "wrap with an ecdsa key InvalidAccessError 15 Key algorithm mismatch\n" +
+        "unwrap an ecdsa key Error SC2020 crypto.subtle.unwrapKey with the ECDSA algorithm is not supported yet\n",
     );
   });
 
   test("a method outside the slice is a named fence where it runs", async () => {
     const r = await compileAndRun(
-      "webcrypto-wrap-key",
+      "webcrypto-get-public-key",
       `console.log("before");
-const key = await crypto.subtle.generateKey({ name: "AES-KW", length: 128 }, true, ["wrapKey"]);
-await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
+const key = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, true, ["sign"]);
+await crypto.subtle.getPublicKey(key, ["verify"]);
 `,
       "mjs",
     );
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
-      /^Uncaught Error: 'crypto\.subtle\.wrapKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+      /^Uncaught Error: 'crypto\.subtle\.getPublicKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
     );
   });
 });

@@ -53,6 +53,8 @@ export function lowerArrayCallback(
   bindUntyped = false,
   expectedReturn?: IrType,
 ): { fnArg: IrExpr & { type: IrType & { kind: "func" } }; arity: number } {
+  // `xs.map(((x) => x))`: a parenthesized callback is the function itself.
+  while (ts.isParenthesizedExpression(argNode)) argNode = argNode.expression;
   // The ambient `Boolean` as the callback (`flags.every(Boolean)`,
   // `xs.some(Boolean)`, `xs.map(Boolean)`): Boolean(value) answers the
   // ToBoolean of its FIRST argument and ignores the rest, so the callback

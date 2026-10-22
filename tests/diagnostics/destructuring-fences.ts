@@ -38,12 +38,12 @@ interface E1 {
 }
 interface E2 {
   kind: "two";
-  b: string;
+  b: number;
   label: string;
 }
 function fromUnion(u: E1 | E2): string {
-  const { b } = u; // union source: narrow first
-  return b;
+  const { b } = u; // union source whose arms type the field differently: narrow first
+  return String(b);
 }
 console.log(fromUnion({ kind: "one", b: "s", count: 1 }));
 

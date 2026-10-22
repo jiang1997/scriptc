@@ -97,11 +97,15 @@ export function arrayConcatHelper(
     return [
       { kind: "varDecl", localId: "offset.0", init: length(out), loc },
       { kind: "varDecl", localId: "count.0", init: length(source), loc },
+      // Storage is reserved first and the length is set after the copy, so
+      // a source without holes is copied by appends and the result gets no
+      // state bytes.
       {
         kind: "arraySetLength",
         arr: out,
         length: { kind: "bin", op: "+", left: offset, right: count, type: F64, loc },
         loc,
+        reserve: true,
       },
       countedFor(loc, count, () => [
         {
@@ -134,6 +138,12 @@ export function arrayConcatHelper(
           loc,
         },
       ]),
+      {
+        kind: "arraySetLength",
+        arr: out,
+        length: { kind: "bin", op: "+", left: offset, right: count, type: F64, loc },
+        loc,
+      },
     ];
   };
   const body: IrStmt[] = [

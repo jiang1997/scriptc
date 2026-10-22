@@ -220,47 +220,106 @@ static bool scr_map_key_eq(const ScrMap *m, uint64_t stored, uint64_t probe) {
  * the value: its hash is the key word's scr_key_mix, which is cheap to
  * recompute, and its stored keys are normalized (one NaN pattern, +0), so
  * a dead entry marks its key with a NaN pattern that no stored key has.
+ * A SCR_MAP_VAL_CREF map (string keys, compact class values) keeps 16-byte
+ * entries: the key, its 32-bit hash and the value as an address over 8.
  * Every other map keeps 24-byte entries with the cached hash, zero for a
- * dead entry. Both layouts put the key at byte 0 and the value at byte 8. */
+ * dead entry. Every layout puts the key at byte 0; the 8-byte layouts put
+ * the value at byte 8. */
 static inline bool scr_map_num(const ScrMap *m) {
   return m->key_kind == SCR_MAP_KEY_F64;
 }
 
+static inline bool scr_map_cref(const ScrMap *m) {
+  return __builtin_expect(m->val_kind == SCR_MAP_VAL_CREF, 0);
+}
+
 static inline size_t scr_map_entry_size(const ScrMap *m) {
-  return scr_map_num(m) ? sizeof(ScrMapNumEntry) : sizeof(ScrMapEntry);
+  if (scr_map_num(m)) return sizeof(ScrMapNumEntry);
+  if (scr_map_cref(m)) return sizeof(ScrMapCEntry);
+  return sizeof(ScrMapEntry);
 }
 
 /* The entry at index e. A number-key entry has no hash field: read its key
- * and value only (scr_map_hash_at gives the hash). */
+ * and value only (scr_map_hash_at gives the hash); a SCR_MAP_VAL_CREF
+ * entry's value is read with scr_map_val_at. */
 static inline ScrMapEntry *scr_map_at(const ScrMap *m, size_t e) {
   return (ScrMapEntry *)((char *)m->entries + e * scr_map_entry_size(m));
 }
 
+static inline ScrMapCEntry *scr_map_c_at(const ScrMap *m, size_t e) {
+  return (ScrMapCEntry *)m->entries + e;
+}
+
 static inline bool scr_map_live_at(const ScrMap *m, size_t e) {
-  const ScrMapEntry *x = scr_map_at(m, e);
-  return scr_map_num(m) ? x->key != SCR_MAP_NUM_DEAD : x->hash != 0;
+  if (scr_map_num(m)) return ((const ScrMapNumEntry *)m->entries)[e].key != SCR_MAP_NUM_DEAD;
+  if (scr_map_cref(m)) return scr_map_c_at(m, e)->hash != 0;
+  return m->entries[e].hash != 0;
 }
 
 /* The entry's hash, nonzero when it is live and zero for a dead entry. */
 static inline uint64_t scr_map_hash_at(const ScrMap *m, size_t e) {
-  const ScrMapEntry *x = scr_map_at(m, e);
-  if (!scr_map_num(m)) return x->hash;
-  if (x->key == SCR_MAP_NUM_DEAD) return 0;
-  uint64_t hash = scr_map_hash_word(x->key);
-  return hash ? hash : 1;
+  if (scr_map_num(m)) {
+    uint64_t key = ((const ScrMapNumEntry *)m->entries)[e].key;
+    if (key == SCR_MAP_NUM_DEAD) return 0;
+    uint64_t hash = scr_map_hash_word(key);
+    return hash ? hash : 1;
+  }
+  if (scr_map_cref(m)) {
+    uint32_t h = scr_map_c_at(m, e)->hash;
+    return h ? scr_map_hash_widen(h) : 0;
+  }
+  return m->entries[e].hash;
 }
 
 static inline void scr_map_kill_at(ScrMap *m, size_t e) {
-  ScrMapEntry *x = scr_map_at(m, e);
-  if (scr_map_num(m)) x->key = SCR_MAP_NUM_DEAD;
-  else x->hash = 0;
+  if (scr_map_num(m)) ((ScrMapNumEntry *)m->entries)[e].key = SCR_MAP_NUM_DEAD;
+  else if (scr_map_cref(m)) scr_map_c_at(m, e)->hash = 0;
+  else m->entries[e].hash = 0;
 }
 
+/* A compact value's 4-byte form and back (scr_cref_encode in scr_array.h). */
+static inline uint32_t scr_map_cref_encode(uint64_t val) { return (uint32_t)(val >> 3); }
+static inline uint64_t scr_map_cref_decode(uint32_t val) { return (uint64_t)val << 3; }
+
+/* The value of entry e as an 8-byte slot, and its store. */
+static inline uint64_t scr_map_val_at(const ScrMap *m, size_t e) {
+  if (scr_map_num(m)) return ((const ScrMapNumEntry *)m->entries)[e].val;
+  if (scr_map_cref(m)) return scr_map_cref_decode(scr_map_c_at(m, e)->val);
+  return m->entries[e].val;
+}
+
+static inline void scr_map_val_put(ScrMap *m, size_t e, uint64_t val) {
+  if (scr_map_num(m)) ((ScrMapNumEntry *)m->entries)[e].val = val;
+  else if (scr_map_cref(m)) scr_map_c_at(m, e)->val = scr_map_cref_encode(val);
+  else m->entries[e].val = val;
+}
+
+/* A reference value as a +1 result: compact values are never counted. */
+static inline void *scr_map_val_retain(const ScrMap *m, uint64_t val) {
+  if (scr_map_cref(m)) return scr_map_slot_to_ptr(val);
+  return m->ops->val_retain(scr_map_slot_to_ptr(val));
+}
+
+/* A SCR_MAP_VAL_CREF map's keys are strings, whose hashes are widened
+ * 32-bit values: the entry keeps the low half. */
 static inline void scr_map_put_at(ScrMap *m, size_t e, uint64_t key, uint64_t val, uint64_t hash) {
-  ScrMapEntry *x = scr_map_at(m, e);
+  if (scr_map_num(m)) {
+    ScrMapNumEntry *x = (ScrMapNumEntry *)m->entries + e;
+    x->key = key;
+    x->val = val;
+    return;
+  }
+  if (scr_map_cref(m)) {
+    ScrMapCEntry *x = scr_map_c_at(m, e);
+    x->key = key;
+    x->hash = (uint32_t)hash;
+    x->val = scr_map_cref_encode(val);
+    return;
+  }
+  ScrMapEntry *x = m->entries + e;
   x->key = key;
   x->val = val;
-  if (!scr_map_num(m)) x->hash = hash;
+  x->hash = hash;
 }
 
 /* ── absent-key filter ─────────────────────────────────────────────────
@@ -282,16 +341,24 @@ static inline uint64_t scr_map_filter_bits(uint64_t hash) {
  * before equality and survive table growth without hashing the keys again.
  * Remap zero to one so every live entry has a nonzero hash. */
 /* SCR_MAP_LOOKUP_NUM is a word compare on a number-key map, so the probe
- * reads 16-byte entries; every other lookup is on a map with 24-byte
- * entries. Knowing the layout from the lookup keeps the entry stride a
- * constant in the inlined probes. */
+ * reads 16-byte entries; SCR_MAP_LOOKUP_STR_C and SPAN_C are the string and
+ * span probes of a SCR_MAP_VAL_CREF map, whose 16-byte entries keep a
+ * 32-bit hash; every other lookup is on a map with 24-byte entries. Knowing
+ * the layout from the lookup keeps the entry stride a constant in the
+ * inlined probes. */
 typedef enum {
   SCR_MAP_LOOKUP_STR,
   SCR_MAP_LOOKUP_SPAN,
   SCR_MAP_LOOKUP_WORD,
   SCR_MAP_LOOKUP_NUM,
-  SCR_MAP_LOOKUP_GENERIC
+  SCR_MAP_LOOKUP_GENERIC,
+  SCR_MAP_LOOKUP_STR_C,
+  SCR_MAP_LOOKUP_SPAN_C
 } ScrMapLookup;
+
+static inline bool scr_map_lookup_c(ScrMapLookup lookup) {
+  return lookup == SCR_MAP_LOOKUP_STR_C || lookup == SCR_MAP_LOOKUP_SPAN_C;
+}
 
 typedef struct { const char *bytes; size_t length; } ScrMapSpan;
 
@@ -301,12 +368,12 @@ typedef struct { const char *bytes; size_t length; } ScrMapSpan;
 static inline bool scr_map_lookup_eq(const ScrMap *m, uint64_t stored, uint64_t key,
                                      ScrMapLookup lookup) {
   if (lookup == SCR_MAP_LOOKUP_WORD || lookup == SCR_MAP_LOOKUP_NUM) return stored == key;
-  if (lookup == SCR_MAP_LOOKUP_SPAN) {
+  if (lookup == SCR_MAP_LOOKUP_SPAN || lookup == SCR_MAP_LOOKUP_SPAN_C) {
     const ScrStr *a = scr_map_slot_to_ptr(stored);
     const ScrMapSpan *b = scr_map_slot_to_ptr(key);
     return a->len == b->length && scr_key_equal(a->data, b->bytes, a->len);
   }
-  if (lookup == SCR_MAP_LOOKUP_STR) {
+  if (lookup == SCR_MAP_LOOKUP_STR || lookup == SCR_MAP_LOOKUP_STR_C) {
     const ScrStr *a = scr_map_slot_to_ptr(stored);
     const ScrStr *b = scr_map_slot_to_ptr(key);
     return a == b || (a->len == b->len && scr_key_equal(a->data, b->data, a->len));
@@ -318,6 +385,7 @@ static inline bool scr_map_lookup_eq(const ScrMap *m, uint64_t stored, uint64_t 
 static inline __attribute__((always_inline)) ScrMapEntry *scr_map_at_with(const ScrMap *m, size_t e,
                                                                           ScrMapLookup lookup) {
   if (lookup == SCR_MAP_LOOKUP_NUM) return (ScrMapEntry *)((ScrMapNumEntry *)m->entries + e);
+  if (scr_map_lookup_c(lookup)) return (ScrMapEntry *)((ScrMapCEntry *)m->entries + e);
   return &m->entries[e];
 }
 
@@ -328,6 +396,8 @@ static inline __attribute__((always_inline)) bool scr_map_match_at(
     const ScrMap *m, size_t e, uint64_t hash, uint64_t key, ScrMapLookup lookup) {
   const ScrMapEntry *x = scr_map_at_with(m, e, lookup);
   if (lookup == SCR_MAP_LOOKUP_NUM) return x->key == key;
+  if (scr_map_lookup_c(lookup))
+    return ((const ScrMapCEntry *)x)->hash == (uint32_t)hash && scr_map_lookup_eq(m, x->key, key, lookup);
   return x->hash == hash && scr_map_lookup_eq(m, x->key, key, lookup);
 }
 
@@ -437,7 +507,7 @@ static inline __attribute__((always_inline)) size_t scr_map_find_with(
 
 static ScrMapLookup scr_map_lookup_kind(const ScrMap *m) {
   switch (m->key_kind) {
-  case SCR_MAP_KEY_STR: return SCR_MAP_LOOKUP_STR;
+  case SCR_MAP_KEY_STR: return scr_map_cref(m) ? SCR_MAP_LOOKUP_STR_C : SCR_MAP_LOOKUP_STR;
   case SCR_MAP_KEY_F64: return SCR_MAP_LOOKUP_NUM;
   case SCR_MAP_KEY_BOOL:
   case SCR_MAP_KEY_REF:
@@ -484,6 +554,7 @@ static size_t scr_map_find(const ScrMap *m, uint64_t hash, uint64_t key) {
   if (m->ndense) return scr_map_find_dense(m, scr_map_slot_to_f64(key));
   switch (scr_map_lookup_kind(m)) {
   case SCR_MAP_LOOKUP_STR: return scr_map_find_with(m, hash, key, SCR_MAP_LOOKUP_STR);
+  case SCR_MAP_LOOKUP_STR_C: return scr_map_find_with(m, hash, key, SCR_MAP_LOOKUP_STR_C);
   case SCR_MAP_LOOKUP_WORD: return scr_map_find_with(m, hash, key, SCR_MAP_LOOKUP_WORD);
   case SCR_MAP_LOOKUP_NUM: return scr_map_find_with(m, hash, key, SCR_MAP_LOOKUP_NUM);
   default: return scr_map_find_with(m, hash, key, SCR_MAP_LOOKUP_GENERIC);
@@ -504,9 +575,24 @@ const ScrMapEntry *scr_map_entry_f64(const ScrMap *m, double key) {
 
 /* The key's hash is usually cached, so even the small linear scan rejects
  * entries by hash before touching their bytes. */
+/* The probes of a SCR_MAP_VAL_CREF map, out of line so that the inlined
+ * probes of other maps keep their size. */
+static __attribute__((noinline)) size_t scr_map_find_str_c(const ScrMap *m, const ScrStr *key) {
+  return scr_map_find_with(m, scr_map_hash_str(key), scr_map_slot_from_ptr((void *)key),
+                           SCR_MAP_LOOKUP_STR_C);
+}
+
+static __attribute__((noinline)) size_t scr_map_find_span_c(const ScrMap *m, const char *bytes,
+                                                            size_t length) {
+  ScrMapSpan key = { bytes, length };
+  return scr_map_find_with(m, scr_map_hash_bytes(bytes, length), scr_map_slot_from_ptr(&key),
+                           SCR_MAP_LOOKUP_SPAN_C);
+}
+
 static inline __attribute__((always_inline)) size_t scr_map_find_str(const ScrMap *m,
                                                                      const ScrStr *key) {
   if (m->nlive == 0) return SCR_MAP_EMPTY;
+  if (scr_map_cref(m)) return scr_map_find_str_c(m, key);
   return scr_map_find_with(m, scr_map_hash_str(key), scr_map_slot_from_ptr((void *)key),
                            SCR_MAP_LOOKUP_STR);
 }
@@ -515,6 +601,7 @@ static inline __attribute__((always_inline)) size_t scr_map_find_str(const ScrMa
  * rules as a string key without allocating or copying the probe. */
 static size_t scr_map_find_span(const ScrMap *m, const char *bytes, size_t length) {
   if (m->nlive == 0) return SCR_MAP_EMPTY;
+  if (scr_map_cref(m)) return scr_map_find_span_c(m, bytes, length);
   ScrMapSpan key = { bytes, length };
   return scr_map_find_with(m, scr_map_hash_bytes(bytes, length), scr_map_slot_from_ptr(&key),
                            SCR_MAP_LOOKUP_SPAN);
@@ -523,20 +610,20 @@ static size_t scr_map_find_span(const ScrMap *m, const char *bytes, size_t lengt
 bool scr_map_get_span_f64(const ScrMap *m, const char *bytes, size_t length, double *out) {
   size_t e = scr_map_find_span(m, bytes, length);
   if (e == SCR_MAP_EMPTY) return false;
-  *out = scr_map_slot_to_f64(scr_map_at(m, e)->val);
+  *out = scr_map_slot_to_f64(scr_map_val_at(m, e));
   return true;
 }
 
 bool scr_map_get_span_bool(const ScrMap *m, const char *bytes, size_t length, bool *out) {
   size_t e = scr_map_find_span(m, bytes, length);
   if (e == SCR_MAP_EMPTY) return false;
-  *out = scr_map_at(m, e)->val != 0;
+  *out = scr_map_val_at(m, e) != 0;
   return true;
 }
 
 void *scr_map_get_span_ref(const ScrMap *m, const char *bytes, size_t length) {
   size_t e = scr_map_find_span(m, bytes, length);
-  return e == SCR_MAP_EMPTY ? NULL : m->ops->val_retain(scr_map_slot_to_ptr(scr_map_at(m, e)->val));
+  return e == SCR_MAP_EMPTY ? NULL : scr_map_val_retain(m, scr_map_val_at(m, e));
 }
 
 /* Rebuild the bucket table (size must be a power of two >= 2 * nentries):
@@ -666,7 +753,12 @@ static void scr_map_compact(ScrMap *m, bool reindex) {
       if (k > top) top = k;
     }
     filter |= scr_map_filter_bits(scr_map_hash_at(m, r));
-    if (w != r) memcpy(scr_map_at(m, w), scr_map_at(m, r), scr_map_entry_size(m));
+    if (w != r) {
+      /* A constant size per layout keeps the copy inline. */
+      if (scr_map_num(m)) memcpy(scr_map_at(m, w), scr_map_at(m, r), sizeof(ScrMapNumEntry));
+      else if (scr_map_cref(m)) memcpy(scr_map_at(m, w), scr_map_at(m, r), sizeof(ScrMapCEntry));
+      else memcpy(scr_map_at(m, w), scr_map_at(m, r), sizeof(ScrMapEntry));
+    }
     w++;
   }
   m->nentries = (uint32_t)w;
@@ -778,7 +870,7 @@ static void scr_map_trace(void *o, ScrTraceVisit visit, void *ctx) {
   for (size_t e = 0; e < m->nentries; e++) {
     if (!scr_map_live_at(m, e)) continue;
     if (keys) visit(scr_map_slot_to_ptr(scr_map_at(m, e)->key), ctx);
-    if (vals) visit(scr_map_slot_to_ptr(scr_map_at(m, e)->val), ctx);
+    if (vals) visit(scr_map_slot_to_ptr(scr_map_val_at(m, e)), ctx);
   }
 }
 
@@ -791,7 +883,7 @@ static void scr_map_gcfree(void *o) {
   for (size_t e = 0; e < m->nentries; e++) {
     if (!scr_map_live_at(m, e)) continue;
     if (!keys) scr_map_release_key(m, scr_map_at(m, e)->key);
-    if (!vals) scr_map_release_val(m, scr_map_at(m, e)->val);
+    if (!vals) scr_map_release_val(m, scr_map_val_at(m, e));
   }
   scr_mem_free(m->entries);
   scr_mem_free(m->buckets);
@@ -843,10 +935,15 @@ ScrMap *scr_map_retain(ScrMap *m) {
 static void scr_map_destroy(void *object) {
   ScrMap *m = object;
   scr_weak_dispose_inline(m);
-  for (size_t e = 0; e < m->nentries; e++) {
-    if (!scr_map_live_at(m, e)) continue;
-    scr_map_release_key(m, scr_map_at(m, e)->key);
-    scr_map_release_val(m, scr_map_at(m, e)->val);
+  /* Number and boolean keys, and values other than references, own
+   * nothing: a map of only those releases no entries. */
+  bool keys = m->key_kind == SCR_MAP_KEY_STR || scr_map_ref_key(m->key_kind);
+  if (keys || m->val_kind == SCR_MAP_VAL_REF) {
+    for (size_t e = 0; e < m->nentries; e++) {
+      if (!scr_map_live_at(m, e)) continue;
+      scr_map_release_key(m, scr_map_at(m, e)->key);
+      scr_map_release_val(m, scr_map_val_at(m, e));
+    }
   }
   scr_mem_free(m->entries);
   scr_mem_free(m->buckets);
@@ -897,7 +994,7 @@ void scr_map_clear(ScrMap *m) {
   uint32_t *dense = m->ndense ? m->dense : NULL;
   for (size_t e = 0; e < walked; e++) {
     if (!scr_map_live_at(m, e)) continue;
-    uint64_t key = scr_map_at(m, e)->key, val = scr_map_at(m, e)->val;
+    uint64_t key = scr_map_at(m, e)->key, val = scr_map_val_at(m, e);
     scr_map_kill_at(m, e);
     if (dense) dense[(size_t)scr_map_slot_to_f64(key)] = 0;
     scr_map_release_key(m, key);
@@ -955,7 +1052,7 @@ bool scr_map_has_str(const ScrMap *m, const ScrStr *key) {
 
 static bool scr_map_delete_found(ScrMap *m, size_t e) {
   if (e == SCR_MAP_EMPTY) return false;
-  uint64_t key = scr_map_at(m, e)->key, val = scr_map_at(m, e)->val;
+  uint64_t key = scr_map_at(m, e)->key, val = scr_map_val_at(m, e);
   scr_map_kill_at(m, e); /* bucket slot stays: probe chains intact */
   m->nlive--;
   if (m->ndense) m->dense[(size_t)scr_map_slot_to_f64(key)] = 0;
@@ -1060,6 +1157,11 @@ static inline __attribute__((always_inline)) void scr_map_set_with(
     e = scr_map_bucket(m, slot);
   }
   if (e != SCR_MAP_EMPTY) {
+    if (scr_map_lookup_c(lookup)) {
+      /* Compact values are never counted: nothing to release. */
+      ((ScrMapCEntry *)m->entries)[e].val = scr_map_cref_encode(val);
+      return;
+    }
     ScrMapEntry *x = scr_map_at_with(m, e, lookup);
     uint64_t old = x->val;
     x->val = val; /* unlink before releasing (cycle collector) */
@@ -1069,7 +1171,18 @@ static inline __attribute__((always_inline)) void scr_map_set_with(
   scr_map_append(m, hash, key, val, slot);
 }
 
+/* The insert of a SCR_MAP_VAL_CREF map, out of line so that the string-key
+ * insert of other maps keeps its size. */
+static __attribute__((noinline)) void scr_map_set_str_c(ScrMap *m, uint64_t hash, uint64_t key,
+                                                        uint64_t val) {
+  scr_map_set_with(m, hash, key, val, SCR_MAP_LOOKUP_STR_C);
+}
+
 static void scr_map_set_str_slot(ScrMap *m, uint64_t hash, uint64_t key, uint64_t val) {
+  if (scr_map_cref(m)) {
+    scr_map_set_str_c(m, hash, key, val);
+    return;
+  }
   scr_map_set_with(m, hash, key, val, SCR_MAP_LOOKUP_STR);
 }
 
@@ -1157,6 +1270,7 @@ static void scr_map_set(ScrMap *m, uint64_t hash, uint64_t key, uint64_t val) {
   }
   switch (scr_map_lookup_kind(m)) {
   case SCR_MAP_LOOKUP_STR: scr_map_set_str_slot(m, hash, key, val); return;
+  case SCR_MAP_LOOKUP_STR_C: scr_map_set_str_c(m, hash, key, val); return;
   case SCR_MAP_LOOKUP_WORD: scr_map_set_word(m, hash, key, val); return;
   case SCR_MAP_LOOKUP_NUM: scr_map_set_num(m, hash, key, val); return;
   default: scr_map_set_with(m, hash, key, val, SCR_MAP_LOOKUP_GENERIC); return;
@@ -1246,10 +1360,14 @@ bool scr_map_get_str_bool(const ScrMap *m, const ScrStr *key, bool *out) {
   return true;
 }
 
+/* scr_map_entry_str serves maps with 24-byte entries (generated code reads
+ * a SCR_MAP_VAL_CREF map through scr_map_entry_str_c). */
 static __attribute__((noinline)) const ScrMapEntry *scr_map_entry_str_slow(const ScrMap *m,
                                                                            const ScrStr *key) {
-  size_t e = scr_map_find_str(m, key);
-  return e == SCR_MAP_EMPTY ? NULL : scr_map_at(m, e);
+  if (m->nlive == 0) return NULL;
+  size_t e = scr_map_find_with(m, scr_map_hash_str(key), scr_map_slot_from_ptr((void *)key),
+                               SCR_MAP_LOOKUP_STR);
+  return e == SCR_MAP_EMPTY ? NULL : &m->entries[e];
 }
 
 /* A stored key with the probe's hash but another identity: compare bytes.
@@ -1302,10 +1420,60 @@ const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key) {
   return scr_map_entry_str_slow(m, key);
 }
 
+static __attribute__((noinline)) const ScrMapCEntry *scr_map_entry_str_c_slow(const ScrMap *m,
+                                                                              const ScrStr *key) {
+  size_t e = scr_map_find_str(m, key);
+  return e == SCR_MAP_EMPTY ? NULL : scr_map_c_at(m, e);
+}
+
+static __attribute__((noinline)) const ScrMapCEntry *scr_map_entry_str_c_bytes(const ScrMap *m,
+                                                                               const ScrStr *key,
+                                                                               const ScrMapCEntry *e) {
+  const ScrStr *stored = scr_map_slot_to_ptr(e->key);
+  if (stored->len == key->len && scr_key_equal(stored->data, key->data, key->len)) return e;
+  return scr_map_entry_str_c_slow(m, key);
+}
+
+/* scr_map_entry_str over a SCR_MAP_VAL_CREF map's 16-byte entries, whose
+ * hash is the low half of the widened one. */
+const ScrMapCEntry *scr_map_entry_str_c(const ScrMap *m, const ScrStr *key) {
+#if SCR_STR_HASH_CACHE
+  uint32_t h = key->hash;
+  size_t nbuckets = m->nbuckets;
+  if (__builtin_expect(h != 0 && scr_map_compact_buckets(nbuckets), 1)) {
+    uint64_t hash = scr_map_hash_widen(h);
+    uint64_t bits = scr_map_filter_bits(hash);
+    if ((m->filter & bits) != bits) return NULL;
+    const ScrMapCEntry *entries = (const ScrMapCEntry *)m->entries;
+    if (nbuckets == 0) {
+      for (size_t e = 0, n = m->nentries; e < n; e++) {
+        if (entries[e].hash != h) continue;
+        if (entries[e].key == scr_map_slot_from_ptr((void *)key)) return &entries[e];
+        return scr_map_entry_str_c_bytes(m, key, &entries[e]);
+      }
+      return NULL;
+    }
+    const uint32_t *buckets = m->buckets;
+    uint32_t tag = (uint32_t)(hash >> 32 & UINT32_C(0xff000000));
+    size_t mask = nbuckets - 1;
+    for (size_t i = hash & mask;; i = (i + 1) & mask) {
+      uint32_t bucket = buckets[i];
+      if (!bucket) return NULL;
+      if ((bucket & ~SCR_MAP_INDEX_MASK) != tag) continue;
+      const ScrMapCEntry *e = &entries[(bucket & SCR_MAP_INDEX_MASK) - 1];
+      if (e->hash != h) continue;
+      if (e->key == scr_map_slot_from_ptr((void *)key)) return e;
+      return scr_map_entry_str_c_bytes(m, key, e);
+    }
+  }
+#endif
+  return scr_map_entry_str_c_slow(m, key);
+}
+
 void *scr_map_get_str_ref(const ScrMap *m, const ScrStr *key) {
   size_t e = scr_map_find_str(m, key);
   if (e == SCR_MAP_EMPTY) return NULL;
-  return m->ops->val_retain(scr_map_slot_to_ptr(scr_map_at(m, e)->val)); /* +1 */
+  return scr_map_val_retain(m, scr_map_val_at(m, e)); /* +1 */
 }
 
 bool scr_map_get_ref_f64(const ScrMap *m, const void *key, double *out) {
@@ -1408,6 +1576,12 @@ static const ScrMapEntry *scr_map_iter_at(const ScrMap *m, double i) {
   return scr_map_at(m, (size_t)i);
 }
 
+/* The value of the live entry at iteration index i as an 8-byte slot. */
+static uint64_t scr_map_iter_val_slot(const ScrMap *m, double i) {
+  (void)scr_map_iter_at(m, i);
+  return scr_map_val_at(m, (size_t)i);
+}
+
 double scr_map_iter_key_f64(const ScrMap *m, double i) {
   return scr_map_slot_to_f64(scr_map_iter_at(m, i)->key);
 }
@@ -1442,7 +1616,7 @@ ScrDyn *scr_map_dyn_key(const ScrMap *map, double index) {
 }
 
 ScrDyn *scr_map_dyn_value(const ScrMap *map, double index) {
-  uint64_t slot = scr_map_iter_at(map, index)->val;
+  uint64_t slot = scr_map_iter_val_slot(map, index);
   return map->dyn_ops ? map->dyn_ops->val_box(slot) : scr_dyn_retain(scr_map_slot_to_ptr(slot));
 }
 
@@ -1491,6 +1665,9 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only, const ScrMapOps *ops
   if (!out->entries) scr_map_oom();
   out->ecap = (uint32_t)count;
   size_t top = 0;
+  /* A key-only copy of a SCR_MAP_VAL_CREF map has the 24-byte layout: its
+   * entries are copied field by field. */
+  bool same_layout = scr_map_cref(source) == scr_map_cref(out);
   for (size_t i = 0; i < source->nentries; i++) {
     if (!scr_map_live_at(source, i)) continue;
     const ScrMapEntry *entry = scr_map_at(source, i);
@@ -1498,11 +1675,13 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only, const ScrMapOps *ops
       size_t k = (size_t)scr_map_slot_to_f64(entry->key);
       if (k > top) top = k;
     }
-    ScrMapEntry *copy = scr_map_at(out, out->nentries++);
-    memcpy(copy, entry, entry_size);
+    size_t e = out->nentries++;
+    ScrMapEntry *copy = scr_map_at(out, e);
+    if (__builtin_expect(same_layout, 1)) memcpy(copy, entry, entry_size);
+    else scr_map_put_at(out, e, entry->key, keys_only ? 0 : scr_map_val_at(source, i), scr_map_hash_at(source, i));
     if (out->key_kind == SCR_MAP_KEY_STR) scr_str_retain(scr_map_slot_to_ptr(copy->key));
     else if (scr_map_ref_key(out->key_kind)) out->ops->key_retain(scr_map_slot_to_ptr(copy->key));
-    if (keys_only) copy->val = 0;
+    if (keys_only) scr_map_val_put(out, e, 0);
     else if (out->val_kind == SCR_MAP_VAL_REF) out->ops->val_retain(scr_map_slot_to_ptr(copy->val));
   }
   out->nlive = (uint32_t)count;
@@ -1527,7 +1706,7 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only, const ScrMapOps *ops
 const ScrMapOps scr_map_dyn_set_ops = {
   scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v, NULL, NULL, NULL, NULL
 };
-static const ScrMapOps scr_map_dyn_map_ops = {
+const ScrMapOps scr_map_dyn_map_ops = {
   scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v,
   scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v, NULL
 };
@@ -1550,7 +1729,7 @@ ScrMap *scr_map_clone_dyn(const ScrMap *source, bool keys_only) {
 void scr_map_values_into(ScrMap *set, const ScrMap *source, bool checked) {
   for (size_t i = 0; i < source->nentries; i++) {
     if (!scr_map_live_at(source, i)) continue;
-    uint64_t value = checked ? scr_map_slot_from_ptr(scr_map_dyn_value(source, (double)i)) : scr_map_at(source, i)->val;
+    uint64_t value = checked ? scr_map_slot_from_ptr(scr_map_dyn_value(source, (double)i)) : scr_map_val_at(source, i);
     if (set->key_kind == SCR_MAP_KEY_F64) value = scr_map_f64_bits(scr_map_slot_to_f64(value));
     scr_map_set(set, scr_map_hash_key(set, value), value, 0);
     if (checked) scr_dyn_release(scr_map_slot_to_ptr(value));
@@ -1567,7 +1746,7 @@ ScrArr *scr_set_to_arr_dyn(const ScrMap *map) {
 }
 
 void *scr_map_iter_val_ref(const ScrMap *m, double i) {
-  return m->ops->val_retain(scr_map_slot_to_ptr(scr_map_iter_at(m, i)->val)); /* +1 */
+  return scr_map_val_retain(m, scr_map_iter_val_slot(m, i)); /* +1 */
 }
 
 /* A published (immortal) map never changes, so iterating it needs no
@@ -1600,7 +1779,7 @@ void scr_set_add_all(ScrMap *set, ScrArr *values) {
     /* Packed values stay owned by the seed array throughout construction.
      * Avoid taking a temporary owner only to release it after insertion.
      * Sparse/missing positions retain the existing accessor semantics. */
-    if (i < values->cap && *scr_arr_state_ptr(values, i) == SCR_ARR_VALUE) {
+    if (i < values->cap && scr_arr_dense_state(values, i) == SCR_ARR_VALUE) {
       uint64_t key = scr_arr_dense_get(values, i);
       if (set->key_kind == SCR_MAP_KEY_F64) key = scr_map_f64_bits(scr_map_slot_to_f64(key));
       scr_map_set(set, scr_map_hash_key(set, key), key, 0);

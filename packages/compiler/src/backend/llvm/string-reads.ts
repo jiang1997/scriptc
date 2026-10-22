@@ -17,6 +17,7 @@
  * is thread-local.
  */
 
+import type { LlvmEmitterContext } from "./expr-context.js";
 import { exactIndexLines, sizeToDouble } from "./common.js";
 import { wtf8Bytes } from "../literals.js";
 import { literalCapWord, literalCapWord32 } from "./string-key-hash.js";
@@ -36,6 +37,43 @@ export const STRING_CHAR_CODE_AT_INT_MARKER = "; uses @sc_str_char_code_at_int";
 export const STRING_CHAR_AT_DECL = "declare ptr @scr_str_char_at(ptr, double)";
 /** Requests the integer-index charAt helper, as the marker above does. */
 export const STRING_CHAR_AT_INT_MARKER = "; uses @sc_str_char_at_int";
+
+/** The proven-ASCII flag of string `s`, as an i1. */
+export function emitStringAsciiFlag(host: LlvmEmitterContext, s: string): string {
+  const B = host.B;
+  const wordPointer = B.tmp(),
+    word = B.tmp(),
+    ascii = B.tmp();
+  B.line(`${wordPointer} = getelementptr inbounds %ScrStr, ptr ${s}, i32 0, i32 2`);
+  B.line(`${word} = load i32, ptr ${wordPointer}`);
+  B.line(`${ascii} = icmp slt i32 ${word}, 0`);
+  return ascii;
+}
+
+/** The byte length of string `s`, as the target's size type. */
+export function emitStringByteLength(host: LlvmEmitterContext, s: string): string {
+  const B = host.B;
+  const lengthPointer = B.tmp(),
+    length = B.tmp();
+  B.line(`${lengthPointer} = getelementptr inbounds %ScrStr, ptr ${s}, i32 0, i32 1`);
+  B.line(`${length} = load ${host.sizeType}, ptr ${lengthPointer}`);
+  return length;
+}
+
+/** Unit `index` (an i64) of a proven-ASCII string `s` whose length covers
+ * it: one byte load, as a double. */
+export function emitAsciiCharCode(host: LlvmEmitterContext, s: string, index: string): string {
+  const B = host.B;
+  const data = B.tmp(),
+    pointer = B.tmp(),
+    byte = B.tmp(),
+    code = B.tmp();
+  B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${s}, i32 1`);
+  B.line(`${pointer} = getelementptr inbounds i8, ptr ${data}, i64 ${index}`);
+  B.line(`${byte} = load i8, ptr ${pointer}`);
+  B.line(`${code} = uitofp i8 ${byte} to double`);
+  return code;
+}
 
 /** Load the proven-ASCII flag of `%s` into `%ascii`. */
 function asciiTest(): string[] {

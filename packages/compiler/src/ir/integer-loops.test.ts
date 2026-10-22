@@ -426,3 +426,119 @@ test("paired counters closing in on each other run as integers", () => {
   unused.body = [];
   expect(matchIntegerPairedForLoop(unused, vars)).toBeNull();
 });
+
+test("counters stepped beside the tested one run as integers", () => {
+  const vars = new Map(locals);
+  for (const id of ["j", "k", "limit", "from"])
+    vars.set(id, { id, name: id, type: F64, mutable: true });
+  vars.set("s", { id: "s", name: "s", type: STRING, mutable: false });
+  const step = (id: string, op: "+" | "-", value = 1): IrStmt => ({
+    kind: "assign",
+    localId: id,
+    value: { kind: "bin", op, left: ref(id), right: number(value), type: F64, loc },
+    loc,
+  });
+  const read = (index: IrExpr): IrStmt => ({
+    kind: "exprStmt",
+    expr: {
+      kind: "strIntrinsic",
+      method: "charCodeAt",
+      receiver: { kind: "varRef", localId: "s", type: STRING, loc },
+      args: [index],
+      type: F64,
+      loc,
+    },
+    loc,
+  });
+  const comoving = (
+    limit: IrExpr,
+    followerStart: IrExpr = number(0),
+    update: IrStmt = { kind: "block", body: [step("i", "+"), step("j", "+", 4)], loc },
+  ) =>
+    ({
+      kind: "for",
+      loc,
+      init: {
+        kind: "block",
+        body: [
+          { kind: "varDecl", localId: "i", init: number(0), loc },
+          { kind: "varDecl", localId: "j", init: followerStart, loc },
+        ],
+        loc,
+      },
+      cond: { kind: "bin", op: "<", left: ref("i"), right: limit, type: BOOL, loc },
+      update,
+      body: [read(ref("j"))],
+    }) as IrStmt & { kind: "for" };
+  // A literal limit bounds the follower: at most 9 updates of 4 before the
+  // last body entry.
+  expect(matchIntegerCountedForLoop(comoving(number(10)), vars)).toMatchObject({
+    localId: "i",
+    guarded: false,
+    range: { min: 0, max: 9 },
+    followers: [
+      {
+        localId: "j",
+        step: 4,
+        startGuarded: false,
+        tripGuarded: false,
+        range: { min: 0, max: 36 },
+      },
+    ],
+  });
+  // An unknown limit or start is tested at run time.
+  expect(matchIntegerCountedForLoop(comoving(ref("limit")), vars)).toMatchObject({
+    guarded: true,
+    followers: [{ tripGuarded: true, range: { min: 0, max: 2 ** 52 + 2 } }],
+  });
+  expect(matchIntegerCountedForLoop(comoving(number(10), ref("from")), vars)).toMatchObject({
+    guarded: true,
+    followers: [{ startGuarded: true, tripGuarded: true }],
+  });
+  // A literal limit with known starts that can pass 2^53 is refused.
+  expect(matchIntegerCountedForLoop(comoving(number(10), number(2 ** 53 - 9)), vars)).toBeNull();
+  // Nested update blocks (`i++, j += 4, k--`) step three counters.
+  const three = comoving(number(10), number(0), {
+    kind: "block",
+    body: [{ kind: "block", body: [step("i", "+"), step("j", "+", 4)], loc }, step("k", "-")],
+    loc,
+  });
+  if (three.init?.kind === "block")
+    three.init.body.push({ kind: "varDecl", localId: "k", init: number(5), loc });
+  expect(matchIntegerCountedForLoop(three, vars)?.followers).toMatchObject([
+    { localId: "j", range: { min: 0, max: 36 } },
+    { localId: "k", step: -1, range: { min: -4, max: 5 } },
+  ]);
+  // A follower without a step, one the body writes, one the limit reads, a
+  // captured one, and a start that reads another counter are refused.
+  expect(
+    matchIntegerCountedForLoop(
+      comoving(number(10), number(0), { kind: "block", body: [step("i", "+")], loc }),
+      vars,
+    ),
+  ).toBeNull();
+  const writing = comoving(number(10));
+  writing.body.push(step("j", "+"));
+  expect(matchIntegerCountedForLoop(writing, vars)).toBeNull();
+  expect(matchIntegerCountedForLoop(comoving(ref("j")), vars)).toBeNull();
+  const boxed = new Map(vars);
+  boxed.set("j", { ...vars.get("j")!, boxed: true });
+  expect(matchIntegerCountedForLoop(comoving(number(10)), boxed)).toBeNull();
+  expect(matchIntegerCountedForLoop(comoving(number(10), ref("i")), vars)).toBeNull();
+  // A driver span above 2^53 - 1 bounds no trip count. From -(2^53 - 1) to
+  // below 2^52 - 1 the span 3 * 2^52 - 3 rounds down to 3 * 2^52 - 4, which
+  // would put this follower's last value at 2^53 - 1 instead of 2^53.
+  const wide = comoving(number(2 ** 52 - 1), number(-(2 ** 52) + 3), {
+    kind: "block",
+    body: [step("i", "+"), step("j", "+")],
+    loc,
+  });
+  if (wide.init?.kind === "block" && wide.init.body[0]?.kind === "varDecl")
+    wide.init.body[0].init = number(-Number.MAX_SAFE_INTEGER);
+  expect(matchIntegerCountedForLoop(wide, vars)).toBeNull();
+  if (wide.init?.kind === "block" && wide.init.body[1]?.kind === "varDecl")
+    wide.init.body[1].init = ref("from");
+  expect(matchIntegerCountedForLoop(wide, vars)?.followers).toMatchObject([
+    { startGuarded: true, tripGuarded: true },
+  ]);
+});

@@ -82,6 +82,8 @@ typedef struct ScrEeEntry {
    * the meta events. */
   ScrClosure *flex_cb;
   ScrDynThunk flex_invoke;
+  /* The function box's typed message entry (scr_emitter_emit_message). */
+  ScrDynMessageListener flex_message;
   const char *flex_sig;
   const char *flex_name;
   uint32_t flex_arity;
@@ -512,6 +514,7 @@ static ScrEmitter *scr_ee_add(ScrEmitter *em, ScrStr *name, ScrClosure *cb /*mov
   if (dyn) {
     e->flex_cb = scr_closure_retain(dyn->v.fn.clo);
     e->flex_invoke = dyn->v.fn.thunk;
+    e->flex_message = dyn->v.fn.message;
     e->flex_sig = dyn->v.fn.sig;
     e->flex_name = dyn->v.fn.name;
     e->flex_arity = dyn->v.fn.arity;
@@ -1013,15 +1016,16 @@ static ScrDyn *const scr_ee_no_args[1] = { NULL };
  * a nested emit's snapshot still holds it (the shared fired flag — Node's
  * wrapper.fired). A listener throw stops the pass (the exception stays
  * pending for the caller). Returns whether the bucket had listeners. */
+typedef struct ScrEeMessage ScrEeMessage;
 static bool scr_ee_emit_core(ScrEmitter *em, ScrStr *name, va_list *ap_template,
-                             ScrDyn *const *flex_args, size_t flex_argc);
+                             ScrDyn *const *flex_args, size_t flex_argc, ScrEeMessage *message);
 
 /* emit('error', ...) first emits the same arguments to errorMonitor. */
 static void scr_ee_emit_error_monitor(ScrEmitter *em, va_list *ap_template,
                                       ScrDyn *const *flex_args, size_t flex_argc) {
   ScrEeBucket *b = scr_ee_bucket_of(em->reg, SCR_EE_ERROR_MONITOR);
   if (!b || b->n == 0) return;
-  scr_ee_emit_core(em, SCR_EE_ERROR_MONITOR, ap_template, flex_args, flex_argc);
+  scr_ee_emit_core(em, SCR_EE_ERROR_MONITOR, ap_template, flex_args, flex_argc, NULL);
 }
 
 /* A listener this emit has no argument form for: an untyped emit whose
@@ -1044,8 +1048,17 @@ SCR_COLD static void scr_ee_listener_mismatch(const ScrStr *name, bool typed_emi
   scr_throw_error(typed_emit ? SCR_ERR_ERROR : SCR_ERR_TYPE, message);
 }
 
+/* A message emit (scr_emitter_emit_message): listeners with a typed message
+ * entry read the message until a listener without one runs; that listener
+ * and every later one share one decoded argument. */
+struct ScrEeMessage {
+  const struct ScrMessage *message;
+  ScrDyn *(*decode)(const struct ScrMessage *);
+  ScrDyn *decoded;
+};
+
 static bool scr_ee_emit_core(ScrEmitter *em, ScrStr *name, va_list *ap_template,
-                             ScrDyn *const *flex_args, size_t flex_argc) {
+                             ScrDyn *const *flex_args, size_t flex_argc, ScrEeMessage *message) {
   if (name->len == 5 && memcmp(name->data, "error", 5) == 0) {
     scr_ee_emit_error_monitor(em, ap_template, flex_args, flex_argc);
     if (scr_exc_pending()) return true;
@@ -1088,6 +1101,22 @@ static bool scr_ee_emit_core(ScrEmitter *em, ScrStr *name, va_list *ap_template,
         continue;
       }
     }
+    /* Once a listener has the decoded value, later listeners read that
+     * value: an earlier listener may have changed it, as in Node. */
+    if (message && !message->decoded && e->flex_message &&
+        e->flex_message(e->flex_cb, message->message)) {
+      scr_ee_entry_unref(e);
+      continue;
+    }
+    if (message && !message->decoded) {
+      message->decoded = message->decode(message->message);
+      if (!message->decoded) {
+        scr_ee_entry_unref(e);
+        continue;
+      }
+      flex_args = &message->decoded;
+      flex_argc = 1;
+    }
     if (flex_args && e->flex_invoke) {
       ScrDyn *answer = e->flex_invoke(e->flex_cb, flex_args, flex_argc);
       scr_dyn_release(answer); /* EventEmitter ignores callback results. */
@@ -1108,7 +1137,7 @@ static bool scr_ee_emit_core(ScrEmitter *em, ScrStr *name, va_list *ap_template,
 static bool scr_ee_emit_va(ScrEmitter *em, ScrStr *name, ...) {
   va_list ap;
   va_start(ap, name);
-  bool had = scr_ee_emit_core(em, name, &ap, NULL, 0);
+  bool had = scr_ee_emit_core(em, name, &ap, NULL, 0, NULL);
   va_end(ap);
   return had;
 }
@@ -1119,7 +1148,7 @@ static bool scr_ee_emit_mixed_va(ScrEmitter *em, ScrStr *name, ScrDyn *const *ar
                                  int typed, ...) {
   va_list ap;
   va_start(ap, typed);
-  bool had = scr_ee_emit_core(em, name, typed ? &ap : NULL, args ? args : scr_ee_no_args, argc);
+  bool had = scr_ee_emit_core(em, name, typed ? &ap : NULL, args ? args : scr_ee_no_args, argc, NULL);
   va_end(ap);
   return had;
 }
@@ -1131,7 +1160,7 @@ static bool scr_ee_emit_mixed_va(ScrEmitter *em, ScrStr *name, ScrDyn *const *ar
 bool scr_emitter_emit(ScrEmitter *em, ScrStr *name, ...) {
   va_list ap;
   va_start(ap, name);
-  bool had = scr_ee_emit_core(em, name, &ap, NULL, 0);
+  bool had = scr_ee_emit_core(em, name, &ap, NULL, 0, NULL);
   va_end(ap);
   return had;
 }
@@ -1143,7 +1172,7 @@ bool scr_emitter_emit(ScrEmitter *em, ScrStr *name, ...) {
 bool scr_emitter_emit_mixed(ScrEmitter *em, ScrStr *name, ScrDyn *const *args, size_t argc, ...) {
   va_list ap;
   va_start(ap, argc);
-  bool had = scr_ee_emit_core(em, name, &ap, args ? args : scr_ee_no_args, argc);
+  bool had = scr_ee_emit_core(em, name, &ap, args ? args : scr_ee_no_args, argc, NULL);
   va_end(ap);
   return had;
 }
@@ -1241,7 +1270,15 @@ static bool scr_ee_emit_error_dyn(ScrEmitter *em, ScrStr *name, ScrDyn *const *a
 /* An untyped emit of a name typed code never fixes a tuple for (computed
  * names, runtime-internal registries): the arguments as given. */
 bool scr_emitter_emit_flex(ScrEmitter *em, ScrStr *name, ScrDyn *const *args, size_t argc) {
-  return scr_ee_emit_core(em, name, NULL, args ? args : scr_ee_no_args, argc);
+  return scr_ee_emit_core(em, name, NULL, args ? args : scr_ee_no_args, argc, NULL);
+}
+
+bool scr_emitter_emit_message(ScrEmitter *em, ScrStr *name, const struct ScrMessage *message,
+                              ScrDyn *(*decode)(const struct ScrMessage *)) {
+  ScrEeMessage state = {message, decode, NULL};
+  bool had = scr_ee_emit_core(em, name, NULL, NULL, 0, &state);
+  scr_dyn_release(state.decoded);
+  return had;
 }
 
 /* emit(name, ...args) through an untyped value: the arguments as given.
@@ -1255,7 +1292,7 @@ bool scr_emitter_emit_any(ScrEmitter *em, ScrStr *name, ScrDyn *const *args, siz
       return scr_ee_emit_mixed_va(em, name, args, argc, s != NULL, s);
     }
   }
-  return scr_ee_emit_core(em, name, NULL, args ? args : scr_ee_no_args, argc);
+  return scr_ee_emit_core(em, name, NULL, args ? args : scr_ee_no_args, argc, NULL);
 }
 
 /* Handle event registries use checked callbacks for every tuple, including
@@ -1268,7 +1305,7 @@ bool scr_emitter_emit_error_flex(ScrEmitter *em, ScrDyn *error) {
     return false;
   }
   ScrStr *name = scr_str_new("error", 5);
-  bool had = scr_ee_emit_core(em, name, NULL, &error, 1);
+  bool had = scr_ee_emit_core(em, name, NULL, &error, 1, NULL);
   scr_str_release(name);
   return had;
 }

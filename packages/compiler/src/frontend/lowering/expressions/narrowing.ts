@@ -46,6 +46,7 @@ import {
 } from "../lower-exprs.js";
 import { isConstAssertionTypeNode, unitOnlyUnion } from "../../type-mapper.js";
 import { assertsGlobalObject, extractionCopiesReference } from "../assertion-identity.js";
+import { iterableSlotValue, iterableUnionOf } from "../iterable-values.js";
 
 /** `c ? a : b`. An explicit destination constructs each branch at that
  * layout before joining it. Without one, retain the expression's inferred
@@ -691,6 +692,18 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
   if (narrowed?.kind === "union") {
     const hosted = hostedStorageView(lowerer, expr, narrowed, expr.loc);
     if (hosted) return hosted;
+  }
+  // An optional Iterable narrowed to the iterable union (`xs !== undefined`):
+  // re-tag into it, so for-of, spread and the other consumers see the
+  // Iterable itself.
+  if (
+    narrowed?.kind === "union" &&
+    narrowed.unionId !== expr.type.unionId &&
+    iterableUnionOf(lowerer, narrowed)
+  ) {
+    const helper = lowerer.narrowedRetagHelper(node, expr.type.unionId, narrowed.unionId, expr.loc);
+    if (helper)
+      return { kind: "call", callee: helper, args: [expr], type: narrowed, loc: expr.loc };
   }
   // A checker type narrowed to a UNIT arm (the `=== undefined` branch)
   // also stays union-typed: a unit arm has no payload to extract, and
@@ -1524,6 +1537,10 @@ export function lowerAsExpression(
   // reach it (assertion-identity.ts).
   if (extractionCopiesReference(lowerer, target) && assertsGlobalObject(lowerer, expr))
     return inner;
+  // `value as Iterable<T>`: the value's own iterator, stepped lazily with
+  // each element checked against T (the generator arm's adapter).
+  const iterable = iterableSlotValue(lowerer, inner, target);
+  if (iterable) return iterable;
   if (
     target.kind === "void" ||
     !canDynCheckTo(

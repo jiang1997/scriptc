@@ -1318,6 +1318,12 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
     argTypes: [STRING, arrayOf(STRING), F64, STRING, F64, F64, F64],
     result: SPAWNRES_T,
   },
+  /** cp.spawnSyncOpts with the `env` option: the trailing [k,v,...]
+   * pairs replace the child's environment (recordToEnvPairs). */
+  "cp.spawnSyncEnv": {
+    argTypes: [STRING, arrayOf(STRING), F64, STRING, F64, F64, F64, arrayOf(STRING)],
+    result: SPAWNRES_T,
+  },
   /** cp.spawnSyncOpts with the stdio carried as a RUNTIME string —
    * "pipe" | "ignore" | "inherit", proven by the call site's TYPE (the
    * defaultRunner idiom `stdio: options?.stdio ?? "pipe"`); the runtime
@@ -1528,6 +1534,13 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   },
   "dgram.sendStr": { argTypes: [DGRAMSOCK_T, STRING, F64, STRING], result: VOID },
   "dgram.sendBytes": { argTypes: [DGRAMSOCK_T, BYTES_U8, F64, STRING], result: VOID },
+  /** Connected AF_UNIX datagram sockets for the hot-shots package shim
+   * (the unix-dgram addon's surface): fd or result >= 0, -errno on
+   * failure; send answers 1 when the socket would block. */
+  "dgram.unixSocket": { argTypes: [], result: F64 },
+  "dgram.unixConnect": { argTypes: [F64, STRING], result: F64 },
+  "dgram.unixSend": { argTypes: [F64, BYTES_U8], result: F64 },
+  "dgram.unixClose": { argTypes: [F64], result: F64 },
   /** The send argument-validation ladder over dyn arguments (Node's
    * signature shuffle: slice bounds, list/type contracts, port/address
    * validation, connected-state errors), then the send: lists, connected
@@ -2813,6 +2826,23 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   /** ECDH.convertKey(key, curve, inputEncoding, outputEncoding, format):
    * the converted point as a Buffer or string. */
   "crypto.ecdhConvertKey": { argTypes: [DYN, DYN, DYN, DYN, DYN], result: DYN },
+  /** createDiffieHellman(sizeOrKey, keyEncoding, generator,
+   * generatorEncoding) over checked-dynamic arguments (scr_dh.c): a native
+   * DiffieHellman handle whose methods dispatch through dynInvoke. */
+  "crypto.dhNew": { argTypes: [DYN, DYN, DYN, DYN], result: DYN },
+  /** getDiffieHellman(groupName) and createDiffieHellmanGroup(name): a
+   * native DiffieHellmanGroup handle. */
+  "crypto.dhGroupNew": { argTypes: [DYN], result: DYN },
+  /** checkPrimeSync(candidate, options) and generatePrimeSync(size,
+   * options) over checked-dynamic arguments (scr_dh.c): a boolean, and an
+   * ArrayBuffer or bigint, as checked-dynamic results. The Cb forms take
+   * the callback and whether its error parameter takes null for Node's
+   * undefined, and call it in a later macrotask; Node's argument errors
+   * throw (may-throw). */
+  "crypto.checkPrimeSync": { argTypes: [DYN, DYN], result: DYN },
+  "crypto.checkPrimeCb": { argTypes: [DYN, DYN, DYN, BOOL], result: VOID },
+  "crypto.generatePrimeSync": { argTypes: [DYN, DYN], result: DYN },
+  "crypto.generatePrimeCb": { argTypes: [DYN, DYN, DYN, BOOL], result: VOID },
   "crypto.hmacNewStr": { argTypes: [STRING, STRING], result: CRYPTOHMAC_T },
   "crypto.hmacNewBytes": { argTypes: [STRING, BYTES_U8], result: CRYPTOHMAC_T },
   "crypto.hashUpdateStr": { argTypes: [CRYPTOHASH_T, STRING], result: CRYPTOHASH_T },
@@ -2876,6 +2906,8 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "webcrypto.exportKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.encrypt": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.decrypt": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
+  "webcrypto.wrapKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
+  "webcrypto.unwrapKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.deriveBits": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.deriveKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.sign": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
@@ -3584,7 +3616,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "weakSet.new": { argTypes: [DYN], result: DYN },
   "dyn.fromEntries": { argTypes: [DYN], result: DYN },
   "bytes.constructor": { argTypes: [STRING], result: DYN },
-  "bytes.instanceOf": { argTypes: [DYN, DYN], result: BOOL },
+  "bytes.instanceOf": { argTypes: [DYN, DYN, STRING], result: BOOL },
   "bytes.construct": { argTypes: [DYN, DYN, STRING], result: DYN },
   /** The ambient receiver — JS `this` in a plain (non-method) function
    * body: the innermost binding the current firing/dispatch window

@@ -666,14 +666,20 @@ export function lowerPropertyAccessExpr(
       );
       if (fixedArity) {
         // A `this` parameter is type-only: callers never pass it.
-        return {
-          kind: "numLit",
-          value: (fn as ts.FunctionLikeDeclaration).parameters.nodes.filter(
-            (p) => !isThisParameter(p),
-          ).length,
-          type: F64,
-          loc,
-        };
+        const declared = (fn as ts.FunctionLikeDeclaration).parameters.nodes.filter(
+          (p) => !isThisParameter(p),
+        ).length;
+        const count = Math.max(declared, contextualArgumentCount(lowerer, fn) ?? 0);
+        // Calls through the expression's own name pass the declared count,
+        // calls through the wider slot pass more: no constant answers both.
+        if (count > declared && referencesOwnName(lowerer, fn)) {
+          lowerer.unsupported(
+            "SC1090",
+            expr,
+            "'arguments.length' in a function expression that is called both through its own name and through a function type with more parameters (the count varies per call)",
+          );
+        }
+        return { kind: "numLit", value: count, type: F64, loc };
       }
       lowerer.unsupported(
         "SC1090",
@@ -4439,4 +4445,48 @@ function lowerPromiseConstructorRead(
         };
   }
   return null;
+}
+
+/** Whether a named function expression refers to itself by name in its
+ * body (a recursive call, or the function escaping under its own name). */
+function referencesOwnName(lowerer: Lowerer, fn: ts.Node): boolean {
+  if (!ts.isFunctionExpression(fn) || fn.name === undefined || fn.body === undefined) return false;
+  const self = lowerer.checker.getSymbolAtLocation(fn.name);
+  if (self === undefined) return false;
+  const name = fn.name.text;
+  let found = false;
+  ts.walkPreorder(fn.body, (node) => {
+    if (found) return "stop";
+    if (
+      ts.isIdentifier(node) &&
+      node.text === name &&
+      lowerer.checker.getSymbolAtLocation(node) === self
+    )
+      found = true;
+    return undefined;
+  });
+  return found;
+}
+
+/** The argument count every caller passes a function expression whose
+ * value flows into one fixed-arity function type, an array method's
+ * callback or an annotated slot: that type's parameter count. Null when
+ * there is no such type or its arity varies. */
+function contextualArgumentCount(lowerer: Lowerer, fn: ts.Node): number | null {
+  if (!ts.isFunctionExpression(fn)) return null;
+  const contextual = lowerer.checker.getContextualType(fn);
+  if (contextual === undefined) return null;
+  const signatures = lowerer.checker.getCallSignatures(
+    lowerer.checker.getNonNullableType(contextual),
+  );
+  if (signatures.length !== 1) return null;
+  const declaration = signatures[0]!.declaration;
+  if (declaration === undefined) return null;
+  let count = 0;
+  for (const parameter of (declaration.parameters?.nodes ?? []) as ts.ParameterDeclaration[]) {
+    if (isThisParameter(parameter)) continue;
+    if (parameter.questionToken || parameter.initializer || parameter.dotDotDotToken) return null;
+    count++;
+  }
+  return count;
 }

@@ -109,8 +109,15 @@ export interface IrModuleVisitor extends IrVisitor {
  * source text, locations, labels, or other metadata. A false predicate stops
  * the whole walk. Results are never retained across mutable compiler passes. */
 export function everyModuleNode(mod: IrModule, visitor: IrModuleVisitor): boolean {
-  const type = (node: IrType, loc: SrcLoc): boolean =>
-    visitor.type(node, loc) && everyTypeChild(node, (child) => type(child, loc));
+  // Every node of one type tree reports the tree's location: one shared
+  // child callback serves them all.
+  let typeLoc: SrcLoc;
+  const typeNode = (node: IrType): boolean =>
+    visitor.type(node, typeLoc) && everyTypeChild(node, typeNode);
+  const type = (node: IrType, loc: SrcLoc): boolean => {
+    typeLoc = loc;
+    return typeNode(node);
+  };
   const expr = (node: IrExpr): boolean =>
     visitor.expr(node) && everyExprChild(node, expr, stmt) && type(node.type, node.loc);
   const stmt = (node: IrStmt): boolean => visitor.stmt(node) && everyStmtChild(node, expr, stmt);

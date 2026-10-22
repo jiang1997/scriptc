@@ -665,6 +665,17 @@ static bool scr_channel_dispatch(void) {
       continue;
     }
     scr_worker_view_retain(view);
+    if (event->message && !view->broadcast && scr_message_readable(event->message)) {
+      /* Compiled listeners with a typed message entry read the message. */
+      ScrStr *name = scr_str_new("message", 7);
+      scr_dyn_this_push(view, SCR_DYNH_MESSAGE_PORT);
+      scr_emitter_emit_message(view->events, name, event->message, scr_message_decode);
+      scr_dyn_this_pop();
+      scr_str_release(name);
+      scr_mail_event_free(event);
+      scr_worker_view_release(view);
+      return true;
+    }
     ScrDyn *argument = event->message ? scr_message_decode(event->message) : NULL;
     if (argument && view->broadcast) {
       ScrDyn *self = scr_dyn_new_handle(view, SCR_DYNH_BROADCAST_CHANNEL);
@@ -815,6 +826,19 @@ static void scr_worker_dispatch(void) {
     }
   }
   scr_worker_view_retain(view);
+  if (event->kind == SCR_WORKER_MESSAGE && event->message && scr_message_readable(event->message)) {
+    /* Compiled listeners with a typed message entry read the message. */
+    if (!scr_exc_pending()) {
+      ScrStr *name = scr_str_new("message", 7);
+      scr_dyn_this_push(view, view->port ? SCR_DYNH_MESSAGE_PORT : SCR_DYNH_WORKER);
+      scr_emitter_emit_message(view->events, name, event->message, scr_message_decode);
+      scr_dyn_this_pop();
+      scr_str_release(name);
+    }
+    scr_worker_view_release(view);
+    scr_mail_event_free(event);
+    return;
+  }
   const char *event_name = event->kind == SCR_WORKER_ONLINE ? "online" :
     event->kind == SCR_WORKER_EXIT ? "exit" : event->kind == SCR_WORKER_ERROR ? "error" : "message";
   ScrDyn *argument = event->message ? scr_message_decode(event->message) :

@@ -38,6 +38,8 @@ When a program has unsupported operations, the report adds a group for each root
     <tr><td><code>compile statically</code></td><td>Statements that compile to native instructions.</td></tr>
     <tr><td><code>in dynamic tier</code></td><td>Of those, the statements in functions that operate on values typed only at runtime, such as <code>any</code> values and untyped JavaScript. Shown when there are any. See <a href="#dynamic-tier">Dynamic tier</a>.</td></tr>
     <tr><td><code>blockers</code></td><td>Unsupported operations with counts, diagnostic codes, reasons, locations, and hints.</td></tr>
+    <tr><td><code>runs at startup</code></td><td>Deferred operations in a JavaScript module's top-level code, which runs when the module loads: at startup for a module the program imports.</td></tr>
+    <tr><td><code>deferred to runtime</code></td><td>Other deferred operations in JavaScript code. Each throws only if it runs.</td></tr>
     <tr><td><code>in unreached code</code></td><td>Blockers in code the entry never reaches. A build never compiles that code, so these cannot fail it.</td></tr>
     <tr><td><code>differs from Node</code></td><td>Sites that compile but can behave differently from Node.js. See <a href="#node-divergences">Node divergences</a>.</td></tr>
     <tr><td><code>npm package compilation</code></td><td>Native package compilation outcomes and refusal reasons.</td></tr>
@@ -46,7 +48,7 @@ When a program has unsupported operations, the report adds a group for each root
 
 Blockers in unreached code and deferred operations in JavaScript packages are listed separately because they don't fail a build. A deferred operation throws a runtime error if it runs, so a successful build doesn't mean every API of a package works; see [unsupported code inside a package](/docs/dependencies#unsupported-code-inside-a-package).
 
-If a function's signature can't compile, the statements in its body count as not compiling, so the percentage reflects how much of the program compiles.
+If a function's signature can't compile, the statements in its body count as not compiling, so the percentage reflects how much of the program compiles. The report still lists the diagnostics of those statements; a use of a parameter whose type can't compile reports `SC2004` back to the signature.
 
 <span id="programs-that-require-dynamic-execution" />
 <span id="analyze-with-dynamic" />
@@ -95,7 +97,7 @@ Coverage and `scriptc build` report the same diagnostic codes. Common ones inclu
 Some code compiles but can behave differently than under Node.js. Coverage reports the cases it can detect as `SC6xxx` warnings, and `scriptc build` prints the same warnings after a successful build. They never fail a build, but `--fail-on=divergences` can fail a CI job on them.
 
 - `SC6001`: a record passed to, stored as, asserted as, or stored as an array element of a record type with different properties is copied, and the program then writes through the copy or compares it by identity.
-- `SC6002`: values of one record type are built in different key orders, so the type keeps its declaration order, an object literal's key order differs from it, and the program observes the order through `JSON.stringify`, `Object.keys`, `Object.values`, `Object.entries`, `for...in`, or console output.
+- `SC6002`: values of one record type are built in key orders scriptc cannot track per value, so the type keeps its declaration order, an object literal's key order differs from it, and the program observes the order through `JSON.stringify`, `Object.keys`, `Object.values`, `Object.entries`, `for...in`, or console output.
 - `SC6003`: `localeCompare` compares a string literal outside the built-in Latin-script collation.
 - `SC6004`: a call passes a class instance to a function that casts it to an unrelated class.
 
@@ -210,6 +212,10 @@ For editors, CI annotations, and other tools, `scriptc coverage --print=diagnost
     <tr>
       <td><code>group</code></td>
       <td>The <code>id</code> of the root-cause group the diagnostic belongs to. A group's <code>primary</code> site is its first in source order.</td>
+    </tr>
+    <tr>
+      <td><code>startup</code></td>
+      <td><code>true</code> on a <code>deferred</code> diagnostic in a module's top-level code, which runs when the module loads. Absent otherwise.</td>
     </tr>
   </tbody>
 </table>

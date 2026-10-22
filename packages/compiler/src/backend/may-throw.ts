@@ -35,7 +35,12 @@ export type MayThrowReason =
  * and a generator's `.return()` unwind through `catch`. */
 export function computeMayThrow(
   mod: IrModule,
-  options: { stackChecks?: boolean; explain?: boolean } = {},
+  options: {
+    stackChecks?: boolean;
+    explain?: boolean;
+    /** computePublishedTypes(mod), when the caller already has it. */
+    published?: ReturnType<typeof computePublishedTypes>;
+  } = {},
 ): {
   fns: Set<string>;
   /** With `explain`: the reason each may-throw function was marked. */
@@ -50,7 +55,8 @@ export function computeMayThrow(
   const terminations = mod.workers === true ? workerTerminationPolls(mod) : null;
   const stackChecks = options.stackChecks === true ? stackCheckedFunctions(mod) : null;
   // Stores that can reach a published object throw the frozen TypeError.
-  const published = computePublishedTypes(mod);
+  const published =
+    options.published !== undefined ? options.published : computePublishedTypes(mod);
   interface Facts {
     throws: boolean;
     callees: string[];

@@ -12961,50 +12961,51 @@ static bool scr_set_to_arr_sparse(const ScrMap *s, ScrArr *out) {
 ScrArr *scr_set_to_arr_f64(const ScrMap *s) {
   ScrArr *out = scr_arr_new(SCR_ELEM_F64, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
-  uint8_t *states = scr_arr_states_end(out);
+  /* A fresh array without states: the values in order. */
   for (size_t i = 0; i < s->nentries; i++) {
     if (!scr_map_entry_live(s, i)) continue;
-    out->data[out->len] = scr_map_entry_at(s, i)->key;
-    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
+    out->data[out->len++] = scr_map_entry_at(s, i)->key;
   }
+  scr_arr_refill(out);
   return out;
 }
 
 ScrArr *scr_set_to_arr_bool(const ScrMap *s) {
   ScrArr *out = scr_arr_new(SCR_ELEM_BOOL, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
-  uint8_t *states = scr_arr_states_end(out);
+  /* A fresh array without states: the values in order. */
   for (size_t i = 0; i < s->nentries; i++) {
     if (!scr_map_entry_live(s, i)) continue;
-    scr_arr_dense_put(out, out->len, scr_map_entry_at(s, i)->key != 0);
-    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
+    scr_arr_dense_put(out, out->len++, scr_map_entry_at(s, i)->key != 0);
   }
+  scr_arr_refill(out);
   return out;
 }
 
 ScrArr *scr_set_to_arr_str(const ScrMap *s) {
   ScrArr *out = scr_arr_new(SCR_ELEM_STR, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
-  uint8_t *states = scr_arr_states_end(out);
+  /* A fresh array without states: the values in order. */
   for (size_t i = 0; i < s->nentries; i++) {
     if (!scr_map_entry_live(s, i)) continue;
     scr_str_retain((ScrStr *)(uintptr_t)scr_map_entry_at(s, i)->key);
-    out->data[out->len] = scr_map_entry_at(s, i)->key;
-    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
+    out->data[out->len++] = scr_map_entry_at(s, i)->key;
   }
+  scr_arr_refill(out);
   return out;
 }
 
 ScrArr *scr_set_to_arr_ref(const ScrMap *s, const ScrArrOps *ops) {
   ScrArr *out = scr_arr_new_ops(ops, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
-  uint8_t *states = scr_arr_states_end(out);
+  /* A fresh array without states: the values in order. */
   for (size_t i = 0; i < s->nentries; i++) {
     if (!scr_map_entry_live(s, i)) continue;
     ops->retain((void *)(uintptr_t)scr_map_entry_at(s, i)->key);
-    out->data[out->len] = scr_map_entry_at(s, i)->key;
-    *scr_arr_state_in(states, out->len++) = SCR_ARR_VALUE;
+    scr_arr_dense_put(out, out->len, scr_map_entry_at(s, i)->key);
+    out->len++;
   }
+  scr_arr_refill(out);
   return out;
 }
 

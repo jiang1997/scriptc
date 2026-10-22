@@ -55,7 +55,7 @@ importers:
         version: 5.9.3
       vercel:
         specifier: 58.1.0
-        version: 58.1.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)
+        version: 58.1.0(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)
       vitest:
         specifier: ^3.0.0
         version: 3.2.7(patch_hash=03a418fae669c2cd9846dc3c49e6c1b8ee7047bbdcda9d4f5d5ee09eb525a1be)(@edge-runtime/vm@3.2.0)(@types/node@24.13.3)(tsx@4.23.0)
@@ -110,8 +110,8 @@ importers:
         specifier: workspace:*
         version: link:../runtime
       tsc-ts:
-        specifier: 0.0.5
-        version: 0.0.5
+        specifier: 0.0.7
+        version: 0.0.7
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -271,14 +271,14 @@ packages:
       effect: ^4.0.0
       redis: '>=5.0.0 <7.0.0'
 
-  '@emnapi/core@2.0.0-alpha.3':
-    resolution: {integrity: sha512-AZypUeJ/yByuxyS7BlSNRDOMLMlROYtjYdIAuBmJssVz1UJDSeYxLrdizhXCFYhedC5bqd/ASy8EuNXbVVXp9g==}
+  '@emnapi/core@1.11.3':
+    resolution: {integrity: sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg==}
 
-  '@emnapi/runtime@2.0.0-alpha.3':
-    resolution: {integrity: sha512-hFPAhMUjJD9BSyCANEISPOogeXC9Zo9ZQl7L6vKnaVsMkCtzznaW/naYypeyl0Gv5rYfWYsZbpixTMpjDJzQeA==}
+  '@emnapi/runtime@1.11.3':
+    resolution: {integrity: sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==}
 
-  '@emnapi/wasi-threads@2.0.1':
-    resolution: {integrity: sha512-9DsSk+o5NBX0CCJT8s0EROGSGxjR/tKu6aBTaVyq+SjAEQH4XcdcRxPBRzsBLizTTJ49MJjF+jgu3qnO9GLQcQ==}
+  '@emnapi/wasi-threads@1.2.3':
+    resolution: {integrity: sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g==}
 
   '@esbuild/aix-ppc64@0.27.0':
     resolution: {integrity: sha512-KuZrd2hRjz01y5JK9mEBSD3Vj3mbCvemhT466rSuJYeE/hjuBrHfjjcjMdTm/sz7au+++sdbJZJmuBwQLuw68A==}
@@ -1360,8 +1360,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@scriptc/threads@0.3.6':
-    resolution: {integrity: sha512-XZb4JhXM/ivhx4MMLxqLLF2mCI28nUK+VVKlCnELO83tacUuGlq7YCe/8LwvzO7fZwy/rCH4+genAYYEc6BF6Q==}
+  '@scriptc/threads@0.4.1':
+    resolution: {integrity: sha512-wKgEBiVc07ZIGNFGwJpV5JbTXJN1N42qG6/g7ipnwt3klsU0nuWH2ToKV9vYH+RQstF7+twq6zMCf2qhUloTHQ==}
     engines: {node: '>=24.0.0'}
 
   '@sinclair/typebox@0.25.24':
@@ -1377,42 +1377,42 @@ packages:
   '@ts-morph/common@0.11.1':
     resolution: {integrity: sha512-7hWZS0NRpEsNV8vWJzg7FEz6V8MaLNeJOmwmghqUXTpzk16V1LLZhdo+4QvE/+zv4cVci0OviuJFnqhEfoV3+g==}
 
-  '@tsc-ts/darwin-arm64@0.0.5':
-    resolution: {integrity: sha512-yP64b2VpAKWG92KepBqxs1P89wpwiheYwNMk4EmmhSl6aw/ImIBrdHYNjvao3sg6FHZCXTc+PB6Vukh6hyQiJQ==}
+  '@tsc-ts/darwin-arm64@0.0.7':
+    resolution: {integrity: sha512-nIaTJKBpG6n60xxRYfBlh02G6aSO2punIvj4qPy8/CXZu0Kw4ra/J3PYJtrtYMIh/eIGo4+f1Q01v5dFPPwZbw==}
     cpu: [arm64]
     os: [darwin]
 
-  '@tsc-ts/darwin-x64@0.0.5':
-    resolution: {integrity: sha512-CEeHOFfpx5H9V3WSq+V7XGU8tfc06nRN818auiRVwuwPHvpti9gHq0HYkvf/43PH1pIGcgf68sQYdIxJhrQDKQ==}
+  '@tsc-ts/darwin-x64@0.0.7':
+    resolution: {integrity: sha512-8ITDyF3FG4SYeS1cV4+oRpbbk0jVsfd23Ww138wbQymbOLYjWPafzj4bymxnIE5kEWjZPVqTFDbaYqgWwNStag==}
     cpu: [x64]
     os: [darwin]
 
-  '@tsc-ts/linux-arm64-gnu@0.0.5':
-    resolution: {integrity: sha512-qwybOqGDEa35eV9x/3WO81ExAUbUMY8288ATC83kUfYGmOAVStaO+JM2IdrsiI8hLWVC7/f0RFgZ+7dyWh9/nA==}
+  '@tsc-ts/linux-arm64-gnu@0.0.7':
+    resolution: {integrity: sha512-nXGjtbM3YrARWOb+nkDaFdhKGSzPf3ofl/gV4x8JnVQ8SgK4IWJ5J0u93sk3mTYgdLj/Gcobp/D3lZ6WIzjKvA==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@tsc-ts/linux-arm64-musl@0.0.5':
-    resolution: {integrity: sha512-6oSw3NbQIrnxxCRuEe190MbMFoOrM+P+u1usascQMgSjsMcVRnJ/ztvTnRrCDtfPEHJ5EC8drgWIpcdrhGsB0w==}
+  '@tsc-ts/linux-arm64-musl@0.0.7':
+    resolution: {integrity: sha512-hSjpQsOhrLaDsbvEO5EH9nC3Vy0WAt3aB+GejytEh9fl4F3kT0BasbBP4wJqu6S5SG9upLW7ZClXiNVnGYDGlQ==}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@tsc-ts/linux-x64-gnu@0.0.5':
-    resolution: {integrity: sha512-KrlBLUcG7M6p7lN+ke+kHVLqy7IiY/H0FxFZzq5slXanhrps/BfjdkUahsyREg7KVprr08xFuXqJTBtLEI4eow==}
+  '@tsc-ts/linux-x64-gnu@0.0.7':
+    resolution: {integrity: sha512-MCU2MFefQGG/++nepg09BtYnsN2mVzeYfIS6GW30ChxUt2nJUMkEvzbDim9czDevW4LRqHgfnwEt+hs2ud1SDQ==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@tsc-ts/linux-x64-musl@0.0.5':
-    resolution: {integrity: sha512-fr8yGzkocCcTYoE+NwC+/WGPNteQ2GmOPJTy/z9NcsLchnpSIZ1fzFll15UYPKQlwQdNRJXxKK3npVBtLRdHTg==}
+  '@tsc-ts/linux-x64-musl@0.0.7':
+    resolution: {integrity: sha512-abTZZkn74772MPABStuXWJ1GHI07nbEf4a3Nwl7NYI5mLFYxeLSbq6+cGh0BUJeBeMhFNsjtQ5/j5sGmsrJ2tg==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@tsc-ts/win32-x64-msvc@0.0.5':
-    resolution: {integrity: sha512-SQwufJafzsiOBYncHOxYkyELWjLlBijcKB+xOs6hr6Lxxp5MMLoPtvDFNG88c7G5xv2TDb1XbvyxnjQltr6SHw==}
+  '@tsc-ts/win32-x64-msvc@0.0.7':
+    resolution: {integrity: sha512-EOhLTkuWYytJYklR5BI1jRtTpEIPh1FQJKD8R37qqlcnPrELlRO6Nc2ncDpdCoYbpN+KrewIVPB3xD4o3VGUaw==}
     cpu: [x64]
     os: [win32]
 
@@ -2577,8 +2577,8 @@ packages:
   ts-toolbelt@6.15.5:
     resolution: {integrity: sha512-FZIXf1ksVyLcfr7M317jbB67XFJhOO1YqdTcuGaq9q5jLUoTikukZ+98TPjKiP2jC5CgmYdWWYs0s2nLSU0/1A==}
 
-  tsc-ts@0.0.5:
-    resolution: {integrity: sha512-Eea+zNv7y696pqNZtXBd0AX7/6PXIhR7aaEb0EhgpHadbk7VEiURD94/NngeLpYWts2tPjetkpwFLJY0+6yOnQ==}
+  tsc-ts@0.0.7:
+    resolution: {integrity: sha512-KRWTXRUvwMXi4At6xOWPDa/0BreY3MR2tPHooEMNWLZUA2eLphNe7PJiHclPLLn9RCnHY4ffDTTeF5hqgyBvtA==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2840,18 +2840,18 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@emnapi/core@2.0.0-alpha.3':
+  '@emnapi/core@1.11.3':
     dependencies:
-      '@emnapi/wasi-threads': 2.0.1
+      '@emnapi/wasi-threads': 1.2.3
       tslib: 2.8.1
     optional: true
 
-  '@emnapi/runtime@2.0.0-alpha.3':
+  '@emnapi/runtime@1.11.3':
     dependencies:
       tslib: 2.8.1
     optional: true
 
-  '@emnapi/wasi-threads@2.0.1':
+  '@emnapi/wasi-threads@1.2.3':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -3090,10 +3090,10 @@ snapshots:
       '@napi-rs/keyring-win32-ia32-msvc': 1.2.0
       '@napi-rs/keyring-win32-x64-msvc': 1.2.0
 
-  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
+  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)':
     dependencies:
-      '@emnapi/core': 2.0.0-alpha.3
-      '@emnapi/runtime': 2.0.0-alpha.3
+      '@emnapi/core': 1.11.3
+      '@emnapi/runtime': 1.11.3
       '@tybys/wasm-util': 0.10.3
     optional: true
 
@@ -3159,9 +3159,9 @@ snapshots:
   '@oxc-transform/binding-openharmony-arm64@0.111.0':
     optional: true
 
-  '@oxc-transform/binding-wasm32-wasi@0.111.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
+  '@oxc-transform/binding-wasm32-wasi@0.111.0(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)':
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
@@ -3340,9 +3340,9 @@ snapshots:
   '@rolldown/binding-openharmony-arm64@1.0.0-rc.1':
     optional: true
 
-  '@rolldown/binding-wasm32-wasi@1.0.0-rc.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
+  '@rolldown/binding-wasm32-wasi@1.0.0-rc.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)':
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
@@ -3439,7 +3439,7 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.2':
     optional: true
 
-  '@scriptc/threads@0.3.6': {}
+  '@scriptc/threads@0.4.1': {}
 
   '@sinclair/typebox@0.25.24': {}
 
@@ -3454,25 +3454,25 @@ snapshots:
       mkdirp: 1.0.4
       path-browserify: 1.0.1
 
-  '@tsc-ts/darwin-arm64@0.0.5':
+  '@tsc-ts/darwin-arm64@0.0.7':
     optional: true
 
-  '@tsc-ts/darwin-x64@0.0.5':
+  '@tsc-ts/darwin-x64@0.0.7':
     optional: true
 
-  '@tsc-ts/linux-arm64-gnu@0.0.5':
+  '@tsc-ts/linux-arm64-gnu@0.0.7':
     optional: true
 
-  '@tsc-ts/linux-arm64-musl@0.0.5':
+  '@tsc-ts/linux-arm64-musl@0.0.7':
     optional: true
 
-  '@tsc-ts/linux-x64-gnu@0.0.5':
+  '@tsc-ts/linux-x64-gnu@0.0.7':
     optional: true
 
-  '@tsc-ts/linux-x64-musl@0.0.5':
+  '@tsc-ts/linux-x64-musl@0.0.7':
     optional: true
 
-  '@tsc-ts/win32-x64-msvc@0.0.5':
+  '@tsc-ts/win32-x64-msvc@0.0.7':
     optional: true
 
   '@tybys/wasm-util@0.10.3':
@@ -3563,7 +3563,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@vercel/backends@0.8.27(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)':
+  '@vercel/backends@0.8.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)':
     dependencies:
       '@vercel/build-utils': 13.36.0
       '@vercel/nft': 1.10.0(rollup@4.62.2)
@@ -3571,10 +3571,10 @@ snapshots:
       execa: 3.2.0
       fs-extra: 11.1.0
       get-port: 5.1.1
-      oxc-transform: 0.111.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
+      oxc-transform: 0.111.0(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
       path-to-regexp: 8.3.0
       resolve.exports: 2.0.3
-      rolldown: 1.0.0-rc.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
+      rolldown: 1.0.0-rc.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
       srvx: 0.11.16
       ts-morph: 12.0.0
       tsx: 4.21.0
@@ -3600,9 +3600,9 @@ snapshots:
       cjs-module-lexer: 1.2.3
       es-module-lexer: 1.5.0
 
-  '@vercel/cervel@0.1.35(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)':
+  '@vercel/cervel@0.1.35(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)':
     dependencies:
-      '@vercel/backends': 0.8.27(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)
+      '@vercel/backends': 0.8.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
@@ -3638,9 +3638,9 @@ snapshots:
 
   '@vercel/error-utils@2.2.0': {}
 
-  '@vercel/express@0.1.118(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)':
+  '@vercel/express@0.1.118(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)':
     dependencies:
-      '@vercel/cervel': 0.1.35(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)
+      '@vercel/cervel': 0.1.35(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)
       '@vercel/nft': 1.10.0(rollup@4.62.2)
       '@vercel/node': 5.9.0(rollup@4.62.2)
       '@vercel/static-config': 3.4.0
@@ -4442,7 +4442,7 @@ snapshots:
 
   os-paths@4.4.0: {}
 
-  oxc-transform@0.111.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3):
+  oxc-transform@0.111.0(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3):
     optionalDependencies:
       '@oxc-transform/binding-android-arm-eabi': 0.111.0
       '@oxc-transform/binding-android-arm64': 0.111.0
@@ -4460,7 +4460,7 @@ snapshots:
       '@oxc-transform/binding-linux-x64-gnu': 0.111.0
       '@oxc-transform/binding-linux-x64-musl': 0.111.0
       '@oxc-transform/binding-openharmony-arm64': 0.111.0
-      '@oxc-transform/binding-wasm32-wasi': 0.111.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
+      '@oxc-transform/binding-wasm32-wasi': 0.111.0(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
       '@oxc-transform/binding-win32-arm64-msvc': 0.111.0
       '@oxc-transform/binding-win32-ia32-msvc': 0.111.0
       '@oxc-transform/binding-win32-x64-msvc': 0.111.0
@@ -4604,7 +4604,7 @@ snapshots:
 
   reusify@1.1.0: {}
 
-  rolldown@1.0.0-rc.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3):
+  rolldown@1.0.0-rc.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3):
     dependencies:
       '@oxc-project/types': 0.110.0
       '@rolldown/pluginutils': 1.0.0-rc.1
@@ -4619,7 +4619,7 @@ snapshots:
       '@rolldown/binding-linux-x64-gnu': 1.0.0-rc.1
       '@rolldown/binding-linux-x64-musl': 1.0.0-rc.1
       '@rolldown/binding-openharmony-arm64': 1.0.0-rc.1
-      '@rolldown/binding-wasm32-wasi': 1.0.0-rc.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
+      '@rolldown/binding-wasm32-wasi': 1.0.0-rc.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
       '@rolldown/binding-win32-arm64-msvc': 1.0.0-rc.1
       '@rolldown/binding-win32-x64-msvc': 1.0.0-rc.1
     transitivePeerDependencies:
@@ -4813,17 +4813,17 @@ snapshots:
 
   ts-toolbelt@6.15.5: {}
 
-  tsc-ts@0.0.5:
+  tsc-ts@0.0.7:
     dependencies:
-      '@scriptc/threads': 0.3.6
+      '@scriptc/threads': 0.4.1
     optionalDependencies:
-      '@tsc-ts/darwin-arm64': 0.0.5
-      '@tsc-ts/darwin-x64': 0.0.5
-      '@tsc-ts/linux-arm64-gnu': 0.0.5
-      '@tsc-ts/linux-arm64-musl': 0.0.5
-      '@tsc-ts/linux-x64-gnu': 0.0.5
-      '@tsc-ts/linux-x64-musl': 0.0.5
-      '@tsc-ts/win32-x64-msvc': 0.0.5
+      '@tsc-ts/darwin-arm64': 0.0.7
+      '@tsc-ts/darwin-x64': 0.0.7
+      '@tsc-ts/linux-arm64-gnu': 0.0.7
+      '@tsc-ts/linux-arm64-musl': 0.0.7
+      '@tsc-ts/linux-x64-gnu': 0.0.7
+      '@tsc-ts/linux-x64-musl': 0.0.7
+      '@tsc-ts/win32-x64-msvc': 0.0.7
 
   tslib@2.8.1:
     optional: true
@@ -4894,9 +4894,9 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  vercel@58.1.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2):
+  vercel@58.1.0(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2):
     dependencies:
-      '@vercel/backends': 0.8.27(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)
+      '@vercel/backends': 0.8.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)
       '@vercel/blob': 2.4.0
       '@vercel/build-utils': 13.36.0
       '@vercel/cli-auth': 0.3.1
@@ -4904,7 +4904,7 @@ snapshots:
       '@vercel/container': 0.1.0
       '@vercel/detect-agent': 1.2.3
       '@vercel/elysia': 0.1.104(rollup@4.62.2)
-      '@vercel/express': 0.1.118(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(rollup@4.62.2)
+      '@vercel/express': 0.1.118(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(rollup@4.62.2)
       '@vercel/fastify': 0.1.107(rollup@4.62.2)
       '@vercel/fun': 1.3.0
       '@vercel/go': 3.10.2

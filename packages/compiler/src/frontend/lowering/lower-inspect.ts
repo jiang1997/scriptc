@@ -1,4 +1,5 @@
 import { keyedHelperName } from "./stable-names.js";
+import { perKeyOrder } from "./key-order-witness.js";
 import {
   dynUndefinedExpr,
   boolLit,
@@ -40,6 +41,7 @@ import {
   isDynTypedRefType,
   recordTextCodecClass,
   shapeHasAccessorSlots,
+  shapeKeyOrders,
   typeKey,
 } from "../../ir/ir.js";
 import type { ClassInfo } from "./lower-classes.js";
@@ -1647,7 +1649,12 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
           });
         }
         body.push(depthGate("[Object]"), ...begin());
-        for (const fname of order) {
+        // One walk per key order (see perKeyOrder).
+        const orders = shapeKeyOrders(current);
+        const walks = orders.map((): IrStmt[] => []);
+        for (const [k, fname] of orders.flatMap((order, k) =>
+          order.map((name) => [k, name] as const),
+        )) {
           const ft = byName.get(fname);
           if (!ft) continue;
           const show = entry(
@@ -1655,12 +1662,13 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
             boolLit(false, loc),
           );
           const present = lowerer.recordFieldPresent(v(), t.shapeId, fname, loc);
-          body.push(
+          walks[k]!.push(
             present.kind === "recordHas"
               ? { kind: "if", cond: present, then: [show], else_: null, loc }
               : show,
           );
         }
+        body.push(...perKeyOrder(current, v(), walks, loc));
         body.push(
           ret(end(strLit("", loc), strLit("{", loc), strLit("}", loc), false, boolLit(false, loc))),
         );

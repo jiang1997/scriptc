@@ -11,6 +11,7 @@ import {
   type IrExpr,
   type IrFunction,
   classValueConstructor,
+  type IrType,
 } from "../../ir/ir.js";
 import { liveRefView } from "./expr-stream-bridges.js";
 import { typedRefConstructor, vAdapters } from "./shapes.js";
@@ -29,7 +30,6 @@ import {
   mangleClassStruct,
   mangleFnClosure,
   mangleFunction,
-  mangleWrapper,
   mangleVtStruct,
   mangleAsyncDirectSpawn,
 } from "../mangle.js";
@@ -56,6 +56,7 @@ import {
 import type { Writes } from "./reference-writes.js";
 import { emitJsIcCall, jsIcSiteOf } from "./js-ic.js";
 import { emitClassMembership, emitDowncastGuard } from "./narrow-guards.js";
+import { registerReplay } from "./emit-journal.js";
 
 export function emitCallExpr(
   host: LlvmEmitterContext,
@@ -816,22 +817,7 @@ export function emitCallExpr(
       const pushReceiver = (): void => {
         if (lazyReceiver) {
           const t = lazyReceiver.type;
-          const key = typeKey(t);
-          let recipe = host.typedRefRecipes.get(key);
-          if (recipe === undefined) {
-            const adapter = host.liveDynRefAdapter(t);
-            const rc = vAdapters(host.shapeHost, t);
-            const ctor = typedRefConstructor(host.shapeHost, t);
-            const kind = ctor.endsWith("_traced") ? 2 : ctor.endsWith("_observed") ? 1 : 0;
-            // The box binds the same live view eager boxing attaches, so
-            // `in`, for-in and Object.keys see the class members.
-            const view = liveRefView(adapter);
-            recipe = `@sc_trr_${host.typedRefRecipes.size}`;
-            host.typedRefRecipes.set(key, recipe);
-            host.resolveThunkDefs.push(
-              `${recipe} = internal constant { ptr, ptr, ptr, ${host.sizeType}, ptr, ptr, i32, i32, ptr } { ptr ${rc.retain}, ptr ${rc.release}, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit}, i32 ${kind}, i32 ${view?.code ?? 0}, ptr ${view?.ops ?? "null"} }`,
-            );
-          }
+          const recipe = typedRefRecipe(host, t);
           host.declare("declare void @scr_dyn_this_push_typed(ptr, ptr)");
           B.line(`call void @scr_dyn_this_push_typed(ptr ${lazyReceiver.name}, ptr ${recipe})`);
           return;
@@ -839,21 +825,9 @@ export function emitCallExpr(
         host.declare("declare void @scr_dyn_this_push_dyn(ptr)");
         B.line(`call void @scr_dyn_this_push_dyn(ptr ${receiver?.name ?? "null"})`);
       };
-      const knownName =
-        e.callee.kind === "closure"
-          ? e.callee.fnName
-          : e.callee.kind === "varRef"
-            ? host.currentConstantCallbacks.get(e.callee.localId)
-            : undefined;
-      const candidate = knownName ? host.fnByName.get(knownName) : undefined;
-      const known = candidate && !candidate.async && !candidate.generator ? candidate : undefined;
-      let direct: string | undefined;
-      if (known) {
-        if (known.captures === undefined) {
-          host.fnValues.add(known.name);
-          direct = `@${mangleWrapper(known.name)}`;
-        } else direct = `@${host.callTarget(known.name)}`;
-      }
+      const target = host.knownCallbackTarget(e.callee);
+      const known = target?.known;
+      const direct = target?.direct;
       // A known closure body that borrows reference parameters is entered
       // directly with lent arguments, as a direct call to a borrowing body
       // is: an argument is read without a reference when neither a later
@@ -939,7 +913,13 @@ export function emitCallExpr(
       let pending = host.indirectMayThrow;
       let pendingGuard: string | undefined;
       let t: string;
-      if (direct && e.callee.kind === "closure") {
+      // A literal closure, or a binding an enclosing callback loop version
+      // proved to hold its known function, enters it directly.
+      if (
+        direct &&
+        (e.callee.kind === "closure" ||
+          (e.callee.kind === "varRef" && host.knownCallbacks.has(e.callee.localId)))
+      ) {
         t = invoke(lending ?? direct, !host.receiverReaders.ignores(known!));
         if (quiet) pending = false;
       } else {
@@ -1500,3 +1480,28 @@ function emitNumericIndexRead(
   B.line(`${result} = phi ptr [ ${fast}, %${fastLabel} ], [ ${read.name}, %${slowLabel} ]`);
   return host.own({ name: result, type: e.type });
 }
+
+/** The recipe a lazily boxed receiver of type `t` is built from: its RC
+ * adapters, type key and live view, one per type. */
+function typedRefRecipe(host: LlvmEmitterContext, t: IrType): string {
+  const key = typeKey(t);
+  let recipe = host.typedRefRecipes.get(key);
+  if (recipe !== undefined) return recipe;
+  const adapter = host.liveDynRefAdapter(t);
+  const rc = vAdapters(host.shapeHost, t);
+  const ctor = typedRefConstructor(host.shapeHost, t);
+  const kind = ctor.endsWith("_traced") ? 2 : ctor.endsWith("_observed") ? 1 : 0;
+  // The box binds the same live view eager boxing attaches, so `in`,
+  // for-in and Object.keys see the class members.
+  const view = liveRefView(adapter);
+  recipe = `@sc_trr_${host.typedRefRecipes.size}`;
+  host.typedRefRecipes.set(key, recipe);
+  host.journal?.allocated(recipe, "typedRefRecipe", [t]);
+  host.resolveThunkDefs.push(
+    `${recipe} = internal constant { ptr, ptr, ptr, ${host.sizeType}, ptr, ptr, i32, i32, ptr } { ptr ${rc.retain}, ptr ${rc.release}, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit}, i32 ${kind}, i32 ${view?.code ?? 0}, ptr ${view?.ops ?? "null"} }`,
+  );
+  host.journal?.built();
+  return recipe;
+}
+
+registerReplay("typedRefRecipe", (host, args) => typedRefRecipe(host, args[0] as IrType));

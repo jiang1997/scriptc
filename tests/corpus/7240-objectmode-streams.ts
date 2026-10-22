@@ -2,7 +2,8 @@
 // and Writable in pipeline(), typed 'data' listeners, a Transform with
 // readableObjectMode parsing bytes into records, an object-mode Duplex,
 // a PassThrough's object-counted high-water mark, and Readable.from over
-// a Map, a Set of records and an array mixing strings and Buffers.
+// a Map, a Set of records and an array mixing strings and Buffers, and
+// byte-mode chunk parameters typed Buffer | string.
 import { Duplex, PassThrough, Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -119,6 +120,34 @@ async function collections(): Promise<void> {
   for await (const t of Readable.from(tags)) console.log("set", JSON.stringify(t));
 }
 
+// Byte-mode sides pass Buffers: a chunk parameter typed as a supertype
+// of Buffer takes them, inline and as an underscore method, and
+// super(undefined) leaves the stream in byte mode.
+class Collector extends Writable {
+  constructor() {
+    super(undefined);
+  }
+  _write(chunk: Buffer | string, _encoding: BufferEncoding, cb: (err?: Error | null) => void): void {
+    console.log("collector", Buffer.isBuffer(chunk), typeof chunk === "string" ? chunk : chunk.toString());
+    cb();
+  }
+}
+
+async function byteChunks(): Promise<void> {
+  const inline = new Writable({
+    write(chunk: Buffer | string, _encoding: BufferEncoding, cb: (err?: Error | null) => void): void {
+      console.log("inline", Buffer.isBuffer(chunk), typeof chunk === "string" ? chunk : chunk.toString());
+      cb();
+    },
+  });
+  inline.write("one");
+  inline.end(Buffer.from("two"));
+  await new Promise<void>((resolve) => inline.on("finish", () => resolve()));
+  const collector = new Collector();
+  collector.end("three");
+  await new Promise<void>((resolve) => collector.on("finish", () => resolve()));
+}
+
 async function main(): Promise<void> {
   await records();
   await collections();
@@ -126,5 +155,7 @@ async function main(): Promise<void> {
   sided();
   duplex();
   passthrough();
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  await byteChunks();
 }
 main();

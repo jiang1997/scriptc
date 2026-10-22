@@ -536,6 +536,27 @@ static void check_mixed_dead_structure_narrows(void) {
   check(live <= narrowed, "a pass that freed a dead mature and old structure did not narrow the growth fraction");
 }
 
+/* scr_cyc_set_growth_cap sets the cap SCR_CYCLE_GROWTH_CAP sets, and a
+ * fraction already widened past it starts at it: after passes that found
+ * nothing widened the old level's fraction to the configured cap, a cap of
+ * 1 has the next dead cycle go once the heap has doubled past the floor.
+ * Restores the configured cap. */
+static void check_program_growth_cap(void) {
+  enum { FLOOR = 4096 };
+  if (getenv("SCR_CYCLE_GROWTH_CAP") != NULL) return; /* it takes precedence */
+  size_t slack = 2 * configured_nursery_threshold() + 2;
+  size_t live = 0;
+  for (int i = 0; i < 4; i++) live = grow_dead_cycle_until_full_pass(0, false);
+  check(live > FLOOR + FLOOR * configured_growth_cap(),
+        "passes that found nothing did not widen the growth fraction to the cap");
+  scr_cyc_set_growth_cap(1);
+  for (int i = 0; i < 4; i++) {
+    live = grow_dead_cycle_until_full_pass(0, false);
+    check(live <= FLOOR + FLOOR + slack, "a program's growth cap of 1 did not bound the heap");
+  }
+  scr_cyc_set_growth_cap(0);
+}
+
 /* The phase sweep (scr_collect_cycles_phase) is for a caller that knows a
  * phase's data has just died: it sweeps, and the growth schedule starts
  * over. After passes that find nothing have widened the old level's
@@ -1500,6 +1521,7 @@ int main(void) {
   check_large_old_buffer_with_nursery_candidates();
   check_unjudged_backlog_follows_growth();
   check_acyclic_objects();
+  check_program_growth_cap();
   printf("cycle collection checks passed: threshold=%zu growth_cap=%zu\n",
          configured_nursery_threshold(), configured_growth_cap());
   return 0;

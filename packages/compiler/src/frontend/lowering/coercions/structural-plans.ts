@@ -1,7 +1,7 @@
 import { planRecordUnionLift, planRecordUnionWrap } from "../union-retag.js";
 import type { WidthLift } from "../width-lift.js";
 import type { IrType } from "../../../ir/ir.js";
-import { isUnitType, typeEquals, UNDEFINED_T } from "../../../ir/ir.js";
+import { canDynCheckTo, isUnitType, typeEquals, UNDEFINED_T } from "../../../ir/ir.js";
 import { type ClassInfo, findMethodOn, findGenericMethodOn } from "../lower-classes.js";
 import type { Lowerer } from "../lowerer.js";
 
@@ -20,6 +20,22 @@ export function widthLiftPlan(lowerer: Lowerer, src: IrType, dst: IrType): Width
   // into `unknown[]` — tsc's top type over the width family's copies).
   if (dst.kind === "dyn" && src.kind !== "dyn" && lowerer.dynConvertible(src)) {
     return { how: "dynIn" };
+  }
+  // An 'unknown' (dyn) SOURCE field into a typed slot — a field TypeScript
+  // types `any` (a JSON.parse read), which the checker lets into any
+  // declared field type: the checked extraction, the same dynCheck a
+  // typed binding initialized from that value applies.
+  if (
+    src.kind === "dyn" &&
+    dst.kind !== "dyn" &&
+    dst.kind !== "union" &&
+    canDynCheckTo(
+      dst,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    )
+  ) {
+    return { how: "dynOut" };
   }
   if (dst.kind === "union") {
     if (src.kind === "union") {
@@ -107,6 +123,10 @@ export function widthLiftPlan(lowerer: Lowerer, src: IrType, dst: IrType): Width
       ) {
         return { how: "discriminantRoute" };
       }
+    }
+    if (selected.length === 2 && src.kind === "record") {
+      const route = presenceRoute(lowerer, src.shapeId, selected[0]!, selected[1]!);
+      if (route) return route;
     }
     if (selected.length !== 1) return null;
     return { how: "liftWrap", tag: selected[0]!.tag, arm: selected[0]!.arm };
@@ -198,6 +218,42 @@ export function widthLiftPlan(lowerer: Lowerer, src: IrType, dst: IrType): Width
       return { how: "tupleArr" };
     }
     return null;
+  }
+  return null;
+}
+
+/** Two record arms a source record fits, where one arm declares a field
+ * the other lacks and the source types that field `T | undefined`
+ * (`{ count, errors: errs.length ? errs : undefined }` into `{ count;
+ * errors: string[] } | { count }`): the field's value picks the arm at
+ * run time. Null for any other pair. */
+function presenceRoute(
+  lowerer: Lowerer,
+  sourceId: string,
+  a: { tag: number; arm: IrType },
+  b: { tag: number; arm: IrType },
+): WidthLift | null {
+  const source = lowerer.shapes.get(sourceId);
+  if (!source || source.tuple || source.indexValue || a.arm.kind !== "record") return null;
+  if (b.arm.kind !== "record") return null;
+  const shapeA = lowerer.shapes.get(a.arm.shapeId);
+  const shapeB = lowerer.shapes.get(b.arm.shapeId);
+  if (!shapeA || !shapeB) return null;
+  const optional = (t: IrType): boolean =>
+    t.kind === "union" && lowerer.armTag(t.unionId, UNDEFINED_T) >= 0;
+  for (const [present, absent, presentShape, absentShape] of [
+    [a, b, shapeA, shapeB],
+    [b, a, shapeB, shapeA],
+  ] as const) {
+    const extra = presentShape.fields.filter(
+      (f) => !absentShape.fields.some((g) => g.name === f.name),
+    );
+    if (extra.length !== 1 || optional(extra[0]!.type)) continue;
+    if (absentShape.fields.some((g) => !presentShape.fields.some((f) => f.name === g.name)))
+      continue;
+    const field = source.fields.find((f) => f.name === extra[0]!.name);
+    if (!field || !optional(field.type)) continue;
+    return { how: "presenceRoute", field: field.name, present, absent };
   }
   return null;
 }

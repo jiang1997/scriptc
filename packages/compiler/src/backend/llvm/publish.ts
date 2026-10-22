@@ -31,6 +31,13 @@ import type { InlineUnionFields } from "./inline-unions.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 
 export interface PublishHost {
+  /** Chunk emitters only (emit-journal.ts): EmitJournal's allocated, built,
+   * opened, used and entry. */
+  journalAllocated?: ((name: string, op: string, args: readonly unknown[]) => void) | undefined;
+  journalBuilt?: (() => void) | undefined;
+  journalOpened?: ((op: string) => void) | undefined;
+  journalUsed?: ((name: string, op: string, args: readonly unknown[]) => void) | undefined;
+  journalEntry?: ((table: string, key: string, value: unknown) => void) | undefined;
   declare(decl: string): void;
   /** An interned NUL-terminated constant. */
   cstr(text: string): string;
@@ -103,6 +110,14 @@ export class PublishWalkers {
 
   constructor(private readonly host: PublishHost) {}
 
+  /** Journal replay (emit-journal.ts): builds or finds the walker a chunk
+   * emitter recorded, and answers its name. */
+  replayHelper(op: string, args: readonly unknown[]): string {
+    if (op === "publish.walker")
+      return this.walker(args[0] as IrType, args[1] as string, args[2] as SrcLoc)!;
+    return this.refusal(args[0] as string, args[1] as string);
+  }
+
   /** The definitions emitted so far (module-level LLVM text). */
   defs(): string[] {
     return this.defsOut;
@@ -119,6 +134,7 @@ export class PublishWalkers {
     }
     const fn = this.walker(t, "the published value", loc);
     if (fn === null) return [];
+    this.host.journalUsed?.(fn, "publish.walker", [t, "the published value", loc]);
     this.host.declare(`declare void @scr_publish(ptr, ptr)`);
     return [`  call void @scr_publish(ptr ${v}, ptr ${fn})`];
   }
@@ -156,8 +172,10 @@ export class PublishWalkers {
     if (known !== undefined) return known;
     const sym = `@sc_pub_${this.counter++}`;
     this.walkers.set(key, sym);
+    this.host.journalOpened?.("publish.walker");
     const body = this.body(t, sym, path, loc);
     this.defsOut.push(...body, ``);
+    this.host.journalBuilt?.();
     return sym;
   }
 
@@ -172,6 +190,7 @@ export class PublishWalkers {
     if (known !== undefined) return known;
     const sym = `@sc_pub_${this.counter++}`;
     this.refusals.set(key, sym);
+    this.host.journalOpened?.("publish.refusal");
     this.host.declare(`declare void @scr_pub_refuse_at(ptr, ptr, ptr)`);
     this.defsOut.push(
       `define internal void ${sym}(ptr %o, ptr %ctx) ${FN_ATTRS} { ; refuse ${llvmComment(detail)}`,
@@ -181,6 +200,7 @@ export class PublishWalkers {
       `}`,
       ``,
     );
+    this.host.journalBuilt?.();
     return sym;
   }
 

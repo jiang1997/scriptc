@@ -508,7 +508,10 @@ export function dynamicFieldStores(
   };
   const dynWritten = new Set<string>();
   let dynWritesAll = false;
-  for (const fn of mod.functions)
+  // A store whose key is not a literal names every field: later stores add
+  // nothing, so the walk stops there.
+  for (const fn of mod.functions) {
+    if (dynWritesAll) break;
     walkFunction(fn, {
       expr: (e) => {
         if (dynWritesAll) return;
@@ -524,6 +527,7 @@ export function dynamicFieldStores(
         }
       },
     });
+  }
   return { all: dynWritesAll, names: dynWritten };
 }
 
@@ -536,6 +540,22 @@ export function dynamicallyStoredFamilies(
   slots: Int32Slots,
   stores?: DynamicFieldStores,
 ): Set<string> {
+  const records = new Map((mod.records ?? []).map((r) => [r.id, r]));
+  const unions = new Map((mod.unions ?? []).map((u) => [u.id, u]));
+  // A live dyn view (typed-ref capsule) of an instance writes back into
+  // its fields only after a runtime store into the capsule; the commit then
+  // writes every field from the view, which holds the exact snapshot value
+  // of any property no store named. So reaching dynamic code disqualifies
+  // exactly the field names some dynamic store in the program can name.
+  const { all: dynWritesAll, names: dynWritten } =
+    stores ?? dynamicFieldStores(mod, records, unions);
+  const storable = (field: { name: string; type: IrType }): boolean =>
+    field.type.kind === "f64" &&
+    !field.name.startsWith("%") &&
+    (dynWritesAll || dynWritten.has(field.name));
+  const families = new Set<string>();
+  // Without a field some store can name, no class is worth exposing.
+  if (!(mod.classes ?? []).some((cls) => cls.fields.some(storable))) return families;
   const classes = new Map((mod.classes ?? []).map((c) => [c.name, c]));
   const children = new Map<string, string[]>();
   for (const cls of classes.values())
@@ -554,8 +574,6 @@ export function dynamicallyStoredFamilies(
     }
     return out;
   };
-  const records = new Map((mod.records ?? []).map((r) => [r.id, r]));
-  const unions = new Map((mod.unions ?? []).map((u) => [u.id, u]));
   const exposedClasses = new Set<string>();
   const seenNamed = new Set<string>();
   let exposeAll = false;
@@ -596,13 +614,6 @@ export function dynamicallyStoredFamilies(
         });
     }
   };
-  // A live dyn view (typed-ref capsule) of an instance writes back into
-  // its fields only after a runtime store into the capsule; the commit then
-  // writes every field from the view, which holds the exact snapshot value
-  // of any property no store named. So reaching dynamic code disqualifies
-  // exactly the field names some dynamic store in the program can name.
-  const { all: dynWritesAll, names: dynWritten } =
-    stores ?? dynamicFieldStores(mod, records, unions);
   for (const fn of mod.functions)
     walkFunction(fn, {
       expr: (e) => {
@@ -628,16 +639,10 @@ export function dynamicallyStoredFamilies(
         if (s.kind === "throw") expose(s.value.type);
       },
     });
-  const families = new Set<string>();
   for (const cls of classes.values()) {
     if (!exposeAll && !exposedClasses.has(cls.name)) continue;
     for (const field of cls.fields)
-      if (
-        field.type.kind === "f64" &&
-        !field.name.startsWith("%") &&
-        (dynWritesAll || dynWritten.has(field.name))
-      )
-        families.add(slots.family(cls.name, field.name)!);
+      if (storable(field)) families.add(slots.family(cls.name, field.name)!);
   }
   return families;
 }
@@ -1058,12 +1063,18 @@ export function analyzeInt32Slots(mod: IrModule, inputs: Int32SlotInputs = {}): 
     if (params) for (const id of params.keys()) reads(`param:${fn.name}\0${id}`, fn.name);
     // Range facts are consulted only at writes into candidate slots; slots
     // are only ever dropped, so a body without such a write needs none.
-    const ranges: IntegerRanges = hasCandidateWrite(fn)
+    const candidate = hasCandidateWrite(fn);
+    const ranges: IntegerRanges = candidate
       ? analyzeIntegerRanges(numeric(fn), slots.facts(fn.name))
       : new Map();
     if (ranges.size > 0) lastWrites.set(fn.name, slotWrites(fn, ranges, functions));
     else lastWrites.delete(fn.name);
     const proven: IrExpr[] = [];
+    // The walk below acts only at writes into candidate slots.
+    if (!candidate) {
+      provenByFunction.set(fn.name, proven);
+      continue;
+    }
     const int32 = (e: IrExpr): boolean => withinInt32(ranges.get(e));
     // An int32 written into a slot still assumed non-negative: widen the
     // assumption when the value may be negative, and reanalyze its readers.

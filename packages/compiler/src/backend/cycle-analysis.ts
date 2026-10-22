@@ -11,7 +11,7 @@ import {
   STRING,
   VOID,
 } from "../ir/ir.js";
-import { computeCycleMutability, fieldKey } from "./cycle-mutability.js";
+import { type CycleMutability, computeCycleMutability, fieldKey } from "./cycle-mutability.js";
 
 /** Cycle capability for native code generation.
  * Nodes are shape units and unions; edges are the references their fields
@@ -38,8 +38,10 @@ import { computeCycleMutability, fieldKey } from "./cycle-mutability.js";
 export function computeTraced(
   mod: IrModule,
   stores?: DynamicFieldStores,
+  /** computeCycleMutability's answer for this module, when the caller has it. */
+  precomputed?: CycleMutability,
 ): { shapes: Set<string>; unions: Set<string> } {
-  const { shapes, unions } = analyzeCycles(mod, false, stores);
+  const { shapes, unions } = analyzeCycles(mod, false, stores, precomputed);
   return { shapes, unions };
 }
 
@@ -93,6 +95,7 @@ function analyzeCycles(
   mod: IrModule,
   labels: boolean,
   stores?: DynamicFieldStores,
+  precomputed?: CycleMutability,
 ): {
   shapes: Set<string>;
   unions: Set<string>;
@@ -125,7 +128,7 @@ function analyzeCycles(
   const lifetimeRoots = new Set(mod.contracts?.programLifetime ?? []);
   const programLifetime = (className: string): boolean =>
     lifetimeRoots.size > 0 && lifetimeRoots.has(rootOf(className));
-  const mutability = computeCycleMutability(mod, unitOfClass, stores);
+  const mutability = precomputed ?? computeCycleMutability(mod, unitOfClass, stores);
   const shapeDefs = [
     ...classes.map((c) => ({
       key: `object:${c.name}`,

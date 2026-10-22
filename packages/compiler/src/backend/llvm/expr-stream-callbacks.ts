@@ -4,6 +4,7 @@ import { type IrType, isRefCounted, typeKey } from "../../ir/ir.js";
 import { FN_ATTRS, releaseSym, retainSym, traceArg } from "./shapes.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 import { unionPeekLines, unionTagLines } from "./union-repr.js";
+import { registerReplay } from "./emit-journal.js";
 
 export function streamDataAdapter(
   host: LlvmEmitterContext,
@@ -14,6 +15,7 @@ export function streamDataAdapter(
   if (sym) return sym;
   sym = `sc_ee_dad_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "streamDataAdapter", [cbT]);
   const p = cbT.params[0];
   if (cbT.params.length > 1) {
     throw new InternalCompilerError(
@@ -207,6 +209,7 @@ export function streamDataAdapter(
     d.push(`}`, ``);
   }
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -220,6 +223,7 @@ export function streamDoneFnFor(
   if (sym) return sym;
   sym = `sc_sd_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "streamDoneFnFor", [kind, doneT]);
   const errT = doneT.params[0];
   let errTag = -1;
   if (errT !== undefined) {
@@ -347,6 +351,7 @@ export function streamDoneFnFor(
     d.push(`  call void ${releaseSym(host.shapeHost, dataT)}(ptr %d)`);
   d.push(`  ret void`, `}`, ``);
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -360,6 +365,7 @@ export function fsRenameThunkFor(host: LlvmEmitterContext, cbT: IrType & { kind:
   if (sym) return sym;
   sym = `sc_fsren_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "fsRenameThunkFor", [cbT]);
   const param = cbT.params[0]!;
   const d: string[] = [
     `define internal void @${sym}(ptr %cb, ptr %err) ${FN_ATTRS} { ; fs.rename callback ${typeKey(cbT)}`,
@@ -415,6 +421,7 @@ export function fsRenameThunkFor(host: LlvmEmitterContext, cbT: IrType & { kind:
     ``,
   );
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -447,6 +454,7 @@ export function cryptoIntThunkFor(
   if (sym) return sym;
   sym = `sc_cryptoint_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "cryptoIntThunkFor", [cbT]);
   const d: string[] = [
     `define internal void @${sym}(ptr %cb, double %value) ${FN_ATTRS} { ; randomInt callback ${typeKey(cbT)}`,
     `entry:`,
@@ -489,6 +497,7 @@ export function cryptoIntThunkFor(
     ``,
   );
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -507,6 +516,7 @@ export function zlibBytesThunkFor(
   if (sym) return sym;
   sym = `sc_${family}bytes_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "zlibBytesThunkFor", [cbT, arrayBuffer, family, valueMode]);
   const d: string[] = [
     `define internal void @${sym}(ptr %cb, ptr %err, ptr %value) ${FN_ATTRS} { ; zlib bytes callback ${typeKey(cbT)}`,
     `entry:`,
@@ -618,6 +628,7 @@ export function zlibBytesThunkFor(
     ``,
   );
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -633,6 +644,7 @@ export function streamCbThunkFor(
   if (sym) return sym;
   sym = `sc_scb_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "streamCbThunkFor", [kind, cbT]);
   const runtimeParams =
     kind === "r"
       ? ["ptr %s", "double %size"]
@@ -901,5 +913,35 @@ export function streamCbThunkFor(
   }
   d.push(`  ret void`, `}`, ``);
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
+
+registerReplay("streamDataAdapter", (host, args) =>
+  streamDataAdapter(host, args[0] as IrType & { kind: "func" }),
+);
+registerReplay("streamDoneFnFor", (host, args) =>
+  streamDoneFnFor(
+    host,
+    args[0] as "w" | "f" | "d" | "t" | "l",
+    args[1] as IrType & { kind: "func" },
+  ),
+);
+registerReplay("fsRenameThunkFor", (host, args) =>
+  fsRenameThunkFor(host, args[0] as IrType & { kind: "func" }),
+);
+registerReplay("cryptoIntThunkFor", (host, args) =>
+  cryptoIntThunkFor(host, args[0] as IrType & { kind: "func" }),
+);
+registerReplay("zlibBytesThunkFor", (host, args) =>
+  zlibBytesThunkFor(
+    host,
+    args[0] as IrType & { kind: "func" },
+    args[1] as boolean,
+    args[2] as string,
+    args[3] as BytesThunkValue,
+  ),
+);
+registerReplay("streamCbThunkFor", (host, args) =>
+  streamCbThunkFor(host, args[0] as "r" | "w" | "f" | "d" | "t" | "l" | "e", args[1] as IrType),
+);

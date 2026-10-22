@@ -138,7 +138,7 @@ r.once('readable', () => {
     expect(r.stdout).toBe(`caught ${READ_FENCE_MESSAGE}\n`);
   });
 
-  test("a dynamic source that mixes Buffers and strings without a decoder is destroyed", async () => {
+  test("a dynamic source that mixes Buffers and strings yields each as it is, as Node does", async () => {
     const r = await compileAndRun(
       "mixed-dynamic-source",
       `import { Readable } from "node:stream";
@@ -151,8 +151,6 @@ r.on("close", () => console.log("close"));
 `,
     );
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe(
-      "data true b1\nerror a Readable.from source that mixes strings and Buffers is not supported yet\nclose\n",
-    );
+    expect(r.stdout).toBe("data true b1\ndata false s1\nclose\n");
   });
 });

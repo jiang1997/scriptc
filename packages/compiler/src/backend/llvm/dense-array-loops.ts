@@ -15,22 +15,33 @@
  * test bounds `a.length` by 2^31 - 1, so the fast copy's counter is an int32.
  * Arrays longer than that are sparse in practice (a dense one would need
  * 16 GB of slots) and take the ordinary copy, as does every array with a
- * hole, present undefined or sparse storage below `a.length`. */
+ * hole, present undefined or sparse storage below `a.length`.
+ *
+ * A counted loop with another invariant limit, such as `j < n` after
+ * `const n = a.length` or `j < 5`, is covered the same way: the test bounds
+ * the loop's exclusive limit by 2^31 - 1 and by each indexed array's
+ * `filled`, and the loop must provably never change any of their lengths. */
 
 import type { IrExpr, IrLocal, IrStmt } from "../../ir/ir.js";
 import type { IntegerRange } from "../../ir/integer-ranges.js";
 import { preservesArrayLength } from "../../ir/array-length-stability.js";
 import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
+import type { IntegerCountedForLoop } from "../../ir/integer-loops.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 import { loadArrCount, SCR_ARR_FIELD } from "./common.js";
+import { emitCountedLoopLimit } from "./counted-loops.js";
 
 export const INT32_MAX = 2147483647;
 
 export interface DenseArrayLoop {
   /** The loop's counter binding. */
   counter: string;
-  /** The array whose length bounds the counter. */
-  length: IrExpr & { kind: "varRef" };
+  /** The array whose length bounds the counter, or null for a counted loop
+   * bounded by `limit`. */
+  length: (IrExpr & { kind: "varRef" }) | null;
+  /** The ascending counted loop whose invariant limit bounds the counter,
+   * when `length` is null. */
+  limit: IntegerCountedForLoop | null;
   /** Arrays whose accesses at the counter are proven to be inside the
    * hole-free prefix in the fast copy, with a read of each binding. */
   arrays: ReadonlyMap<string, IrExpr & { kind: "varRef" }>;
@@ -39,12 +50,15 @@ export interface DenseArrayLoop {
 }
 
 /** The fast copy duplicates the loop; keep the duplicated code small. */
-const MAX_LOOP_NODES = 120;
+const MAX_LOOP_NODES = 160;
 
 /** How a matched integer loop bounds its counter below `length.length`. */
 export interface DenseLoopShape {
   counter: string;
-  length: IrExpr & { kind: "varRef" };
+  /** The array whose length bounds the counter, or null for `limit`. */
+  length: (IrExpr & { kind: "varRef" }) | null;
+  /** An ascending counted loop bounded by another invariant limit. */
+  limit?: IntegerCountedForLoop;
   /** The counter's proven range on every pass of the ordinary loop; the
    * fast copy keeps its minimum, which must be at least 0. */
   range: IntegerRange;
@@ -73,22 +87,18 @@ function lengthOffset(e: IrExpr): { receiver: IrExpr & { kind: "varRef" }; offse
 
 /** The array bounding a counted loop's counter below its length: an
  * ascending loop compared below `a.length - c`, or a descending one starting
- * at `a.length - c` (c >= 1). */
+ * at `a.length - c` (c >= 1). Another ascending loop is bounded by its own
+ * invariant limit. */
 export function countedDenseShape(
   loop: IrStmt & { kind: "for" },
-  counted: {
-    localId: string;
-    start: IrExpr;
-    limit: IrExpr;
-    step: number;
-    inclusive: boolean;
-    range: IntegerRange;
-  },
+  counted: IntegerCountedForLoop,
 ): DenseLoopShape | null {
   if (counted.range.min < 0) return null;
   if (counted.step > 0) {
     const bound = lengthOffset(counted.limit);
-    if (!bound || bound.offset < (counted.inclusive ? 1 : 0)) return null;
+    if (!bound)
+      return { counter: counted.localId, length: null, limit: counted, range: counted.range };
+    if (bound.offset < (counted.inclusive ? 1 : 0)) return null;
     return { counter: counted.localId, length: bound.receiver, range: counted.range };
   }
   // The start is evaluated once, before the loop; the counter only falls.
@@ -143,9 +153,11 @@ export function matchDenseArrayLoop(
     return everyStmtChild(s, expr, stmt);
   };
   if (!loop.body.every(stmt) || !expr(loop.cond) || nested) return null;
+  const nodesOfLoop = [loop.cond, ...loop.body];
   if (
+    length !== null &&
     !preservesArrayLength(
-      [loop.cond, ...loop.body],
+      nodesOfLoop,
       { receiver: length.localId, inRange: counter },
       locals,
       unaliased,
@@ -161,7 +173,14 @@ export function matchDenseArrayLoop(
       local.boxed ||
       local.tdz ||
       disturbed.has(id) ||
-      (id !== length.localId && !initialized.has(id))
+      (id !== length?.localId && !initialized.has(id))
+    )
+      continue;
+    // Without a bounding array, the entry test reads each array's `filled`
+    // once: the loop must not change any of their lengths.
+    if (
+      length === null &&
+      !preservesArrayLength(nodesOfLoop, { receiver: id, inRange: counter }, locals, unaliased)
     )
       continue;
     arrays.set(id, ref);
@@ -170,13 +189,15 @@ export function matchDenseArrayLoop(
   return {
     counter,
     length,
+    limit: length === null ? (shape.limit ?? null) : null,
     arrays,
     range: { min: shape.range.min, max: Math.min(shape.range.max, INT32_MAX - 1) },
   };
 }
 
-/** The fast copy's entry test: the bounding length is at most 2^31 - 1 and
- * at most every indexed array's hole-free prefix bound. */
+/** The fast copy's entry test: the bounding length (or the counted loop's
+ * exclusive limit) is at most 2^31 - 1 and at most every indexed array's
+ * hole-free prefix bound. */
 export function emitDenseLoopGuard(host: LlvmEmitterContext, loop: DenseArrayLoop): string {
   const B = host.B;
   const size = host.sizeType;
@@ -186,7 +207,29 @@ export function emitDenseLoopGuard(host: LlvmEmitterContext, loop: DenseArrayLoo
     host.markMemoryPointer(ptr, "array:header");
     return ptr;
   };
-  const receiver = host.emitStableReceiver(loop.length, []);
+  if (loop.length === null) {
+    // A limit at or below the start runs no pass, and passes the test.
+    const limit = emitCountedLoopLimit(host, loop.limit!);
+    const small = B.tmp();
+    B.line(`${small} = icmp sle i64 ${limit}, ${INT32_MAX}`);
+    let valid = small;
+    for (const ref of loop.arrays.values()) {
+      const array = host.emitStableReceiver(ref, []);
+      const filledPtr = header(array.name, SCR_ARR_FIELD.filled),
+        filled = B.tmp(),
+        wide = B.tmp(),
+        covered = B.tmp(),
+        both = B.tmp();
+      B.line(`${filled} = load i32, ptr ${filledPtr}${host.fieldAliasAttachment(filledPtr)}`);
+      B.line(`${wide} = zext i32 ${filled} to i64`);
+      B.line(`${covered} = icmp sle i64 ${limit}, ${wide}`);
+      B.line(`${both} = and i1 ${valid}, ${covered}`);
+      valid = both;
+    }
+    return valid;
+  }
+  const length = loop.length;
+  const receiver = host.emitStableReceiver(length, []);
   const lenPtr = header(receiver.name, SCR_ARR_FIELD.len),
     len = B.tmp(),
     small = B.tmp();
@@ -194,7 +237,7 @@ export function emitDenseLoopGuard(host: LlvmEmitterContext, loop: DenseArrayLoo
   B.line(`${small} = icmp ule ${size} ${len}, ${INT32_MAX}`);
   let valid = small;
   for (const [id, ref] of loop.arrays) {
-    const array = id === loop.length.localId ? receiver : host.emitStableReceiver(ref, []);
+    const array = id === length.localId ? receiver : host.emitStableReceiver(ref, []);
     const filledPtr = header(array.name, SCR_ARR_FIELD.filled),
       filled = B.tmp(),
       covered = B.tmp(),

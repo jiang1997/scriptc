@@ -934,11 +934,11 @@ export function lowerObjectLiteral(
       // spread's own position (any position: they introduce one fresh
       // name, collision-fenced below). Everything else stays fenced.
       const cs = conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression);
-      if (cs === "unsupported" || (cs && cs.props.length !== 1)) {
+      if (cs === "unsupported" && conditionalRecordSpreadOf(lowerer, prop.expression) === null) {
         lowerer.unsupported(
           "SC1090",
           prop,
-          "conditional spreads beyond `...(c ? { field: v } : {})` (exactly one property against an empty arm — spell other shapes as optional fields)",
+          "conditional spreads beyond `...(c ? { field: v } : {})` and `...(c ? record : {})` (one arm must be empty — spell other shapes as optional fields)",
         );
       }
       // Spread ORDER is fenced in the field-by-field desugar below, not
@@ -1722,64 +1722,71 @@ export function lowerObjectLiteral(
     if (ts.isSpreadAssignment(prop)) {
       const cs = conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression);
       if (cs && cs !== "unsupported") {
-        // `...(c ? { k: v } : {})` — ONE conditional field at the
-        // spread's own position: cond evaluates exactly once, `v` only
-        // when the non-empty arm is taken (ternary arms are lazy), and
-        // the empty arm holds the interned undefined arm — exactly the
-        // omitted-optional-field representation, which is also why the
-        // target field must be optional (tsc types the idiom that way).
-        const csProp = cs.props[0]!; // single-prop-checked in the fence pass
-        const name = csProp.name.text;
-        const fieldType = fieldTypes.get(name);
-        if (!fieldType) {
-          if (shape.indexValue) {
+        // `...(c ? { k: v } : {})` — one conditional field per carried
+        // property at the spread's own position: cond evaluates exactly
+        // once (into a hidden local when several fields test it), each
+        // `v` only when the non-empty arm is taken (ternary arms are
+        // lazy), in property order, and the empty arm holds the interned
+        // undefined arm — exactly the omitted-optional-field
+        // representation, which is also why the target fields must be
+        // optional (tsc types the idiom that way).
+        let cond: IrExpr | null = null;
+        for (const csProp of cs.props) {
+          const name = csProp.name.text;
+          const fieldType = fieldTypes.get(name);
+          if (!fieldType) {
+            if (shape.indexValue) {
+              lowerer.unsupported(
+                "SC1090",
+                prop,
+                "conditional spreads into index-signature keys (overflow entries model presence — write the key in an if statement instead)",
+              );
+            }
+            shapeMismatch(prop);
+          }
+          // An 'unknown' slot holds the checked-dynamic undefined for the
+          // empty arm, the absent-property read the width copy uses too.
+          const absent =
+            lowerer.absentFieldValue(fieldType, locOf(prop)) ??
+            (fieldType.kind === "dyn" ? dynUndefinedExpr(locOf(prop)) : null);
+          if (!absent) {
             lowerer.unsupported(
               "SC1090",
               prop,
-              "conditional spreads into index-signature keys (overflow entries model presence — write the key in an if statement instead)",
+              `conditional spreads onto the required field '${name}' (the empty arm leaves it undefined — declare the field optional)`,
             );
           }
-          shapeMismatch(prop);
+          if (fields.some((f) => f.name === name)) {
+            lowerer.unsupported(
+              "SC1090",
+              prop,
+              `conditional spread of '${name}' over an earlier '${name}' (the desugar keeps one entry per name — restructure so each name has one contributor)`,
+            );
+          }
+          if (cond === null) {
+            cond = lowerer.lowerCondition(cs.cond);
+            if (cs.props.length > 1) cond = capture(cond);
+          }
+          const valueNode = ts.isPropertyAssignment(csProp) ? csProp.initializer : csProp;
+          let v = ts.isPropertyAssignment(csProp)
+            ? lowerer.lowerExpr(csProp.initializer)
+            : lowerer.lowerShorthandValue(csProp);
+          v = lowerer.coerceInto(valueNode, v, fieldType);
+          if (!typeEquals(v.type, fieldType)) lowerer.badType(valueNode, lowerer.typeOf(valueNode));
+          conditionalNames.add(name);
+          orderSegments.push({ kind: "key", name, definite: false });
+          fields.push({
+            name,
+            value: {
+              kind: "ternary",
+              cond,
+              then: cs.whenTrue ? v : absent,
+              else_: cs.whenTrue ? absent : v,
+              type: fieldType,
+              loc: locOf(prop),
+            },
+          });
         }
-        // An 'unknown' slot holds the checked-dynamic undefined for the
-        // empty arm, the absent-property read the width copy uses too.
-        const absent =
-          lowerer.absentFieldValue(fieldType, locOf(prop)) ??
-          (fieldType.kind === "dyn" ? dynUndefinedExpr(locOf(prop)) : null);
-        if (!absent) {
-          lowerer.unsupported(
-            "SC1090",
-            prop,
-            `conditional spreads onto the required field '${name}' (the empty arm leaves it undefined — declare the field optional)`,
-          );
-        }
-        if (fields.some((f) => f.name === name)) {
-          lowerer.unsupported(
-            "SC1090",
-            prop,
-            `conditional spread of '${name}' over an earlier '${name}' (the desugar keeps one entry per name — restructure so each name has one contributor)`,
-          );
-        }
-        const cond = lowerer.lowerCondition(cs.cond);
-        const valueNode = ts.isPropertyAssignment(csProp) ? csProp.initializer : csProp;
-        let v = ts.isPropertyAssignment(csProp)
-          ? lowerer.lowerExpr(csProp.initializer)
-          : lowerer.lowerShorthandValue(csProp);
-        v = lowerer.coerceInto(valueNode, v, fieldType);
-        if (!typeEquals(v.type, fieldType)) lowerer.badType(valueNode, lowerer.typeOf(valueNode));
-        conditionalNames.add(name);
-        orderSegments.push({ kind: "key", name, definite: false });
-        fields.push({
-          name,
-          value: {
-            kind: "ternary",
-            cond,
-            then: cs.whenTrue ? v : absent,
-            else_: cs.whenTrue ? absent : v,
-            type: fieldType,
-            loc: locOf(prop),
-          },
-        });
         continue;
       }
       // `{ ...base, ... }` — field-by-field copy of a known record
@@ -1791,10 +1798,13 @@ export function lowerObjectLiteral(
       // overridden. Field snapshots above preserve the copy order.
       let srcNode: ts.Expression = prop.expression;
       while (ts.isParenthesizedExpression(srcNode)) srcNode = srcNode.expression;
+      const condRecord = conditionalRecordSpreadOf(lowerer, prop.expression);
       const srcLowered = capture(
-        prop === expr.properties.nodes[0] && leadingSpreadLowered !== null
-          ? leadingSpreadLowered
-          : lowerer.lowerExpr(srcNode),
+        condRecord !== null
+          ? lowerConditionalRecordSpread(lowerer, condRecord, locOf(prop))
+          : prop === expr.properties.nodes[0] && leadingSpreadLowered !== null
+            ? leadingSpreadLowered
+            : lowerer.lowerExpr(srcNode),
       );
       // Array callbacks can receive a record-or-undefined ABI even when
       // TypeScript describes a required record. Select the copy strategy
@@ -2732,6 +2742,62 @@ function syntacticAndSpread(
   return { cond, props, whenTrue: true };
 }
 
+/** `...(c ? source : {})` (either arm order; the empty arm may also be
+ * `undefined` or `null`) where `source` maps to a record and is not the
+ * literal the field desugar handles (conditionalSpreadOf). The spread
+ * copies the source's fields when the source arm is taken and nothing
+ * otherwise, which is the copy of a `Record | undefined` spread source. */
+export function conditionalRecordSpreadOf(
+  lowerer: Lowerer,
+  expr: ts.Expression,
+): { cond: ts.Expression; source: ts.Expression; whenTrue: boolean } | null {
+  let e: ts.Expression = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (!ts.isConditionalExpression(e)) return null;
+  const unwrap = (a: ts.Expression): ts.Expression => {
+    let x = a;
+    while (ts.isParenthesizedExpression(x)) x = x.expression;
+    return x;
+  };
+  const isEmpty = (x: ts.Expression): boolean =>
+    (ts.isObjectLiteralExpression(x) && x.properties.nodes.length === 0) ||
+    x.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(x) &&
+      x.text === "undefined" &&
+      (lowerer.typeOf(x).flags & ts.TypeFlags.Undefined) !== 0);
+  const whenTrue = unwrap(e.whenTrue);
+  const whenFalse = unwrap(e.whenFalse);
+  const sourceIsTrue = isEmpty(whenFalse) && !isEmpty(whenTrue);
+  if (!sourceIsTrue && !(isEmpty(whenTrue) && !isEmpty(whenFalse))) return null;
+  const source = sourceIsTrue ? whenTrue : whenFalse;
+  if (lowerer.mapTypeOf(lowerer.typeOf(source))?.kind !== "record") return null;
+  return { cond: e.condition, source, whenTrue: sourceIsTrue };
+}
+
+/** The spread source of a conditionalRecordSpreadOf match: `c ? source :
+ * undefined` as a `Record | undefined` value (cond first, the source only
+ * when its arm is taken). */
+function lowerConditionalRecordSpread(
+  lowerer: Lowerer,
+  spread: { cond: ts.Expression; source: ts.Expression; whenTrue: boolean },
+  loc: SrcLoc,
+): IrExpr {
+  const cond = lowerer.lowerCondition(spread.cond);
+  const source = lowerer.lowerExpr(spread.source);
+  if (source.type.kind !== "record") lowerer.badType(spread.source, lowerer.typeOf(spread.source));
+  const type = lowerer.withUndefinedArm(source.type);
+  const present = lowerer.coerceToExpected(source, type);
+  const absent = lowerer.wrappedUndefined(type, loc)!;
+  return {
+    kind: "ternary",
+    cond,
+    then: spread.whenTrue ? present : absent,
+    else_: spread.whenTrue ? absent : present,
+    type,
+    loc,
+  };
+}
+
 /** A conditional spread's carrier property: `name: value` or shorthand,
  * with an identifier/string-literal name. */
 export type CondSpreadProp = (ts.PropertyAssignment | ts.ShorthandPropertyAssignment) & {
@@ -3251,6 +3317,9 @@ export function lowerShorthandValue(
         `generic functions as values (call '${propName.text}' directly)`,
       );
     }
+    // A standard-library global (`{ Date }`): the value the long form
+    // `{ Date: Date }` reads.
+    if (lowerer.isStdlibSymbol(resolved)) return lowerer.lowerExpr(propName);
   }
   lowerer.rejectUnresolvedSymbol(
     symbol

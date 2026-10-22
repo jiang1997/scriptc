@@ -1,5 +1,6 @@
 import { keyedHelperName } from "./stable-names.js";
 import { lowerWebAssemblyValue, refuseWebAssemblyUse } from "./builtins/webassembly.js";
+import { lowerAwaitedUniformPromiseAll } from "./builtins/promises.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, strLit, varRef } from "../../ir/build.js";
 import { InternalCompilerError } from "../../errors.js";
 /* Expression lowering: the expression dispatch (lowerExpr), literals
@@ -575,6 +576,8 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       // boundary for malformed/upstream ASTs.
       lowerer.unsupported("SC1090", expr, "top-level await (await outside async functions)");
     }
+    const uniformAll = lowerAwaitedUniformPromiseAll(lowerer, expr);
+    if (uniformAll) return uniformAll;
     const value = lowerer.lowerExpr(expr.expression);
     // A promise-or-absent union (`Promise<T> | undefined` values, calls
     // of `(...) => Promise<void> | void` callbacks): the await handles
@@ -2092,6 +2095,7 @@ export function typeofAnswer(arm: IrType): string | null {
     case "array":
     case "map":
     case "set":
+    case "generator":
     case "regex":
     case "bytes":
     case "url":

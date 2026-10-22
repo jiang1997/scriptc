@@ -16,6 +16,7 @@ import { streamTypedRefEligible } from "../../ir/analysis.js";
 import {
   DYN,
   type IrExpr,
+  type IrType,
   isDynTypedRefType,
   isRefCounted,
   isUnitType,
@@ -221,6 +222,19 @@ export function emitDynamicExpr(
       host.own({ name: prepared, type: { kind: "dyn" } });
       host.emitPendingCheck();
       const args = e.args.map((a) => emitBorrowedInput(host, a));
+      // A closure registered as a 'message' listener gets a typed message
+      // entry: ports deliver messages of its parameter's layout without
+      // decoding them to checked-dynamic values first.
+      const listener = messageListenerArg(e);
+      if (listener !== null) {
+        const entry = host.dyn.messageListenerHelper(listener);
+        if (entry !== null) {
+          host.declare(`declare void @scr_dyn_func_set_message(ptr, ptr, ptr)`);
+          B.line(
+            `call void @scr_dyn_func_set_message(ptr ${args[1]!.name}, ptr @${host.dyn.dynFuncThunkHelper(listener)}, ptr @${entry})`,
+          );
+        }
+      }
       let argsPtr = "null";
       if (args.length > 0) {
         const arr = B.slot();
@@ -1282,9 +1296,7 @@ function emitUnionEqWrappedScalar(
     B.startBlock(same);
     const eq = B.tmp();
     if (arm.kind === "f64") {
-      host.declare(`declare double @scr_union_get_f64(ptr)`);
-      const v = B.tmp();
-      B.line(`${v} = call double @scr_union_get_f64(ptr ${union.name})`);
+      const v = host.unionGetF64(union.name);
       if (e.sameValue) {
         host.declare(`declare zeroext i1 @scr_num_same_value(double, double)`);
         B.line(`${eq} = call zeroext i1 @scr_num_same_value(double ${v}, double ${plain.name})`);
@@ -1292,9 +1304,7 @@ function emitUnionEqWrappedScalar(
         B.line(`${eq} = fcmp oeq double ${v}, ${plain.name}`);
       }
     } else {
-      host.declare(`declare zeroext i1 @scr_union_get_bool(ptr)`);
-      const v = B.tmp();
-      B.line(`${v} = call zeroext i1 @scr_union_get_bool(ptr ${union.name})`);
+      const v = host.unionGetBool(union.name);
       B.line(`${eq} = icmp eq i1 ${v}, ${plain.name}`);
     }
     B.line(`store i1 ${eq}, ptr ${slot}`);
@@ -1323,3 +1333,24 @@ export const INHERITED_OBJECT_MEMBERS: ReadonlySet<string> = new Set([
   "hasOwnProperty",
   "propertyIsEnumerable",
 ]);
+
+/** EventEmitter methods that register their second argument as a listener. */
+const LISTENER_METHODS: ReadonlySet<string> = new Set([
+  "on",
+  "once",
+  "addListener",
+  "prependListener",
+  "prependOnceListener",
+]);
+
+/** The closure type of `recv.on("message", listener)` and the other
+ * listener registrations with a typed closure for the 'message' event, or
+ * null. */
+function messageListenerArg(e: ExprOf<"dynInvoke">): (IrType & { kind: "func" }) | null {
+  if (!LISTENER_METHODS.has(e.method) || e.args.length !== 2) return null;
+  const [event, listener] = e.args;
+  if (event?.kind !== "dynFrom" || event.value.kind !== "strLit" || event.value.value !== "message")
+    return null;
+  if (listener?.kind !== "dynFrom" || listener.value.type.kind !== "func") return null;
+  return listener.value.type;
+}

@@ -8,7 +8,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
-import { loadLibraryProfile, profileRemediation, profileTeaching } from "@scriptc/compiler";
+import {
+  loadLibraryProfile,
+  profileRemediation,
+  profileTeaching,
+  resolveLibraryFences,
+} from "@scriptc/compiler";
 
 const dir = mkdtempSync(join(tmpdir(), "scriptc-lib-profile-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -475,6 +480,13 @@ describe("library profile fences", () => {
   });
 
   test("a fence remediation feeds the trap-remediation lookup through covered codes", () => {
+    // A crypto member that still refuses with SC2020, read from the
+    // manifest: members leave that set as they gain lowerings.
+    const builtins = resolveLibraryFences([{ path: "fences[0]", prefix: "node-builtin.crypto." }]);
+    expect(builtins.ok).toBe(true);
+    if (!builtins.ok) return;
+    const unlowered = builtins.fences[0]!.surfaces.find((s) => s.code === "SC2020");
+    expect(unlowered).toBeDefined();
     const r = loadLibraryProfile(
       writeProfile({
         ...good,
@@ -482,7 +494,7 @@ describe("library profile fences", () => {
           remediations: { SC2012: "the explicit map key wins" },
           fences: [
             { id: "diagnostic.sc2012", remediation: "request it as an effect" },
-            { id: "node-builtin.crypto.createSign", remediation: "signatures come from the host" },
+            { id: unlowered!.id, remediation: "the host provides it" },
           ],
         },
       }),
@@ -492,9 +504,9 @@ describe("library profile fences", () => {
     // Explicit remediations keys win over fence-supplied text.
     expect(profileRemediation(r.profile, "SC2012")).toBe("the explicit map key wins");
     // A fence's remediation answers for its covered entries' codes
-    // (crypto.createSign is SC2020) — spec §3's "in a fence entry or a
-    // remediations map", one lookup either way.
-    expect(profileRemediation(r.profile, "SC2020")).toBe("signatures come from the host");
+    // (SC2020 here) — spec §3's "in a fence entry or a remediations map",
+    // one lookup either way.
+    expect(profileRemediation(r.profile, "SC2020")).toBe("the host provides it");
     expect(profileRemediation(r.profile, "SC4014")).toBeUndefined();
   });
 

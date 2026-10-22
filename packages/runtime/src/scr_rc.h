@@ -670,6 +670,10 @@ static inline void scr_cyc_dead(void *obj) {
  * live heap — do not put it on a per-turn path. */
 void scr_collect_cycles(void);
 void scr_collect_cycles_phase(void);
+/* Sets the growth cap SCR_CYCLE_GROWTH_CAP sets (scr_cycle.c), for a program
+ * that knows its own memory profile; the environment variable takes
+ * precedence. Call it before the program allocates much. */
+void scr_cyc_set_growth_cap(long cap);
 void scr_cyc_context_cleanup(void);
 
 /* One pass on the normal generational schedule, for callers that reach a

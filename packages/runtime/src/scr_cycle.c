@@ -529,7 +529,8 @@ static SCR_TL size_t scr_cyc_live_after[SCR_CYC_NGENS];
  * large program, say) those walks dominate collection time. The cap trades
  * that walking for memory only when passes find nothing: while they find
  * garbage, the yield keeps the fraction narrow. SCR_CYCLE_GROWTH_CAP lowers
- * the cap for memory-sensitive programs: a power of two from 1 to 16, with
+ * the cap for memory-sensitive programs, as scr_cyc_set_growth_cap does for
+ * a program that sets its own: a power of two from 1 to 16, with
  * other positive values rounded down to a power of two and larger ones read
  * as 16. At 1 the heap may at most double past its size after the last pass
  * at a level before the next. */
@@ -539,20 +540,34 @@ static SCR_TL unsigned char scr_cyc_growth_shift[SCR_CYC_NGENS];
 static SCR_TL unsigned char scr_cyc_growth_streak[SCR_CYC_NGENS];
 #endif
 
+/* The growth cap a program sets for itself (scr_cyc_set_growth_cap), 0 for
+ * the default; SCR_CYCLE_GROWTH_CAP takes precedence over it. */
+static long scr_cyc_growth_cap_set = 0;
+static SCR_TL unsigned char scr_cyc_growth_max_shift_cached = 0;
+
 /* Shift of the configured growth cap: 2 + log2(cap), since the base
  * fraction is 1/4. */
 static unsigned scr_cyc_growth_max_shift(void) {
-  static SCR_TL unsigned char cached = 0;
-  if (cached == 0) {
+  if (scr_cyc_growth_max_shift_cached == 0) {
     const char *env = scr_getenv("SCR_CYCLE_GROWTH_CAP");
     long v = env ? strtol(env, NULL, 10) : 0;
+    if (v <= 0) v = scr_cyc_growth_cap_set;
     unsigned shift = SCR_CYC_GROWTH_MAX_SHIFT;
     if (v > 0)
       for (shift = 2; shift < SCR_CYC_GROWTH_MAX_SHIFT && (2L << (shift - 2)) <= v;)
         shift++;
-    cached = (unsigned char)shift;
+    scr_cyc_growth_max_shift_cached = (unsigned char)shift;
   }
-  return cached;
+  return scr_cyc_growth_max_shift_cached;
+}
+
+void scr_cyc_set_growth_cap(long cap) {
+  scr_cyc_growth_cap_set = cap;
+  scr_cyc_growth_max_shift_cached = 0;
+  /* Fractions already widened past the new cap start at it. */
+  unsigned max = scr_cyc_growth_max_shift();
+  for (unsigned gen = 0; gen < SCR_CYC_NGENS; gen++)
+    if (scr_cyc_growth_shift[gen] > max) scr_cyc_growth_shift[gen] = (unsigned char)max;
 }
 
 /* Doublings of each generation's backlog threshold earned by consecutive
@@ -1244,9 +1259,9 @@ void scr_cyc_on_release(void *obj) {
 #define SCR_CYC_ARRAY_WALK(name, visit)                                  \
   static __attribute__((noinline)) void name(const ScrArr *arr, void *ctx) { \
     size_t end = arr->len < arr->cap ? arr->len : arr->cap;               \
-    size_t filled = arr->filled < end ? arr->filled : end;                \
+    const uint8_t *states = scr_arr_scan_states(arr);                     \
+    size_t filled = !states || arr->filled > end ? end : arr->filled;     \
     for (size_t i = 0; i < filled; i++) visit((void *)(uintptr_t)arr->data[i], ctx); \
-    const uint8_t *states = scr_arr_states_end(arr);                      \
     for (size_t i = filled; i < end; i++)                                 \
       if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE)                   \
         visit((void *)(uintptr_t)arr->data[i], ctx);                      \

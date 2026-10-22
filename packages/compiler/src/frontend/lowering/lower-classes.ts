@@ -184,6 +184,7 @@ import { constructionEscape } from "./construction-escapes.js";
 import { checkedClassConstruction, checkedClassConstructionPacked } from "./class-construction.js";
 import { initializeRuntimeStatics, hasRuntimeStatics } from "./class-runtime-statics.js";
 import { reflectedClassStaticMethodValue } from "./class-method-values.js";
+import { identifierReadSymbol } from "./surfaces.js";
 
 export function returnsOnlyThis(member: ts.MethodDeclaration): boolean {
   const body = member.body;
@@ -6034,6 +6035,28 @@ export function lowerClassExpressionInfo(
   return info;
 }
 
+/** True when a named class expression's body refers to the class value by
+ * its own name (`class Box { static of() { return new Box(); } }`, a
+ * shorthand property `{ Box }` included); type annotations naming it
+ * (`again(): Box`) do not count. */
+function classExpressionNamesItself(lowerer: Lowerer, expr: ts.ClassExpression): boolean {
+  const name = expr.name;
+  if (!name) return false;
+  const symbol = lowerer.checker.getSymbolAtLocation(name);
+  if (!symbol) return false;
+  let found = false;
+  for (const member of expr.members.nodes) {
+    ts.walkPreorder(member, (n) => {
+      if (found || ts.isTypeNode(n)) return "skip";
+      if (ts.isIdentifier(n) && n.text === name.text && identifierReadSymbol(lowerer, n) === symbol)
+        found = true;
+      return undefined;
+    });
+    if (found) return true;
+  }
+  return false;
+}
+
 /** `class {…}` in expression position: a class definition bound to no
  * statement — once the static side is a value, the expression IS the
  * definition plus a classRef over it. A DECORATED class expression
@@ -6041,8 +6064,16 @@ export function lowerClassExpressionInfo(
  * mints a class at all: evaluating the expression IS the
  * ReferenceError, so it lowers to exactly that read — every evaluation
  * throws identically, which is why the once-evaluated restriction and
- * the member fences don't apply. */
-export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclaration): IrExpr {
+ * the member fences don't apply.
+ *
+ * `binding` is the local of a function-local class declaration's name,
+ * declared without a value; the class value assigns it before the class's
+ * static members are defined (see initializeRuntimeStatics). */
+export function lowerClassExpression(
+  lowerer: Lowerer,
+  expr: ts.ClassLikeDeclaration,
+  binding?: IrLocal,
+): IrExpr {
   if (
     decoratorNodesOf(expr).length > 0 ||
     expr.members.nodes.some((m) => decoratorNodesOf(m).length > 0)
@@ -6058,6 +6089,41 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
     }
   }
   const info = lowerClassExpressionInfo(lowerer, expr);
+  // A function-local class expression's own name is a binding of its body:
+  // declared before the members lower, so their references to the name
+  // resolve to it. The class value captures it before it is assigned, as
+  // it captures a class declaration's binding.
+  if (
+    !binding &&
+    info.localClass &&
+    ts.isClassExpression(expr) &&
+    expr.name &&
+    classExpressionNamesItself(lowerer, expr)
+  ) {
+    const own = lowerer.declareLocal(
+      expr.name,
+      expr.name.text,
+      { kind: "classval", className: info.def.name },
+      true,
+    );
+    const value = lowerClassValue(lowerer, expr, info, own);
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "varDecl", localId: own.id, init: null, loc: value.loc }],
+      result: value,
+      type: value.type,
+      loc: value.loc,
+    };
+  }
+  return lowerClassValue(lowerer, expr, info, binding);
+}
+
+function lowerClassValue(
+  lowerer: Lowerer,
+  expr: ts.ClassLikeDeclaration,
+  info: ClassInfo,
+  binding: IrLocal | undefined,
+): IrExpr {
   if (
     !info.localClass &&
     !info.expressionInitializationEmitted &&
@@ -6104,7 +6170,7 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
     const clsRef: IrExpr = { kind: "varRef", localId: clsLocal.id, type: value.type, loc };
     const boxed: IrExpr = { kind: "dynFrom", value: clsRef, type: DYN, loc };
     info.localPrototypeData = true;
-    return initializeRuntimeStatics(lowerer, info, {
+    const built: IrExpr = {
       kind: "seqExpr",
       stmts: [
         { kind: "varDecl", localId: baseLocal.id, init: base, loc },
@@ -6137,7 +6203,8 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
       result: clsRef,
       type: value.type,
       loc,
-    });
+    };
+    return initializeRuntimeStatics(lowerer, info, built, binding);
   }
   if (info.localClass?.baseExpression && info.base && value.kind === "classRef") {
     const loc = locOf(expr);
@@ -6152,7 +6219,7 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
     const clsRef: IrExpr = { kind: "varRef", localId: clsLocal.id, type: value.type, loc };
     const basePrototype = classPrototypeData(lowerer, info.base, loc, baseRef)!;
     info.localPrototypeData = true;
-    return initializeRuntimeStatics(lowerer, info, {
+    const built: IrExpr = {
       kind: "seqExpr",
       stmts: [
         { kind: "varDecl", localId: baseLocal.id, init: base, loc },
@@ -6191,13 +6258,15 @@ export function lowerClassExpression(lowerer: Lowerer, expr: ts.ClassLikeDeclara
       result: clsRef,
       type: value.type,
       loc,
-    });
+    };
+    return initializeRuntimeStatics(lowerer, info, built, binding);
   }
   if (!info.localClass) return value;
   const classValue = initializeRuntimeStatics(
     lowerer,
     info,
     value.kind === "classRef" ? { ...value, captures: info.localClass.captureSources } : value,
+    binding,
   );
   // The base resolves statically here, but Node still evaluates the
   // heritage expression each time the class definition runs, first.
@@ -7124,10 +7193,100 @@ export function inHierarchy(lowerer: Lowerer, info: ClassInfo): boolean {
  * dynamically. Abstract re-declarations don't count (they carry no
  * implementation; the concrete ones below them do, via the recursion). */
 export function overrideBelow(lowerer: Lowerer, info: ClassInfo, name: string): boolean {
+  if (info.decl !== null && localOverrideBelow(lowerer, info.decl, name)) return true;
   return info.subclasses.some((s) => {
     const m = s.methods.get(name);
     return (m !== undefined && m.abstract !== true) || lowerer.overrideBelow(s, name);
   });
+}
+
+/** The class node an `extends` clause names: a class declaration, or the
+ * class expression a variable is initialized with. */
+function extendedClassNode(lowerer: Lowerer, decl: ts.ClassLikeDeclaration): ts.Node | null {
+  const heritage = decl.heritageClauses?.nodes.find(
+    (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+  )?.types?.nodes[0]?.expression;
+  if (!heritage || !ts.isIdentifier(heritage)) return null;
+  let symbol = lowerer.checker.getSymbolAtLocation(heritage);
+  if (symbol && symbol.flags & ts.SymbolFlags.Alias)
+    symbol = lowerer.checker.getAliasedSymbol(symbol);
+  const target = symbol?.valueDeclaration;
+  if (!target) return null;
+  if (ts.isClassDeclaration(target) || ts.isClassExpression(target)) return target;
+  if (ts.isVariableDeclaration(target) && target.initializer) {
+    let init: ts.Expression = target.initializer;
+    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    if (ts.isClassExpression(init)) return init;
+  }
+  return null;
+}
+
+/** The function-local classes that extend the class node `base`. Function
+ * bodies lower on demand, after code that may already call methods of a
+ * class their local classes extend, so such a subclass is not yet in its
+ * base's `subclasses` when those calls lower. */
+function localSubclassesOf(lowerer: Lowerer, base: ts.Node): readonly ts.ClassLikeDeclaration[] {
+  let index = lowerer.localSubclassIndex;
+  if (index === null) {
+    index = new Map();
+    const files = lowerer.moduleOrder.length > 0 ? lowerer.moduleOrder : [lowerer.entry];
+    for (const sf of files) {
+      if (!sf.text.includes("extends")) continue;
+      ts.walkPreorder(sf, (node) => {
+        if (
+          (ts.isClassDeclaration(node) || ts.isClassExpression(node)) &&
+          node.heritageClauses !== undefined &&
+          functionLocalClass(node)
+        ) {
+          const extended = extendedClassNode(lowerer, node);
+          if (extended) {
+            const list = index!.get(extended);
+            if (list) list.push(node);
+            else index!.set(extended, [node]);
+          }
+        }
+        return undefined;
+      });
+    }
+    lowerer.localSubclassIndex = index;
+  }
+  return index.get(base) ?? [];
+}
+
+/** True when a function-local class below the class node `base` declares
+ * a concrete instance method or accessor `name` (accessors are keyed
+ * `get:x` and `set:x`). A call on `base`'s class then dispatches on the
+ * receiver; devirtualization turns it back into a direct call when no such
+ * override is reachable. */
+function localOverrideBelow(
+  lowerer: Lowerer,
+  base: ts.Node,
+  name: string,
+  visited?: Set<ts.Node>,
+): boolean {
+  const subclasses = localSubclassesOf(lowerer, base);
+  if (subclasses.length === 0) return false;
+  visited ??= new Set();
+  if (visited.has(base)) return false;
+  visited.add(base);
+  const accessor = name.startsWith("get:") ? "get" : name.startsWith("set:") ? "set" : null;
+  const member = accessor ? name.slice(4) : name;
+  return subclasses.some(
+    (sub) =>
+      sub.members.nodes.some(
+        (m) =>
+          (accessor === null
+            ? ts.isMethodDeclaration(m)
+            : accessor === "get"
+              ? ts.isGetAccessorDeclaration(m)
+              : ts.isSetAccessorDeclaration(m)) &&
+          m.body !== undefined &&
+          m.name !== undefined &&
+          (ts.isIdentifier(m.name) || ts.isStringLiteral(m.name)) &&
+          m.name.text === member &&
+          !ts.getModifiers(m)?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
+      ) || localOverrideBelow(lowerer, sub, name, visited),
+  );
 }
 
 /** The nearest GENERIC-method declaration of `name` at/above `info` —

@@ -12,20 +12,9 @@ import {
 import { dynamicFieldStores } from "../../ir/int32-slots.js";
 import { everyExpr, everyStmtList, transformStmtList } from "../../ir/traverse.js";
 import { InlineUnionFields } from "./inline-unions.js";
+import { RESULT_DST_ID, resultEntryName } from "../result-slots.js";
 
-/** Prefix of a function's result-slot entry: `%into.<name>(...params, dst)`
- * writes the function's fresh result object into `dst` and returns nothing. */
-export const RESULT_ENTRY_PREFIX = "%into.";
-
-export function resultEntryName(name: string): string {
-  return `${RESULT_ENTRY_PREFIX}${name}`;
-}
-
-/** The local id of a result-slot entry's destination parameter. The
- * caller passes zeroed frame storage, and on every path the entry stores
- * each of its fields at most once, so a store into it is an
- * initialization: there is no old value to release. */
-export const RESULT_DST_ID = "%into.dst";
+export { RESULT_DST_ID, RESULT_ENTRY_PREFIX, resultEntryName } from "../result-slots.js";
 
 function distinctNames(names: readonly string[]): boolean {
   return new Set(names).size === names.length;

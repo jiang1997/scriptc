@@ -1,5 +1,6 @@
 {
  "order": [
+  "<repo>/packages/compiler/shims/chalk/v5.ts",
   "<repo>/tests/fixtures/npm/cases/chalk5/main.ts"
  ],
  "diags": []

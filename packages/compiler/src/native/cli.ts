@@ -20,12 +20,30 @@ import { openNativeCache } from "./cache.js";
 import { loadNativeToolchain } from "./toolchain.js";
 import { buildSanitizedRuntime } from "./sanitizer.js";
 import { runCompilerTask } from "./task.js";
+import { processFork } from "../frontend/process-fork.js";
 
 declare function compilerNativePrivateDirectory(path: string, harden: boolean): boolean;
 declare function compilerNativeCollectCycles(): void;
+declare function compilerNativeFork(): number;
+declare function compilerNativeExit(code: number): void;
+declare function compilerNativeWait(pid: number): number;
+declare function compilerNativeLockOpen(path: string): boolean;
+declare function compilerNativeLock(): void;
+declare function compilerNativeUnlock(): void;
+declare function compilerNativeBoundCycleGrowth(): void;
 
 async function main(): Promise<number> {
+  compilerNativeBoundCycleGrowth();
   setFrontendDisposedHook(() => compilerNativeCollectCycles());
+  if (process.platform !== "win32")
+    processFork.primitives = {
+      fork: () => compilerNativeFork(),
+      exit: (code) => compilerNativeExit(code),
+      wait: (pid) => compilerNativeWait(pid),
+      openLock: (path) => compilerNativeLockOpen(path),
+      lock: () => compilerNativeLock(),
+      unlock: () => compilerNativeUnlock(),
+    };
   const manifestPath = process.env["SCRIPTC_TOOLCHAIN"] ?? process.execPath + ".json";
   let compiler: NativeCompiler | null = null;
   let cache: ReturnType<typeof openNativeCache> = null;
@@ -110,6 +128,7 @@ async function main(): Promise<number> {
               tls: false,
               cipher: false,
               ecdh: false,
+              dh: false,
               pki: false,
               ed25519: false,
               webcrypto: false,

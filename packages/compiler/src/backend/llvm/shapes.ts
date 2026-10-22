@@ -68,9 +68,22 @@ const CYC_MAX_TYPES = 32768;
 /** What the tables need from the emitter: the extern-declaration ledger
  * and the module-wide cycle/shape indexes. */
 export interface ShapeHost {
+  /** Chunk emitters only (emit-journal.ts): EmitJournal's allocated, built,
+   * opened, used and entry. */
+  journalAllocated?: ((name: string, op: string, args: readonly unknown[]) => void) | undefined;
+  journalBuilt?: (() => void) | undefined;
+  journalOpened?: ((op: string) => void) | undefined;
+  journalUsed?: ((name: string, op: string, args: readonly unknown[]) => void) | undefined;
+  journalEntry?: ((table: string, key: string, value: unknown) => void) | undefined;
   /** The hierarchy root of a class (a program class or a runtime base),
    * or undefined for classes outside the class graph. */
   classRootOf?(className: string): string | undefined;
+  /** Whether arrays of `elem` hold 32-bit references to compact class
+   * instances (SCR_ELEM_CREF; LlEmitter.compactArrayElem). */
+  compactArrayElem?(elem: IrType): boolean;
+  /** Whether compact class instances live in the program-lifetime region
+   * (LlEmitter.compactRegion). */
+  compactRegion?(): boolean;
   /** Byte offset from an object pointer back to ScrCycHdr.buf. */
   readonly cycleBufOffset: number;
   declare(decl: string): void;
@@ -386,6 +399,7 @@ function nullableRetainSym(host: ShapeHost, arm: IrType): string {
   const sym = `@sc_nretain_${arm.kind}`;
   if (!host.nullableUnions.retainWrappers.has(sym))
     host.nullableUnions.retainWrappers.set(sym, retainSym(host, arm));
+  host.journalEntry?.("retainWrapper", sym, host.nullableUnions.retainWrappers.get(sym));
   return sym;
 }
 
@@ -564,14 +578,16 @@ export function inlineRcFamily(host: ShapeHost, stem: string, op: RcOp): InlineR
 }
 
 /** Which RC fast paths an emission inlines. `speed` mirrors every family
- * with a fast path. `release` mirrors only the string retain and the dyn
- * retain and release: the operations that dominate dynamic-value and string
- * code, at almost no size cost. String releases stay calls in `release`
- * because string-heavy programs have many release sites. */
+ * with a fast path. `release` mirrors only the string and Map retains and
+ * the dyn retain and release: the operations that dominate dynamic-value,
+ * string and Map code (a Map read from an array or another Map), at almost
+ * no size cost. String releases stay calls in `release` because
+ * string-heavy programs have many release sites. */
 export type InlineRcMode = "release" | "speed";
 
 const RELEASE_RC_OPS = new Set([
   "str:retain",
+  "map:retain",
   "dyn:retain",
   "dyn:release",
   "js:retain",
@@ -1076,17 +1092,29 @@ export function arrNewCall(
 
 /** The %ScrArrOps descriptor (retain, release, trace, registry id) of a REF
  * element type, defined once per module and shared by all its arrays. It is
- * writable: the runtime stores its registry id on the first array. */
+ * writable: the runtime stores its registry id on the first array. Its tail
+ * padding is the runtime's flags word (0); arrays of compact class
+ * references (ShapeHost.compactArrayElem) spell the word out as
+ * SCR_ARR_OPS_COMPACT. */
 export function arrOps(host: ShapeHost, elem: IrType): string {
   const v = vAdapters(host, elem);
   const trace = traceArg(host, elem);
   const part = (sym: string): string => sym.replace(/^@/, "").replace(/[^A-Za-z0-9_.]/g, "_");
   const name = `@sc_arrops.${part(v.retain)}.${part(v.release)}.${part(trace)}`;
+  if (host.compactArrayElem?.(elem) === true) {
+    host.declare(
+      `${name}.c = internal global { ptr, ptr, ptr, i32, i32 } { ptr ${v.retain}, ptr ${v.release}, ptr ${trace}, i32 0, i32 ${SCR_ARR_OPS_COMPACT} }`,
+    );
+    return `${name}.c`;
+  }
   host.declare(
     `${name} = internal global %ScrArrOps { ptr ${v.retain}, ptr ${v.release}, ptr ${trace}, i32 0 }`,
   );
   return name;
 }
+
+/** scr_array.h SCR_ARR_OPS_COMPACT. */
+const SCR_ARR_OPS_COMPACT = 1;
 
 /* ── capture boxes ────────────────────────────────────────────────────── */
 

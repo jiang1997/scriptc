@@ -3,6 +3,7 @@ import type { LlvmUnsupportedError } from "./llvm/emitter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import { type IrModule, type SrcLoc } from "../ir/ir.js";
 import {
+  DH_LIB_FNS,
   PKI_LIB_FNS,
   moduleUsesFetch,
   moduleUsesWebCryptoAsymmetric,
@@ -212,10 +213,15 @@ export function moduleWasiUnavailableSurface(
         };
         return false;
       }
-      if (node.fn === "webcrypto.encrypt" || node.fn === "webcrypto.decrypt") {
+      if (
+        node.fn === "webcrypto.encrypt" ||
+        node.fn === "webcrypto.decrypt" ||
+        node.fn === "webcrypto.wrapKey" ||
+        node.fn === "webcrypto.unwrapKey"
+      ) {
         found = {
           surface:
-            "WebCrypto encrypt and decrypt (the wasm32-wasi runtime does not include the mbedTLS library)",
+            "WebCrypto encrypt, decrypt, wrapKey and unwrapKey (the wasm32-wasi runtime does not include the mbedTLS library)",
           loc,
         };
         return false;
@@ -223,6 +229,16 @@ export function moduleWasiUnavailableSurface(
       if (node.fn === "crypto.ecdhNew" || node.fn === "crypto.ecdhConvertKey") {
         found = {
           surface: "ECDH (the wasm32-wasi runtime does not include the mbedTLS library)",
+          loc,
+        };
+        return false;
+      }
+      if (DH_LIB_FNS.has(node.fn)) {
+        found = {
+          surface:
+            node.fn === "crypto.dhNew" || node.fn === "crypto.dhGroupNew"
+              ? "DiffieHellman (the wasm32-wasi runtime does not include the mbedTLS library)"
+              : "checkPrime and generatePrime (the wasm32-wasi runtime does not include the mbedTLS library)",
           loc,
         };
         return false;

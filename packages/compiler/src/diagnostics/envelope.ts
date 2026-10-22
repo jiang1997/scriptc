@@ -67,6 +67,9 @@ export interface LocatedDiagnostic extends SourcePosition {
   hint: string;
   /** The id of the root-cause group this site belongs to. */
   group: string;
+  /** Deferred scope only: the statement is module top-level code, so it
+   * runs when its module loads. */
+  startup?: true;
 }
 
 export interface DiagnosticGroup {
@@ -290,6 +293,7 @@ export function locateDiagnostic(
     message: diag.message,
     hint: hintOf(diag),
     group: groupId(diag, scope),
+    ...(scope === "deferred" && diag.startup === true ? { startup: true as const } : {}),
   };
 }
 

@@ -1,3 +1,4 @@
+import { iterableGeneratorArm } from "./iterable-values.js";
 import { mapAsyncGeneratorAnnotation } from "../type-mapper.js";
 import { dynUndefinedExpr } from "../../ir/build.js";
 import * as ts from "../ts7/adapter.js";
@@ -147,6 +148,9 @@ export function declaredReturnType(
   // (`.action(() => { throw ... })`). `never` VALUES stay unmapped.
   if (retTsType.flags & ts.TypeFlags.Never) return VOID;
   let mappedReturn = lowerer.mapTypeOf(retTsType);
+  // A generator declared to return Iterable<T> returns a generator over T.
+  if (mappedReturn && decl.asteriskToken)
+    mappedReturn = iterableGeneratorArm(lowerer, mappedReturn);
   if (
     mappedReturn === null &&
     decl.asteriskToken &&

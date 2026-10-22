@@ -101,6 +101,21 @@ ScrDyn *scr_crypto_cipher_new(bool decrypt, ScrDyn *cipher, ScrDyn *key, ScrDyn 
  * or result, or NULL with Node's error pending. */
 ScrDyn *scr_crypto_ecdh_new(ScrDyn *curve);
 ScrDyn *scr_crypto_ecdh_convert_key(ScrDyn *key, ScrDyn *curve, ScrDyn *in_enc, ScrDyn *out_enc, ScrDyn *format);
+/* crypto.createDiffieHellman(sizeOrKey, keyEncoding, generator,
+ * generatorEncoding) and crypto.getDiffieHellman(groupName) over
+ * checked-dynamic arguments (scr_dh.c, linked with the vendored mbedTLS
+ * archive). +1 DiffieHellman or DiffieHellmanGroup handle, or NULL with
+ * Node's error pending. */
+ScrDyn *scr_crypto_dh_new(ScrDyn *size_or_key, ScrDyn *key_encoding, ScrDyn *generator, ScrDyn *generator_encoding);
+ScrDyn *scr_crypto_dh_group_new(ScrDyn *name);
+/* crypto.checkPrimeSync, checkPrime, generatePrimeSync and generatePrime
+ * (scr_dh.c): checked-dynamic arguments, borrowed; the sync forms answer
+ * +1 or NULL with the error pending. The callbacks receive undefined as
+ * the error, as Node passes it, or null when `null_error`. */
+ScrDyn *scr_crypto_check_prime_sync(ScrDyn *candidate, ScrDyn *options);
+void scr_crypto_check_prime_async(ScrDyn *candidate, ScrDyn *options, ScrDyn *callback, bool null_error);
+ScrDyn *scr_crypto_generate_prime_sync(ScrDyn *size, ScrDyn *options);
+void scr_crypto_generate_prime_async(ScrDyn *size, ScrDyn *options, ScrDyn *callback, bool null_error);
 ScrBytes *scr_crypto_pbkdf2(ScrBytes *password, ScrBytes *salt,
                             double iterations, double keylen, ScrStr *digest);
 ScrBytes *scr_crypto_pbkdf2_job(ScrBytes *password, ScrBytes *salt, double iterations,
@@ -245,6 +260,13 @@ typedef ScrBytes *(*ScrWebCryptoAesFn)(const char *name, bool decrypt, const uns
 ScrPromise *scr_webcrypto_cipher(ScrDyn *args, bool decrypt, ScrWebCryptoAesFn aes);
 ScrPromise *scr_webcrypto_encrypt(ScrDyn *args);
 ScrPromise *scr_webcrypto_decrypt(ScrDyn *args);
+/* wrapKey and unwrapKey run the same way (AES-KW wrapping, or the AES
+ * ciphers): wrapKey fulfills with an ArrayBuffer and unwrapKey with a
+ * CryptoKey on a later loop turn. */
+ScrPromise *scr_webcrypto_wrap(ScrDyn *args, ScrWebCryptoAesFn aes);
+ScrPromise *scr_webcrypto_unwrap(ScrDyn *args, ScrWebCryptoAesFn aes);
+ScrPromise *scr_webcrypto_wrap_key(ScrDyn *args);
+ScrPromise *scr_webcrypto_unwrap_key(ScrDyn *args);
 /* deriveBits and deriveKey (PBKDF2 and HKDF) over node:crypto's KDF core:
  * deriveBits fulfills with an ArrayBuffer (at once for a zero length) and
  * deriveKey with a CryptoKey of the derived key type, on a later loop

@@ -48,7 +48,7 @@ static inline const ScrArrExt *scr_arr_ax(const ScrArr *a) {
 }
 #define SCR_AX(a) scr_arr_ax(a)
 
-static void scr_arr_move_inline(ScrArr *a, size_t cap, size_t unit);
+static void scr_arr_move_inline(ScrArr *a, size_t cap);
 
 /* Bytes before the dense slots' allocation start: the ext pointer's word. */
 static size_t scr_arr_prefix(const ScrArr *a) {
@@ -60,9 +60,10 @@ static void *scr_arr_alloc_start(const ScrArr *a) {
   return (char *)scr_arr_block(a) - scr_arr_prefix(a);
 }
 
-/* Bytes per dense slot with its state: an 8-byte value, or a boolean byte. */
+/* Bytes per dense slot: an 8-byte value or a boolean byte, and its state
+ * byte when the array has states. */
 static size_t scr_arr_slot_unit(const ScrArr *a) {
-  return a->elem == SCR_ELEM_BOOL ? 2 * sizeof(uint8_t) : sizeof(uint64_t) + sizeof(uint8_t);
+  return scr_arr_slot_width(a) + (scr_arr_has_states(a) ? 1 : 0);
 }
 
 /* Bytes of dense storage (head room included) after the prefix. */
@@ -78,7 +79,7 @@ ScrArrExt *scr_arr_ext(ScrArr *a) {
   /* The pointer goes in the word before the dense allocation, which an
    * array with ext always has: inline slots move out, and an array without
    * storage gets an allocation of the word alone. */
-  if (a->spare & SCR_ARR_INLINE_SLOTS) scr_arr_move_inline(a, a->cap, scr_arr_slot_unit(a));
+  if (a->spare & SCR_ARR_INLINE_SLOTS) scr_arr_move_inline(a, a->cap);
   char *start;
   if (!a->data) {
     start = scr_mem_alloc(SCR_ARR_EXT_PREFIX);
@@ -212,6 +213,11 @@ static bool scr_elem_is_ref(ScrElemKind k) {
          k == SCR_ELEM_REF;
 }
 
+/* Whether `a`'s element type comes with element ops (scr_arr_ops). */
+static bool scr_arr_has_ops(const ScrArr *a) {
+  return a->elem == SCR_ELEM_REF || a->elem == SCR_ELEM_CREF;
+}
+
 /* Releases an element slot of kind `elem`, with element ops `ops` for
  * SCR_ELEM_REF. An array's kind and ops never change, so loops look them up
  * once (element releases may run teardown, which reloads anything read
@@ -266,6 +272,7 @@ typedef struct {
 
 static uint64_t scr_arr_storage_get(const ScrArrStorage *s, size_t index) {
   if (s->elem == SCR_ELEM_BOOL) return ((const uint8_t *)s->data)[index];
+  if (s->elem == SCR_ELEM_CREF) return scr_cref_decode(((const uint32_t *)s->data)[index]);
   return s->data[index];
 }
 
@@ -387,18 +394,14 @@ static void scr_arr_sparse_drop_prefix(ScrArr *a, size_t count) {
   x->sparse_len -= count;
 }
 
-/* Bytes per dense slot: the value and its state byte. Boolean arrays
- * store a one-byte value. */
-#define SCR_ARR_SLOT_BYTES (sizeof(uint64_t) + sizeof(uint8_t))
-#define SCR_ARR_BOOL_SLOT_BYTES (2 * sizeof(uint8_t))
 /* Appends to an array smaller than this grow straight to it. */
 #define SCR_ARR_MIN_GROWTH ((size_t)4)
 
 /* Inline slots: an array built by scr_arr_new_small / scr_arr_new_ops_small
  * (empty literals the compiler sees appended to), or constructed with a
  * known element count of up to SCR_ARR_KNOWN_INLINE_MAX, keeps its first
- * dense slots and states in its own block, right after the ScrArr, so it
- * costs one allocation and its first elements share the header's cache lines.
+ * dense slots in its own block, right after the ScrArr, so it costs one
+ * allocation and its first elements share the header's cache lines.
  * `spare` records it. Growth past the inline capacity moves the slots to an
  * ordinary allocation; the inline room then stays unused until the array is
  * freed. */
@@ -449,8 +452,14 @@ static void scr_arr_drop_head(ScrArr *a) {
   a->spare &= (uint16_t)~SCR_ARR_HEAD_ROOM;
   if (head == 0) return;
   size_t cap = a->cap, total = cap + head, live = a->len < cap ? a->len : cap;
-  uint8_t *end = scr_arr_states_end(a);
   uint64_t *data = a->data - head;
+  if (!scr_arr_has_states(a)) {
+    if (live) memmove(data, a->data, live * scr_arr_slot_width(a));
+    a->data = data;
+    a->cap = total;
+    return;
+  }
+  uint8_t *end = scr_arr_states_end(a);
   /* The states end moves to the end of the allocation, past the `head`
    * vacated states: the live states move up with it, and every other state
    * becomes a hole. */
@@ -469,10 +478,10 @@ static void scr_arr_drop_head(ScrArr *a) {
  * for storage without head room (booleans, inline slots); the caller then
  * moves the tail down itself. */
 static bool scr_arr_drop_front(ScrArr *a, size_t count) {
-  if (a->elem == SCR_ELEM_BOOL || scr_arr_inline(a)) return false;
+  if (scr_arr_slot_width(a) != sizeof(uint64_t) || scr_arr_inline(a)) return false;
   if (count == 0) return true;
   size_t head = scr_arr_head(a);
-  memset(scr_arr_state_run(a, 0, count), SCR_ARR_HOLE, count);
+  if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, 0, count), SCR_ARR_HOLE, count);
   memset(a->data, 0, count * sizeof(uint64_t));
   if (head) a->data[-1] = 0;
   a->data += count;
@@ -492,9 +501,9 @@ static bool scr_arr_drop_front(ScrArr *a, size_t count) {
 }
 
 /* Slots requested by the small constructions. The small allocator rounds
- * them up to fill its block: 3 eight-byte slots after a plain header in a
- * 64-byte block (72 after a collector header), or 4 booleans in a 40-byte
- * block. Most small arrays hold up to three elements; two slots make
+ * them up to fill its block: 4 eight-byte slots after a plain header in a
+ * 64-byte block (3 in 72 bytes after a collector header), or 8 booleans in
+ * a 40-byte block. Most small arrays hold up to three elements; two slots make
  * arrays that grow past them move their storage often enough to slow
  * programs that build many short lists. */
 #if SCR_SMALL_ALLOC
@@ -504,18 +513,14 @@ static bool scr_arr_drop_front(ScrArr *a, size_t count) {
 #endif
 
 /* Inline capacity of a small construction with `prefix` bytes of block
- * before the slots. */
-static size_t scr_arr_small_cap(size_t prefix, bool bools) {
+ * before slots of `unit` bytes. Inlined, so it folds to a constant for a
+ * constant unit. */
+static inline size_t scr_arr_small_cap(size_t prefix, size_t unit) {
 #if SCR_SMALL_ALLOC
-  /* One return per slot unit, so each folds to a constant at its callers. */
-  if (bools)
-    return (scr_sa_class_size(scr_sa_class(prefix + SCR_ARR_SMALL_SLOTS * SCR_ARR_BOOL_SLOT_BYTES)) - prefix) /
-           SCR_ARR_BOOL_SLOT_BYTES;
-  return (scr_sa_class_size(scr_sa_class(prefix + SCR_ARR_SMALL_SLOTS * SCR_ARR_SLOT_BYTES)) - prefix) /
-         SCR_ARR_SLOT_BYTES;
+  return (scr_sa_class_size(scr_sa_class(prefix + SCR_ARR_SMALL_SLOTS * unit)) - prefix) / unit;
 #else
   (void)prefix;
-  (void)bools;
+  (void)unit;
   return SCR_ARR_SMALL_SLOTS;
 #endif
 }
@@ -528,39 +533,42 @@ static size_t scr_arr_small_cap(size_t prefix, bool bools) {
 #define SCR_ARR_KNOWN_INLINE_MAX ((size_t)16)
 
 /* Inline capacity of a construction of `need` elements with `prefix` bytes
- * of block before the slots, rounded up to fill the block; 0 when its slots
- * stay separate. */
-static size_t scr_arr_known_cap(size_t prefix, size_t need, bool bools) {
+ * of block before slots of `unit` bytes, rounded up to fill the block; 0
+ * when its slots stay separate. */
+static size_t scr_arr_known_cap(size_t prefix, size_t need, size_t unit) {
   if (need == 0 || need > SCR_ARR_KNOWN_INLINE_MAX) return 0;
 #if SCR_SMALL_ALLOC
-  size_t unit = bools ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES;
   size_t bytes = prefix + need * unit;
   if (bytes > SCR_SA_MAX) return 0;
   return (scr_sa_class_size(scr_sa_class(bytes)) - prefix) / unit;
 #else
   (void)prefix;
-  (void)bools;
+  (void)unit;
   return need;
 #endif
 }
 
-static void scr_arr_use_inline(ScrArr *a, size_t cap) {
+/* Points `a` at `cap` inline slots of `unit` bytes: the slot width, plus
+ * the state byte when the array has states (then all holes). */
+static void scr_arr_use_inline(ScrArr *a, size_t cap, size_t unit) {
   a->data = (uint64_t *)((char *)a + SCR_ARR_INLINE_OFFSET);
   a->cap = (uint32_t)cap;
-  memset(scr_arr_state_run(a, 0, cap), SCR_ARR_HOLE, cap);
+  if (scr_arr_has_states(a)) memset((char *)a->data + cap * (unit - 1), SCR_ARR_HOLE, cap);
   a->spare |= SCR_ARR_INLINE_SLOTS;
 }
 
 /* Move inline slots to their own allocation of `cap` (>= a->cap) slots; the
  * array's block keeps the unused room until it is freed. */
-static void scr_arr_move_inline(ScrArr *a, size_t cap, size_t unit) {
+static void scr_arr_move_inline(ScrArr *a, size_t cap) {
   size_t width = scr_arr_slot_width(a);
-  uint64_t *data = scr_mem_alloc(cap * unit);
+  uint64_t *data = scr_mem_alloc(cap * scr_arr_slot_unit(a));
   if (!data) scr_arr_oom();
-  uint8_t *end = (uint8_t *)data + cap * (width + 1);
   memcpy(data, a->data, a->cap * width);
-  memcpy(end - a->cap, scr_arr_state_run(a, 0, a->cap), a->cap);
-  memset(end - cap, SCR_ARR_HOLE, cap - a->cap);
+  if (scr_arr_has_states(a)) {
+    uint8_t *end = (uint8_t *)data + cap * (width + 1);
+    memcpy(end - a->cap, scr_arr_state_run(a, 0, a->cap), a->cap);
+    memset(end - cap, SCR_ARR_HOLE, cap - a->cap);
+  }
   a->data = data;
   a->cap = cap;
   a->spare &= (uint16_t)~SCR_ARR_INLINE_SLOTS;
@@ -582,15 +590,15 @@ typedef enum {
  * reallocation. Growth keeps its own sequence (4, 8, 16, ...): rounding it
  * as well moves array storage into other size classes and measured
  * slower. */
-static size_t scr_arr_block_cap(size_t cap, bool bools) {
+static size_t scr_arr_block_cap(size_t cap, size_t unit) {
 #if SCR_SMALL_ALLOC
-  size_t bytes = cap * (bools ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES);
+  size_t bytes = cap * unit;
   if (bytes <= SCR_SA_MAX) {
     size_t block = scr_sa_class_size(scr_sa_class((bytes + 15) & ~(size_t)15));
-    return bools ? block / SCR_ARR_BOOL_SLOT_BYTES : block / SCR_ARR_SLOT_BYTES;
+    return block / unit;
   }
 #else
-  (void)bools;
+  (void)unit;
 #endif
   return cap;
 }
@@ -609,27 +617,30 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode);
  * paths pick the same capacity. */
 static inline void scr_arr_grow_dense_to(ScrArr *a, size_t need, ScrArrGrow mode) {
   if (need <= a->cap) return;
-  if (a->elem == SCR_ELEM_BOOL || (a->spare & (SCR_ARR_INLINE_SLOTS | SCR_ARR_HEAD_ROOM | SCR_ARR_HAS_EXT)) ||
-      need > SCR_ARR_DENSE_LIMIT) {
+  if (a->elem == SCR_ELEM_BOOL || a->elem == SCR_ELEM_CREF ||
+      (a->spare & (SCR_ARR_INLINE_SLOTS | SCR_ARR_HEAD_ROOM | SCR_ARR_HAS_EXT)) || need > SCR_ARR_DENSE_LIMIT) {
     scr_arr_grow_dense_slow(a, need, mode);
     return;
   }
+  bool states = scr_arr_has_states(a);
+  size_t unit = sizeof(uint64_t) + (states ? 1 : 0);
   size_t cap;
   if (mode == SCR_ARR_GROW_EXACT) {
-    cap = scr_arr_block_cap(need, false);
+    cap = scr_arr_block_cap(need, unit);
   } else {
     cap = a->cap < SCR_ARR_MIN_GROWTH ? SCR_ARR_MIN_GROWTH : a->cap;
     while (cap < need) cap += cap;
     if (cap > SCR_ARR_DENSE_LIMIT) cap = SCR_ARR_DENSE_LIMIT;
   }
   size_t old = a->cap;
-  uint64_t *data = a->data ? scr_mem_realloc(a->data, cap * SCR_ARR_SLOT_BYTES)
-                           : scr_mem_alloc(cap * SCR_ARR_SLOT_BYTES);
+  uint64_t *data = a->data ? scr_mem_realloc(a->data, cap * unit) : scr_mem_alloc(cap * unit);
   if (!data) scr_arr_oom();
-  /* The states end the allocation: move them to its new end. */
-  uint8_t *end = (uint8_t *)(data + cap) + cap;
-  if (old) memmove(end - old, (uint8_t *)(data + old), old);
-  memset(end - cap, SCR_ARR_HOLE, cap - old);
+  if (states) {
+    /* The states end the allocation: move them to its new end. */
+    uint8_t *end = (uint8_t *)(data + cap) + cap;
+    if (old) memmove(end - old, (uint8_t *)(data + old), old);
+    memset(end - cap, SCR_ARR_HOLE, cap - old);
+  }
   a->data = data;
   a->cap = cap;
 }
@@ -660,12 +671,12 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode) {
       mode = SCR_ARR_GROW_APPEND;
     }
   }
-  bool bools = a->elem == SCR_ELEM_BOOL;
+  bool states = scr_arr_has_states(a);
   size_t width = scr_arr_slot_width(a);
-  size_t unit = bools ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES;
+  size_t unit = scr_arr_slot_unit(a);
   size_t cap;
   if (mode == SCR_ARR_GROW_EXACT) {
-    cap = scr_arr_block_cap(need, bools);
+    cap = scr_arr_block_cap(need, unit);
   } else {
     /* Inline slots overflow into the ordinary sequence (4, 8, 16, ...). */
     size_t from = scr_arr_inline(a) ? 0 : a->cap;
@@ -680,9 +691,9 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode) {
      * appends benefit from geometric headroom. */
     if (mode == SCR_ARR_GROW_SPAN && need > SCR_ARR_DENSE_LIMIT) cap = need;
   }
-  if (cap > SIZE_MAX / SCR_ARR_SLOT_BYTES) scr_arr_oom(); /* bounds both slot sizes */
+  if (cap > SIZE_MAX / (sizeof(uint64_t) + 1)) scr_arr_oom(); /* bounds every slot unit */
   if (scr_arr_inline(a)) {
-    scr_arr_move_inline(a, cap, unit);
+    scr_arr_move_inline(a, cap);
     scr_arr_absorb_sparse(a);
     return;
   }
@@ -692,7 +703,7 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode) {
     if (!data) scr_arr_oom();
     a->data = data;
     a->cap = (uint32_t)cap;
-    memset(scr_arr_state_run(a, 0, cap), SCR_ARR_HOLE, cap);
+    if (states) memset(scr_arr_state_run(a, 0, cap), SCR_ARR_HOLE, cap);
     return;
   }
   /* Values and states share one allocation. Move the old states to its new
@@ -702,9 +713,11 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode) {
   char *start = scr_mem_realloc((char *)a->data - prefix, prefix + cap * unit);
   if (!start) scr_arr_oom();
   uint64_t *data = (uint64_t *)(start + prefix);
-  uint8_t *end = (uint8_t *)data + cap * (width + 1);
-  if (a->cap) memmove(end - a->cap, (uint8_t *)data + a->cap * width, a->cap);
-  memset(end - cap, SCR_ARR_HOLE, cap - a->cap);
+  if (states) {
+    uint8_t *end = (uint8_t *)data + cap * (width + 1);
+    if (a->cap) memmove(end - a->cap, (uint8_t *)data + a->cap * width, a->cap);
+    memset(end - cap, SCR_ARR_HOLE, cap - a->cap);
+  }
   a->data = data;
   a->cap = cap;
   scr_arr_absorb_sparse(a);
@@ -712,6 +725,44 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode) {
 
 static void scr_arr_grow_dense(ScrArr *a, size_t need) {
   scr_arr_grow_dense_to(a, need, SCR_ARR_GROW_APPEND);
+}
+
+/* States follow the value slots, and the capacity stays: inline slots
+ * move to an allocation of their own, and other storage grows by the state
+ * bytes (immortal storage, which may be static, is copied instead). */
+void scr_arr_add_states(ScrArr *a) {
+  if (scr_arr_has_states(a)) return;
+  size_t width = scr_arr_slot_width(a), len = a->len;
+  if (a->cap == 0) {
+    a->spare |= SCR_ARR_STATES;
+    return;
+  }
+  if (scr_arr_inline(a)) {
+    uint64_t *data = scr_mem_alloc(a->cap * (width + 1));
+    if (!data) scr_arr_oom();
+    memcpy(data, a->data, len * width);
+    a->data = data;
+    a->spare &= (uint16_t)~SCR_ARR_INLINE_SLOTS;
+  } else if (a->rc == SIZE_MAX) {
+    size_t prefix = scr_arr_prefix(a);
+    char *start = scr_mem_alloc(prefix + a->cap * (width + 1));
+    if (!start) scr_arr_oom();
+    if (prefix) memcpy(start, scr_arr_alloc_start(a), prefix);
+    memcpy(start + prefix, a->data, len * width);
+    a->data = (uint64_t *)(start + prefix);
+    a->spare &= (uint16_t)~SCR_ARR_HEAD_ROOM;
+  } else {
+    /* Head room goes back to the capacity first. */
+    scr_arr_drop_head(a);
+    size_t prefix = scr_arr_prefix(a);
+    char *start = scr_mem_realloc(scr_arr_alloc_start(a), prefix + a->cap * (width + 1));
+    if (!start) scr_arr_oom();
+    a->data = (uint64_t *)(start + prefix);
+  }
+  a->spare |= SCR_ARR_STATES;
+  uint8_t *end = scr_arr_states_end(a);
+  memset(end - len, SCR_ARR_VALUE, len);
+  memset(end - a->cap, SCR_ARR_HOLE, a->cap - len);
 }
 
 /* Room for `count` values in front of the first element of a dense array:
@@ -723,7 +774,7 @@ static void scr_arr_grow_dense(ScrArr *a, size_t need) {
  * array's allocation. Returns false when the caller must move the elements
  * itself. */
 static bool scr_arr_open_head(ScrArr *a, size_t count) {
-  if (a->elem == SCR_ELEM_BOOL || scr_arr_inline(a)) return false;
+  if (scr_arr_slot_width(a) != sizeof(uint64_t) || scr_arr_inline(a)) return false;
   size_t head = scr_arr_head(a);
   if (head < count) {
     size_t len = a->len;
@@ -734,21 +785,24 @@ static bool scr_arr_open_head(ScrArr *a, size_t count) {
     /* The new allocation: head room for the new values plus half the new
      * length, then the current dense window (its tail capacity included). */
     size_t room = count + (len + count) / 2;
-    if (room > SCR_ARR_MAX_LENGTH || a->cap > SIZE_MAX / SCR_ARR_SLOT_BYTES - room) return false;
+    size_t unit = scr_arr_slot_unit(a);
+    if (room > SCR_ARR_MAX_LENGTH || a->cap > SIZE_MAX / unit - room) return false;
     size_t total = room + a->cap;
     size_t prefix = scr_arr_prefix(a);
-    char *start = scr_mem_alloc(prefix + total * SCR_ARR_SLOT_BYTES);
+    char *start = scr_mem_alloc(prefix + total * unit);
     if (!start) scr_arr_oom();
     /* The ext pointer's word moves with the allocation. */
     if (prefix) memcpy(start, scr_arr_alloc_start(a), prefix);
     uint64_t *block = (uint64_t *)(start + prefix);
-    /* The window's states end `room` bytes before the allocation does; the
-     * room's states past it are holes. */
-    uint8_t *end = (uint8_t *)(block + total) + a->cap;
     memcpy(block + room, a->data, len * sizeof(uint64_t));
-    memset(end, SCR_ARR_HOLE, room);
-    memcpy(end - len, scr_arr_state_run(a, 0, len), len);
-    memset(end - a->cap, SCR_ARR_HOLE, a->cap - len);
+    if (scr_arr_has_states(a)) {
+      /* The window's states end `room` bytes before the allocation does;
+       * the room's states past it are holes. */
+      uint8_t *end = (uint8_t *)(block + total) + a->cap;
+      memset(end, SCR_ARR_HOLE, room);
+      memcpy(end - len, scr_arr_state_run(a, 0, len), len);
+      memset(end - a->cap, SCR_ARR_HOLE, a->cap - len);
+    }
     scr_mem_free(scr_arr_alloc_start(a));
     a->data = block + room;
     head = room;
@@ -764,10 +818,9 @@ static bool scr_arr_open_head(ScrArr *a, size_t count) {
  * within that gap past capacity. */
 static bool scr_arr_dense_tail_populated(const ScrArr *a) {
   size_t window = a->cap < SCR_ARR_DENSE_GAP ? a->cap : SCR_ARR_DENSE_GAP;
-  const uint8_t *states = scr_arr_states_end(a);
-  if (window == 0 || *scr_arr_state_in(states, a->cap - 1) == SCR_ARR_HOLE) return false;
+  if (window == 0 || scr_arr_dense_state(a, a->cap - 1) == SCR_ARR_HOLE) return false;
   size_t populated = 0;
-  for (size_t i = a->cap - window; i < a->cap; i++) populated += *scr_arr_state_in(states, i) != SCR_ARR_HOLE;
+  for (size_t i = a->cap - window; i < a->cap; i++) populated += scr_arr_dense_state(a, i) != SCR_ARR_HOLE;
   return populated * 16 >= window * 3;
 }
 
@@ -841,7 +894,7 @@ static __attribute__((noinline, pure)) ScrArrStateSlot scr_arr_sparse_state_at(c
  * sparse entries above it. */
 static inline uint8_t scr_arr_state_at(const ScrArr *a, size_t index, uint64_t *out) {
   if (index < a->cap) {
-    uint8_t state = *scr_arr_state_in(scr_arr_states_end(a), index);
+    uint8_t state = scr_arr_dense_state(a, index);
     if (state == SCR_ARR_HOLE) return SCR_ARR_HOLE;
     if (out) *out = scr_arr_dense_get(a, index);
     return state;
@@ -851,19 +904,38 @@ static inline uint8_t scr_arr_state_at(const ScrArr *a, size_t index, uint64_t *
   return sparse.state;
 }
 
+/* scr_arr_state_at for a number[] (SCR_ELEM_F64): 8-byte slots, with no
+ * element-kind test. */
+static inline uint8_t scr_arr_f64_state_at(const ScrArr *a, size_t index, uint64_t *out) {
+  if (index < a->cap) {
+    uint8_t state = !scr_arr_has_states(a) ? (index < a->len ? SCR_ARR_VALUE : SCR_ARR_HOLE)
+                                           : *scr_arr_state_in(scr_arr_states_end_w(a, 8), index);
+    if (state == SCR_ARR_HOLE) return SCR_ARR_HOLE;
+    *out = a->data[index];
+    return state;
+  }
+  ScrArrStateSlot sparse = scr_arr_sparse_state_at(a, index);
+  if (sparse.state != SCR_ARR_HOLE) *out = sparse.slot;
+  return sparse.state;
+}
+
 static inline bool scr_arr_slot_at(const ScrArr *a, size_t index, uint64_t *out) {
   return scr_arr_state_at(a, index, out) != SCR_ARR_HOLE;
 }
 
-/* Store an owned slot into an empty index. The caller has already established
- * the destination length and does not need a retain. */
+/* Store an owned slot into an empty index. The caller does not need a
+ * retain. An array with states has its destination length established
+ * already; an array without states takes only a value at its length,
+ * whose caller then raises the length, and gets states for any other
+ * store. */
 static void scr_arr_store_state_owned(ScrArr *a, size_t index, uint64_t slot,
                                       uint8_t state) {
   if (state != SCR_ARR_VALUE) scr_arr_cut(a, index);
+  if (!scr_arr_has_states(a) && (state != SCR_ARR_VALUE || index != a->len)) scr_arr_add_states(a);
   scr_arr_grow_for_index(a, index);
   if (index < a->cap) {
     scr_arr_dense_put(a, index, slot);
-    *scr_arr_state_ptr(a, index) = state;
+    if (scr_arr_has_states(a)) *scr_arr_state_ptr(a, index) = state;
     return;
   }
   size_t pos = scr_arr_sparse_lower_bound(SCR_AX(a)->sparse, SCR_AX(a)->sparse_len, index);
@@ -879,12 +951,15 @@ static void scr_arr_store_owned(ScrArr *a, size_t index, uint64_t slot) {
   scr_arr_store_state_owned(a, index, slot, SCR_ARR_VALUE);
 }
 
+/* Take the slot at `index`, leaving a hole: an array without states gets
+ * them. */
 static bool scr_arr_take_state(ScrArr *a, size_t index, uint64_t *out,
                                uint8_t *state_out) {
   if (index < a->cap) {
-    uint8_t state = *scr_arr_state_ptr(a, index);
+    uint8_t state = scr_arr_dense_state(a, index);
     if (state == SCR_ARR_HOLE) return false;
     scr_arr_cut(a, index);
+    scr_arr_need_states(a);
     *out = scr_arr_dense_get(a, index);
     *scr_arr_state_ptr(a, index) = SCR_ARR_HOLE;
     scr_arr_dense_put(a, index, 0);
@@ -909,11 +984,19 @@ static void scr_arr_replace_state_owned(ScrArr *a, size_t index, uint64_t slot,
   uint8_t old_state;
   uint64_t old = 0;
   if (state != SCR_ARR_VALUE) scr_arr_cut(a, index);
+  /* Without states, a value below the length replaces a value. */
+  if (!scr_arr_has_states(a) && (state != SCR_ARR_VALUE || index >= a->len)) {
+    if (state == SCR_ARR_VALUE && index == a->len) {
+      scr_arr_store_state_owned(a, index, slot, state);
+      return;
+    }
+    scr_arr_add_states(a);
+  }
   if (index < a->cap) {
-    old_state = *scr_arr_state_ptr(a, index);
+    old_state = scr_arr_dense_state(a, index);
     if (old_state == SCR_ARR_VALUE) old = scr_arr_dense_get(a, index);
     scr_arr_dense_put(a, index, slot);
-    *scr_arr_state_ptr(a, index) = state;
+    if (scr_arr_has_states(a)) *scr_arr_state_ptr(a, index) = state;
   } else {
     size_t pos = scr_arr_sparse_lower_bound(SCR_AX(a)->sparse, SCR_AX(a)->sparse_len, index);
     if (pos == SCR_AX(a)->sparse_len || SCR_AX(a)->sparse[pos].index != index) {
@@ -941,6 +1024,10 @@ static void scr_arr_note_value(ScrArr *a, size_t index) {
 /* scr_arr_refill bounded to [0, limit): for range operations whose cost is
  * proportional to the range, not to the whole array. */
 static void scr_arr_refill_to(ScrArr *a, size_t limit) {
+  if (!scr_arr_has_states(a)) {
+    scr_arr_refill(a);
+    return;
+  }
   size_t end = a->len < a->cap ? a->len : a->cap;
   if (limit < end) end = limit;
   size_t f = a->filled;
@@ -1022,7 +1109,11 @@ static bool scr_arr_prop_delete(ScrArr *a, double key) {
   return true;
 }
 
+/* Detach the storage of `a` for a rebuild through the element stores. Both
+ * have states: the detached storage for its readers, and the array for
+ * stores at any index. */
 static ScrArrStorage scr_arr_take_storage(ScrArr *a) {
+  scr_arr_need_states(a);
   ScrArrExt *x = scr_arr_ext_of(a);
   ScrArrStorage old = {a->data, scr_arr_states_end(a), a->cap, SCR_AX(a)->sparse,
                        SCR_AX(a)->sparse_len, SCR_AX(a)->sparse_cap, a->elem,
@@ -1059,17 +1150,20 @@ static bool scr_arr_is_dense(const ScrArr *a) {
   return a->len <= a->cap && (!(a->spare & SCR_ARR_HAS_EXT) || scr_arr_ext_of(a)->sparse_len == 0);
 }
 
+/* Without states, both move the values only: the caller keeps the
+ * elements contiguous from 0 and sets the length to their count. */
 static void scr_arr_move_dense(ScrArr *a, size_t to, size_t from, size_t count) {
   if (count == 0) return;
   scr_arr_cut(a, to);
   memmove(scr_arr_dense_at(a, to), scr_arr_dense_at(a, from), count * scr_arr_slot_width(a));
-  memmove(scr_arr_state_run(a, to, count), scr_arr_state_run(a, from, count), count);
+  if (scr_arr_has_states(a))
+    memmove(scr_arr_state_run(a, to, count), scr_arr_state_run(a, from, count), count);
 }
 
 static void scr_arr_clear_dense(ScrArr *a, size_t from, size_t count) {
   if (count == 0) return;
   scr_arr_cut(a, from);
-  memset(scr_arr_state_run(a, from, count), SCR_ARR_HOLE, count);
+  if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, from, count), SCR_ARR_HOLE, count);
   memset(scr_arr_dense_at(a, from), 0, count * scr_arr_slot_width(a));
 }
 
@@ -1138,39 +1232,75 @@ static inline void scr_arr_copy_slots(uint64_t *dst, const uint64_t *src, size_t
   }
 }
 
+/* Whether dense slots [from, from + count) of `a` all hold values. */
+static bool scr_arr_dense_run_values(const ScrArr *a, size_t from, size_t count) {
+  if (!scr_arr_has_states(a)) return from + count <= a->len;
+  if (from + count <= a->filled) return true;
+  return scr_arr_value_run(scr_arr_states_end(a), from, from + count) == from + count;
+}
+
 /* The destination owns no values in this range. Only retain adapters run
  * while copying references: no release can collect an intermediate copy.
  * Self-appends use disjoint ranges after reserving capacity. Both arrays
- * hold the same element kind, so their slots have the same width. */
+ * hold the same element kind, so their slots have the same width. A
+ * destination without states keeps none for a range of values: its caller
+ * makes the range contiguous with its elements and sets the length; any
+ * other range gives it states. */
 static void scr_arr_copy_dense(ScrArr *dst, size_t to, const ScrArr *src,
                                 size_t from, size_t count, bool reverse,
                                 bool materialize_holes) {
   if (count == 0) return;
   scr_arr_cut(dst, to);
   /* 8-byte slots: a constant slot size, and constant-width state ends. */
-  bool wide = dst->elem != SCR_ELEM_BOOL;
-  uint8_t *dst_states = wide ? scr_arr_states_end_w(dst, 8) : scr_arr_states_end_w(dst, 1);
-  const uint8_t *src_states = wide ? scr_arr_states_end_w(src, 8) : scr_arr_states_end_w(src, 1);
+  size_t width = scr_arr_slot_width(dst);
+  bool wide = width == sizeof(uint64_t);
+  /* Callers copy from an array without states only from its elements
+   * (which a self-copy reads after moving them, past the length). */
+  bool values = !scr_arr_has_states(src) || scr_arr_dense_run_values(src, from, count);
+  if (!values) scr_arr_need_states(dst);
+  bool refs = scr_elem_is_ref(src->elem);
+  if (!scr_arr_has_states(dst)) {
+    if (!reverse && wide) {
+      scr_arr_copy_slots(dst->data + to, src->data + from, count);
+    } else if (!reverse) {
+      memcpy(scr_arr_dense_at(dst, to), scr_arr_dense_at(src, from), count * width);
+    } else {
+      for (size_t i = 0; i < count; i++)
+        scr_arr_dense_put(dst, to + i, scr_arr_dense_get(src, from + count - i - 1));
+    }
+    if (!refs) return;
+    uint8_t elem = src->elem;
+    const ScrArrOps *ops = scr_arr_ops(src);
+    if (wide)
+      for (size_t i = to; i < to + count; i++) dst->data[i] = scr_elem_retain_with(elem, ops, dst->data[i]);
+    else
+      for (size_t i = to; i < to + count; i++)
+        scr_arr_dense_put(dst, i, scr_elem_retain_with(elem, ops, scr_arr_dense_get(dst, i)));
+    return;
+  }
+  uint8_t *dst_states = wide ? scr_arr_states_end_w(dst, 8) : scr_arr_states_end_w(dst, width);
+  const uint8_t *src_states = values ? NULL : wide ? scr_arr_states_end_w(src, 8) : scr_arr_states_end_w(src, width);
   if (!reverse && wide) {
     scr_arr_copy_slots(dst->data + to, src->data + from, count);
-    /* A range below the source's hole-free prefix holds only values. */
-    if (from + count <= src->filled)
+    if (values)
       scr_arr_set_states(dst_states - to - count, SCR_ARR_VALUE, count);
     else
       scr_arr_copy_states(dst_states - to - count, src_states - from - count, count);
   } else if (!reverse) {
     memcpy(scr_arr_dense_at(dst, to), scr_arr_dense_at(src, from),
            count * scr_arr_slot_width(dst));
-    scr_arr_copy_states(dst_states - to - count, src_states - from - count, count);
+    if (values)
+      scr_arr_set_states(dst_states - to - count, SCR_ARR_VALUE, count);
+    else
+      scr_arr_copy_states(dst_states - to - count, src_states - from - count, count);
   } else {
     for (size_t i = 0; i < count; i++) {
       size_t source = from + count - i - 1;
       scr_arr_dense_put(dst, to + i, scr_arr_dense_get(src, source));
-      *scr_arr_state_in(dst_states, to + i) = *scr_arr_state_in(src_states, source);
+      *scr_arr_state_in(dst_states, to + i) = values ? SCR_ARR_VALUE : *scr_arr_state_in(src_states, source);
     }
   }
-  bool refs = scr_elem_is_ref(src->elem);
-  if (!refs && !materialize_holes) return;
+  if (!refs && (!materialize_holes || values)) return;
   uint8_t elem = src->elem;
   const ScrArrOps *ops = scr_arr_ops(src);
   for (size_t i = to; i < to + count; i++) {
@@ -1185,7 +1315,7 @@ static void scr_arr_copy_dense(ScrArr *dst, size_t to, const ScrArr *src,
 
 /* Store `count` 8-byte value slots into dense storage starting at `to`. */
 static void scr_arr_put_slots(ScrArr *a, size_t to, size_t count, const uint64_t *slots) {
-  if (a->elem != SCR_ELEM_BOOL) {
+  if (scr_arr_slot_width(a) == sizeof(uint64_t)) {
     scr_arr_copy_slots(a->data + to, slots, count);
     return;
   }
@@ -1197,9 +1327,9 @@ static void scr_arr_put_slots(ScrArr *a, size_t to, size_t count, const uint64_t
 static inline __attribute__((always_inline)) ScrArr *scr_arr_make(ScrElemKind elem,
                                                                   size_t initial_cap,
                                                                   bool small) {
-  size_t unit = elem == SCR_ELEM_BOOL ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES;
-  size_t inline_cap = small ? scr_arr_small_cap(SCR_ARR_INLINE_OFFSET, elem == SCR_ELEM_BOOL)
-                            : scr_arr_known_cap(SCR_ARR_INLINE_OFFSET, initial_cap, elem == SCR_ELEM_BOOL);
+  size_t unit = scr_elem_slot_width(elem);
+  size_t inline_cap = small ? scr_arr_small_cap(SCR_ARR_INLINE_OFFSET, unit)
+                            : scr_arr_known_cap(SCR_ARR_INLINE_OFFSET, initial_cap, unit);
   ScrArr *a = scr_mem_alloc(inline_cap ? SCR_ARR_INLINE_OFFSET + inline_cap * unit : sizeof(ScrArr));
   if (!a) scr_arr_oom();
   a->rc = 1;
@@ -1210,7 +1340,7 @@ static inline __attribute__((always_inline)) ScrArr *scr_arr_make(ScrElemKind el
   a->spare = 0;
   a->filled = 0;
   a->data = NULL;
-  if (inline_cap) scr_arr_use_inline(a, inline_cap);
+  if (inline_cap) scr_arr_use_inline(a, inline_cap, unit);
   else if (initial_cap > 0) scr_arr_grow_dense_to(a, initial_cap, SCR_ARR_GROW_EXACT);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
@@ -1225,13 +1355,18 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
 ScrArr *scr_arr_new_small(ScrElemKind elem) { return scr_arr_make(elem, 0, true); }
 
 /* A non-cycle array whose final length the runtime knows when it builds
- * it (regex match results): its `cap` slots and states share the header's
- * block, so construction and teardown cost one allocation. Growth past
+ * it (regex match results): its `cap` slots share the header's block, so
+ * construction and teardown cost one allocation. With `states`, the array
+ * starts with states, whose bytes share the block as well. Growth past
  * `cap` moves the slots out like any inline array. */
-ScrArr *scr_arr_new_inline(ScrElemKind elem, size_t cap) {
-  if (cap == 0) return scr_arr_make(elem, 0, false);
+ScrArr *scr_arr_new_inline(ScrElemKind elem, size_t cap, bool states) {
+  if (cap == 0) {
+    ScrArr *a = scr_arr_make(elem, 0, false);
+    if (states) a->spare |= SCR_ARR_STATES;
+    return a;
+  }
   if (cap > SCR_ARR_MAX_LENGTH) scr_arr_oom();
-  size_t unit = elem == SCR_ELEM_BOOL ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES;
+  size_t unit = scr_elem_slot_width(elem) + (states ? 1 : 0);
   ScrArr *a = scr_mem_alloc(SCR_ARR_INLINE_OFFSET + cap * unit);
   if (!a) scr_arr_oom();
   a->rc = 1;
@@ -1239,10 +1374,10 @@ ScrArr *scr_arr_new_inline(ScrElemKind elem, size_t cap) {
   a->cap = 0;
   a->elem = (uint8_t)elem;
   a->cyc = 0;
-  a->spare = 0;
+  a->spare = states ? SCR_ARR_STATES : 0;
   a->filled = 0;
   a->data = NULL;
-  scr_arr_use_inline(a, cap);
+  scr_arr_use_inline(a, cap, unit);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
 #endif
@@ -1250,10 +1385,9 @@ ScrArr *scr_arr_new_inline(ScrElemKind elem, size_t cap) {
 }
 
 void scr_arr_outline(ScrArr *a) {
-  if (scr_arr_inline(a))
-    scr_arr_move_inline(a, a->cap,
-                        a->elem == SCR_ELEM_BOOL ? SCR_ARR_BOOL_SLOT_BYTES : SCR_ARR_SLOT_BYTES);
-  /* The swapped fields do not include `spare`: no head room either. */
+  if (scr_arr_inline(a)) scr_arr_move_inline(a, a->cap);
+  /* Of `spare`, a swap of the storage fields may move only the states
+   * flag: no head room either. */
   if (a->spare & SCR_ARR_HEAD_ROOM) {
     scr_arr_drop_head(a);
     scr_arr_absorb_sparse(a);
@@ -1287,9 +1421,14 @@ void scr_arr_trace_v(void *a0, ScrTraceVisit visit, void *ctx) {
   if (SCR_AX(a)->metadata) visit(SCR_AX(a)->metadata, ctx);
   /* Growth and truncation leave spare capacity empty. Sparse slots and
    * named properties are separate edges, independent of dense length. */
-  const uint8_t *states = scr_arr_states_end(a);
-  for (size_t i = 0, end = a->len < a->cap ? a->len : a->cap; i < end; i++) {
-    if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE) visit(scr_slot_to_ptr(a->data[i]), ctx);
+  size_t end = a->len < a->cap ? a->len : a->cap;
+  if (!scr_arr_has_states(a)) {
+    for (size_t i = 0; i < end; i++) visit(scr_slot_to_ptr(a->data[i]), ctx);
+  } else {
+    const uint8_t *states = scr_arr_states_end(a);
+    for (size_t i = 0; i < end; i++) {
+      if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE) visit(scr_slot_to_ptr(a->data[i]), ctx);
+    }
   }
   for (size_t i = 0; i < SCR_AX(a)->sparse_len; i++) {
     if (SCR_AX(a)->sparse[i].state == SCR_ARR_VALUE) {
@@ -1329,18 +1468,21 @@ static void scr_arr_gc_free(void *a0) {
   scr_cyc_free_inline(a);
 }
 
-/* Inlined into each constructor like scr_arr_make: with `small` and the
- * count constant, scr_arr_new_ops_small's size class folds to a table
- * index. */
-static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops(const ScrArrOps *ops,
-                                                                      size_t initial_cap,
-                                                                      bool small) {
+/* Inlined into each constructor like scr_arr_make: with `small`, the count
+ * and `elem` constant, scr_arr_new_ops_small's size class folds to a table
+ * index and the slot sizes to constants. */
+static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops_kind(const ScrArrOps *ops,
+                                                                           size_t initial_cap,
+                                                                           bool small,
+                                                                           uint8_t elem) {
   ScrArr *a;
   bool cyc = ops->trace != NULL;
+  /* The array starts without states: slots of the value width alone. */
+  size_t unit = scr_elem_slot_width(elem);
   size_t prefix = SCR_ARR_INLINE_OFFSET + (cyc ? sizeof(ScrCycHdr) : 0);
   size_t inline_cap =
-      small ? scr_arr_small_cap(prefix, false) : scr_arr_known_cap(prefix, initial_cap, false);
-  size_t size = inline_cap ? SCR_ARR_INLINE_OFFSET + inline_cap * SCR_ARR_SLOT_BYTES : sizeof(ScrArr);
+      small ? scr_arr_small_cap(prefix, unit) : scr_arr_known_cap(prefix, initial_cap, unit);
+  size_t size = inline_cap ? SCR_ARR_INLINE_OFFSET + inline_cap * unit : sizeof(ScrArr);
   if (cyc) {
     static ScrCycType cyc_type = { &scr_arr_trace_v, &scr_arr_gc_free, SCR_CYC_KIND_ARRAY };
     a = scr_cyc_alloc_inline(size, &cyc_type);
@@ -1351,7 +1493,7 @@ static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops(const ScrA
   a->rc = 1;
   a->len = 0;
   a->cap = 0;
-  a->elem = SCR_ELEM_REF;
+  a->elem = elem;
   a->cyc = cyc;
   /* The ops id is written with the other header fields: reading `spare`
    * back after scr_arr_use_inline sets its inline flag stalls the
@@ -1360,7 +1502,7 @@ static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops(const ScrA
   a->spare = (uint16_t)(id << SCR_ARR_OPS_SHIFT);
   a->filled = 0;
   a->data = NULL;
-  if (inline_cap) scr_arr_use_inline(a, inline_cap);
+  if (inline_cap) scr_arr_use_inline(a, inline_cap, unit);
   else if (initial_cap > 0) scr_arr_grow_dense_to(a, initial_cap, SCR_ARR_GROW_EXACT);
   /* After the storage: ops past the registry live in the ext, whose
    * pointer precedes the dense allocation, so inline slots move out first
@@ -1370,6 +1512,16 @@ static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops(const ScrA
   scr_live_arrays++;
 #endif
   return a;
+}
+
+/* SCR_ELEM_CREF for compact element types, SCR_ELEM_REF otherwise. Each
+ * branch inlines scr_arr_make_ops_kind with a constant kind. */
+static inline __attribute__((always_inline)) ScrArr *scr_arr_make_ops(const ScrArrOps *ops,
+                                                                      size_t initial_cap,
+                                                                      bool small) {
+  if (__builtin_expect(scr_arr_ops_compact(ops), 0))
+    return scr_arr_make_ops_kind(ops, initial_cap, small, SCR_ELEM_CREF);
+  return scr_arr_make_ops_kind(ops, initial_cap, small, SCR_ELEM_REF);
 }
 
 ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap) {
@@ -1391,17 +1543,27 @@ static void scr_arr_destroy(void *object) {
        * first (and the storage cannot move under the loop); immortal strings
        * (interned characters, literals) need no call. */
       const uint64_t *data = a->data;
-      const uint8_t *states = scr_arr_states_end_w(a, 8);
-      /* Slots below the hole-free prefix bound hold values. */
-      size_t filled = a->filled < end ? a->filled : end;
+      /* Slots below the hole-free prefix bound hold values, as do all
+       * slots below the length of an array without states. */
+      size_t filled = !scr_arr_has_states(a) ? end : a->filled < end ? a->filled : end;
       for (size_t i = 0; i < filled; i++) {
         ScrStr *s = (ScrStr *)scr_slot_to_ptr(data[i]);
         if (s && s->rc != SIZE_MAX) scr_str_release(s);
       }
+      const uint8_t *states = scr_arr_states_end_w(a, 8);
       for (size_t i = filled; i < end; i++) {
         if (*scr_arr_state_in(states, i) != SCR_ARR_VALUE) continue;
         ScrStr *s = (ScrStr *)scr_slot_to_ptr(data[i]);
         if (s && s->rc != SIZE_MAX) scr_str_release(s);
+      }
+    } else if (!scr_arr_has_states(a)) {
+      /* Each slot is cleared before its release, as with states. */
+      uint8_t elem = a->elem;
+      const ScrArrOps *ops = scr_arr_ops(a);
+      for (size_t i = 0; i < end; i++) {
+        uint64_t old = a->data[i];
+        a->data[i] = 0;
+        scr_elem_release_with(elem, ops, old);
       }
     } else {
       uint8_t *states = scr_arr_states_end(a);
@@ -1485,6 +1647,7 @@ double scr_arr_next_present(const ScrArr *a, double start) {
   if (!(start < SCR_ARR_LEN_F64(a->len))) return SCR_ARR_LEN_F64(a->len);
   size_t i = start > 0 ? (size_t)ceil(start) : 0;
   size_t end = a->cap < a->len ? a->cap : a->len;
+  if (!scr_arr_has_states(a)) return (double)i;
   const uint8_t *states = scr_arr_states_end(a);
   for (; i < end; i++) {
     if (*scr_arr_state_in(states, i) != SCR_ARR_HOLE) return (double)i;
@@ -1523,6 +1686,22 @@ void scr_arr_set_len(ScrArr *a, double length) {
      * array must cost only the elements removed, not its historical peak. */
     size_t dense_end = a->len < a->cap ? a->len : a->cap;
     size_t dense_stop = next < dense_end ? next : dense_end;
+    if (!scr_arr_has_states(a)) {
+      /* Values only: each slot is cleared before its release. The
+       * length drops first, so a release that reads the array sees the
+       * values that remain. */
+      a->len = (uint32_t)next;
+      if (scr_elem_is_ref(a->elem)) {
+        for (size_t i = dense_stop; i < dense_end; i++) {
+          uint64_t old = a->data[i];
+          a->data[i] = 0;
+          scr_elem_release(a, old);
+        }
+      } else if (dense_stop < dense_end) {
+        memset(scr_arr_dense_at(a, dense_stop), 0, (dense_end - dense_stop) * scr_arr_slot_width(a));
+      }
+      return;
+    }
     if (scr_elem_is_ref(a->elem)) {
       for (size_t i = dense_stop; i < dense_end; i++) {
         if (*scr_arr_state_ptr(a, i) != SCR_ARR_HOLE) {
@@ -1551,8 +1730,20 @@ void scr_arr_set_len(ScrArr *a, double length) {
       }
       if (scr_arr_ext_of(a)) scr_arr_ext_of(a)->sparse_len = scr_arr_sparse_lower_bound(scr_arr_ext_of(a)->sparse, scr_arr_ext_of(a)->sparse_len, next);
     }
-  } else if (a->len == 0 && next <= SCR_ARR_PRESIZE_LIMIT && (a->cap == 0 || scr_arr_inline(a))) {
-    scr_arr_reserve_exact(a, next);
+  } else if (next > a->len) {
+    /* The indices past the elements are holes. An empty array gives up
+     * its inline slots first, so its slots and states take one allocation. */
+    if (a->len == 0 && next <= SCR_ARR_PRESIZE_LIMIT && (a->cap == 0 || scr_arr_inline(a))) {
+      if (scr_arr_inline(a)) {
+        a->spare &= (uint16_t)~SCR_ARR_INLINE_SLOTS;
+        a->cap = 0;
+        a->data = NULL;
+      }
+      scr_arr_need_states(a);
+      scr_arr_reserve_exact(a, next);
+    } else {
+      scr_arr_need_states(a);
+    }
   }
   a->len = next;
 }
@@ -1583,11 +1774,24 @@ void scr_arr_copy_range_ex(ScrArr *dst, size_t dst_start, const ScrArr *src,
   scr_arr_refill_to(dst, dst_start + count);
 }
 
+/* A destination without states takes a dense copy at its length, whose
+ * caller then raises the length over the copy; any other copy gives it
+ * states first. */
 static void scr_arr_copy_range_states(ScrArr *dst, size_t dst_start, const ScrArr *src,
                                       size_t src_start, size_t count, bool reverse,
                                       bool materialize_holes) {
-  if (src != dst && src_start <= src->cap && count <= src->cap - src_start &&
-      dst_start <= dst->cap && count <= dst->cap - dst_start) {
+  size_t src_end = scr_arr_has_states(src) ? src->cap : src->len;
+  bool fits = src != dst && src_start <= src_end && count <= src_end - src_start &&
+              dst_start <= dst->cap && count <= dst->cap - dst_start;
+  if (!scr_arr_has_states(dst)) {
+    if (fits && dst_start == dst->len) {
+      scr_arr_copy_dense(dst, dst_start, src, src_start, count, reverse, materialize_holes);
+      return;
+    }
+    scr_arr_add_states(dst);
+    fits = fits && dst_start <= dst->cap && count <= dst->cap - dst_start;
+  }
+  if (fits) {
     const uint8_t *dst_states = scr_arr_states_end(dst);
     size_t empty = 0;
     while (empty < count && *scr_arr_state_in(dst_states, dst_start + empty) == SCR_ARR_HOLE) empty++;
@@ -1673,11 +1877,13 @@ static ScrArr *scr_arr_fill_slot(ScrArr *a, uint64_t slot, uint8_t state,
   if (from >= until) return scr_arr_retain(a);
   bool refs = scr_elem_is_ref(a->elem);
   if (scr_arr_dense_ok(a, until, until - from)) scr_arr_grow_dense(a, until);
+  if (state != SCR_ARR_VALUE) scr_arr_need_states(a);
   if (!refs && until <= a->cap) {
     if (state != SCR_ARR_VALUE) scr_arr_cut(a, from);
     if (a->elem == SCR_ELEM_BOOL) memset(scr_arr_dense_at(a, from), (int)slot, until - from);
+    else if (a->elem == SCR_ELEM_CREF) for (size_t i = from; i < until; i++) scr_arr_dense_put(a, i, slot);
     else for (size_t i = from; i < until; i++) a->data[i] = slot;
-    memset(scr_arr_state_run(a, from, until - from), state, until - from);
+    if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, from, until - from), state, until - from);
   } else {
     for (size_t i = from; i < until; i++) {
       uint64_t value = refs && state == SCR_ARR_VALUE ? scr_elem_retain_slot(a, slot) : slot;
@@ -1712,7 +1918,7 @@ double scr_math_max_arr(ScrArr *a) {
   double best = -INFINITY;
   for (size_t i = 0; i < a->len; i++) {
     uint64_t slot;
-    if (scr_arr_state_at(a, i, &slot) != SCR_ARR_VALUE) return NAN;
+    if (scr_arr_f64_state_at(a, i, &slot) != SCR_ARR_VALUE) return NAN;
     double v = scr_slot_to_f64(slot);
     if (isnan(v)) return v;
     if (v > best || (v == 0.0 && best == 0.0 && !signbit(v))) best = v;
@@ -1724,7 +1930,7 @@ double scr_math_min_arr(ScrArr *a) {
   double best = INFINITY;
   for (size_t i = 0; i < a->len; i++) {
     uint64_t slot;
-    if (scr_arr_state_at(a, i, &slot) != SCR_ARR_VALUE) return NAN;
+    if (scr_arr_f64_state_at(a, i, &slot) != SCR_ARR_VALUE) return NAN;
     double v = scr_slot_to_f64(slot);
     if (isnan(v)) return v;
     if (v < best || (v == 0.0 && best == 0.0 && signbit(v))) best = v;
@@ -1739,7 +1945,7 @@ double scr_math_hypot_arr(ScrArr *a) {
   bool has_nan = false;
   for (size_t i = 0; i < a->len; i++) {
     uint64_t slot;
-    if (scr_arr_state_at(a, i, &slot) != SCR_ARR_VALUE) {
+    if (scr_arr_f64_state_at(a, i, &slot) != SCR_ARR_VALUE) {
       has_nan = true;
       continue;
     }
@@ -1754,7 +1960,7 @@ double scr_math_hypot_arr(ScrArr *a) {
   double correction = 0.0;
   for (size_t i = 0; i < a->len; i++) {
     uint64_t slot;
-    (void)scr_arr_state_at(a, i, &slot);
+    (void)scr_arr_f64_state_at(a, i, &slot);
     double v = scr_slot_to_f64(slot) / scale;
     double term = v * v - correction;
     double next = sum + term;
@@ -1830,9 +2036,9 @@ void *scr_arr_peek_ref(const ScrArr *a, double i) {
   if (i >= 0 && i < (double)a->cap) {
     size_t idx = (size_t)i;
     if ((double)idx == i) {
-      if (idx < a->filled) return scr_slot_to_ptr(a->data[idx]);
-      if (idx >= a->len || *scr_arr_state_ptr(a, idx) != SCR_ARR_VALUE) return NULL;
-      return scr_slot_to_ptr(a->data[idx]);
+      if (idx < a->filled) return scr_slot_to_ptr(scr_arr_dense_get(a, idx));
+      if (idx >= a->len || scr_arr_dense_state(a, idx) != SCR_ARR_VALUE) return NULL;
+      return scr_slot_to_ptr(scr_arr_dense_get(a, idx));
     }
   }
   uint64_t slot;
@@ -1861,8 +2067,8 @@ bool scr_arr_index_eq(const ScrArr *a, double i, const ScrArr *b, double j) {
   if (i >= 0 && i < (double)a->cap && i == trunc(i) &&
       j >= 0 && j < (double)b->cap && j == trunc(j)) {
     size_t ai = (size_t)i, bi = (size_t)j;
-    bool ap = ai < a->len && *scr_arr_state_ptr(a, ai) == SCR_ARR_VALUE;
-    bool bp = bi < b->len && *scr_arr_state_ptr(b, bi) == SCR_ARR_VALUE;
+    bool ap = ai < a->len && scr_arr_dense_state(a, ai) == SCR_ARR_VALUE;
+    bool bp = bi < b->len && scr_arr_dense_state(b, bi) == SCR_ARR_VALUE;
     if (!ap || !bp) return ap == bp;
     av = scr_arr_dense_get(a, ai);
     bv = scr_arr_dense_get(b, bi);
@@ -1886,7 +2092,7 @@ void *scr_arr_get_ref(ScrArr *a, double i) {
   if (a->elem == SCR_ELEM_STR) scr_str_retain((ScrStr *)p);
   else if (a->elem == SCR_ELEM_BYTES) scr_bytes_retain((ScrBytes *)p);
   else if (a->elem == SCR_ELEM_REF) p = scr_arr_ops(a)->retain(p);
-  else scr_arr_retain((ScrArr *)p);
+  else if (a->elem == SCR_ELEM_ARR) scr_arr_retain((ScrArr *)p);
   return p;
 }
 
@@ -1901,6 +2107,17 @@ static void scr_arr_set_slot(ScrArr *a, double i, uint64_t slot) {
   if (!scr_arr_valid_index(i, &idx)) {
     scr_arr_prop_set(a, i, slot);
     return;
+  }
+  if (!scr_arr_has_states(a) && idx >= a->len) {
+    /* An append keeps the array without states; a write past the length
+     * leaves holes. */
+    if (idx == a->len) {
+      scr_arr_store_owned(a, idx, slot);
+      a->len = (uint32_t)(idx + 1);
+      scr_arr_note_value(a, idx);
+      return;
+    }
+    scr_arr_add_states(a);
   }
   if (idx >= a->len) a->len = idx + 1;
   /* Unlink-then-release: a release can trigger a cycle collection, which
@@ -1927,6 +2144,7 @@ void scr_arr_set_undefined(ScrArr *a, double i) {
     scr_arr_prop_set_undefined(a, i);
     return;
   }
+  scr_arr_need_states(a);
   if (idx >= a->len) a->len = idx + 1;
   scr_arr_replace_state_owned(a, idx, 0, SCR_ARR_UNDEFINED);
 }
@@ -1976,7 +2194,7 @@ double scr_arr_push_many(ScrArr *a, size_t count, const uint64_t *slots) {
     scr_arr_grow_dense(a, next);
     if (count) {
       scr_arr_put_slots(a, from, count, slots);
-      scr_arr_set_states(scr_arr_state_run(a, from, count), SCR_ARR_VALUE, count);
+      if (scr_arr_has_states(a)) scr_arr_set_states(scr_arr_state_run(a, from, count), SCR_ARR_VALUE, count);
     }
     a->len = (uint32_t)next;
     /* The appended states are values: a bound at the old length moves to
@@ -1985,6 +2203,7 @@ double scr_arr_push_many(ScrArr *a, size_t count, const uint64_t *slots) {
     else scr_arr_refill(a);
     return (double)next;
   }
+  scr_arr_need_states(a);
   for (size_t i = 0; i < count; i++) scr_arr_store_owned(a, from + i, slots[i]);
   a->len = (uint32_t)next;
   scr_arr_refill(a);
@@ -2021,6 +2240,7 @@ double scr_arr_push_spread(ScrArr *a, const ScrArr *src) {
     scr_arr_refill(a);
     return SCR_ARR_LEN_F64(a->len);
   }
+  scr_arr_need_states(a);
   a->len = old_len + add;
   for (size_t i = 0; i < add; i++) {
     uint64_t slot;
@@ -2065,9 +2285,10 @@ double scr_arr_concat_copy(ScrArr *a, const ScrArr *src) {
     scr_arr_refill(a);
     return SCR_ARR_LEN_F64(a->len);
   }
+  scr_arr_need_states(a);
   a->len = old_len + add;
   for (size_t i = 0; i < src->cap; i++) {
-    if (*scr_arr_state_ptr(src, i) != SCR_ARR_HOLE) {
+    if (scr_arr_dense_state(src, i) != SCR_ARR_HOLE) {
       scr_arr_copy_index(a, old_len + i, src, i);
     }
   }
@@ -2121,7 +2342,7 @@ static double scr_arr_unshift_slot(ScrArr *a, uint64_t slot) {
     /* The prefix stays put in front of the new first value. */
     size_t f = a->filled;
     a->data[0] = slot;
-    *scr_arr_state_ptr(a, 0) = SCR_ARR_VALUE;
+    if (scr_arr_has_states(a)) *scr_arr_state_ptr(a, 0) = SCR_ARR_VALUE;
     a->len++;
     a->filled = (uint32_t)(f + 1);
     return SCR_ARR_LEN_F64(a->len);
@@ -2132,7 +2353,7 @@ static double scr_arr_unshift_slot(ScrArr *a, uint64_t slot) {
     size_t f = a->filled;
     scr_arr_move_dense(a, 1, 0, old_len);
     scr_arr_dense_put(a, 0, slot);
-    *scr_arr_state_ptr(a, 0) = SCR_ARR_VALUE;
+    if (scr_arr_has_states(a)) *scr_arr_state_ptr(a, 0) = SCR_ARR_VALUE;
     a->len++;
     a->filled = (uint32_t)(f + 1);
     return SCR_ARR_LEN_F64(a->len);
@@ -2173,7 +2394,7 @@ double scr_arr_unshift_many(ScrArr *a, size_t count, const uint64_t *slots) {
   if (scr_arr_is_dense(a) && scr_arr_open_head(a, count)) {
     size_t f = a->filled;
     scr_arr_put_slots(a, 0, count, slots);
-    memset(scr_arr_state_run(a, 0, count), SCR_ARR_VALUE, count);
+    if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, 0, count), SCR_ARR_VALUE, count);
     a->len = old_len + count;
     a->filled = (uint32_t)(f + count);
     return SCR_ARR_LEN_F64(a->len);
@@ -2183,7 +2404,7 @@ double scr_arr_unshift_many(ScrArr *a, size_t count, const uint64_t *slots) {
     size_t f = a->filled;
     scr_arr_move_dense(a, count, 0, old_len);
     scr_arr_put_slots(a, 0, count, slots);
-    memset(scr_arr_state_run(a, 0, count), SCR_ARR_VALUE, count);
+    if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, 0, count), SCR_ARR_VALUE, count);
     a->len = old_len + count;
     a->filled = (uint32_t)(f + count);
     return SCR_ARR_LEN_F64(a->len);
@@ -2210,6 +2431,10 @@ double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src) {
   size_t add = src->len;
   if (add == 0) return (double)old_len;
   if (add > SCR_ARR_MAX_LENGTH - old_len) scr_arr_oom();
+  /* Holes and present undefined in the source become present undefined:
+   * the receiver needs states, before its elements move. */
+  if (!scr_arr_has_states(a) && (!scr_arr_is_dense(src) || !scr_arr_dense_run_values(src, 0, add)))
+    scr_arr_add_states(a);
   if (scr_arr_is_dense(a) && scr_arr_is_dense(src) && scr_arr_open_head(a, add)) {
     /* A self-spread reads the original values behind the opened room. */
     scr_arr_copy_dense(a, 0, src, src == a ? add : 0, add, false, true);
@@ -2257,6 +2482,15 @@ double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src) {
 
 ScrArr *scr_arr_reverse(ScrArr *a) {
   size_t len = a->len;
+  if (!scr_arr_has_states(a)) {
+    for (size_t i = 0; i < len / 2; i++) {
+      size_t j = len - i - 1;
+      uint64_t slot = scr_arr_dense_get(a, i);
+      scr_arr_dense_put(a, i, scr_arr_dense_get(a, j));
+      scr_arr_dense_put(a, j, slot);
+    }
+    return scr_arr_retain(a);
+  }
   if (scr_arr_is_dense(a)) {
     /* A hole-free array stays hole-free; any other prefix is recomputed. */
     if (a->filled != len) scr_arr_cut(a, 0);
@@ -2292,6 +2526,13 @@ uint8_t scr_arr_pop_state(ScrArr *a, uint64_t *slot_out) {
   if (slot_out) *slot_out = 0;
   if (a->len == 0) return SCR_ARR_HOLE;
   size_t idx = a->len - 1;
+  if (!scr_arr_has_states(a)) {
+    if (slot_out) *slot_out = scr_arr_dense_get(a, idx);
+    scr_arr_dense_put(a, idx, 0);
+    scr_arr_cut(a, idx);
+    a->len = (uint32_t)idx;
+    return SCR_ARR_VALUE;
+  }
   uint64_t slot = 0;
   uint8_t state = SCR_ARR_HOLE;
   if (!scr_arr_take_state(a, idx, &slot, &state)) state = SCR_ARR_HOLE;
@@ -2327,7 +2568,7 @@ uint8_t scr_arr_shift_state(ScrArr *a, uint64_t *slot_out) {
   if (a->len == 0) return SCR_ARR_HOLE;
   size_t old_len = a->len;
   if (scr_arr_is_dense(a)) {
-    uint8_t state = *scr_arr_state_ptr(a, 0);
+    uint8_t state = scr_arr_dense_state(a, 0);
     if (slot_out && state == SCR_ARR_VALUE) *slot_out = scr_arr_dense_get(a, 0);
     /* The first slot becomes head room; the tail stays where it is. */
     if (scr_arr_drop_front(a, 1)) return state;
@@ -2395,16 +2636,18 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
    * otherwise the range may be mostly holes, so the capacity is a hint. */
   size_t hint = scr_arr_is_dense(a) || n <= SCR_ARR_DENSE_LIMIT ? n : SCR_ARR_DENSE_LIMIT;
   ScrArr *out =
-      a->elem == SCR_ELEM_REF
+      scr_arr_has_ops(a)
           ? scr_arr_new_ops(scr_arr_ops(a), hint ? hint : 1)
           : scr_arr_new(a->elem, hint ? hint : 1);
-  out->len = n;
   size_t old_len = a->len;
   if (scr_arr_is_dense(a)) {
     if (n) {
+      /* The removed elements keep their states unless all are values. */
+      if (!scr_arr_dense_run_values(a, from, n)) scr_arr_add_states(out);
       memcpy(out->data, scr_arr_dense_at(a, from), n * scr_arr_slot_width(a));
-      memcpy(scr_arr_state_run(out, 0, n), scr_arr_state_run(a, from, n), n);
+      if (scr_arr_has_states(out)) memcpy(scr_arr_state_run(out, 0, n), scr_arr_state_run(a, from, n), n);
     }
+    out->len = n;
     scr_arr_refill(out);
     /* A removed prefix becomes head room. */
     if (from == 0 && scr_arr_drop_front(a, n)) return out;
@@ -2418,6 +2661,8 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
     else scr_arr_refill(a);
     return out;
   }
+  scr_arr_add_states(out);
+  out->len = n;
   ScrArrStorage old = scr_arr_take_storage(a);
   a->len = 0;
   for (size_t i = 0; i < old.cap; i++) {
@@ -2475,12 +2720,17 @@ ScrArr *scr_arr_splice_insert(ScrArr *a, double start, double deleteCount,
      * is needed only by direct self-spread runtime callers. */
     ScrArr *snapshot = items == a ? scr_arr_slice(a, 0, INFINITY) : NULL;
     if (snapshot) items = snapshot;
-    ScrArr *removed = a->elem == SCR_ELEM_REF
+    /* Holes and present undefined among the items become present
+     * undefined: the receiver needs states, before its elements move. */
+    if (!scr_arr_dense_run_values(items, 0, add)) scr_arr_need_states(a);
+    ScrArr *removed = scr_arr_has_ops(a)
         ? scr_arr_new_ops(scr_arr_ops(a), n)
         : scr_arr_new(a->elem, n);
     if (n) {
+      if (!scr_arr_dense_run_values(a, from, n)) scr_arr_add_states(removed);
       memcpy(removed->data, scr_arr_dense_at(a, from), n * scr_arr_slot_width(a));
-      memcpy(scr_arr_state_run(removed, 0, n), scr_arr_state_run(a, from, n), n);
+      if (scr_arr_has_states(removed))
+        memcpy(scr_arr_state_run(removed, 0, n), scr_arr_state_run(a, from, n), n);
     }
     removed->len = n;
     scr_arr_refill(removed);
@@ -2521,7 +2771,7 @@ void scr_arr_splice_drop(ScrArr *a, double start, double deleteCount, size_t cou
   size_t next_len = a->len - n + count;
   bool refs = scr_elem_is_ref(a->elem);
   if (!scr_arr_is_dense(a) || !scr_arr_dense_ok(a, next_len, count)) {
-    ScrArr *items = a->elem == SCR_ELEM_REF
+    ScrArr *items = scr_arr_has_ops(a)
         ? scr_arr_new_ops(scr_arr_ops(a), count)
         : scr_arr_new(a->elem, count);
     scr_arr_push_many(items, count, slots);
@@ -2538,9 +2788,8 @@ void scr_arr_splice_drop(ScrArr *a, double start, double deleteCount, size_t cou
       removed = scr_mem_alloc(n * sizeof(uint64_t));
       if (!removed) scr_arr_oom();
     }
-    const uint8_t *states = scr_arr_states_end(a);
     for (size_t i = from; i < from + n; i++) {
-      if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE) removed[kept++] = a->data[i];
+      if (scr_arr_dense_state(a, i) == SCR_ARR_VALUE) removed[kept++] = a->data[i];
     }
   }
   size_t old_len = a->len;
@@ -2555,7 +2804,7 @@ void scr_arr_splice_drop(ScrArr *a, double start, double deleteCount, size_t cou
   scr_arr_move_dense(a, from + count, from + n, old_len - from - n);
   if (count) {
     scr_arr_put_slots(a, from, count, slots);
-    memset(scr_arr_state_run(a, from, count), SCR_ARR_VALUE, count);
+    if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, from, count), SCR_ARR_VALUE, count);
   }
   if (next_len < old_len) scr_arr_clear_dense(a, next_len, old_len - next_len);
   a->len = next_len;
@@ -2580,13 +2829,15 @@ ScrArr *scr_arr_flat_copy(const ScrArr *a, ScrArr *out, bool flatten) {
       for (size_t j = 0; j < inner->len; j++) {
         if (scr_arr_state_at(inner, j, NULL) == SCR_ARR_HOLE) continue;
         if (out->len == SCR_ARR_MAX_LENGTH) scr_arr_oom();
-        size_t at = out->len++;
+        size_t at = out->len;
         scr_arr_copy_index(out, at, inner, j);
+        out->len = (uint32_t)(at + 1);
       }
     } else {
       if (out->len == SCR_ARR_MAX_LENGTH) scr_arr_oom();
-      size_t at = out->len++;
+      size_t at = out->len;
       scr_arr_copy_index(out, at, a, i);
+      out->len = (uint32_t)(at + 1);
     }
   }
   scr_arr_refill(out);
@@ -2611,10 +2862,12 @@ static bool scr_arr_ref_eq(const ScrArr *a, uint64_t slot, void *v) {
   return p == v;
 }
 
+#define SCR_ARR_SCAN_VALUE(states, i) (!(states) || *scr_arr_state_in((states), (i)) == SCR_ARR_VALUE)
+
 double scr_arr_index_of_f64(ScrArr *a, double v) {
-  const uint8_t *states = scr_arr_states_end(a);
+  const uint8_t *states = scr_arr_scan_states(a);
   for (size_t i = 0; i < a->cap && i < a->len; i++) {
-    if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE && scr_slot_to_f64(a->data[i]) == v) return (double)i;
+    if (SCR_ARR_SCAN_VALUE(states, i) && scr_slot_to_f64(a->data[i]) == v) return (double)i;
   }
   for (size_t i = 0; i < SCR_AX(a)->sparse_len; i++) {
     if (SCR_AX(a)->sparse[i].state == SCR_ARR_VALUE && scr_slot_to_f64(SCR_AX(a)->sparse[i].slot) == v) return (double)SCR_AX(a)->sparse[i].index;
@@ -2623,9 +2876,9 @@ double scr_arr_index_of_f64(ScrArr *a, double v) {
 }
 
 double scr_arr_index_of_bool(ScrArr *a, bool v) {
-  const uint8_t *states = scr_arr_states_end(a);
+  const uint8_t *states = scr_arr_scan_states(a);
   for (size_t i = 0; i < a->cap && i < a->len; i++) {
-    if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE && ((scr_arr_dense_get(a, i) != 0) == v)) return (double)i;
+    if (SCR_ARR_SCAN_VALUE(states, i) && ((scr_arr_dense_get(a, i) != 0) == v)) return (double)i;
   }
   for (size_t i = 0; i < SCR_AX(a)->sparse_len; i++) {
     if (SCR_AX(a)->sparse[i].state == SCR_ARR_VALUE && (SCR_AX(a)->sparse[i].slot != 0) == v) return (double)SCR_AX(a)->sparse[i].index;
@@ -2634,9 +2887,9 @@ double scr_arr_index_of_bool(ScrArr *a, bool v) {
 }
 
 double scr_arr_index_of_ref(ScrArr *a, void *v) {
-  const uint8_t *states = scr_arr_states_end(a);
+  const uint8_t *states = scr_arr_scan_states(a);
   for (size_t i = 0; i < a->cap && i < a->len; i++) {
-    if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE && scr_arr_ref_eq(a, a->data[i], v)) return (double)i;
+    if (SCR_ARR_SCAN_VALUE(states, i) && scr_arr_ref_eq(a, scr_arr_dense_get(a, i), v)) return (double)i;
   }
   for (size_t i = 0; i < SCR_AX(a)->sparse_len; i++) {
     if (SCR_AX(a)->sparse[i].state == SCR_ARR_VALUE && scr_arr_ref_eq(a, SCR_AX(a)->sparse[i].slot, v)) return (double)SCR_AX(a)->sparse[i].index;
@@ -2645,9 +2898,9 @@ double scr_arr_index_of_ref(ScrArr *a, void *v) {
 }
 
 bool scr_arr_includes_f64(ScrArr *a, double v) {
-  const uint8_t *states = scr_arr_states_end(a);
+  const uint8_t *states = scr_arr_scan_states(a);
   for (size_t i = 0; i < a->cap && i < a->len; i++) {
-    if (*scr_arr_state_in(states, i) != SCR_ARR_VALUE) continue;
+    if (!SCR_ARR_SCAN_VALUE(states, i)) continue;
     double x = scr_slot_to_f64(a->data[i]);
     if (x == v || (x != x && v != v)) return true; /* SameValueZero: NaN hits */
   }
@@ -2667,9 +2920,9 @@ bool scr_arr_includes_ref(ScrArr *a, void *v) {
   if (a->elem == SCR_ELEM_REF && scr_arr_ops(a)->retain == scr_dyn_retain_v) {
     const ScrDyn *needle = (const ScrDyn *)v;
     if (needle->kind == SCR_DYN_NUM && needle->v.num != needle->v.num) {
-      const uint8_t *states = scr_arr_states_end(a);
+      const uint8_t *states = scr_arr_scan_states(a);
       for (size_t i = 0; i < a->cap && i < a->len; i++) {
-        if (*scr_arr_state_in(states, i) != SCR_ARR_VALUE) continue;
+        if (!SCR_ARR_SCAN_VALUE(states, i)) continue;
         const ScrDyn *d = (const ScrDyn *)scr_slot_to_ptr(a->data[i]);
         if (d->kind == SCR_DYN_NUM && d->v.num != d->v.num) return true;
       }
@@ -2727,25 +2980,30 @@ ScrArr *scr_arr_slice(ScrArr *a, double start, double end) {
    * sparse side store may be mostly holes, so its capacity is a hint. */
   size_t hint = to <= a->cap || n <= SCR_ARR_DENSE_LIMIT ? n : SCR_ARR_DENSE_LIMIT;
   ScrArr *out =
-      a->elem == SCR_ELEM_REF
+      scr_arr_has_ops(a)
           ? scr_arr_new_ops(scr_arr_ops(a), hint ? hint : 1)
           : scr_arr_new(a->elem, hint ? hint : 1);
-  out->len = n;
-  if (to <= a->cap && to <= a->filled && a->elem != SCR_ELEM_BOOL && !scr_elem_is_ref(a->elem)) {
+  if (to <= a->cap && to <= a->filled && scr_arr_slot_width(a) == sizeof(uint64_t) &&
+      !scr_elem_is_ref(a->elem)) {
     /* Numbers below the source's hole-free prefix: values only. */
     scr_arr_copy_slots(out->data, a->data + from, n);
-    scr_arr_set_states(scr_arr_states_end_w(out, 8) - n, SCR_ARR_VALUE, n);
+    out->len = (uint32_t)n;
     out->filled = (uint32_t)n;
     return out;
   }
   if (to <= a->cap) {
     scr_arr_copy_dense(out, 0, a, from, n, false, false);
+    out->len = (uint32_t)n;
     /* States copied from below the source's bound are present values. */
     if (n > 0 && from < a->filled)
       out->filled = (uint32_t)((to < a->filled ? to : a->filled) - from);
     scr_arr_refill(out);
     return out;
   }
+  /* A range reaching the sparse entries: the source has states, and so
+   * does the copy. */
+  scr_arr_add_states(out);
+  out->len = (uint32_t)n;
   const uint8_t *states = scr_arr_states_end(a);
   for (size_t i = 0; i < a->cap && i < to; i++) {
     if (i < from || *scr_arr_state_in(states, i) == SCR_ARR_HOLE) continue;
@@ -2875,8 +3133,9 @@ ScrArr *scr_arr_sort_primitive(ScrArr *a, bool copy) {
   if (a->len == 0) return copy ? scr_arr_new(a->elem, 0) : scr_arr_retain(a);
   size_t dense = a->len < a->cap ? a->len : a->cap;
   size_t count = 0, undefined_count = 0;
-  const uint8_t *states = scr_arr_states_end(a);
-  for (size_t i = 0; i < dense; i++) {
+  const uint8_t *states = scr_arr_scan_states(a);
+  if (!states) count = dense;
+  for (size_t i = 0; states && i < dense; i++) {
     count += *scr_arr_state_in(states, i) == SCR_ARR_VALUE;
     undefined_count += *scr_arr_state_in(states, i) == SCR_ARR_UNDEFINED;
   }
@@ -2889,7 +3148,7 @@ ScrArr *scr_arr_sort_primitive(ScrArr *a, bool copy) {
   if (count && !values) scr_arr_oom();
   size_t used = 0;
   for (size_t i = 0; i < dense; i++)
-    if (*scr_arr_state_in(states, i) == SCR_ARR_VALUE) values[used++] = scr_arr_dense_get(a, i);
+    if (SCR_ARR_SCAN_VALUE(states, i)) values[used++] = scr_arr_dense_get(a, i);
   for (size_t i = 0; i < SCR_AX(a)->sparse_len; i++)
     if (SCR_AX(a)->sparse[i].state == SCR_ARR_VALUE) values[used++] = SCR_AX(a)->sparse[i].slot;
   ScrNumberSortKey *numbers = NULL;
@@ -2911,8 +3170,10 @@ ScrArr *scr_arr_sort_primitive(ScrArr *a, bool copy) {
   }
   size_t present = copy ? a->len : count + undefined_count;
   ScrArr *out = copy ? scr_arr_new(a->elem, present) : a;
-  if (copy) out->len = a->len;
-  if (!copy && scr_arr_is_dense(a)) {
+  if (!copy && !states) {
+    /* Values only, in place. */
+    if (count) scr_arr_put_slots(a, 0, count, values);
+  } else if (!copy && scr_arr_is_dense(a)) {
     if (count) scr_arr_put_slots(a, 0, count, values);
     scr_arr_cut(a, count);
     memset(scr_arr_state_run(a, 0, count), SCR_ARR_VALUE, count);
@@ -2920,14 +3181,20 @@ ScrArr *scr_arr_sort_primitive(ScrArr *a, bool copy) {
     scr_arr_clear_dense(a, count + undefined_count, a->len - count - undefined_count);
     if (undefined_count)
       memset(scr_arr_dense_at(a, count), 0, undefined_count * scr_arr_slot_width(a));
+  } else if (copy) {
+    /* The values, then present undefined for every other index. */
+    for (size_t i = 0; i < count; i++) values[i] = scr_elem_retain_slot(a, values[i]);
+    scr_arr_push_many(out, count, values);
+    for (size_t i = count; i < present; i++) {
+      scr_arr_store_state_owned(out, i, 0, SCR_ARR_UNDEFINED);
+      out->len = (uint32_t)(i + 1);
+    }
   } else {
-    ScrArrStorage old = {0};
-    if (!copy) old = scr_arr_take_storage(a);
-    for (size_t i = 0; i < count; i++)
-      scr_arr_store_owned(out, i, copy ? scr_elem_retain_slot(a, values[i]) : values[i]);
+    ScrArrStorage old = scr_arr_take_storage(a);
+    for (size_t i = 0; i < count; i++) scr_arr_store_owned(out, i, values[i]);
     for (size_t i = count; i < present; i++)
       scr_arr_store_state_owned(out, i, 0, SCR_ARR_UNDEFINED);
-    if (!copy) scr_arr_free_storage(&old);
+    scr_arr_free_storage(&old);
   }
   free(values);
   scr_arr_refill(out);
@@ -3024,14 +3291,14 @@ static ScrSortCompare scr_sort_compare_for(const ScrArr *a, ScrClosure *f, uint3
   bool multi = order >= 2;
   if (order != 0 &&
       (arity != 2 || (order != 1 && order != -1 && !scr_sort_keys_valid(order)) ||
-       (c.numbers ? key != NULL || multi : a->elem != SCR_ELEM_REF || key == NULL)))
+       (c.numbers ? key != NULL || multi : !scr_arr_has_ops(a) || key == NULL)))
     scr_trap("scriptc: invalid keyed sort\n");
   if (!c.numbers) {
     c.borrowing = f->fn_borrowed != NULL;
     if (a->elem == SCR_ELEM_STR) c.retain = scr_sort_retain_str;
     else if (a->elem == SCR_ELEM_ARR) c.retain = scr_sort_retain_arr;
     else if (a->elem == SCR_ELEM_BYTES) c.retain = scr_sort_retain_bytes;
-    else if (a->elem == SCR_ELEM_REF) c.retain = scr_arr_ops(a)->retain;
+    else if (scr_arr_has_ops(a)) c.retain = scr_arr_ops(a)->retain;
     else scr_trap("scriptc: invalid comparator sort element kind\n");
   }
   return c;
@@ -4606,7 +4873,7 @@ void scr_arr_sort_values(ScrArr *a, double count, ScrClosure *f, uint32_t arity,
  * holes, no storage-level undefined and no sparse tail. */
 static bool scr_arr_dense_values(const ScrArr *a) {
   if (!scr_arr_is_dense(a)) return false;
-  if (a->filled == a->len) return true;
+  if (a->filled == a->len || !scr_arr_has_states(a)) return true;
   const uint8_t *states = scr_arr_states_end(a);
   bool all = true;
   for (size_t i = 0; i < a->len; i++) all &= *scr_arr_state_in(states, i) == SCR_ARR_VALUE;
@@ -4619,7 +4886,7 @@ static bool scr_arr_dense_values(const ScrArr *a) {
  * elements (stored in 1-byte slots). The slots are borrowed and stay valid
  * while nothing writes the array. */
 const uint64_t *scr_arr_dense_slots(const ScrArr *a, size_t *len) {
-  if (a->len == 0 || a->elem == SCR_ELEM_BOOL || !scr_arr_dense_values(a)) return NULL;
+  if (a->len == 0 || scr_arr_slot_width(a) != sizeof(uint64_t) || !scr_arr_dense_values(a)) return NULL;
   *len = a->len;
   return a->data;
 }
@@ -4646,7 +4913,9 @@ bool scr_arr_sort_dense(ScrArr *a, ScrClosure *f, uint32_t arity, bool owned, in
                         ScrClosure *key) {
   uint8_t elem = a->elem;
   const ScrArrOps *ops = scr_arr_ops(a);
-  if (a->rc == SIZE_MAX || !scr_arr_dense_values(a)) return false;
+  /* Compact references sort through the snapshot path, which reads and
+   * writes 8-byte slots. */
+  if (a->rc == SIZE_MAX || elem == SCR_ELEM_CREF || !scr_arr_dense_values(a)) return false;
   size_t n = a->len;
   if (n < 2) return true;
   if (n > SIZE_MAX / 2 / sizeof(uint64_t)) scr_arr_oom();
@@ -4683,16 +4952,16 @@ bool scr_arr_sort_dense(ScrArr *a, ScrClosure *f, uint32_t arity, bool owned, in
   } else if (a->len >= n && a->cap >= n) {
     if (!retained) {
       memcpy(a->data, src, n * sizeof(*src));
-      memset(scr_arr_state_run(a, 0, n), SCR_ARR_VALUE, n);
+      if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, 0, n), SCR_ARR_VALUE, n);
     } else {
       /* Publish each new edge before releasing the value it replaces: a
        * release can collect cycles. The buffer still holds the slots not
        * yet written. */
       for (size_t i = 0; i < n; i++) {
-        bool held = *scr_arr_state_ptr(a, i) == SCR_ARR_VALUE;
+        bool held = scr_arr_dense_state(a, i) == SCR_ARR_VALUE;
         uint64_t old = held ? a->data[i] : 0;
         a->data[i] = src[i];
-        *scr_arr_state_ptr(a, i) = SCR_ARR_VALUE;
+        if (scr_arr_has_states(a)) *scr_arr_state_ptr(a, i) = SCR_ARR_VALUE;
         if (held) scr_elem_release(a, old);
       }
     }
@@ -4787,6 +5056,7 @@ ScrStr *scr_arr_join(ScrArr *a, ScrStr *sep) {
       case SCR_ELEM_ARR:
       case SCR_ELEM_BYTES:
       case SCR_ELEM_REF:
+      case SCR_ELEM_CREF:
         /* The compiler rejects join on ref-element arrays (SC1090). */
         scr_trap("scriptc: internal error: join on a ref-element array\n");
     }

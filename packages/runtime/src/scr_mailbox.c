@@ -140,9 +140,11 @@ ScrMailbox *scr_mailbox_retain(ScrMailbox *mailbox) {
 
 void scr_mail_event_free(ScrMailEvent *event) {
   if (!event) return;
-  scr_message_free(event->message);
   free(event->data);
-  free(event);
+  ScrMessage *message = event->message;
+  /* An event in its message's block goes with the message. */
+  if (!event->in_message) free(event);
+  scr_message_free(message);
 }
 
 void scr_mailbox_release(ScrMailbox *mailbox) {
@@ -460,7 +462,7 @@ void scr_channel_set_owner(ScrChannel *channel, int side, ScrMailbox *owner, uns
  * messages as ready, so it does not wait while the queue is non-empty. */
 bool scr_channel_post(ScrChannel *channel, int side, ScrMessage *message, unsigned message_kind,
                       unsigned wake_kind) {
-  ScrMailEvent *event = calloc(1, sizeof(*event));
+  ScrMailEvent *event = message ? scr_message_mail_event(message) : calloc(1, sizeof(*event));
   if (!event) scr_trap("scriptc: out of memory\n");
   event->kind = message_kind;
   event->message = message;

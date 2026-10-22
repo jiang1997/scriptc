@@ -18,6 +18,7 @@ import type {
 } from "./ir.js";
 import {
   arrayOf,
+  iterableArmsElem,
   BYTES_ELEMENT_NAME,
   BOOL,
   BYTES_U8,
@@ -61,6 +62,7 @@ import { unionWideningTags } from "./analysis.js";
 import { alwaysReturns } from "./control-flow.js";
 import { dynamicOperationOf, functionTier } from "./tiers.js";
 import { LIB_FN_SIGS, pipelinePumpedRuns } from "./builtin-signatures.js";
+import { ALWAYS_THROW_LIB_FNS } from "./builtin-effects.js";
 
 /** The promisified crypto calls' value kinds besides checked-dynamic. */
 const CRYPTO_PROMISE_VALUES: Readonly<Record<string, "buffer" | "view" | "number" | "dyn">> = {
@@ -800,7 +802,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         arm.kind === "union" ||
         arm.kind === "dyn" ||
         arm.kind === "date" ||
-        arm.kind === "generator"
+        (arm.kind === "generator" && iterableArmsElem(u.arms) === null)
       ) {
         errors.push({ message: `union ${u.id}: arm ${i} is ${arm.kind}`, loc: noLoc });
       }
@@ -5345,32 +5347,8 @@ function validateFunction(
       const callback = e.args[e.args.length - 1]?.type;
       if (callback?.kind !== "func") err(`libCall ${e.fn} callback must be a function`, e.loc);
     }
-    if (e.fn === "global.undefRead") {
-      // Always throws — the result type is whatever the declared type
-      // of the undefined global mapped to (never materialized).
-      return true;
-    }
-    if (
-      e.fn === "error.nodeThrow" ||
-      e.fn === "error.argTypeThrow" ||
-      e.fn === "error.propTypeThrow" ||
-      e.fn === "fs.mkdtempChk" ||
-      e.fn === "fs.readFileChk" ||
-      e.fn === "fs.opendirChk" ||
-      e.fn === "fs.watchFileChk" ||
-      e.fn === "fs.lchmodChk" ||
-      e.fn === "fs.readChk" ||
-      e.fn === "fs.streamOptsChk" ||
-      e.fn === "net.connectOptsChk" ||
-      e.fn === "tls.caCertsChk"
-    ) {
-      // Always throws — the result type is the replaced expression's
-      // own (never materialized; the global.undefRead pattern). The
-      // fs Chk ladders qualify: every validation failure throws
-      // Node's typed error, and a full pass throws the trailing
-      // compiler-rendered fence.
-      return true;
-    }
+    // Always throws: the result type is never materialized.
+    if (ALWAYS_THROW_LIB_FNS.has(e.fn)) return true;
     if (e.fn === "error.new" || e.fn === "error.newOptions") {
       // Which builtin the runtime constructs is named by the result type.
       if (!isBuiltinErrorObject(e.type)) {

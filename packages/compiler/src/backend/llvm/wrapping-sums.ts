@@ -1,4 +1,5 @@
-import type { IrExpr } from "../../ir/ir.js";
+import type { IrExpr, IrFunction, IrStmt } from "../../ir/ir.js";
+import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
 import { integerArithmeticRange, type IntegerRange } from "../../ir/integer-ranges.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import type { LlInteger } from "./integer-values.js";
@@ -47,12 +48,41 @@ export function integerOrNaNRange(host: LlvmEmitterContext, e: IrExpr): IntegerR
     return ELEMENT_RANGES.i32!;
   // A UTF-16 code unit, or NaN past either end.
   if (e.kind === "strIntrinsic" && e.method === "charCodeAt") return { min: 0, max: 65535 };
+  if (e.kind === "varRef") return host.integerOrNaNLocals.get(e.localId) ?? null;
   if (e.kind === "bin" && (e.op === "+" || e.op === "-")) {
     const left = integerOrNaNRange(host, e.left);
     const right = left && integerOrNaNRange(host, e.right);
     return right ? integerArithmeticRange(e.op, left!, right) : null;
   }
   return null;
+}
+
+/** An index that is an exact integer or NaN (`integerOrNaNRange`): the integer as an i64, and an
+ * i1 that is false when the index is NaN. An index check then needs no round trip through a double:
+ * the integer is the value's ToUint32 view where the range proves it holds the whole value, or one
+ * conversion, which is exact for a safe integer and frozen, since the conversion of NaN is poison.
+ * Null for any other index. */
+export function integerOrNaNIndex(
+  host: LlvmEmitterContext,
+  value: LlValue,
+  expr: IrExpr | undefined,
+): { wide: string; ordered: string } | null {
+  const range = expr ? integerOrNaNRange(host, expr) : null;
+  if (!range) return null;
+  const B = host.B;
+  const ordered = B.tmp();
+  const wide = B.tmp();
+  B.line(`${ordered} = fcmp ord double ${value.name}, 0.0`);
+  if (value.uint32 !== undefined && range.min >= 0 && range.max <= 4294967295) {
+    B.line(`${wide} = zext i32 ${value.uint32} to i64`);
+  } else if (value.uint32 !== undefined && range.min >= -2147483648 && range.max <= 2147483647) {
+    B.line(`${wide} = sext i32 ${value.uint32} to i64`);
+  } else {
+    const raw = B.tmp();
+    B.line(`${raw} = fptosi double ${value.name} to i64`);
+    B.line(`${wide} = freeze i64 ${raw}`);
+  }
+  return { wide, ordered };
 }
 
 const ELEMENT_RANGES: Partial<Record<string, IntegerRange>> = {
@@ -130,4 +160,86 @@ export function emitWrappingSum(
   const out = B.tmp();
   B.line(`${out} = select i1 ${valid}, i32 ${sum}, i32 0`);
   return out;
+}
+
+/** The number locals of `fn` that only hold exact integers (never -0) or NaN, with the range of
+ * those integers: locals declared once with an initializer, neither parameters nor captured or
+ * boxed, whose initializer and every later write `integerOrNaNRange` covers. A local joins once
+ * the values it is written depend only on locals that have joined, so `x = x + 1` keeps `x` out:
+ * its values have no bound. Uses the function's `integerRanges` and `int32Elements`. */
+export function findIntegerOrNaNLocals(
+  host: LlvmEmitterContext,
+  fn: IrFunction,
+): ReadonlyMap<string, IntegerRange> {
+  const found = new Map<string, IntegerRange>();
+  if (fn.async || fn.generator) return found;
+  const excluded = new Set<string>();
+  for (const param of fn.params) excluded.add(param.localId);
+  for (const capture of fn.captures ?? []) excluded.add(capture.localId);
+  for (const capture of fn.classCaptures ?? []) excluded.add(capture.localId);
+  const candidates = new Set<string>();
+  for (const local of fn.locals)
+    if (local.type.kind === "f64" && !local.boxed && !local.tdz && !excluded.has(local.id))
+      candidates.add(local.id);
+  if (candidates.size === 0) return found;
+  const declared = new Set<string>();
+  const writes = new Map<string, IrExpr[]>();
+  const drop = (id: string): void => {
+    candidates.delete(id);
+    writes.delete(id);
+  };
+  const write = (id: string, value: IrExpr): void => {
+    if (!candidates.has(id)) return;
+    const list = writes.get(id);
+    if (list) list.push(value);
+    else writes.set(id, [value]);
+  };
+  function walkExpr(e: IrExpr): boolean {
+    if (e.kind === "assignExpr") write(e.localId, e.value);
+    else if (e.kind === "incDec") drop(e.localId);
+    return everyExprChild(e, walkExpr, walkStmt);
+  }
+  function walkStmt(s: IrStmt): boolean {
+    if (s.kind === "assign") write(s.localId, s.value);
+    else if (s.kind === "varDecl") {
+      if (s.init === null || declared.has(s.localId)) drop(s.localId);
+      else {
+        declared.add(s.localId);
+        write(s.localId, s.init);
+      }
+    } else if (s.kind === "forOf") drop(s.localId);
+    else if (s.kind === "tryCatch" && s.catchLocalId) drop(s.catchLocalId);
+    return everyStmtChild(s, walkExpr, walkStmt);
+  }
+  for (const s of fn.body) walkStmt(s);
+  // `integerOrNaNRange` reads the joined locals while the next ones are tested.
+  const previous = host.integerOrNaNLocals;
+  host.integerOrNaNLocals = found;
+  try {
+    let joined = true;
+    while (joined) {
+      joined = false;
+      for (const [id, values] of writes) {
+        if (found.has(id) || !declared.has(id)) continue;
+        let range: IntegerRange | null = null;
+        for (const value of values) {
+          const next = integerOrNaNRange(host, value);
+          if (next === null) {
+            range = null;
+            break;
+          }
+          range =
+            range === null
+              ? next
+              : { min: Math.min(range.min, next.min), max: Math.max(range.max, next.max) };
+        }
+        if (range === null) continue;
+        found.set(id, range);
+        joined = true;
+      }
+    }
+  } finally {
+    host.integerOrNaNLocals = previous;
+  }
+  return found;
 }

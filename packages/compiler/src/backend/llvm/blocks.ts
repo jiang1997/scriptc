@@ -95,8 +95,8 @@ export class BlockBuilder {
     this.terminate(`br label %${label}`);
   }
 
-  condBr(v: string, t: string, f: string): void {
-    this.terminate(`br i1 ${v}, label %${t}, label %${f}`);
+  condBr(v: string, t: string, f: string, attachment = ""): void {
+    this.terminate(`br i1 ${v}, label %${t}, label %${f}${attachment}`);
   }
 
   /** Emit a double-indexed `for (i = 0; i < len; i++)` loop. `next` is

@@ -6,7 +6,7 @@ import { buildArrayConversion } from "./builders.js";
 import type { WidthLift } from "../width-lift.js";
 import { InternalCompilerError } from "../../../errors.js";
 import type { IrExpr, IrFunction, IrRecordShape, IrStmt, IrType, SrcLoc } from "../../../ir/ir.js";
-import { BOOL, DYN, F64, STRING } from "../../../ir/ir.js";
+import { BOOL, DYN, F64, STRING, UNDEFINED_T } from "../../../ir/ir.js";
 import { typeKey } from "../../type-mapper.js";
 import { findStaticOn, findGenericStaticOn } from "../lower-classes.js";
 import { lowerRecordOvfCaptureHelper } from "../containers/indexed-objects.js";
@@ -155,6 +155,76 @@ export function applyWidthLift(
         loc,
       };
     }
+    case "presenceRoute": {
+      if (dst.kind !== "union" || value.type.kind !== "record")
+        throw new InternalCompilerError("lowerer bug: presenceRoute lift shape");
+      const sourceType = value.type;
+      const fieldType = lowerer.shapes
+        .get(sourceType.shapeId)
+        ?.fields.find((f) => f.name === lift.field)?.type;
+      if (fieldType?.kind !== "union")
+        throw new InternalCompilerError("lowerer bug: presenceRoute field shape");
+      // One helper per pair: the conversion reads the source twice.
+      const key = `presence:${typeKey(sourceType)}:${dst.unionId}:${lift.field}`;
+      let helper = lowerer.valueHelpers.get(key);
+      if (!helper) {
+        helper = `%union.presence.${lowerer.valueHelpers.size}`;
+        lowerer.valueHelpers.set(key, helper);
+        const source = (): IrExpr => varRef("v.0", sourceType, loc);
+        const arm = (route: { tag: number; arm: IrType }): IrExpr => {
+          const inner = lowerer.widthLiftPlan(sourceType, route.arm);
+          if (!inner)
+            throw new InternalCompilerError(
+              "lowerer bug: planned presenceRoute arm stopped lifting",
+            );
+          return {
+            kind: "unionWrap",
+            unionId: dst.unionId,
+            tag: route.tag,
+            value: lowerer.applyWidthLift(inner, source(), route.arm, loc),
+            type: dst,
+            loc,
+          };
+        };
+        lowerer.liftedFns.push({
+          name: helper,
+          params: [{ localId: "v.0", name: "v", type: sourceType }],
+          returnType: dst,
+          locals: [{ id: "v.0", name: "v", type: sourceType, mutable: false }],
+          body: [
+            {
+              kind: "return",
+              value: {
+                kind: "ternary",
+                cond: {
+                  kind: "unionIsTag",
+                  unionId: fieldType.unionId,
+                  tag: lowerer.armTag(fieldType.unionId, UNDEFINED_T),
+                  value: {
+                    kind: "recordGet",
+                    obj: source(),
+                    shapeId: sourceType.shapeId,
+                    field: lift.field,
+                    type: fieldType,
+                    loc,
+                  },
+                  negated: false,
+                  type: BOOL,
+                  loc,
+                },
+                then: arm(lift.absent),
+                else_: arm(lift.present),
+                type: dst,
+                loc,
+              },
+              loc,
+            },
+          ],
+          loc,
+        });
+      }
+      return { kind: "call", callee: helper, args: [value], type: dst, loc };
+    }
     case "width": {
       if (dst.kind !== "record" || value.type.kind !== "record")
         throw new InternalCompilerError("lowerer bug: width lift shape");
@@ -220,6 +290,8 @@ export function applyWidthLift(
         throw new InternalCompilerError("lowerer bug: dynIn lift against a non-dyn slot");
       return { kind: "dynFrom", value, type: DYN, loc };
     }
+    case "dynOut":
+      return { kind: "dynCheck", value, type: dst, loc };
     case "upcast": {
       if (dst.kind !== "object" || value.type.kind !== "object")
         throw new InternalCompilerError("lowerer bug: upcast lift shape");

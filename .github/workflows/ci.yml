@@ -364,6 +364,20 @@ jobs:
           target: wasm32-wasi
           helper: "false"
       - run: pnpm build
+      # The sanitized seed compiles the compiler's 700 MB module with one clang
+      # process under AddressSanitizer. It peaks near 14 GB while the Node
+      # process that emitted the module still holds about 6 GB. Together they
+      # exceed the runner's 16 GB of memory, so back them with swap.
+      - name: Enlarge swap for the sanitized seed
+        if: matrix.flavor == 'san'
+        run: |
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 24G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
       - name: Prepare bootstrap seed
         run: node scripts/bootstrap-seed.mjs
         env:

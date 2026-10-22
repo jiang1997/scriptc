@@ -1263,17 +1263,28 @@ class FusedLoop {
         loc,
       });
       if (holes) {
+        // The result keeps the source's holes: storage for its length is
+        // reserved first and the length is set after the loop, so a result
+        // without holes is filled by appends and gets no state bytes.
+        const length = (): IrExpr => ({
+          kind: "ternary",
+          cond: { kind: "bin", op: "<", left: lo, right: hi, type: BOOL, loc },
+          then: { kind: "bin", op: "-", left: hi, right: lo, type: F64, loc },
+          else_: numLit(0, loc),
+          type: F64,
+          loc,
+        });
         stateDecls.push({
           kind: "arraySetLength",
           arr: varRef(out, resultT, loc),
-          length: {
-            kind: "ternary",
-            cond: { kind: "bin", op: "<", left: lo, right: hi, type: BOOL, loc },
-            then: { kind: "bin", op: "-", left: hi, right: lo, type: F64, loc },
-            else_: numLit(0, loc),
-            type: F64,
-            loc,
-          },
+          length: length(),
+          loc,
+          reserve: true,
+        });
+        epilogue.push({
+          kind: "arraySetLength",
+          arr: varRef(out, resultT, loc),
+          length: length(),
           loc,
         });
       }

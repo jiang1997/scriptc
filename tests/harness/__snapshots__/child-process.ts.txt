@@ -14,7 +14,7 @@ child-process.ts:27:14 - error SC1090: listeners returning a value (make the cal
      |              ^~~~~~~~~~~~~~~
   28 | // Methods have no bound-value form — call on directly.
 
-child-process.ts:29:7 - error SC2007: values of type '{ (event: "spawn", listener: () => void): void; (event: "exit", listener: (code: number | null, signal: string | null) => void): void; (event: "close", listener: (code: number | null, signal: string | null) => void): void; (event: "error", listener: (err: Error) => void): void; (event: "message", listener: (message:...' cannot be compiled: the type declares multiple call signatures (overloads), and a compiled function value is always one concrete signature
+child-process.ts:29:7 - error SC2007: values of type '{ (event: "spawn", listener: () => void): ChildProcess; (event: "exit", listener: (code: number | null, signal: string | null) => void): ChildProcess; (event: "close", listener: (code: number | null, signal: string | null) => void): ChildProcess; (event: "error", listener: (err: Error) => void): ChildProcess; (event...' cannot be compiled: the type declares multiple call signatures (overloads), and a compiled function value is always one concrete signature
 
   28 | // Methods have no bound-value form — call on directly.
   29 | const f = c.on;

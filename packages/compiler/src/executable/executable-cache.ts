@@ -97,6 +97,7 @@ export interface EarlyExecutableNativeFeatures {
   tls: boolean;
   cipher: boolean;
   ecdh: boolean;
+  dh: boolean;
   pki: boolean;
   ed25519: boolean;
   perfLoop: boolean;
@@ -240,6 +241,7 @@ const BOOLEAN_NATIVE_KEYS = [
   "tlsCa",
   "cipher",
   "ecdh",
+  "dh",
   "pki",
   "ed25519",
   "webcrypto",

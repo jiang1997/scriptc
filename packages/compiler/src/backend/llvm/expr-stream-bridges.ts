@@ -13,6 +13,8 @@ import {
   classFieldAttributesName,
   isClassOwnEnumerableFieldName,
   isDirentShape,
+  KEY_ORDER_FIELD,
+  shapeKeyOrders,
   isDynTypedRefType,
   isRefCounted,
   shapeHasAccessorSlots,
@@ -44,6 +46,8 @@ import type { NullableRefField } from "./nullable-fields.js";
 import { emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { inlineUnionCopyLines } from "./inline-unions.js";
 import { recordMayKeepSource } from "./record-sources.js";
+import { emitPerKeyOrder } from "./key-orders.js";
+import { registerReplay } from "./emit-journal.js";
 
 /** An owned (+1) union value for a nullable-pointer class field slot `p`
  * (the unit arm's immortal instance, or a fresh box around a retained
@@ -91,6 +95,7 @@ export function dynPromiseAdapter(host: LlvmEmitterContext, inner: IrType): stri
   if (existing) return existing;
   const sym = `sc_dpa_${host.dynPromiseAdapters.size}`;
   host.dynPromiseAdapters.set(key, sym);
+  host.journal?.allocated(sym, "dynPromiseAdapter", [inner]);
   host.declare(`declare ptr @scr_promise_payload_ref(ptr)`);
   host.declare(`declare void @scr_dyn_release_v(ptr)`);
   host.declare(`declare void @scr_promise_reject_pending(ptr)`);
@@ -146,6 +151,7 @@ export function dynPromiseAdapter(host: LlvmEmitterContext, inner: IrType): stri
     `}`,
     ``,
   );
+  host.journal?.built();
   return sym;
 }
 
@@ -602,6 +608,7 @@ export function liveDynUnionRefAdapter(
 
   const sym = `sc_ldu_${host.liveDynUnionRefAdapters.size}`;
   host.liveDynUnionRefAdapters.set(key, sym);
+  host.journal?.allocated(sym, "liveDynUnionRefAdapter", [t]);
 
   const adapters = new Map<number, LlStreamTypedRefAdapter>();
   for (const { arm, tag } of mutableArms) {
@@ -684,6 +691,7 @@ export function liveDynUnionRefAdapter(
     `}`,
     ``,
   );
+  host.journal?.built();
   return sym;
 }
 
@@ -732,6 +740,11 @@ export function streamTypedRefMaterializeAdapter(
   const snapshot = `sc_ldr_${host.liveDynRefAdapters.size}_materialize`;
   const adapter: LlStreamTypedRefAdapter = { snapshot, commit: "null" };
   host.liveDynRefAdapters.set(key, adapter);
+  host.journal?.allocated(
+    snapshot.replace(/_materialize$/, ""),
+    "streamTypedRefMaterializeAdapter",
+    [t],
+  );
   if (isDynTypedRefType(t)) {
     const fields = host.classMeta.get(t.className)?.def.fields;
     if (
@@ -744,6 +757,7 @@ export function streamTypedRefMaterializeAdapter(
     ) {
       host.declare(`declare ptr @scr_dyn_class_view_unavailable(ptr)`);
       adapter.snapshot = "scr_dyn_class_view_unavailable";
+      host.journal?.built();
       return adapter;
     }
   }
@@ -1054,52 +1068,68 @@ export function streamTypedRefMaterializeAdapter(
       const out = B.tmp();
       B.line(`${out} = call ptr @scr_dyn_new_obj()`);
       const byName = new Map(shape.fields.map((field) => [field.name, field]));
-      const order = shape.declaredOrder ?? shape.fields.map((field) => field.name);
-      const inOrder = new Set(order);
-      const fields = [
-        ...order.map((name) => byName.get(name)).filter((field) => field !== undefined),
-        ...shape.fields.filter((field) => !inOrder.has(field.name)),
-      ];
+      // A shape with orderVariants has one field list per key order; its
+      // order index is no key.
+      const orders = shapeKeyOrders(shape);
+      const fieldsOf = (order: readonly string[]): IrRecordShape["fields"][number][] => {
+        const inOrder = new Set(order);
+        return [
+          ...order.map((name) => byName.get(name)).filter((field) => field !== undefined),
+          ...shape.fields.filter(
+            (field) => !inOrder.has(field.name) && field.name !== KEY_ORDER_FIELD,
+          ),
+        ];
+      };
       // Published before the field converters, like the array hooks below.
       // A Dirent row reads through its finished view (the prototype and
       // the non-enumerable %dtype).
       const dirent = isDirentShape(shape);
-      if (!dirent && liveRecordOpsEligible(fields)) {
-        adapter.recordOps = `@${snapshot}_rops`;
-        liveRecordOps(host, t, snapshot, fields);
-      }
-      for (const field of fields) {
-        const index = shape.fields.indexOf(field) + host.nullableUnions.fieldBase(t.shapeId);
-        const fieldPtr = B.tmp();
-        B.line(
-          `${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`,
-        );
-        const fieldValue = loadStructField(
-          B,
-          host.sizeType,
-          fieldPtr,
-          field.type,
-          host.inlineUnions.record(field.type),
-        );
-        // An ABSENT optional field contributes no key.
-        const undefinedTag = undefinedArmTag(field.type, host.unionsById);
-        let skip: string | null = null;
-        if (undefinedTag >= 0 && field.type.kind === "union") {
-          const absent = host.fieldAbsentTestIn(B, fieldValue, field.type.unionId);
-          skip = B.newLabel("live.record.absent");
-          const set = B.newLabel("live.record.set");
-          B.condBr(absent, skip, set);
-          B.startBlock(set);
-        }
-        const boxed = host.streamTypedRefBoxValue(B, field.type, fieldValue);
-        B.line(
-          `call void @scr_dyn_obj_set(ptr ${out}, ptr ${host.cstr(field.name)}, ${host.sizeType} ${Buffer.byteLength(field.name, "utf8")}, ptr ${boxed})`,
-        );
-        if (skip !== null) {
-          B.br(skip);
-          B.startBlock(skip);
+      if (!dirent && orders.every((order) => liveRecordOpsEligible(fieldsOf(order)))) {
+        if (orders.length === 1) {
+          adapter.recordOps = `@${snapshot}_rops`;
+          liveRecordOps(host, t, snapshot, fieldsOf(orders[0]!));
+        } else {
+          orders.forEach((order, i) =>
+            liveRecordOps(host, t, `${snapshot}_o${i}`, fieldsOf(order)),
+          );
+          adapter.recordOps = `@${snapshot}_rops`;
+          liveRecordOrderSelect(host, shape, snapshot);
         }
       }
+      emitPerKeyOrder(B, shape, host.nullableUnions.fieldBase(t.shapeId), "%p", (order) => {
+        for (const field of fieldsOf(order)) {
+          const index = shape.fields.indexOf(field) + host.nullableUnions.fieldBase(t.shapeId);
+          const fieldPtr = B.tmp();
+          B.line(
+            `${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`,
+          );
+          const fieldValue = loadStructField(
+            B,
+            host.sizeType,
+            fieldPtr,
+            field.type,
+            host.inlineUnions.record(field.type),
+          );
+          // An ABSENT optional field contributes no key.
+          const undefinedTag = undefinedArmTag(field.type, host.unionsById);
+          let skip: string | null = null;
+          if (undefinedTag >= 0 && field.type.kind === "union") {
+            const absent = host.fieldAbsentTestIn(B, fieldValue, field.type.unionId);
+            skip = B.newLabel("live.record.absent");
+            const set = B.newLabel("live.record.set");
+            B.condBr(absent, skip, set);
+            B.startBlock(set);
+          }
+          const boxed = host.streamTypedRefBoxValue(B, field.type, fieldValue);
+          B.line(
+            `call void @scr_dyn_obj_set(ptr ${out}, ptr ${host.cstr(field.name)}, ${host.sizeType} ${Buffer.byteLength(field.name, "utf8")}, ptr ${boxed})`,
+          );
+          if (skip !== null) {
+            B.br(skip);
+            B.startBlock(skip);
+          }
+        }
+      });
       if (dirent) {
         host.declare(`declare void @scr_dyn_dirent_finish(ptr)`);
         B.line(`call void @scr_dyn_dirent_finish(ptr ${out})`);
@@ -1185,6 +1215,7 @@ export function streamTypedRefMaterializeAdapter(
     `}`,
     ``,
   );
+  host.journal?.built();
   return adapter;
 }
 
@@ -1361,7 +1392,35 @@ function liveRecordOps(
     ``,
     `@${names} = internal constant [${fields.length} x ptr] [${literals.join(", ")}]`,
     // Mutable: the runtime fills the trailing key-array slot on first use.
-    `@${ops} = internal global { ${host.sizeType}, ptr, ptr, ptr, i8, ptr } { ${host.sizeType} ${fields.length}, ptr @${names}, ptr @${has}, ptr @${get}, i8 ${optional.length === 0 ? 1 : 0}, ptr null }`,
+    `@${ops} = internal global { ${host.sizeType}, ptr, ptr, ptr, i8, ptr, ptr } { ${host.sizeType} ${fields.length}, ptr @${names}, ptr @${has}, ptr @${get}, i8 ${optional.length === 0 ? 1 : 0}, ptr null, ptr null }`,
+    ``,
+  );
+}
+
+/** `@<snapshot>_rops` for a shape with orderVariants: a record-ops table
+ * whose `select` hook answers the `_o<i>_rops` table (liveRecordOps) of the
+ * record's current key order, which a write of an optional key can change
+ * after the record is boxed. */
+function liveRecordOrderSelect(
+  host: LlvmEmitterContext,
+  shape: IrRecordShape,
+  snapshot: string,
+): void {
+  const B = new BlockBuilder();
+  const out = B.slot();
+  B.entryAllocas.push(`${out} = alloca ptr`);
+  emitPerKeyOrder(B, shape, host.nullableUnions.fieldBase(shape.id), "%p", (_, i) => {
+    B.line(`store ptr @${snapshot}_o${i}_rops, ptr ${out}`);
+  });
+  const ops = B.tmp();
+  B.line(`${ops} = load ptr, ptr ${out}`);
+  B.terminate(`ret ptr ${ops}`);
+  host.resolveThunkDefs.push(
+    `define internal ptr @${snapshot}_select(ptr %p) ${FN_ATTRS} { ; live record ops by key order`,
+    B.render(),
+    `}`,
+    ``,
+    `@${snapshot}_rops = internal global { ${host.sizeType}, ptr, ptr, ptr, i8, ptr, ptr } { ${host.sizeType} 0, ptr null, ptr null, ptr null, i8 0, ptr null, ptr @${snapshot}_select }`,
     ``,
   );
 }
@@ -1469,6 +1528,7 @@ export function streamFromArrayAdapter(
   if (existing) return existing;
   const sym = `sc_sfa_${host.streamFromArrayAdapters.size}`;
   host.streamFromArrayAdapters.set(key, sym);
+  host.journal?.allocated(sym, "streamFromArrayAdapter", [t]);
   const B = new BlockBuilder();
   const unionDef = elem.kind === "union" ? host.unionsById.get(elem.unionId) : undefined;
   if (elem.kind === "union" && !unionDef) {
@@ -1585,5 +1645,17 @@ export function streamFromArrayAdapter(
     `}`,
     ``,
   );
+  host.journal?.built();
   return sym;
 }
+
+registerReplay("dynPromiseAdapter", (host, args) => dynPromiseAdapter(host, args[0] as IrType));
+registerReplay("liveDynUnionRefAdapter", (host, args) =>
+  liveDynUnionRefAdapter(host, args[0] as IrType & { kind: "union" }),
+);
+registerReplay("streamTypedRefMaterializeAdapter", (host, args) =>
+  streamTypedRefMaterializeAdapter(host, args[0] as IrType).snapshot.replace(/_materialize$/, ""),
+);
+registerReplay("streamFromArrayAdapter", (host, args) =>
+  streamFromArrayAdapter(host, args[0] as IrType & { kind: "array" }),
+);

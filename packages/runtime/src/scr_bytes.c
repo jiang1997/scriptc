@@ -3122,7 +3122,7 @@ static void scr_bytes_fill_from_arr(uint8_t *out, ScrBytesElem elem, const ScrAr
       /* Sparse tails and explicit undefined retain ordinary iteration
        * semantics. Numeric array slots own no conversion callbacks. */
       if (index < arr->cap) {
-        if (*scr_arr_state_ptr(arr, index) == SCR_ARR_VALUE)
+        if (scr_arr_dense_state(arr, index) == SCR_ARR_VALUE)
           memcpy(&values[i], &arr->data[index], sizeof(double));
         else values[i] = NAN;
       } else values[i] = scr_arr_get_number(arr, (double)index);
@@ -3271,16 +3271,24 @@ double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off,
   }
   if (nlen == 0) return o > (double)len ? (double)len : o; /* '' matches at the clamp */
   if (nlen > len) return -1;
+  /* Candidates are the positions holding the needle's first byte; only
+   * those compare the rest. */
+  const uint8_t first = needle->data[0];
   if (fwd) {
     size_t start = o > (double)len ? len : (size_t)o;
-    for (size_t i = start; i + nlen <= len; i++) {
-      if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
+    const uint8_t *at = b->data + start, *end = b->data + (len - nlen) + 1;
+    while (at < end) {
+      at = memchr(at, first, (size_t)(end - at));
+      if (!at) return -1;
+      if (nlen == 1 || memcmp(at + 1, needle->data + 1, nlen - 1) == 0) return (double)(at - b->data);
+      at++;
     }
     return -1;
   }
   size_t start = o > (double)(len - nlen) ? len - nlen : (size_t)o;
   for (size_t i = start;; i--) {
-    if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
+    if (b->data[i] == first && (nlen == 1 || memcmp(b->data + i + 1, needle->data + 1, nlen - 1) == 0))
+      return (double)i;
     if (i == 0) break;
   }
   return -1;

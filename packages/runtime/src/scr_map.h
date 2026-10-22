@@ -50,7 +50,11 @@ typedef enum {
   SCR_MAP_KEY_BIGINT, SCR_MAP_KEY_BOOL, SCR_MAP_KEY_UNION_VALUE,
   SCR_MAP_KEY_NULL, SCR_MAP_KEY_UNDEFINED /* tag-only union arms */
 } ScrMapKeyKind;
-typedef enum { SCR_MAP_VAL_F64, SCR_MAP_VAL_BOOL, SCR_MAP_VAL_REF } ScrMapValKind;
+/* SCR_MAP_VAL_CREF: a string-key map whose values are compact class
+ * instances in the program-lifetime region (llvm/classes.ts
+ * LlClassMeta.compact). Its entries are ScrMapCEntry; the values are never
+ * counted or traced. */
+typedef enum { SCR_MAP_VAL_F64, SCR_MAP_VAL_BOOL, SCR_MAP_VAL_REF, SCR_MAP_VAL_CREF } ScrMapValKind;
 
 typedef struct {
   uint64_t key; /* double bits (normalized), ScrStr* (owned), or ref ptr (owned) */
@@ -65,6 +69,15 @@ typedef struct {
   uint64_t val;
 } ScrMapNumEntry;
 #define SCR_MAP_NUM_DEAD UINT64_C(0x7ff0000000000001)
+/* A SCR_MAP_VAL_CREF map's entry: the string key, the key's 32-bit hash
+ * (its cached 64-bit hash is the same value in both halves,
+ * scr_map.c scr_map_hash_widen; zero = tombstone), and the value as an
+ * address over 8 (0 for NULL). */
+typedef struct {
+  uint64_t key;
+  uint32_t hash;
+  uint32_t val;
+} ScrMapCEntry;
 
 /* Checked views use the original storage. Slot converters borrow on reads
  * and return owned references on writes, just like typed Map operations. */
@@ -140,16 +153,25 @@ typedef struct ScrMap {
    * the whole deleted prefix again. */
   uint32_t head;
 } ScrMap;
-/* The entry at index i of either layout, and whether it is live (code that
- * walks a map's entries outside scr_map.c). Key and value are at bytes 0
- * and 8 in both layouts; a number-key entry has no hash field. */
+/* The entry at index i of any layout, whether it is live, and its value as
+ * an 8-byte slot (code that walks a map's entries outside scr_map.c). The
+ * key is at byte 0 in every layout; a number-key entry has no hash field,
+ * and a SCR_MAP_VAL_CREF entry keeps its value in 4 bytes. */
 static inline const ScrMapEntry *scr_map_entry_at(const ScrMap *m, size_t i) {
-  size_t size = m->key_kind == SCR_MAP_KEY_F64 ? sizeof(ScrMapNumEntry) : sizeof(ScrMapEntry);
+  size_t size = m->key_kind == SCR_MAP_KEY_F64 ? sizeof(ScrMapNumEntry)
+                : m->val_kind == SCR_MAP_VAL_CREF ? sizeof(ScrMapCEntry)
+                                                  : sizeof(ScrMapEntry);
   return (const ScrMapEntry *)((const char *)m->entries + i * size);
 }
 static inline bool scr_map_entry_live(const ScrMap *m, size_t i) {
   const ScrMapEntry *e = scr_map_entry_at(m, i);
-  return m->key_kind == SCR_MAP_KEY_F64 ? e->key != SCR_MAP_NUM_DEAD : e->hash != 0;
+  if (m->key_kind == SCR_MAP_KEY_F64) return e->key != SCR_MAP_NUM_DEAD;
+  if (m->val_kind == SCR_MAP_VAL_CREF) return ((const ScrMapCEntry *)e)->hash != 0;
+  return e->hash != 0;
+}
+static inline uint64_t scr_map_entry_val(const ScrMap *m, const ScrMapEntry *e) {
+  if (m->val_kind == SCR_MAP_VAL_CREF) return (uint64_t)((const ScrMapCEntry *)e)->val << 3;
+  return e->val;
 }
 /* The LLVM backend reads the header through two types (emitter.ts). Its
  * inline retain/release test the traced byte as %ScrMapRc field 3, as
@@ -162,7 +184,8 @@ static inline bool scr_map_entry_live(const ScrMap *m, size_t i) {
  * third field (sc_map_iter_entry), or for a number-key map its key against
  * SCR_MAP_NUM_DEAD (sc_map_iter_entry_num). Iteration over a checked
  * (unknown-key) Map or Set picks one of the two steps from the key kind,
- * %ScrMapIx field 1, compared with SCR_MAP_KEY_F64 (0). */
+ * %ScrMapIx field 1, compared with SCR_MAP_KEY_F64 (0). Map.size
+ * (sc_map_size) reads the live count, field 9, as scr_map_size does. */
 _Static_assert(offsetof(ScrMap, key_kind) == sizeof(size_t) && SCR_MAP_KEY_F64 == 0,
                "inline iteration over checked collections reads ScrMap.key_kind as %ScrMapIx field 1");
 _Static_assert(offsetof(ScrMap, traced) == sizeof(size_t) + 2,
@@ -193,6 +216,9 @@ _Static_assert(sizeof(ScrMapEntry) == 24 && offsetof(ScrMapEntry, val) == 8,
                "inline lookups read ScrMapEntry.val at byte 8");
 _Static_assert(sizeof(ScrMapNumEntry) == 16 && offsetof(ScrMapNumEntry, val) == 8,
                "inline number-key lookups and iteration read %ScrMapNumEntry { key, val }");
+_Static_assert(sizeof(ScrMapCEntry) == 16 && offsetof(ScrMapCEntry, hash) == 8 &&
+                   offsetof(ScrMapCEntry, val) == 12,
+               "inline compact-value lookups and iteration read %ScrMapCEntry { key, hash, val }");
 _Static_assert(sizeof(ScrMap) <= 11 * sizeof(uint64_t), "the ScrMap header stays within 88 bytes");
 /* Entry for a number key, or NULL when absent. The pointer is valid until
  * the next mutation; generated code reads the value slot through it. */
@@ -201,6 +227,9 @@ const ScrMapEntry *scr_map_entry_f64(const ScrMap *m, double key);
  * reference reads retain the value with its static type's retain instead
  * of the collection's adapter. */
 const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key);
+/* scr_map_entry_str for a SCR_MAP_VAL_CREF map: its entry is a
+ * ScrMapCEntry. */
+const ScrMapCEntry *scr_map_entry_str_c(const ScrMap *m, const ScrStr *key);
 
 /* String-key lookups borrow an exact byte span. Reference results return
  * +1; scalar outputs are written only on a hit, like the string getters. */
@@ -214,8 +243,10 @@ void *scr_map_get_span_ref(const ScrMap *m, const char *bytes, size_t length);
  * adapters); NULL keeps the source's descriptor. */
 ScrMap *scr_map_clone(const ScrMap *source, bool keys_only, const ScrMapOps *ops);
 ScrMap *scr_map_clone_dyn(const ScrMap *source, bool keys_only);
-/* The descriptor of a Set of checked values (SCR_MAP_KEY_DYN keys). */
+/* The descriptors of a Set and a Map of checked values (SCR_MAP_KEY_DYN
+ * keys; the Map's values are checked values too). */
 extern const ScrMapOps scr_map_dyn_set_ops;
+extern const ScrMapOps scr_map_dyn_map_ops;
 void scr_map_values_into(ScrMap *set, const ScrMap *source, bool checked);
 
 void scr_map_dyn_attach(ScrMap *map, const ScrMapDynOps *ops);

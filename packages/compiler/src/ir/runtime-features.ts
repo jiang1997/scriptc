@@ -605,14 +605,23 @@ const STDIO_EXTENDED_NAMES: ReadonlySet<string> = new Set(["setEncoding", "resiz
 /** The libCall nodes the rules below test. */
 type LibCallNode = IrExpr & { kind: "libCall" };
 
+/** A condition over several nodes of the module (a WebCrypto call and an
+ * algorithm name): the scan's one walk shows it every expression, and the
+ * feature is set when `result` answers true after the walk. */
+interface RuleScan {
+  expr(node: IrExpr): void;
+  result(): boolean;
+}
+
 /** What makes a program need one optional runtime unit. The feature is set
  * when any condition holds: `initial` from the module's declarations, a
  * libCall named in `fns` or starting with one of `prefixes`, a libCall
- * `libCall` accepts, another expression node `expr` accepts, or a type
- * slot of one of the `types` kinds. A libCall or type that needs several
- * units appears in each unit's rule. */
+ * `libCall` accepts, another expression node `expr` accepts, a type slot of
+ * one of the `types` kinds, or a `scan` over the whole module. A libCall or
+ * type that needs several units appears in each unit's rule. */
 interface RuntimeFeatureRule {
   initial?: (mod: IrModule) => boolean;
+  scan?: () => RuleScan;
   fns?: readonly IrLibFn[];
   prefixes?: readonly string[];
   libCall?: (node: LibCallNode) => boolean;
@@ -625,6 +634,16 @@ const rule = (r: RuntimeFeatureRule): RuntimeFeatureRule => r;
 
 /* The HTTP, HTTPS, HTTP/2 and TLS surfaces, which link the net unit. */
 const NET_PREFIXES: readonly string[] = ["net.", "http.", "tls.", "https.", "http2."];
+
+/** The scr_dh.c entry points (the dh unit). */
+export const DH_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "crypto.dhNew",
+  "crypto.dhGroupNew",
+  "crypto.checkPrimeSync",
+  "crypto.checkPrimeCb",
+  "crypto.generatePrimeSync",
+  "crypto.generatePrimeCb",
+]);
 
 /** The scr_pki.c entry points (the pki unit). */
 export const PKI_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
@@ -650,17 +669,32 @@ const WEBCRYPTO_ASYMMETRIC_NAMES: ReadonlySet<string> = new Set([
 /** Whether a string literal in the module names Ed25519, without regard
  * to case ("ed25519" for node:crypto, "Ed25519" for WebCrypto): the
  * Ed25519 unit links then, alongside the pki unit. */
-export function moduleNamesEd25519(mod: IrModule): boolean {
+function ed25519NameScan(): RuleScan {
   let named = false;
-  everyModuleNode(mod, {
+  return {
     expr: (node) => {
-      if (node.kind === "strLit" && node.value.toLowerCase() === "ed25519") named = true;
-      return !named;
+      if (!named && node.kind === "strLit" && node.value.toLowerCase() === "ed25519") named = true;
     },
-    stmt: () => !named,
-    type: () => true,
-  });
-  return named;
+    result: () => named,
+  };
+}
+
+/** moduleUsesWebCryptoAsymmetric's condition as a runtime-feature scan. */
+function webCryptoAsymmetricScan(): RuleScan {
+  let webcrypto = false;
+  let named = false;
+  return {
+    expr: (node) => {
+      if (node.kind === "libCall" && node.fn.startsWith("webcrypto.")) webcrypto = true;
+      else if (
+        !named &&
+        node.kind === "strLit" &&
+        WEBCRYPTO_ASYMMETRIC_NAMES.has(node.value.toLowerCase())
+      )
+        named = true;
+    },
+    result: () => webcrypto && named,
+  };
 }
 
 /** Whether the module calls WebCrypto and a string literal in it names one
@@ -709,9 +743,17 @@ const RUNTIME_FEATURE_RULES = {
   }),
   /** scr_cipher.c over the mbedTLS archive; DEP0182 reports through the
    * process-warning unit, and unknown output encodings render through the
-   * inspect unit. WebCrypto's encrypt and decrypt (scr_webcrypto_aes.c)
-   * link the same archive. */
-  cipher: rule({ fns: ["crypto.cipherNew", "webcrypto.encrypt", "webcrypto.decrypt"] }),
+   * inspect unit. WebCrypto's encrypt, decrypt, wrapKey and unwrapKey
+   * (scr_webcrypto_aes.c) link the same archive. */
+  cipher: rule({
+    fns: [
+      "crypto.cipherNew",
+      "webcrypto.encrypt",
+      "webcrypto.decrypt",
+      "webcrypto.wrapKey",
+      "webcrypto.unwrapKey",
+    ],
+  }),
   copying: rule({
     expr: (node, _tables) =>
       (node.kind === "arrIntrinsic" && COPYING_ARR_METHODS.has(node.method)) ||
@@ -747,6 +789,8 @@ const RUNTIME_FEATURE_RULES = {
       "crypto.cipherNew",
       "webcrypto.encrypt",
       "webcrypto.decrypt",
+      "webcrypto.wrapKey",
+      "webcrypto.unwrapKey",
       "crypto.ecdhNew",
     ],
     prefixes: [...READABLE_DYN_ASYNC_PREFIXES, "wasm."],
@@ -810,6 +854,10 @@ const RUNTIME_FEATURE_RULES = {
    * process-warning unit, and unknown encodings and formats render through
    * the inspect unit. */
   ecdh: rule({ fns: ["crypto.ecdhNew", "crypto.ecdhConvertKey"] }),
+  /** scr_dh.c over the mbedTLS archive, also for checkPrime and
+   * generatePrime; unknown encodings and argument values render through
+   * the inspect unit. */
+  dh: rule({ fns: [...DH_LIB_FNS] }),
   emitter: rule({
     initial: (mod) =>
       mod.workers === true || (mod.classes ?? []).some((c) => c.name === RUNTIME_EMITTER_CLASS),
@@ -855,8 +903,11 @@ const RUNTIME_FEATURE_RULES = {
       "crypto.cipherNew",
       "webcrypto.encrypt",
       "webcrypto.decrypt",
+      "webcrypto.wrapKey",
+      "webcrypto.unwrapKey",
       "crypto.ecdhNew",
       "crypto.ecdhConvertKey",
+      ...DH_LIB_FNS,
       ...BUILTIN_CLASS_LIB_FNS,
       ...UTIL_CALLABLE_LIB_FNS,
     ],
@@ -889,10 +940,10 @@ const RUNTIME_FEATURE_RULES = {
   perfLoop: rule({ fns: ["perf.idleTime"], prefixes: ["perf.loop", "perf.eld"] }),
   /** scr_pki.c over the mbedTLS archive: asymmetric KeyObjects and
    * signatures. */
-  pki: rule({ initial: moduleUsesWebCryptoAsymmetric, fns: [...PKI_LIB_FNS] }),
+  pki: rule({ scan: webCryptoAsymmetricScan, fns: [...PKI_LIB_FNS] }),
   /** scr_ed25519.c (the vendored libsodium Ed25519), linked with pki: a
    * string literal in the module names Ed25519. */
-  ed25519: rule({ initial: moduleNamesEd25519 }),
+  ed25519: rule({ scan: ed25519NameScan }),
   processEvents: rule({ fns: [...PROCESS_EVENT_LIB_FNS, "util.styleText"], types: ["procStream"] }),
   /** scr_url_legacy.c parses and stringifies queries. */
   qs: rule({ fns: [...QS_LIB_FNS, ...LEGACY_URL_LIB_FNS] }),
@@ -984,6 +1035,7 @@ function noRuntimeFeatures(): RuntimeFeatures {
     dynInvoke: false,
     dynTier: false,
     ecdh: false,
+    dh: false,
     emitter: false,
     eventTarget: false,
     eventsOnceSignal: false,
@@ -1052,9 +1104,11 @@ for (const name of RUNTIME_FEATURE_NAMES) {
 
 function scanRuntimeFeatures(mod: IrModule, stopAt?: RuntimeFeatureName): RuntimeFeatures {
   const features = noRuntimeFeatures();
+  const scans: { name: RuntimeFeatureName; scan: RuleScan }[] = [];
   for (const name of RUNTIME_FEATURE_NAMES) {
-    const initial = ruleOf(name).initial;
+    const { initial, scan } = ruleOf(name);
     if (initial && initial(mod)) features[name] = true;
+    if (scan) scans.push({ name, scan: scan() });
   }
   const keepGoing = (): boolean => stopAt === undefined || !features[stopAt];
   let tables: TypeTables | undefined;
@@ -1065,6 +1119,7 @@ function scanRuntimeFeatures(mod: IrModule, stopAt?: RuntimeFeatureName): Runtim
       classes: new Map((mod.classes ?? []).map((c) => [c.name, c])),
     });
   const expr = (node: IrExpr): boolean => {
+    for (let i = 0; i < scans.length; i++) scans[i]!.scan.expr(node);
     if (node.kind === "libCall") {
       const fn = node.fn;
       for (const name of FEATURES_BY_FN.get(fn) ?? []) features[name] = true;
@@ -1083,6 +1138,7 @@ function scanRuntimeFeatures(mod: IrModule, stopAt?: RuntimeFeatureName): Runtim
     return keepGoing();
   };
   if (keepGoing()) everyModuleNode(mod, { expr, stmt: keepGoing, type });
+  for (const { name, scan } of scans) if (scan.result()) features[name] = true;
   // Inline-cache sites of dynamic-tier functions use the tier's shapes
   // (scr_js_object.c, with the SCR_JS_TIER build of scr_json.c).
   if (!features.dynTier && mod.functions.some((fn) => fn.tier === "dynamic")) {

@@ -279,6 +279,8 @@ function shapeUnion(
  * tag and payload inside the C map. */
 function boxedUnionIds(mod: IrModule): Set<string> {
   const boxed = new Set<string>();
+  // Only the module's union definitions consult the result.
+  if (!mod.unions?.length) return boxed;
   const mark = (t: IrType): void => {
     if (t.kind === "union") boxed.add(t.unionId);
   };

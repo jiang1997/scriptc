@@ -940,3 +940,17 @@ test("a dense read tests the hole-free prefix before the capacity", () => {
     expect(ir.lastIndexOf("local.array.range", firstCap)).toBeGreaterThan(firstFilled);
   }
 });
+
+test("an optional read at a proven integer index skips the double round trip", () => {
+  const module = fixture();
+  const call = module.functions[2]!.body[0]!;
+  if (call.kind !== "varDecl" || call.init?.kind !== "call") throw new Error("missing call");
+  call.init.args[1] = { kind: "bin", op: "|", left: ref("i", F64), right: num(0), type: F64, loc };
+  expect(candidates(module).get("value")?.borrow).toBe(true);
+  expect(validateModule(module)).toEqual([]);
+  // The int32 index is the dense offset on 64-bit targets; a 32-bit target
+  // converts the double, as a borrowed read does.
+  expect(workBody(module, 64)).not.toContain("local.array.exact");
+  expect(workBody(module, 64)).toContain("local.array.value");
+  expect(workBody(module, 32)).toContain("local.array.exact");
+});

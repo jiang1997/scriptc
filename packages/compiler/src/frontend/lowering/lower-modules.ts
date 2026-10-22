@@ -2929,6 +2929,38 @@ export function lowerDefaultExport(lowerer: Lowerer, stmt: ts.ExportAssignment):
   return { kind: "assign", localId: g.id, value, loc: locOf(stmt) };
 }
 
+/** Marks the runtime fences recorded since `fencesBefore` that lie in
+ * `sf`'s top-level code: they run when the module initializes. A fence
+ * inside a function, or inside a class member that runs later (a method,
+ * accessor, constructor or instance field initializer), runs when that
+ * code is called. */
+function markModuleInitFences(lowerer: Lowerer, sf: ts.SourceFile, fencesBefore: number): void {
+  for (let i = fencesBefore; i < lowerer.runtimeFences.length; i++) {
+    const fence = lowerer.runtimeFences[i]!;
+    if (fence.loc.file !== sf.fileName || runsAfterModuleInit(sf, fence.loc.start)) continue;
+    lowerer.runtimeFences[i] = { ...fence, startup: true };
+  }
+}
+
+/** Whether the code at `pos` sits in a function or a later-running class
+ * member body. */
+function runsAfterModuleInit(sf: ts.SourceFile, pos: number): boolean {
+  let later = false;
+  ts.walkPreorder(sf, (node) => {
+    if (node.pos > pos || node.end <= pos) return "skip";
+    if (
+      ts.isFunctionLike(node) ||
+      (ts.isPropertyDeclaration(node) &&
+        !node.modifiers?.nodes.some((m) => m.kind === ts.SyntaxKind.StaticKeyword))
+    ) {
+      later = true;
+      return "stop";
+    }
+    return undefined;
+  });
+  return later;
+}
+
 export function lowerFileInit(
   lowerer: Lowerer,
   sf: ts.SourceFile,
@@ -2938,6 +2970,7 @@ export function lowerFileInit(
   const isAsync = lowerer.asyncInitFiles.has(sf);
   const ctx = newFnCtx(false, null, null, VOID);
   ctx.isAsync = isAsync;
+  const fencesBefore = lowerer.runtimeFences.length;
   lowerer.fnStack.push(ctx);
   try {
     const loc0: SrcLoc = { file: sf.fileName, start: 0, end: 0 };
@@ -3288,6 +3321,7 @@ export function lowerFileInit(
     };
   } finally {
     lowerer.fnStack.pop();
+    markModuleInitFences(lowerer, sf, fencesBefore);
   }
 }
 

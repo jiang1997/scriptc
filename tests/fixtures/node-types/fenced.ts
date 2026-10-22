@@ -69,13 +69,13 @@ http2.createSecureServer({
 http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", streamResetBurst: 1 + 0 });
 http2.connect("https://localhost");
 /* The crypto surface beyond the lowered slice (randomness, the hash
- * chain, the introspection statics): Diffie-Hellman names the lowered
- * asymmetric surface, symmetric ciphers the missing cipher stack, prime
- * checks theirs, and setFips the FIPS truth (getFips() lowers to 0). */
-import { checkPrimeSync, createCipheriv, createDiffieHellman, setFips } from "node:crypto";
-createDiffieHellman(512);
+ * chain, the introspection statics): RSA encryption names the lowered
+ * asymmetric surface, symmetric ciphers the missing cipher stack, the
+ * secure heap the generic hint, and setFips the FIPS truth (getFips() lowers to 0). */
+import { createCipheriv, publicEncrypt, secureHeapUsed, setFips } from "node:crypto";
+publicEncrypt("key", Buffer.alloc(1));
 createCipheriv("aes-128-ccm", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
-checkPrimeSync(7n);
+secureHeapUsed();
 setFips(false);
 fetch("https://example.invalid/", {
   integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -99,13 +99,19 @@ void callbackified;
 import { createECDH } from "node:crypto";
 createECDH("sect163k1");
 createECDH("prime256v1").computeSecret(Buffer.alloc(65), "hex");
+/* DiffieHellman's Object.prototype members, and crypto.diffieHellman over
+ * asymmetric KeyObjects. */
+import { createDiffieHellman, diffieHellman, type KeyObject } from "node:crypto";
+createDiffieHellman(Buffer.from([23])).toString();
+declare const dhKey: KeyObject;
+diffieHellman({ privateKey: dhKey, publicKey: dhKey });
 /* WebCrypto beyond the secret-key slice: @types/node declares the whole
  * SubtleCrypto surface, and the methods outside the slice, such as
- * wrapKey, fence by name. */
-async function wrapWithWebCrypto(key: import("node:crypto").webcrypto.CryptoKey): Promise<void> {
-  await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
+ * getPublicKey, fence by name. */
+async function publicKeyWithWebCrypto(key: import("node:crypto").webcrypto.CryptoKey): Promise<void> {
+  await crypto.subtle.getPublicKey(key, ["verify"]);
 }
-void wrapWithWebCrypto;
+void publicKeyWithWebCrypto;
 /* Node's navigator global: typeof navigator and navigator.userAgent
  * compile; the other members fence by name. */
 const cores = navigator.hardwareConcurrency;

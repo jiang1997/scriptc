@@ -22,6 +22,7 @@ process.env.SCRIPTC_RUNTIME_PACK_CONFIG = JSON.stringify({
     "scr_tls.c",
     "scr_cipher.c",
     "scr_ecdh.c",
+    "scr_dh.c",
     "scr_pki.c",
     "scr_webcrypto_pki.c",
     "scr_ed25519.c",

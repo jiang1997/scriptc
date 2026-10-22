@@ -13,7 +13,8 @@ import {
   type IrType,
   type SrcLoc,
 } from "../../ir/ir.js";
-import { everyStmtList, transformExpr, transformStmtList } from "../../ir/traverse.js";
+import { transformExpr, transformStmtList } from "../../ir/traverse.js";
+import type { DispatchSites } from "./dispatch-sites.js";
 import type { Lowerer } from "./lowerer.js";
 import type { ParamShape } from "./call-signatures.js";
 import { classPrototypeData } from "./class-prototypes.js";
@@ -24,16 +25,21 @@ const PREFIX = "%class.construct:";
 const PACKED = `${PREFIX}packed`;
 const INSTANCEOF = "%class.instanceof:dynamic";
 
+/** `value instanceof callee` for an untyped constructor value, through one
+ * shared helper. `refusal` is the site's message for a runtime
+ * constructor with no instance test. */
 export function checkedClassInstanceOf(
   lowerer: Lowerer,
   value: IrExpr,
   callee: IrExpr,
+  refusal: string,
   loc: SrcLoc,
 ): IrExpr {
   if (!lowerer.liftedFns.some((fn) => fn.name === INSTANCEOF)) {
     const params = [
       { localId: "value", name: "value", type: DYN },
       { localId: "callee", name: "callee", type: DYN },
+      { localId: "refusal", name: "refusal", type: STRING },
     ];
     lowerer.liftedFns.push({
       name: INSTANCEOF,
@@ -46,7 +52,11 @@ export function checkedClassInstanceOf(
           value: {
             kind: "libCall",
             fn: "bytes.instanceOf",
-            args: [varRef("value", DYN, loc), varRef("callee", DYN, loc)],
+            args: [
+              varRef("value", DYN, loc),
+              varRef("callee", DYN, loc),
+              varRef("refusal", STRING, loc),
+            ],
             type: BOOL,
             loc,
           },
@@ -56,7 +66,13 @@ export function checkedClassInstanceOf(
       loc,
     });
   }
-  return { kind: "call", callee: INSTANCEOF, args: [value, callee], type: BOOL, loc };
+  return {
+    kind: "call",
+    callee: INSTANCEOF,
+    args: [value, callee, { kind: "strLit", value: refusal, type: STRING, loc }],
+    type: BOOL,
+    loc,
+  };
 }
 
 /** Checked construction dispatches to emitted native constructor thunks. */
@@ -254,22 +270,17 @@ export class ClassConstructionDispatch {
   private prototypeHelper: IrFunction | null = null;
   private readonly prototypes = new Set<string>();
 
-  process(lowerer: Lowerer, functions: readonly IrFunction[]): boolean {
+  process(lowerer: Lowerer, functions: readonly IrFunction[], sites: DispatchSites): boolean {
     const discover = (type: IrType): void => {
       if (type.kind === "classval") this.constructors.add(type.className);
       else if (type.kind === "union") lowerer.unions.get(type.unionId)?.arms.forEach(discover);
     };
     const prototypeReads = new Set<IrFunction>();
-    for (const fn of functions)
-      everyStmtList(fn.body, {
-        stmt: () => true,
-        expr: (expr) => {
-          if (expr.kind === "dynFrom") discover(expr.value.type);
-          if (expr.kind === "libCall" && expr.fn === "dyn.classBasePrototype")
-            prototypeReads.add(fn);
-          return true;
-        },
-      });
+    for (const fn of functions) {
+      const found = sites.of(fn);
+      found.values.forEach(discover);
+      if (found.basePrototypes) prototypeReads.add(fn);
+    }
     let changed = false;
     for (const fn of functions) {
       if (fn === this.prototypeHelper || !prototypeReads.has(fn)) continue;

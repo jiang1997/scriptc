@@ -28,7 +28,35 @@ export interface IntegerCountedForLoop {
   startGuarded: boolean;
   guardLimit: number;
   range: IntegerRange;
+  /** Counters declared and stepped beside this one that the condition does
+   * not test, such as `j` in `for (let i = 0, j = 0; i < n; i++, j += 4)`. */
+  followers: IntegerLoopFollower[];
 }
+
+/** A counter that steps by a constant on every update of a counted loop.
+ * After `k` updates it holds `start + step * k`. */
+export interface IntegerLoopFollower {
+  localId: string;
+  start: IrExpr;
+  step: number;
+  /** As the driver's `startGuarded` (part of the loop's `guarded`). */
+  startGuarded: boolean;
+  /** The follower's range depends on the run-time trip count: the versioned
+   * loop also tests `|start| + |step| * span / |driver step|` against
+   * `FOLLOWER_GUARD_LIMIT`, where `span` is the distance from the driver's
+   * start to the limit (part of the loop's `guarded`). */
+  tripGuarded: boolean;
+  /** The follower's values on every body entry. */
+  range: IntegerRange;
+}
+
+/** The bound of the run-time follower test. */
+export const FOLLOWER_GUARD_LIMIT = 2 ** 52;
+/** The magnitude a follower that passed the test can reach. The test's four
+ * f64 operations (the step ratio, the span, its product and the sum) each
+ * round down by at most a factor of 1 - 2^-53, so the exact sum is below
+ * `2^52 / (1 - 2^-53)^4`, which is less than 2^52 + 3. */
+const FOLLOWER_GUARD_RANGE = FOLLOWER_GUARD_LIMIT + 2;
 
 function constantStep(update: IrStmt | null, id: string): number | null {
   if (update?.kind === "exprStmt" && update.expr.kind === "incDec" && update.expr.localId === id)
@@ -115,33 +143,61 @@ export function matchIntegerCountedForLoop(
   ranges: IntegerRanges = new Map(),
   unaliased: ReadonlySet<string> | null = null,
 ): IntegerCountedForLoop | null {
-  const init = stmt.init;
-  if (init?.kind !== "varDecl" || !init.init) return null;
-  const local = locals.get(init.localId);
-  if (local?.type.kind !== "f64" || !local.mutable || local.boxed || local.tdz) return null;
-  const start = init.init;
-  let startRange =
-    start.kind === "numLit" && Number.isSafeInteger(start.value) && !Object.is(start.value, -0)
-      ? { min: start.value, max: start.value }
-      : ranges.get(start);
-  // An unproven start is tested at run time, on a versioned loop.
-  const startGuarded = !startRange && start.kind !== "numLit" && start.type.kind === "f64";
-  if (startGuarded) startRange = { min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER };
-  if (
-    !startRange ||
-    startRange.min < -Number.MAX_SAFE_INTEGER ||
-    startRange.max > Number.MAX_SAFE_INTEGER ||
-    !stableLoopValue(start, locals, stmt.body, false, local.id)
-  )
-    return null;
-  const step = constantStep(stmt.update, local.id);
-  if (step === null || writesLocal(stmt.body, local.id)) return null;
   const cond = stmt.cond;
   if (cond?.kind !== "bin") return null;
+  const decls = stmt.init?.kind === "block" ? stmt.init.body : stmt.init ? [stmt.init] : [];
+  // `i++, j += 2, k--` lowers to nested blocks of steps.
+  const flat = (u: IrStmt | null): (IrStmt | null)[] =>
+    u?.kind === "block" ? u.body.flatMap(flat) : [u];
+  const updates = flat(stmt.update);
+  if (decls.length === 0 || updates.length !== decls.length) return null;
+  const declared = (e: IrExpr): string | null =>
+    e.kind === "varRef" && decls.some((d) => d.kind === "varDecl" && d.localId === e.localId)
+      ? e.localId
+      : null;
+  // The condition tests the driving counter; every other declaration
+  // follows it.
+  const driver = declared(cond.left) ?? declared(cond.right);
+  const counterIds = decls.map((d) => (d.kind === "varDecl" ? d.localId : ""));
+  const stepOf = (id: string): number | null => {
+    const steps = updates.map((u) => constantStep(u, id)).filter((v) => v !== null);
+    return steps.length === 1 ? steps[0]! : null;
+  };
+  // A counter's start is a stable integer that refers to no counter. An
+  // unproven start is tested at run time, on a versioned loop.
+  const counterStart = (
+    id: string,
+  ): { start: IrExpr; range: IntegerRange; guarded: boolean; step: number } | null => {
+    const decl = decls.find((d) => d.kind === "varDecl" && d.localId === id);
+    if (decl?.kind !== "varDecl" || !decl.init) return null;
+    const local = locals.get(id);
+    if (local?.type.kind !== "f64" || !local.mutable || local.boxed || local.tdz) return null;
+    const start = decl.init;
+    const known =
+      start.kind === "numLit" && Number.isSafeInteger(start.value) && !Object.is(start.value, -0)
+        ? { min: start.value, max: start.value }
+        : ranges.get(start);
+    const guarded = !known && start.kind !== "numLit" && start.type.kind === "f64";
+    const range = guarded ? { min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER } : known;
+    const step = stepOf(id);
+    if (
+      !range ||
+      range.min < -Number.MAX_SAFE_INTEGER ||
+      range.max > Number.MAX_SAFE_INTEGER ||
+      !counterIds.every((counter) => stableLoopValue(start, locals, stmt.body, false, counter)) ||
+      step === null ||
+      writesLocal(stmt.body, id)
+    )
+      return null;
+    return { start, range, guarded, step };
+  };
+  const head = driver === null ? null : counterStart(driver);
+  if (!head) return null;
+  const local = locals.get(driver!)!;
+  const { start, step, guarded: startGuarded, range: startRange } = head;
   let limit = cond.right,
     op: string = cond.op;
   if (cond.left.kind !== "varRef" || cond.left.localId !== local.id) {
-    if (cond.right.kind !== "varRef" || cond.right.localId !== local.id) return null;
     limit = cond.left;
     op = ({ "<": ">", "<=": ">=", ">": "<", ">=": "<=" } as Record<string, string>)[op] ?? "";
   }
@@ -185,11 +241,70 @@ export function matchIntegerCountedForLoop(
   const limitGuarded =
     !boundRange || (step > 0 ? !(boundRange.max <= guardLimit) : !(boundRange.min >= guardLimit));
   if (limitGuarded && limit.kind === "numLit") return null;
-  const guarded = limitGuarded || startGuarded;
+  const range =
+    step > 0
+      ? {
+          min: startRange.min,
+          max: Math.max(
+            startRange.min,
+            Math.min(
+              Number.MAX_SAFE_INTEGER,
+              boundRange
+                ? Math.ceil(boundRange.max) - (inclusive ? 0 : 1)
+                : Number.MAX_SAFE_INTEGER,
+            ),
+          ),
+        }
+      : {
+          min: Math.min(
+            startRange.max,
+            Math.max(
+              -Number.MAX_SAFE_INTEGER,
+              boundRange
+                ? Math.floor(boundRange.min) + (inclusive ? 0 : 1)
+                : -Number.MAX_SAFE_INTEGER,
+            ),
+          ),
+          max: startRange.max,
+        };
+  // On body entry k the driver holds `start + step * k`, so k is at most the
+  // driver's span over |step|, and a follower holds its start plus its own
+  // step times k. A span above 2^53 - 1 can round down, so it bounds no
+  // trip count. Below it the quotient rounds to at least its floor, and the
+  // follower's products and sums below are exact while they stay within
+  // ±(2^53 - 1) and round outside it otherwise.
+  const span = step > 0 ? range.max - startRange.min : startRange.max - range.min;
+  const trips = span <= Number.MAX_SAFE_INTEGER ? Math.floor(span / Math.abs(step)) : Infinity;
+  const followers: IntegerLoopFollower[] = [];
+  for (const id of counterIds) {
+    if (id === local.id) continue;
+    const follower = counterStart(id);
+    // The limit is evaluated once; a follower changes on every update.
+    if (!follower || !stableLoopValue(limit, locals, stmt.body, false, id)) return null;
+    const reach = follower.step * trips;
+    const min = follower.range.min + Math.min(0, reach),
+      max = follower.range.max + Math.max(0, reach);
+    const tripGuarded = min < -Number.MAX_SAFE_INTEGER || max > Number.MAX_SAFE_INTEGER;
+    // Known starts and a literal limit are not tested at run time.
+    if (tripGuarded && !follower.guarded && !startGuarded && limit.kind === "numLit") return null;
+    followers.push({
+      localId: id,
+      start: follower.start,
+      step: follower.step,
+      startGuarded: follower.guarded,
+      tripGuarded,
+      range: tripGuarded
+        ? { min: Math.max(-FOLLOWER_GUARD_RANGE, min), max: Math.min(FOLLOWER_GUARD_RANGE, max) }
+        : { min, max },
+    });
+  }
+  const guarded =
+    limitGuarded || startGuarded || followers.some((f) => f.startGuarded || f.tripGuarded);
   let useful = false;
   let cost = 0;
   const counter = (e: IrExpr): boolean =>
-    (e.kind === "varRef" && e.localId === local.id) ||
+    (e.kind === "varRef" &&
+      (e.localId === local.id || followers.some((f) => f.localId === e.localId))) ||
     (e.kind === "bin" &&
       (e.op === "+" || e.op === "-" || e.op === "*") &&
       (counter(e.left) || counter(e.right)));
@@ -241,32 +356,6 @@ export function matchIntegerCountedForLoop(
     return (!guarded || ++cost <= 80) && everyStmtChild(s, expr, bodyStmt);
   };
   if (!stmt.body.every(bodyStmt) || !useful) return null;
-  const range =
-    step > 0
-      ? {
-          min: startRange.min,
-          max: Math.max(
-            startRange.min,
-            Math.min(
-              Number.MAX_SAFE_INTEGER,
-              boundRange
-                ? Math.ceil(boundRange.max) - (inclusive ? 0 : 1)
-                : Number.MAX_SAFE_INTEGER,
-            ),
-          ),
-        }
-      : {
-          min: Math.min(
-            startRange.max,
-            Math.max(
-              -Number.MAX_SAFE_INTEGER,
-              boundRange
-                ? Math.floor(boundRange.min) + (inclusive ? 0 : 1)
-                : -Number.MAX_SAFE_INTEGER,
-            ),
-          ),
-          max: startRange.max,
-        };
   return {
     localId: local.id,
     start,
@@ -278,6 +367,7 @@ export function matchIntegerCountedForLoop(
     startGuarded,
     guardLimit,
     range,
+    followers,
   };
 }
 

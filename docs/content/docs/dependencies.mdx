@@ -132,7 +132,7 @@ CommonJS packages compile with Node.js's module semantics. Each `require()` eval
 
 ## Unsupported code inside a package
 
-A JavaScript package can contain operations scriptc can't compile, often in functions your program never calls. These don't fail the build: each one compiles to code that throws a runtime error if it ever runs. Coverage reports list them as deferred sites, so review the list and test the parts of the package your program uses.
+A JavaScript package can contain operations scriptc can't compile, often in functions your program never calls. These don't fail the build: each one compiles to code that throws a runtime error if it ever runs. Coverage reports list them as deferred sites, so review the list and test the parts of the package your program uses. Sites in a module's top-level code are listed under `runs at startup`: that code runs when the module loads, at startup for a module the program imports.
 
 ## Provenance sources (experimental)
 

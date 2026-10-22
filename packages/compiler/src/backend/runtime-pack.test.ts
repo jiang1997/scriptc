@@ -61,6 +61,7 @@ const BASE: NativeLinkFeatures = {
   tlsCa: false,
   cipher: false,
   ecdh: false,
+  dh: false,
   pki: false,
   ed25519: false,
   webcrypto: false,
@@ -126,7 +127,7 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
       object_format: target.objectFormat,
       minimum_os: target.minimumOs,
     },
-    runtime_abi: { version: 26, marker: "scr_runtime_abi_v26" },
+    runtime_abi: { version: 28, marker: "scr_runtime_abi_v28" },
     compiler: {
       command: "clang",
       identity: "fixture clang",

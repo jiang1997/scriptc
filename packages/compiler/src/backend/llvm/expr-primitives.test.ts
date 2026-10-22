@@ -200,6 +200,10 @@ test("identity bitwise forms over a proven int32 return the operand's number", (
   }
   // Unproven operands keep the full ToInt32; other operators still compute.
   expect(body("unknown_or")).toContain("uint32.coerce.slow");
+  // The i64 conversion covers every magnitude below 2^63; only NaN, the
+  // infinities and larger magnitudes take the slow block.
+  expect(body("unknown_or")).toMatch(/ = fcmp oge double %\S+, 0xC3E0000000000000$/m);
+  expect(body("unknown_or")).toMatch(/ = fcmp olt double %\S+, 0x43E0000000000000$/m);
   expect(body("length_and")).toMatch(/ = and i32 .*, 255$/m);
 });
 
@@ -308,7 +312,7 @@ test("sums that only feed a bitwise conversion of int32 operands add in 32 bits"
 });
 
 test.each([32, 64] as const)(
-  "tagged-template string arrays keep 8-byte slots before their states on %i-bit targets",
+  "tagged-template string arrays keep 8-byte slots without states on %i-bit targets",
   (bits) => {
     const strings: IrExpr = {
       kind: "templateStrings",
@@ -321,14 +325,17 @@ test.each([32, 64] as const)(
     mod.functions[0]!.body = [{ kind: "exprStmt", expr: strings, loc }];
     const llvm = emitLlvmModule(mod, { pointerBits: bits });
     const data = /^@sc_tsa_0_data = internal constant .*$/m.exec(llvm)![0];
-    // The runtime reads each slot as 8 bytes and finds the states after
-    // cap * 8 bytes of slots (scr_arr_states_end).
-    if (bits === 64) expect(data).toContain("<{ [3 x ptr], [3 x i8] }>");
+    // The runtime reads each slot as 8 bytes; an array without states
+    // (`spare` 0 in its header) has no state bytes after them.
+    if (bits === 64) expect(data).toMatch(/^\S+ = internal constant \[3 x ptr\] /);
     else {
-      expect(data).toContain("<{ [3 x <{ ptr, i32 }>], [3 x i8] }>");
+      expect(data).toMatch(/^\S+ = internal constant \[3 x <\{ ptr, i32 \}>\] /);
       expect(data.match(/<\{ ptr @\S+, i32 0 \}>/g)).toHaveLength(3);
     }
-    expect(data).toContain("[3 x i8] [ i8 1, i8 1, i8 1 ]");
+    expect(data).not.toContain("x i8]");
+    expect(llvm).toMatch(
+      /^@sc_tsa_0 = internal global %ScrArr \{ i\d+ -1, i32 3, i32 3, i8 2, i8 0, i16 0, i32 3, /m,
+    );
   },
 );
 

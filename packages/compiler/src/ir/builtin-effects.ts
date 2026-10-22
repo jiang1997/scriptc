@@ -13,6 +13,15 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // Node's curve, key, point, encoding and format errors.
   "crypto.ecdhNew",
   "crypto.ecdhConvertKey",
+  // Node's prime, generator, size, encoding and group-name errors.
+  "crypto.dhNew",
+  "crypto.dhGroupNew",
+  // Node's candidate, size, options, add and rem errors, and OpenSSL's
+  // generation errors.
+  "crypto.checkPrimeSync",
+  "crypto.checkPrimeCb",
+  "crypto.generatePrimeSync",
+  "crypto.generatePrimeCb",
   // node:test's { timeout } and { concurrency } range checks.
   "test.register",
   "test.registerEmpty",
@@ -997,4 +1006,26 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.verifyOneshot",
   "crypto.createSign",
   "crypto.createVerify",
+]);
+
+/** libCall members that always throw. Their result type is the replaced
+ * expression's own and is never materialized: global.undefRead's is the
+ * declared type of the undefined global; the others stand in for a value
+ * of the expression they replace. The fs Chk ladders qualify: every
+ * validation failure throws Node's typed error, and a full pass throws the
+ * trailing compiler-rendered fence. */
+export const ALWAYS_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "global.undefRead",
+  "error.nodeThrow",
+  "error.argTypeThrow",
+  "error.propTypeThrow",
+  "fs.mkdtempChk",
+  "fs.readFileChk",
+  "fs.opendirChk",
+  "fs.watchFileChk",
+  "fs.lchmodChk",
+  "fs.readChk",
+  "fs.streamOptsChk",
+  "net.connectOptsChk",
+  "tls.caCertsChk",
 ]);

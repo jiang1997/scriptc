@@ -169,6 +169,30 @@ function ids(
   return nodes?.map((n) => (n as OracleNode).index);
 }
 
+test("generated child getters select the child their name selects", () => {
+  // These getters adapt their raw child; their slot functions are compared instead.
+  const adapted = ["body", "initializer", "left", "modifiers", "operand", "questionToken"];
+  const names = [...new Set(Object.values(childProperties).flat())];
+  const lists = (value: unknown): unknown => (value instanceof AstNodeList ? value.nodes : value);
+  let compared = 0;
+  for (const { file } of decoded.values()) {
+    walkPreorder(file.root, (node) => {
+      const view = node as unknown as Record<string, unknown>;
+      for (const name of names) {
+        if (adapted.includes(name)) {
+          const slot = (view[`${name}Slot`] as () => number).call(node);
+          expect(slot, `${node.kind}.${name}`).toBe(astChildOrder(node.kind, name));
+        } else {
+          expect(lists(view[name]), `${node.kind}.${name}`).toBe(lists(node.child(name)));
+        }
+        compared++;
+      }
+      return undefined;
+    });
+  }
+  expect(compared).toBeGreaterThan(100_000);
+});
+
 test("the writeTargets option answers write targets without their wrappers", () => {
   const { bytes, file: plain } = decoded.get("targets.ts")!;
   const file = new AstFile(bytes, undefined, { writeTargets: true });

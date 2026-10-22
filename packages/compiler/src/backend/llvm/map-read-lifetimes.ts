@@ -15,6 +15,7 @@ import {
   emitNumberMapGetScalar,
   emitStringMapGetScalar,
   emitStringMapGetRef,
+  compactMapValues,
 } from "./map-number-lookup.js";
 import { mapKeyAccess, mapKeyParamType } from "./shapes.js";
 import { rememberMapEntry } from "./map-entry-fusion.js";
@@ -323,7 +324,10 @@ export function emitStackMapRead(host: LlvmEmitterContext, read: LocalMapRead): 
   } else if (isRefCounted(read.value)) {
     const stringKey = entryStringKey(key);
     let raw: string;
-    if (stringKey !== null) raw = emitStringMapGetRef(host, receiver.name, stringKey, read.value);
+    const mapType = read.receiver.type;
+    const compact = mapType.kind === "map" && compactMapValues(host, mapType.key, mapType.value);
+    if (stringKey !== null)
+      raw = emitStringMapGetRef(host, receiver.name, stringKey, read.value, compact);
     else {
       raw = B.tmp();
       host.declare(`declare ptr @scr_map_get_${access}_ref(ptr, ${keyType})`);

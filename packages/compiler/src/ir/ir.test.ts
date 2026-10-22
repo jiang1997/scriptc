@@ -10,6 +10,7 @@ import {
   canDynCheckTo,
   type IrBytesElem,
   isJsonSafeType,
+  iterableArmsElem,
   isJsonStringifySafeType,
   isJsonStringifyDynamicType,
   type IrRecordShape,
@@ -21,6 +22,29 @@ import {
   typeEquals,
   typeKey,
 } from "./ir.js";
+
+describe("iterable unions", () => {
+  const gen = (yieldT: IrType): IrType => ({
+    kind: "generator",
+    yieldT,
+    retT: { kind: "void" },
+    nextT: { kind: "undefinedT" },
+  });
+
+  test("names the element type of an Iterable<T> union", () => {
+    expect(iterableArmsElem([arrayOf(F64), gen(F64), { kind: "set", elem: F64 }])).toEqual(F64);
+    expect(iterableArmsElem([arrayOf(STRING), gen(STRING), STRING])).toEqual(STRING);
+    expect(iterableArmsElem([arrayOf(F64), gen(F64), { kind: "undefinedT" }])).toEqual(F64);
+  });
+
+  test("rejects unions without exactly one plain generator arm over the same element", () => {
+    expect(iterableArmsElem([arrayOf(F64), STRING])).toBeNull();
+    expect(iterableArmsElem([arrayOf(STRING), gen(F64)])).toBeNull();
+    expect(iterableArmsElem([arrayOf(F64), gen(F64), gen(STRING)])).toBeNull();
+    expect(iterableArmsElem([gen(F64), STRING])).toBeNull();
+    expect(iterableArmsElem([arrayOf(F64), { ...gen(F64), nextT: F64 } as IrType])).toBeNull();
+  });
+});
 
 describe("IR kind sets", () => {
   test("keeps procStream as the scalar handle exception", () => {

@@ -192,7 +192,10 @@ export class Ts7Host {
     const key = tsgoPath(path);
     if (this.virtualFiles.get(key) === content) return;
     if (!this.virtualChanges.has(key))
-      this.virtualChanges.set(key, this.virtualFiles.has(key) ? "changed" : "created");
+      this.virtualChanges.set(
+        key,
+        this.virtualFiles.has(key) || trackedFileExists(path) ? "changed" : "created",
+      );
     this.virtualFiles.set(key, content);
   }
 

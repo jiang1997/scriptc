@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "compilerVersion": "0.4.1",
+  "compilerVersion": "0.4.2",
   "coverage": [
     "Entries are projected mechanically from the compiler's own decision tables: the diagnostics registry, the unsupported-syntax dispatch tables, the stdlib and node-builtin lowering tables, and the supported-builtin-module list. Nothing is hand-maintained; the manifest regenerates byte-identically from the source tree at this version.",
     "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, global functions (parseInt, parseFloat, isNaN, isFinite), and the process surface outside its ambient slice.",
@@ -481,6 +481,18 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.crypto.checkPrime",
+      "kind": "node-builtin",
+      "name": "crypto.checkPrime",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.crypto.checkPrimeSync",
+      "kind": "node-builtin",
+      "name": "crypto.checkPrimeSync",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.crypto.createCipheriv",
       "kind": "node-builtin",
       "name": "crypto.createCipheriv",
@@ -496,17 +508,13 @@
       "id": "node-builtin.crypto.createDiffieHellman",
       "kind": "node-builtin",
       "name": "crypto.createDiffieHellman",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.createDiffieHellmanGroup",
       "kind": "node-builtin",
       "name": "crypto.createDiffieHellmanGroup",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.createECDH",
@@ -562,7 +570,7 @@
       "name": "crypto.diffieHellman",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "crypto.diffieHellman takes DH, EC or X25519 KeyObjects and has no lowering; the objects of createDiffieHellman, getDiffieHellman and createECDH compute shared secrets"
     },
     {
       "id": "node-builtin.crypto.generateKey",
@@ -589,20 +597,30 @@
       "status": "static"
     },
     {
+      "id": "node-builtin.crypto.generatePrime",
+      "kind": "node-builtin",
+      "name": "crypto.generatePrime",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.crypto.generatePrimeSync",
+      "kind": "node-builtin",
+      "name": "crypto.generatePrimeSync",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.crypto.getCipherInfo",
       "kind": "node-builtin",
       "name": "crypto.getCipherInfo",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "cipher metadata has no lowering — createCipheriv and createDecipheriv support aes-128/192/256 in cbc, ctr, and gcm modes and chacha20-poly1305"
+      "note": "cipher metadata has no lowering — createCipheriv and createDecipheriv support aes-128/192/256 in cbc, ctr, gcm, ecb, cfb, cfb8, cfb1, and ofb modes, des-ede3 and des-ede, chacha20, and chacha20-poly1305"
     },
     {
       "id": "node-builtin.crypto.getDiffieHellman",
       "kind": "node-builtin",
       "name": "crypto.getDiffieHellman",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.getRandomValues",
@@ -646,7 +664,7 @@
       "name": "crypto.privateDecrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.privateEncrypt",
@@ -654,7 +672,7 @@
       "name": "crypto.privateEncrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.publicDecrypt",
@@ -662,7 +680,7 @@
       "name": "crypto.publicDecrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.publicEncrypt",
@@ -670,7 +688,7 @@
       "name": "crypto.publicEncrypt",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Diffie-Hellman and RSA encryption have no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, and createECDH"
+      "note": "RSA encryption has no lowering — the asymmetric crypto surface is RSA and EC KeyObjects (generateKeyPair, createPrivateKey, createPublicKey), sign, verify, createSign, createVerify, createECDH, and createDiffieHellman"
     },
     {
       "id": "node-builtin.crypto.randomBytes",
@@ -5702,7 +5720,7 @@
       "kind": "stdlib",
       "name": "globalThis.crypto.subtle",
       "status": "static",
-      "note": "importKey, generateKey and exportKey (raw and jwk) for HMAC and AES keys, importKey for PBKDF2 and HKDF keys, AES-GCM, AES-CBC and AES-CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign and verify, generateKey, importKey, exportKey, sign and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused"
+      "note": "importKey, generateKey and exportKey (raw and jwk) for HMAC and AES keys, importKey for PBKDF2 and HKDF keys, AES-GCM, AES-CBC and AES-CTR encrypt and decrypt, wrapKey and unwrapKey of secret keys with AES-KW or those ciphers, PBKDF2 and HKDF deriveBits and deriveKey, HMAC sign and verify, generateKey, importKey, exportKey, sign and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and SHA-1/SHA-2 digest; other methods, algorithms and key formats are refused"
     },
     {
       "id": "syntax.async-generators",

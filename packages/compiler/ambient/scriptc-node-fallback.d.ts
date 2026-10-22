@@ -546,8 +546,9 @@ declare var DOMException: {
 
 /* WebCrypto (scr_webcrypto.c): crypto.subtle's importKey, generateKey and
  * exportKey for HMAC and AES keys (importKey also for PBKDF2 and HKDF
- * keys), AES-GCM/CBC/CTR encrypt and decrypt, PBKDF2 and HKDF deriveBits
- * and deriveKey, HMAC sign/verify, generateKey, importKey, exportKey, sign
+ * keys), AES-GCM/CBC/CTR encrypt and decrypt, wrapKey and unwrapKey of
+ * secret keys (AES-KW or those ciphers), PBKDF2 and HKDF deriveBits and
+ * deriveKey, HMAC sign/verify, generateKey, importKey, exportKey, sign
  * and verify for ECDSA, Ed25519, RSASSA-PKCS1-v1_5 and RSA-PSS, and the
  * SHA-1/SHA-2 digests, typed as exactly that surface (the declarations
  * mirror @types/node's webcrypto shapes), plus the global's randomUUID and
@@ -753,12 +754,27 @@ interface SubtleCrypto {
     key: CryptoKey,
     data: BufferSource,
   ): Promise<ArrayBuffer>;
+  unwrapKey(
+    format: KeyFormat,
+    wrappedKey: BufferSource,
+    unwrappingKey: CryptoKey,
+    unwrapAlgorithm: AlgorithmIdentifier | AesGcmParams | AesCbcParams | AesCtrParams,
+    unwrappedKeyAlgorithm: AlgorithmIdentifier | HmacImportParams,
+    extractable: boolean,
+    keyUsages: readonly KeyUsage[],
+  ): Promise<CryptoKey>;
   verify(
     algorithm: AlgorithmIdentifier | EcdsaParams | RsaPssParams,
     key: CryptoKey,
     signature: BufferSource,
     data: BufferSource,
   ): Promise<boolean>;
+  wrapKey(
+    format: KeyFormat,
+    key: CryptoKey,
+    wrappingKey: CryptoKey,
+    wrapAlgorithm: AlgorithmIdentifier | AesGcmParams | AesCbcParams | AesCtrParams,
+  ): Promise<ArrayBuffer>;
 }
 interface Crypto {
   readonly subtle: SubtleCrypto;
@@ -3155,7 +3171,8 @@ declare module "crypto" {
     callback: (error: Error | null, buffer: Buffer) => void,
   ): void;
   export type BinaryLike = string | ArrayBuffer | ArrayBufferView;
-  /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, and gcm modes and
+  /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, gcm, ecb, cfb, cfb8,
+   * cfb1, and ofb modes, des-ede3 and des-ede, chacha20, and
    * chacha20-poly1305. Both are Transforms: written chunks go through
    * update(), and the end pushes final(). */
   export type CipherGCMTypes = "aes-128-gcm" | "aes-192-gcm" | "aes-256-gcm";
@@ -3273,6 +3290,123 @@ declare module "crypto" {
     setPrivateKey(privateKey: string, encoding: BinaryToTextEncoding): void;
   }
   export function createECDH(curveName: string): ECDH;
+  export class DiffieHellman {
+    private constructor();
+    generateKeys(): Buffer;
+    generateKeys(encoding: BinaryToTextEncoding): string;
+    computeSecret(
+      otherPublicKey: ArrayBufferView,
+      inputEncoding?: null,
+      outputEncoding?: null,
+    ): Buffer;
+    computeSecret(
+      otherPublicKey: string,
+      inputEncoding: BinaryToTextEncoding,
+      outputEncoding?: null,
+    ): Buffer;
+    computeSecret(
+      otherPublicKey: ArrayBufferView,
+      inputEncoding: null,
+      outputEncoding: BinaryToTextEncoding,
+    ): string;
+    computeSecret(
+      otherPublicKey: string,
+      inputEncoding: BinaryToTextEncoding,
+      outputEncoding: BinaryToTextEncoding,
+    ): string;
+    getPrime(): Buffer;
+    getPrime(encoding: BinaryToTextEncoding): string;
+    getGenerator(): Buffer;
+    getGenerator(encoding: BinaryToTextEncoding): string;
+    getPublicKey(): Buffer;
+    getPublicKey(encoding: BinaryToTextEncoding): string;
+    getPrivateKey(): Buffer;
+    getPrivateKey(encoding: BinaryToTextEncoding): string;
+    setPublicKey(publicKey: ArrayBufferView): void;
+    setPublicKey(publicKey: string, encoding: BufferEncoding): void;
+    setPrivateKey(privateKey: ArrayBufferView): void;
+    setPrivateKey(privateKey: string, encoding: BufferEncoding): void;
+    verifyError: number;
+  }
+  export type DiffieHellmanGroup = Omit<DiffieHellman, "setPublicKey" | "setPrivateKey">;
+  export function createDiffieHellman(primeLength: number, generator?: number): DiffieHellman;
+  export function createDiffieHellman(
+    prime: ArrayBuffer | ArrayBufferView,
+    generator?: number | ArrayBuffer | ArrayBufferView,
+  ): DiffieHellman;
+  export function createDiffieHellman(
+    prime: ArrayBuffer | ArrayBufferView,
+    generator: string,
+    generatorEncoding: BinaryToTextEncoding,
+  ): DiffieHellman;
+  export function createDiffieHellman(
+    prime: string,
+    primeEncoding: BinaryToTextEncoding,
+    generator?: number | ArrayBuffer | ArrayBufferView,
+  ): DiffieHellman;
+  export function createDiffieHellman(
+    prime: string,
+    primeEncoding: BinaryToTextEncoding,
+    generator: string,
+    generatorEncoding: BinaryToTextEncoding,
+  ): DiffieHellman;
+  export function getDiffieHellman(groupName: string): DiffieHellmanGroup;
+  export function createDiffieHellmanGroup(name: string): DiffieHellmanGroup;
+  export type LargeNumberLike = ArrayBufferView | SharedArrayBuffer | ArrayBuffer | bigint;
+  export interface GeneratePrimeOptions {
+    add?: LargeNumberLike | undefined;
+    rem?: LargeNumberLike | undefined;
+    safe?: boolean | undefined;
+    bigint?: boolean | undefined;
+  }
+  export interface GeneratePrimeOptionsBigInt extends GeneratePrimeOptions {
+    bigint: true;
+  }
+  export interface GeneratePrimeOptionsArrayBuffer extends GeneratePrimeOptions {
+    bigint?: false | undefined;
+  }
+  export function generatePrime(
+    size: number,
+    callback: (err: Error | null, prime: ArrayBuffer) => void,
+  ): void;
+  export function generatePrime(
+    size: number,
+    options: GeneratePrimeOptionsBigInt,
+    callback: (err: Error | null, prime: bigint) => void,
+  ): void;
+  export function generatePrime(
+    size: number,
+    options: GeneratePrimeOptionsArrayBuffer,
+    callback: (err: Error | null, prime: ArrayBuffer) => void,
+  ): void;
+  export function generatePrime(
+    size: number,
+    options: GeneratePrimeOptions,
+    callback: (err: Error | null, prime: ArrayBuffer | bigint) => void,
+  ): void;
+  export function generatePrimeSync(size: number): ArrayBuffer;
+  export function generatePrimeSync(size: number, options: GeneratePrimeOptionsBigInt): bigint;
+  export function generatePrimeSync(
+    size: number,
+    options: GeneratePrimeOptionsArrayBuffer,
+  ): ArrayBuffer;
+  export function generatePrimeSync(
+    size: number,
+    options: GeneratePrimeOptions,
+  ): ArrayBuffer | bigint;
+  export interface CheckPrimeOptions {
+    checks?: number | undefined;
+  }
+  export function checkPrime(
+    value: LargeNumberLike,
+    callback: (err: Error | null, result: boolean) => void,
+  ): void;
+  export function checkPrime(
+    value: LargeNumberLike,
+    options: CheckPrimeOptions,
+    callback: (err: Error | null, result: boolean) => void,
+  ): void;
+  export function checkPrimeSync(candidate: LargeNumberLike, options?: CheckPrimeOptions): boolean;
   export interface ScryptOptions {
     N?: number;
     r?: number;
@@ -3434,7 +3568,8 @@ declare module "child_process" {
    * killSignal at the deadline and the result carries error: ETIMEDOUT +
    * the signal, never a throw), killSignal (a signal NAME literal),
    * stdio ("ignore"/"inherit"/"pipe" or a 3-tuple of those — captures
-   * read "" for non-piped streams), and windowsHide (a POSIX no-op). */
+   * read "" for non-piped streams), env (replaces the child's
+   * environment), and windowsHide (a POSIX no-op). */
   export function spawnSync(
     command: string,
     args?: string[],
@@ -3443,6 +3578,7 @@ declare module "child_process" {
       timeout?: number;
       killSignal?: string;
       stdio?: "pipe" | "ignore" | "inherit" | ("pipe" | "ignore" | "inherit")[];
+      env?: { [k: string]: string | undefined };
       windowsHide?: boolean;
     },
   ): SpawnSyncReturns;
@@ -3476,20 +3612,20 @@ declare module "child_process" {
 
   export interface ChildProcess extends Disposable {
     ref(): void;
-    on(event: "spawn", listener: () => void): void;
-    once(event: "spawn", listener: () => void): void;
+    on(event: "spawn", listener: () => void): this;
+    once(event: "spawn", listener: () => void): this;
     /* The exit listener may also take Node's second parameter — the
      * terminating signal's name, null for a normal exit. */
-    on(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
-    on(event: "close", listener: (code: number | null, signal: string | null) => void): void;
-    on(event: "error", listener: (err: Error) => void): void;
-    once(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
-    once(event: "close", listener: (code: number | null, signal: string | null) => void): void;
-    once(event: "error", listener: (err: Error) => void): void;
-    on(event: "message", listener: (message: any) => void): void;
-    on(event: "disconnect", listener: () => void): void;
-    once(event: "message", listener: (message: any) => void): void;
-    once(event: "disconnect", listener: () => void): void;
+    on(event: "exit", listener: (code: number | null, signal: string | null) => void): this;
+    on(event: "close", listener: (code: number | null, signal: string | null) => void): this;
+    on(event: "error", listener: (err: Error) => void): this;
+    once(event: "exit", listener: (code: number | null, signal: string | null) => void): this;
+    once(event: "close", listener: (code: number | null, signal: string | null) => void): this;
+    once(event: "error", listener: (err: Error) => void): this;
+    on(event: "message", listener: (message: any) => void): this;
+    on(event: "disconnect", listener: () => void): this;
+    once(event: "message", listener: (message: any) => void): this;
+    once(event: "disconnect", listener: () => void): this;
     /* The lifecycle members, Node's exact shapes: pid is undefined exactly
      * when the spawn failed; exitCode is null while running, the code
      * after a normal exit, null for a signal death, and -errno once a

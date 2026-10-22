@@ -17,6 +17,7 @@ import {
 } from "../ir/ir.js";
 import { computeTraced, explainCycle } from "./cycle-analysis.js";
 import { computeTraced as llvmTraced } from "./llvm/shapes.js";
+import { addRecordResultEntries } from "./llvm/record-results.js";
 
 const loc = { file: "cycles.ts", start: 0, end: 1 };
 function module(): IrModule {
@@ -402,6 +403,61 @@ test("a later write through any alias makes the edge mutable", () => {
     loc,
   });
   checkExact(record, ["record:list"]);
+});
+
+test("a result-slot entry's stores into its destination are not writes", () => {
+  const next: IrType = { kind: "union", unionId: "next" };
+  const listModule = (): IrModule => {
+    const mod = module();
+    mod.records = [shape("list", [next, F64])];
+    mod.unions = [{ id: "next", arms: [ref("list"), { kind: "nullT" }] }];
+    mod.functions.push({
+      name: "cell",
+      params: [{ localId: "rest", name: "rest", type: next }],
+      locals: [],
+      returnType: ref("list"),
+      body: [
+        {
+          kind: "return",
+          value: {
+            kind: "recordLit",
+            fields: [
+              { name: "field0", value: { kind: "varRef", localId: "rest", type: next, loc } },
+              { name: "field1", value: { kind: "numLit", value: 1, type: F64, loc } },
+            ],
+            type: ref("list"),
+            loc,
+          },
+          loc,
+        },
+      ],
+      loc,
+    });
+    return addRecordResultEntries(mod);
+  };
+  // The entry stores the literal's fields into caller frame storage that
+  // nothing can point to: the list stays acyclic.
+  const entries = listModule();
+  expect(entries.functions.map((fn) => fn.name)).toContain("%into.cell");
+  checkExact(entries, []);
+  // The same store into the destination's local id outside an entry, and a
+  // store into any other binding of the shape inside one, are writes.
+  const store = (localId: string): IrStmt => ({
+    kind: "recordSet",
+    obj: { kind: "varRef", localId, type: ref("list"), loc },
+    shapeId: "list",
+    field: "field0",
+    value: value(next),
+    loc,
+  });
+  for (const [fn, localId] of [
+    ["main", "%into.dst"],
+    ["%into.cell", "v"],
+  ] as const) {
+    const written = listModule();
+    written.functions.find((f) => f.name === fn)!.body.unshift(store(localId));
+    checkExact(written, ["record:list"], ["next"]);
+  }
 });
 
 test("field increments count as writes", () => {

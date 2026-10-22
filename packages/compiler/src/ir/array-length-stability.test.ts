@@ -167,3 +167,29 @@ test("fresh local arrays read only as receivers have no alias", () => {
   const rebound = [...body, { kind: "assign", localId: "out", value: arr("a"), loc } as IrStmt];
   expect(findUnaliasedLocalArrays(fn(rebound)).has("out")).toBe(false);
 });
+
+test("number and boolean writes to class fields run no user code", () => {
+  const obj: IrExpr = {
+    kind: "varRef",
+    localId: "o",
+    type: { kind: "object", className: "P" },
+    loc,
+  };
+  const scope = new Map(locals).set("o", {
+    id: "o",
+    name: "o",
+    type: { kind: "object", className: "P" },
+    mutable: false,
+  });
+  const fieldSet = (value: IrExpr): IrStmt => ({
+    kind: "fieldSet",
+    obj,
+    className: "P",
+    field: "x",
+    value,
+    loc,
+  });
+  expect(preserves([fieldSet(read("a", ref("i")))], "i", new Set(), scope)).toBe(true);
+  // A reference stored into a field releases the old one.
+  expect(preserves([fieldSet(arr("b"))], "i", new Set(), scope)).toBe(false);
+});

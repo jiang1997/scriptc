@@ -57,7 +57,6 @@ import {
 } from "../../ir/ir.js";
 import { moduleRuntimeFeatures, type RuntimeFeatures } from "../../ir/runtime-features.js";
 import { captureFreeFunctions, observesStacks } from "../stack-observations.js";
-import { type DenseArrayLoop } from "./dense-array-loops.js";
 import { findInitializedByteLoopBindings } from "./byte-windows.js";
 import { matchBytesLoopVersion } from "./bytes-loop-versions.js";
 import { globalSlotAlias } from "./bytes-alias.js";
@@ -71,7 +70,15 @@ import {
 import { scalarizeNumericRecords } from "../../ir/scalar-records.js";
 import { addRecordResultEntries } from "./record-results.js";
 import { specializeCallbackCalls } from "../../ir/callback-specialization.js";
+import {
+  type ChunkResult,
+  EmitJournal,
+  registerReplay,
+  renameChunk,
+  replayJournal,
+} from "./emit-journal.js";
 import { specializeNumericCalls } from "../../ir/numeric-call-specialization.js";
+import { versionLoopBoundParameters } from "../../ir/parameter-versions.js";
 import { everyExpr, everyExprChild, everyStmtChild, everyStmtList } from "../../ir/traverse.js";
 import { INT32_RANGE, type IntegerRange, type IntegerRanges } from "../../ir/integer-ranges.js";
 import { unshareNodes } from "../../ir/unshare.js";
@@ -175,8 +182,10 @@ import { emitDynamicExpr } from "./expr-dynamic.js";
 import { emitIntrinsicExpr, emitSerializationExpr, emitAsyncExpr } from "./expr-async.js";
 import { PublishWalkers } from "./publish.js";
 import { computeImmutableFields, stableGlobals, type ImmutableFields } from "../immutability.js";
+import { computeCycleMutability, hierarchyUnitOfClass } from "../cycle-mutability.js";
 import { computePublishedTypes, type PublishedTypes } from "../publication.js";
 import { emitExpr } from "./expr-dispatch.js";
+import { LOOPS } from "./loop-state.js";
 
 import {
   dynKind,
@@ -392,9 +401,32 @@ export interface LlScopeEntry {
   lazy?: boolean;
 }
 
+/** Process primitives for forked emission workers. */
+export interface ForkPrimitives {
+  /** 0 in the worker, the worker's pid in the parent, -1 on failure. */
+  fork(): number;
+  /** Ends the worker without running exit handlers. */
+  exit(code: number): void;
+  /** The worker's exit status, 128 plus a signal number, or -1. */
+  wait(pid: number): number;
+}
+
 export interface LlvmTargetOptions {
   /** C ABI target; omitted direct emission uses the host ABI. */
   targetTriple?: string;
+  /** Emit the function bodies in this many contiguous ranges, each by its
+   * own emitter, and merge them in function order (emit-journal.ts). The
+   * output is the same as one emitter's. Debug builds (`debugSources`)
+   * emit in one emitter. */
+  functionChunks?: number;
+  /** Emit the function bodies of a large module on this many forked worker
+   * processes at a time (emit-module.ts), forked with `forkPrimitives`. The
+   * output is the same as one emitter's. Debug builds (`debugSources`)
+   * emit in one emitter. */
+  functionWorkers?: number;
+  /** The host's process primitives, where it can fork (the native
+   * compiler's). */
+  forkPrimitives?: ForkPrimitives | undefined;
   /** Exact frontend sources for dev-build locations and variable metadata. */
   debugSources?: ReadonlyMap<string, string>;
   /** Pointer width of the target C ABI. Native targets are 64-bit today. */
@@ -442,6 +474,14 @@ export function lowRegionTarget(platform: string, sanitize: boolean): boolean {
   return platform === "linux" && !sanitize;
 }
 
+/** Function versions on loop-bounding number parameters
+ * (ir/parameter-versions.ts). Library builds have no int32 entries, and a
+ * module that observes call stacks could see the version's frame. */
+function versionParameters(mod: IrModule): IrModule {
+  if (mod.lib !== undefined || observesStacks(mod)) return mod;
+  return versionLoopBoundParameters(mod, mangleFunction);
+}
+
 export function emitLlvmModule(input: IrModule, options: LlvmTargetOptions = {}): string {
   // Facts are keyed by node identity: emit the same module whether it was
   // lowered in memory or read back from its serialized form.
@@ -449,20 +489,22 @@ export function emitLlvmModule(input: IrModule, options: LlvmTargetOptions = {})
   // Keep source storage intact for debugger inspection in dev builds.
   return new LlEmitter(
     options.debugSources === undefined
-      ? addRecordResultEntries(
-          scalarizeNumericRecords(
-            specializeCallbackCalls(
-              specializeNumericCalls(
-                foldConstantGlobals(
-                  copyStableCaptures(
-                    resolveSelfCaptures(
-                      hoistFinalFieldReads(freezeInitOnlyGlobals(dropUnwrittenPropertyBags(mod))),
+      ? versionParameters(
+          addRecordResultEntries(
+            scalarizeNumericRecords(
+              specializeCallbackCalls(
+                specializeNumericCalls(
+                  foldConstantGlobals(
+                    copyStableCaptures(
+                      resolveSelfCaptures(
+                        hoistFinalFieldReads(freezeInitOnlyGlobals(dropUnwrittenPropertyBags(mod))),
+                      ),
                     ),
                   ),
+                  mangleFunction,
                 ),
                 mangleFunction,
               ),
-              mangleFunction,
             ),
           ),
         )
@@ -481,20 +523,22 @@ export function emitLlvmModuleSource(
   const mod = unshareNodes(input);
   const parts = new LlEmitter(
     options.debugSources === undefined
-      ? addRecordResultEntries(
-          scalarizeNumericRecords(
-            specializeCallbackCalls(
-              specializeNumericCalls(
-                foldConstantGlobals(
-                  copyStableCaptures(
-                    resolveSelfCaptures(
-                      hoistFinalFieldReads(freezeInitOnlyGlobals(dropUnwrittenPropertyBags(mod))),
+      ? versionParameters(
+          addRecordResultEntries(
+            scalarizeNumericRecords(
+              specializeCallbackCalls(
+                specializeNumericCalls(
+                  foldConstantGlobals(
+                    copyStableCaptures(
+                      resolveSelfCaptures(
+                        hoistFinalFieldReads(freezeInitOnlyGlobals(dropUnwrittenPropertyBags(mod))),
+                      ),
                     ),
                   ),
+                  mangleFunction,
                 ),
                 mangleFunction,
               ),
-              mangleFunction,
             ),
           ),
         )
@@ -616,6 +660,8 @@ function countLocalMentions(body: readonly IrStmt[], id: string): number {
 }
 
 export class LlEmitter {
+  /** Per-feature state (emitter-state.ts), indexed by each key's slot. */
+  readonly moduleStates: unknown[] = [];
   localArrayReads = new Map<string, LocalArrayRead>();
   loopArrayBorrows: ReadonlySet<IrStmt> = new Set();
   scalarStringSlices = new Map<string, IrExpr & { kind: "strIntrinsic" }>();
@@ -641,9 +687,11 @@ export class LlEmitter {
    * 32-bit references to compact class instances (LlClassMeta.compressed):
    * loadField/loadRef decode them and storeField/storeRef encode them. */
   readonly compressedFieldPtrs = new Set<string>();
-  /** Whether a class has compressed fields: main reserves the region before
-   * compiled code runs (scr_plr_init). */
-  usesCompactRefs = false;
+  /** Compact class instances live in the program-lifetime region below
+   * 32 GiB (LlvmTargetOptions.lowRegion, and the program has compact
+   * classes): main reserves it before compiled code runs (scr_plr_init), and
+   * fields and arrays of compactRefType hold 32-bit references. */
+  compactRegion = false;
 
   /** Native class fields with different property names cannot occupy the
    * same slot of one object. Inherited views of the same property share a
@@ -660,6 +708,7 @@ export class LlEmitter {
       tag = 2 + this.fieldAliasTags.size * 2;
       this.fieldAliasTags.set(field, tag);
     }
+    this.journal?.entry("tag", field, tag);
     this.fieldPointerTags.set(ptr, tag);
   }
 
@@ -672,6 +721,7 @@ export class LlEmitter {
       tag = 2 + this.fieldAliasTags.size * 2;
       this.fieldAliasTags.set(category, tag);
     }
+    this.journal?.entry("tag", category, tag);
     return `, !tbaa !${tag}`;
   }
 
@@ -679,7 +729,7 @@ export class LlEmitter {
    * prefix: the counter of a dense array loop's fast copy indexing one of
    * the arrays its entry test covered. */
   provenDenseIndex(arr: IrExpr, index: IrExpr): boolean {
-    const loop = this.denseLoop;
+    const loop = LOOPS.of(this).denseLoop;
     return (
       loop !== null &&
       arr.kind === "varRef" &&
@@ -831,6 +881,15 @@ export class LlEmitter {
   readonly callLifetimes: CallLifetimes;
   readonly constantCallbacks: Map<string, Map<string, string>>;
   currentConstantCallbacks: ReadonlyMap<string, string> = new Map();
+  /** The current function's running maximum and minimum updates, whose
+   * branches are weighted as rarely taken (running-extrema.ts). */
+  runningExtrema: ReadonlySet<IrStmt> = new Set();
+  /** Callback bindings whose closures an enclosing callback loop version
+   * proved to hold their known function: calls take the direct entry with
+   * no fallback (emitCallbackVersionedLoop). */
+  knownCallbacks = new Set<string>();
+  readonly callbackVersioning = new Set<IrStmt>();
+  callbackVersionsEnabled = false;
   readonly stackCallbacks: StackCallbacks;
   readonly receiverReaders: AmbientReceiverReaders;
   readonly stackCaptures: StackCaptures;
@@ -1067,14 +1126,6 @@ export class LlEmitter {
    * immortal from construction (classes.ts programLifetimeClass). */
   readonly programLifetime: ReadonlySet<string>;
   numericLocals = new Map<string, IrLocal>();
-  /** Local arrays of the current function that no other binding can hold
-   * (ir/array-length-stability.ts). */
-  unaliasedArrays: ReadonlySet<string> = new Set();
-  /** Dense array loops (dense-array-loops.ts) run in this function. */
-  denseLoopsEnabled = false;
-  denseLoopEntries: ReturnType<typeof findInitializedByteLoopBindings> = new Map();
-  /** The fast copy of a dense array loop being emitted. */
-  denseLoop: DenseArrayLoop | null = null;
   captureIds = new Set<string>();
   /** Active induction bindings retain their width independently of size_t. */
   integerLoopBindings = new Map<
@@ -1092,7 +1143,6 @@ export class LlEmitter {
    * async or generator body resumes with its locals in its frame, which
    * an entry alloca is not part of. */
   integerTempsEnabled = false;
-  countedLoopsEnabled = false;
   /** Speculative integer loops (speculative-integers.ts) run in this function. */
   speculativeLoopsEnabled = false;
   /** The fast copy of a speculative integer loop being emitted: its
@@ -1102,9 +1152,20 @@ export class LlEmitter {
     resume: Map<IrStmt, string>;
     /** Globals whose double is written back only when the copy is left. */
     deferred: Set<string>;
+    /** The loop site's count of bailing entries in a row (a global), and
+     * whether this entry completed a speculated write (a slot). A proven
+     * integer loop has neither. */
+    bails?: string;
+    ran?: string;
   } | null = null;
+  /** Speculative loop sites numbered so far in the module. */
+  speculativeLoopSites = 0;
   /** The ordinary copy being emitted: resume labels still to place. */
   speculationResume: Map<IrStmt, { label: string; placed: boolean }> | null = null;
+  /** Run once at the top of the next loop copy's header
+   * (`enterLoopHeader`): records the ordinary copy's header, or sends the
+   * third copy's header there. */
+  speculationHeader: ((header: string) => void) | null = null;
   /** The function being emitted, for speculative globals. */
   speculativeFunction = "";
   /** Every function that writes each number global (computed on demand). */
@@ -1122,19 +1183,9 @@ export class LlEmitter {
   int32Elements: ((arr: IrExpr) => boolean) | null = null;
   /** Sums whose result only feeds 32-bit conversions (wrapping-sums.ts). */
   wrappingSums = new Set<IrExpr>();
-  byteWindowsEnabled = true;
-  byteWindowEntries: ReturnType<typeof findInitializedByteLoopBindings> = new Map();
-  /** Typed-array loop versioning (bytes-loop-versions.ts) for the current
-   * function: off in debug and suspending functions and inside a copy. */
-  bytesLoopVersionsEnabled = false;
-  /** Loops being versioned around the statement being emitted: a loop is
-   * never versioned inside its own copies, and versions nest boundedly. */
-  readonly bytesLoopVersioning = new Set<IrStmt>();
-  bytesLoopEntries: ReturnType<typeof findInitializedByteLoopBindings> | null = null;
-  bytesLoopFunction: IrFunction | null = null;
-  /** Counted loops whose integer-form safety test an enclosing version
-   * guard already passed. */
-  readonly provenCountedGuards = new Set<IrStmt>();
+  /** Number locals of the current function that hold exact integers or NaN
+   * (findIntegerOrNaNLocals in wrapping-sums.ts). */
+  integerOrNaNLocals: ReadonlyMap<string, IntegerRange> = new Map();
   bytesBounds: ReadonlySet<IrExpr | IrStmt> = new Set();
   /** Worker programs: typed-array accesses whose views an enclosing version
    * guard proved thread-owned. */
@@ -1206,13 +1257,29 @@ export class LlEmitter {
   readonly chainSlots = new Map<string, LlValue>();
   logArgSlots = 0;
   readonly stackTraces: boolean;
+  /** The options this emitter was built with (chunk emitters reuse them). */
+  readonly targetOptions: LlvmTargetOptions;
+  /** Records the module-level effects of emitting a range of functions,
+   * which the emitter that merges the range replays (emit-journal.ts). Null
+   * when this emitter emits the whole module itself. */
+  journal: EmitJournal | null;
+  /** The emitter's hosts forward to `journal` (journal set, or workers). */
+  private readonly journaled: boolean;
   /** Stack-trace mode: functions no capture can include (no frame push). */
   readonly unframedFunctions: ReadonlySet<string>;
 
   constructor(
     readonly mod: IrModule,
     options: LlvmTargetOptions,
+    journal: EmitJournal | null = null,
   ) {
+    this.targetOptions = options;
+    this.journal = journal;
+    this.journaled =
+      journal !== null ||
+      ((options.functionWorkers ?? 1) > 1 &&
+        options.forkPrimitives !== undefined &&
+        options.debugSources === undefined);
     this.stackTraces = observesStacks(mod);
     this.nullableUnions = new NullableUnions(mod, options.debugSources === undefined);
     this.mockTimers = this.runtimeFeatures.mockTimers;
@@ -1295,8 +1362,10 @@ export class LlEmitter {
     // and per async fiber; WASI, Windows and library builds have none.
     const triple = (options.targetTriple ?? "").toLowerCase();
     const windows = triple === "" ? process.platform === "win32" : triple.includes("windows");
+    this.publishedTypes = computePublishedTypes(mod);
     const mt = computeMayThrow(mod, {
       stackChecks: !this.wasi && mod.lib === undefined && !windows,
+      published: this.publishedTypes,
     });
     this.mayThrow = mt.fns;
     this.workerEntryPolls = mt.workerEntryPolls ?? null;
@@ -1305,11 +1374,12 @@ export class LlEmitter {
     // runtime moves deep prefix nests to a fresh stack using the guard,
     // which Windows lacks.
     this.stacklessAsyncAllowed = this.stacklessGenerators && mod.lib === undefined && !windows;
-    this.publishedTypes = computePublishedTypes(mod);
     this.unframedFunctions = this.stackTraces
       ? captureFreeFunctions(mod, this.stackChecks, this.publishedTypes)
       : new Set();
-    this.immutableFields = computeImmutableFields(mod, dynamicStores);
+    // One field-mutability answer serves immutable fields and traced shapes.
+    const cycleMutability = computeCycleMutability(mod, hierarchyUnitOfClass(mod), dynamicStores);
+    this.immutableFields = computeImmutableFields(mod, dynamicStores, cycleMutability);
     this.constructorFunctions = new Set((mod.classes ?? []).map((c) => `%${c.name}.constructor`));
     this.indirectMayThrow = mt.indirect || mod.workers === true;
     for (const cls of mod.classes ?? []) {
@@ -1434,7 +1504,7 @@ export class LlEmitter {
     this.receiverReaders = new AmbientReceiverReaders(this.fnByName);
     this.stackCaptures = new StackCaptures(this.fnByName, this.callLifetimes, this.stackCallbacks);
     this.lazyCaptures = new LazyCaptures(this.fnByName);
-    const traced = computeTraced(mod, dynamicStores);
+    const traced = computeTraced(mod, dynamicStores, cycleMutability);
     this.tracedShapes = traced.shapes;
     this.tracedUnions = traced.unions;
     // A shape union's value is whichever record it holds, and the collector
@@ -1459,6 +1529,22 @@ export class LlEmitter {
       }
     }
     this.shapeHost = {
+      // Journal hooks only on emitters that can emit ranges (chunk
+      // emitters, and emitters whose workers take a journal after the
+      // fork), so the host's optional calls cost nothing otherwise.
+      journalAllocated: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.allocated(name, op, args),
+      journalBuilt: !this.journaled ? undefined : () => this.journal?.built(),
+      journalOpened: !this.journaled ? undefined : (op) => this.journal?.opened(op),
+      journalUsed: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.used(name, op, args),
+      journalEntry: !this.journaled
+        ? undefined
+        : (table, key, value) => this.journal?.entry(table, key, value),
+      compactArrayElem: (elem) => this.compactArrayElem(elem),
+      compactRegion: () => this.compactRegion,
       sizeType: this.sizeType,
       cycleBufOffset: this.cycleBufOffset,
       tracedShapes: this.tracedShapes,
@@ -1588,22 +1674,19 @@ export class LlEmitter {
           ? (cls, i, isCompact) => {
               const f = cls.fields[i]!;
               if (this.inlineUnions.classField(cls.name, f.name)) return false;
-              const t = f.type;
-              if (t.kind === "object") return isCompact(t.className);
-              if (t.kind !== "union") return false;
-              const single = this.nullableUnions.single(t.unionId);
-              if (single !== null)
-                return (
-                  single.nullTag < 0 &&
-                  single.arm.kind === "object" &&
-                  isCompact(single.arm.className)
-                );
-              const nullable = this.nullableFields.get(cls.name, f.name);
+              if (this.compactRefType(f.type, isCompact)) return true;
+              const nullable =
+                f.type.kind === "union" && this.nullableUnions.single(f.type.unionId) === null
+                  ? this.nullableFields.get(cls.name, f.name)
+                  : null;
               return nullable !== null && isCompact(nullable.arm.className);
             }
           : undefined,
       );
-    this.usesCompactRefs = [...this.classMeta.values()].some((m) => m.compressed.some(Boolean));
+    this.compactRegion =
+      mod.lib === undefined &&
+      options.lowRegion === true &&
+      [...this.classMeta.values()].some((m) => m.compact);
     for (const [name, rec] of RUNTIME_ERROR_CLASSES) {
       const meta = this.classMeta.get(name);
       if (!meta) break; // hand-written IR without the builtin defs: no stamps
@@ -2215,7 +2298,7 @@ export class LlEmitter {
       B.condBr(thrown, rejected, clean);
       B.startBlock(clean);
       if (acc === "ref") this.toHeap(value);
-      this.arrPush(values, acc, value.name);
+      this.arrPush(values, acc, value.name, elem);
       B.br(next);
       B.startBlock(rejected);
       const promise = B.tmp();
@@ -2331,6 +2414,7 @@ export class LlEmitter {
       };
       this.literals.set(text, lit);
     }
+    this.journal?.entry("literal", text, lit);
     const name = `@${lit.sym}`;
     this.immortalValues.add(name);
     return name;
@@ -2341,6 +2425,7 @@ export class LlEmitter {
   literalEquals(text: string): string {
     const literal = this.internLiteral(text);
     const name = `@sc_streq_${literal.slice("@sc_lit_".length)}`;
+    this.journal?.entry("literalEquality", text, name);
     if (!this.literalEqualities.has(text)) {
       this.literalEqualities.set(text, name);
       if (Buffer.byteLength(text, "utf8") > INLINE_LITERAL_BYTES) {
@@ -2367,6 +2452,7 @@ export class LlEmitter {
       lit = { sym: this.contentSymbol("sc_bigint_", key), value };
       this.bigintLiterals.set(key, lit);
     }
+    this.journal?.entry("bigint", key, { sym: lit.sym, value: lit.value.toString() });
     const name = `@${lit.sym}`;
     this.immortalValues.add(name);
     return name;
@@ -2380,6 +2466,7 @@ export class LlEmitter {
       c = { sym: this.contentSymbol("sc_cs_", text), len: Buffer.byteLength(text, "utf8") };
       this.cstrs.set(text, c);
     }
+    this.journal?.entry("cstr", text, c);
     return `@${c.sym}`;
   }
 
@@ -2396,6 +2483,7 @@ export class LlEmitter {
       sym = this.contentSymbol("sc_map_ops_", body);
       this.mapOpsConsts.set(body, sym);
     }
+    this.journal?.entry("mapOps", body, sym);
     return `@${sym}`;
   }
 
@@ -2422,6 +2510,7 @@ export class LlEmitter {
       sym = `sc_unit_${this.unitInstances.size}`;
       this.unitInstances.set(key, sym);
     }
+    this.journal?.entry("unit", key, sym);
     const name = `@${sym}`;
     this.immortalValues.add(name);
     return name;
@@ -2435,6 +2524,7 @@ export class LlEmitter {
       sym = `sc_retype_guard_${this.retypeGuards.size}`;
       this.retypeGuards.set(unionId, sym);
     }
+    this.journal?.entry("retype", unionId, sym);
     return `@${sym}`;
   }
 
@@ -2456,6 +2546,7 @@ export class LlEmitter {
       sym = `sc_absent_${this.absentInstances.size}`;
       this.absentInstances.set(unionId, sym);
     }
+    this.journal?.entry("absent", unionId, sym);
     const name = `@${sym}`;
     this.immortalValues.add(name);
     return name;
@@ -2503,6 +2594,7 @@ export class LlEmitter {
   }
 
   declare(decl: string): void {
+    this.journal?.entry("decl", decl, null);
     this.decls.add(decl);
   }
 
@@ -3568,6 +3660,30 @@ export class LlEmitter {
     return { ptr: p, type, inline: this.inlineUnions.classField(className, field), compressed };
   }
 
+  /** Whether values of `t` are NULL or a compact class instance: `C`,
+   * `C | undefined` or `C | null` for a compact class `C`. `C | null |
+   * undefined` is not: its null is a sentinel outside the region. */
+  compactRefType(
+    t: IrType,
+    isCompact: (className: string) => boolean = (name) =>
+      this.classMeta.get(name)?.compact === true,
+  ): boolean {
+    if (t.kind === "object") return isCompact(t.className);
+    if (t.kind !== "union") return false;
+    const single = this.nullableUnions.single(t.unionId);
+    return (
+      single !== null &&
+      single.nullTag < 0 &&
+      single.arm.kind === "object" &&
+      isCompact(single.arm.className)
+    );
+  }
+
+  /** Whether arrays of `elem` hold 32-bit references (SCR_ELEM_CREF). */
+  compactArrayElem(elem: IrType): boolean {
+    return this.compactRegion && this.compactRefType(elem);
+  }
+
   /** Loads the reference a field pointer addresses: a pointer, or the
    * decoded 32-bit reference of a compressed field (compressedFieldPtrs).
    * `tagged`: the load carries the field's alias tags. */
@@ -3623,6 +3739,7 @@ export class LlEmitter {
       const meta = this.classMetaOf(className);
       this.classObjs.set(className, { nameSym: this.internLiteral(classJsName(meta.def)) });
     }
+    this.journal?.entry("classObj", className, this.classObjs.get(className));
     return mangleClassObj(className);
   }
 
@@ -3832,13 +3949,13 @@ export class LlEmitter {
   /** A binding's storage: a module global, a plain local slot, or a boxed
    * local (the slot holds the capture BOX; access goes through it). */
   matchBytesLoopVersion(
-    s: IrStmt & { kind: "for" },
+    s: IrStmt & { kind: "for" | "while" },
     counted: IntegerCountedForLoop | null,
   ): ReturnType<typeof matchBytesLoopVersion> {
-    const fn = this.bytesLoopFunction;
+    const fn = LOOPS.of(this).bytesLoopFunction;
     if (!fn) return null;
-    this.bytesLoopEntries ??= findInitializedByteLoopBindings(fn);
-    const initialized = this.bytesLoopEntries.get(s);
+    LOOPS.of(this).bytesLoopEntries ??= findInitializedByteLoopBindings(fn);
+    const initialized = LOOPS.of(this).bytesLoopEntries!.get(s);
     if (!initialized) return null;
     const invariantGlobals = new Set(this.stableGlobals);
     for (const global of this.initializerBindings.get(fn.name) ?? [])
@@ -3852,6 +3969,7 @@ export class LlEmitter {
       proven: this.bytesBounds,
       workers: this.mod.workers === true,
       owned: this.bytesOwned,
+      scalarStrings: new Set(this.stringSlices.keys()),
     });
   }
 
@@ -3901,6 +4019,25 @@ export class LlEmitter {
     return b;
   }
 
+  /** The function a call through `callee` is known to reach (a literal
+   * closure, or a binding the constant-callback census resolves) and the
+   * entry it calls directly. Async and generator functions stay indirect. */
+  knownCallbackTarget(callee: IrExpr): { known: IrFunction; direct: string } | undefined {
+    const knownName =
+      callee.kind === "closure"
+        ? callee.fnName
+        : callee.kind === "varRef"
+          ? this.currentConstantCallbacks.get(callee.localId)
+          : undefined;
+    const known = knownName ? this.fnByName.get(knownName) : undefined;
+    if (!known || known.async || known.generator) return undefined;
+    if (known.captures === undefined) {
+      this.fnValues.add(known.name);
+      return { known, direct: `@${mangleWrapper(known.name)}` };
+    }
+    return { known, direct: `@${this.callTarget(known.name)}` };
+  }
+
   /** The payload slot of a capture box (ScrBox.slot, field 5). */
   boxSlot(box: string): string {
     const slot = this.B.tmp();
@@ -3914,12 +4051,18 @@ export class LlEmitter {
     const r = B.tmp();
     // Scalar payloads are read in place (scr_box_get_f64/bool are a
     // memcpy and a nonzero test of the same slot), so LLVM can keep a
-    // captured number in a register across a loop of calls.
+    // captured number in a register across a loop of calls. They have an
+    // alias category of their own: every other access to a box's payload
+    // is untagged or a runtime call.
     if (acc === "f64") {
-      B.line(`${r} = load double, ptr ${this.boxSlot(box)}`);
+      B.line(
+        `${r} = load double, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
     } else if (acc === "bool") {
       const raw = B.tmp();
-      B.line(`${raw} = load i64, ptr ${this.boxSlot(box)}`);
+      B.line(
+        `${raw} = load i64, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
       B.line(`${r} = icmp ne i64 ${raw}, 0`);
     } else {
       this.declare(`declare ptr @scr_box_get_ref(ptr)`);
@@ -3933,11 +4076,15 @@ export class LlEmitter {
     const B = this.B;
     const acc = boxAccess(t);
     if (acc === "f64") {
-      B.line(`store double ${value}, ptr ${this.boxSlot(box)}`);
+      B.line(
+        `store double ${value}, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
     } else if (acc === "bool") {
       const raw = B.tmp();
       B.line(`${raw} = zext i1 ${value} to i64`);
-      B.line(`store i64 ${raw}, ptr ${this.boxSlot(box)}`);
+      B.line(
+        `store i64 ${raw}, ptr ${this.boxSlot(box)}${this.memoryAliasAttachment("box:scalar")}`,
+      );
     } else {
       this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
       B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${value})`);
@@ -3986,7 +4133,7 @@ export class LlEmitter {
     const acc = boxAccess(t);
     const cell = B.tmp();
     B.line(`${cell} = ${arrNewCall(this.shapeHost, t, "1")} ; TDZ cell`);
-    this.arrPush(cell, acc === "bool" ? "bool" : "f64", value);
+    this.arrPush(cell, acc === "bool" ? "bool" : "f64", value, null);
     this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
     B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${cell})`);
   }
@@ -4299,6 +4446,189 @@ export class LlEmitter {
   }
   emitFunction(fn: IrFunction): string {
     return emitFunction(this, fn);
+  }
+
+  /** What this range emitter (chunkEmitter) hands the merging emitter, as
+   * plain data a worker process can write: its journal and the sets and
+   * flags its functions set. */
+  chunkResult(): ChunkResult {
+    return {
+      entries: this.journal!.entries,
+      flags: {
+        usesCoroutines: this.usesCoroutines,
+        usesTimers: this.usesTimers,
+        usesGenSlots: this.usesGenSlots,
+        needsUnionNone: this.needsUnionNone,
+        needsNullableAbsent: this.needsNullableAbsent,
+        needsOom: this.needsOom,
+        needsBadTag: this.needsBadTag,
+        needsBadKey: this.needsBadKey,
+        needsRetainBox: this.needsRetainBox,
+      },
+      publishedNamesSym: this.publishedNamesSym,
+      rcHelpers: this.rcHelpers === null ? [] : [...this.rcHelpers],
+      immortalValues: [...this.immortalValues],
+      fnValues: [...this.fnValues],
+      arraySearchKinds: [...this.arraySearchKinds],
+      recordCloneShapes: [...this.recordCloneShapes],
+      awaitCallees: [...this.awaitCallees],
+      adoptCallees: [...this.adoptCallees],
+      directAwaitCallees: [...this.directAwaitCallees],
+      inlineAwaitCallees: [...this.inlineAwaitCallees],
+    };
+  }
+
+  /** Merges a range emitter's result (chunkResult) into this emitter, in
+   * the range's order, and answers the rename of the range's text to this
+   * emitter's numbered helpers. Ranges merge in function order. */
+  mergeChunk(chunk: ChunkResult): (text: string) => string {
+    const names = new Map<string, string>();
+    const tags = new Map<number, number>();
+    // The range's helpers and table entries first, in its order; then the
+    // sets and flags, which replayed definitions must find as serial
+    // emission left them (a helper set guards the declarations its first
+    // request adds).
+    replayJournal(this, chunk.entries, names, tags);
+    const flags = chunk.flags;
+    this.usesCoroutines ||= flags.usesCoroutines;
+    this.usesTimers ||= flags.usesTimers;
+    this.usesGenSlots ||= flags.usesGenSlots;
+    this.needsUnionNone ||= flags.needsUnionNone;
+    this.needsNullableAbsent ||= flags.needsNullableAbsent;
+    this.needsOom ||= flags.needsOom;
+    this.needsBadTag ||= flags.needsBadTag;
+    this.needsBadKey ||= flags.needsBadKey;
+    this.needsRetainBox ||= flags.needsRetainBox;
+    this.publishedNamesSym ??= chunk.publishedNamesSym;
+    if (this.rcHelpers !== null) for (const key of chunk.rcHelpers) this.rcHelpers.add(key);
+    for (const name of chunk.immortalValues) this.immortalValues.add(name);
+    for (const name of chunk.fnValues) this.fnValues.add(name);
+    for (const kind of chunk.arraySearchKinds) this.arraySearchKinds.add(kind as ArraySearchKind);
+    for (const shapeId of chunk.recordCloneShapes) this.recordCloneShapes.add(shapeId);
+    for (const name of chunk.awaitCallees) this.awaitCallees.add(name);
+    for (const name of chunk.adoptCallees) this.adoptCallees.add(name);
+    for (const name of chunk.directAwaitCallees) this.directAwaitCallees.add(name);
+    for (const name of chunk.inlineAwaitCallees) this.inlineAwaitCallees.add(name);
+    return renameChunk(names, tags);
+  }
+
+  /** Adds a content-named constant a chunk interned. Its symbol is this
+   * emitter's own: a digest collision retries in first-use order, which a
+   * chunk alone does not know. */
+  private addContentEntry<V extends { sym: string }>(
+    into: Map<string, V>,
+    key: string,
+    entry: V,
+    prefix: string,
+    names: Map<string, string>,
+  ): void {
+    let own = into.get(key);
+    if (own === undefined) {
+      own = { ...entry, sym: this.contentSymbol(prefix, key) };
+      into.set(key, own);
+    }
+    if (own.sym !== entry.sym) names.set(entry.sym, own.sym);
+  }
+
+  /** Applies a chunk's table entry (EmitJournal.entry) at its place in the
+   * chunk's order: a key this emitter lacks is added, numbered after its
+   * own entries where the table numbers them, and the chunk's name for it
+   * is renamed to this emitter's. */
+  applyJournalEntry(
+    table: string,
+    key: string,
+    value: unknown,
+    names: Map<string, string>,
+    tags: Map<number, number>,
+  ): void {
+    switch (table) {
+      case "decl":
+        this.decls.add(key);
+        return;
+      case "literal":
+        this.addContentEntry(
+          this.literals,
+          key,
+          value as { sym: string; len: number },
+          "sc_lit_",
+          names,
+        );
+        return;
+      case "literalEquality":
+        addEntry(this.literalEqualities, key, value as string);
+        return;
+      case "bigint":
+        {
+          const entry = value as { sym: string; value: string };
+          this.addContentEntry(
+            this.bigintLiterals,
+            key,
+            { sym: entry.sym, value: BigInt(entry.value) },
+            "sc_bigint_",
+            names,
+          );
+        }
+        return;
+      case "cstr":
+        this.addContentEntry(
+          this.cstrs,
+          key,
+          value as { sym: string; len: number },
+          "sc_cs_",
+          names,
+        );
+        return;
+      case "mapOps": {
+        let own = this.mapOpsConsts.get(key);
+        if (own === undefined) {
+          own = this.contentSymbol("sc_map_ops_", key);
+          this.mapOpsConsts.set(key, own);
+        }
+        if (own !== value) names.set(value as string, own);
+        return;
+      }
+      case "classObj":
+        addEntry(this.classObjs, key, value as { nameSym: string });
+        return;
+      case "retainWrapper":
+        addEntry(this.nullableUnions.retainWrappers, key, value as string);
+        return;
+      case "unit":
+        return addNumbered(this.unitInstances, key, value as string, "sc_unit_", names);
+      case "absent":
+        return addNumbered(this.absentInstances, key, value as string, "sc_absent_", names);
+      case "retype":
+        return addNumbered(this.retypeGuards, key, value as string, "sc_retype_guard_", names);
+      case "slots":
+        return addNumbered(this.threadSlotsBlocks, key, value as string, "@sc_slots_", names);
+      case "regex":
+        return addNumberedSymbol(this.regexInstances, key, value as never, "sc_re_", names);
+      case "templateStrings":
+        return addNumberedSymbol(
+          this.templateStringsInstances,
+          key,
+          value as never,
+          "sc_tsa_",
+          names,
+        );
+      case "tag": {
+        let own = this.fieldAliasTags.get(key);
+        if (own === undefined) {
+          own = 2 + this.fieldAliasTags.size * 2;
+          this.fieldAliasTags.set(key, own);
+        }
+        if (own !== value) tags.set(value as number, own);
+        return;
+      }
+      default:
+        throw new InternalCompilerError(`llvm emitter bug: no journal table ${table}`);
+    }
+  }
+
+  /** An emitter for a range of this module's functions: the same facts,
+   * empty module-level tables, and a journal of what the range adds. */
+  chunkEmitter(): LlEmitter {
+    return new LlEmitter(this.mod, { ...this.targetOptions, functionChunks: 1 }, new EmitJournal());
   }
 
   /** The double-ABI entry of a function with an i32 entry: every caller
@@ -5383,6 +5713,7 @@ export class LlEmitter {
       sym = `@sc_slots_${this.threadSlotsBlocks.size}`;
       this.threadSlotsBlocks.set(name, sym);
     }
+    this.journal?.entry("slots", name, sym);
     return sym;
   }
 
@@ -5532,6 +5863,20 @@ export class LlEmitter {
     if (this.publishWalkersCache !== null) return this.publishWalkersCache;
     const byPre = [...this.classMeta.values()].sort((a, b) => a.pre - b.pre);
     this.publishWalkersCache = new PublishWalkers({
+      // Journal hooks only on emitters that can emit ranges (chunk
+      // emitters, and emitters whose workers take a journal after the
+      // fork), so the host's optional calls cost nothing otherwise.
+      journalAllocated: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.allocated(name, op, args),
+      journalBuilt: !this.journaled ? undefined : () => this.journal?.built(),
+      journalOpened: !this.journaled ? undefined : (op) => this.journal?.opened(op),
+      journalUsed: !this.journaled
+        ? undefined
+        : (name, op, args) => this.journal?.used(name, op, args),
+      journalEntry: !this.journaled
+        ? undefined
+        : (table, key, value) => this.journal?.entry(table, key, value),
       declare: (decl) => this.declare(decl),
       cstr: (text) => this.cstr(text),
       sizeType: this.sizeType,
@@ -6018,12 +6363,27 @@ export class LlEmitter {
   }
 
   jsIcSite(): string {
-    return `@sc_js_ic_${this.jsIcSiteCount++}`;
+    const name = `@sc_js_ic_${this.jsIcSiteCount++}`;
+    this.journal?.site(name, "jsIcSite");
+    return name;
   }
 
   /** A fresh read-site cache for one constant-key dyn read. */
   dynReadIcSite(): string {
-    return `@sc_dyn_read_ic_${this.dynReadIcSites++}`;
+    const name = `@sc_dyn_read_ic_${this.dynReadIcSites++}`;
+    this.journal?.site(name, "dynReadIcSite");
+    return name;
+  }
+
+  /** A fresh speculative loop site: the global that counts its bailing
+   * entries in a row. */
+  speculativeLoopSite(): string {
+    const name = `@sc_spec_bails_${this.speculativeLoopSites++}`;
+    this.journal?.site(name, "speculativeLoopSite");
+    this.journal?.opened("speculativeLoopSite");
+    this.declare(`${name} = internal global i8 0`);
+    this.journal?.built();
+    return name;
   }
 
   dynKind(d: string): string {
@@ -6136,8 +6496,8 @@ export class LlEmitter {
     return tagInSet(this, uName, unionId, tags);
   }
 
-  arrPush(arr: string, acc: "f64" | "bool" | "ref", value: string): string {
-    return arrPush(this, arr, acc, value);
+  arrPush(arr: string, acc: "f64" | "bool" | "ref", value: string, element: IrType | null): string {
+    return arrPush(this, arr, acc, value, element);
   }
 
   emitArrayCopyLoop(dst: string, src: string, acc: "f64" | "bool" | "ref"): void {
@@ -6425,3 +6785,76 @@ export function adoptingAwaitOf(value: IrExpr | null): ExprOf<"awaitExpr"> | nul
   });
   return found;
 }
+
+/** Adds `key` to `into` when it lacks it. */
+function addEntry<V>(into: Map<string, V>, key: string, value: V): void {
+  if (!into.has(key)) into.set(key, value);
+}
+
+/** Adds `key` to a numbered table when it lacks it, numbering it after the
+ * table's own entries (`prefix` and its index), and records the rename of
+ * the chunk's `name` for it. */
+function addNumbered(
+  into: Map<string, string>,
+  key: string,
+  name: string,
+  prefix: string,
+  names: Map<string, string>,
+): void {
+  let own = into.get(key);
+  if (own === undefined) {
+    own = `${prefix}${into.size}`;
+    into.set(key, own);
+  }
+  if (own !== name) names.set(name.replace(/^@/, ""), own.replace(/^@/, ""));
+}
+
+/** addNumbered for entries that keep their numbered name in `sym`. */
+function addNumberedSymbol<V extends { sym: string }>(
+  into: Map<string, V>,
+  key: string,
+  entry: V,
+  prefix: string,
+  names: Map<string, string>,
+): void {
+  let own = into.get(key);
+  if (own === undefined) {
+    own = { ...entry, sym: `${prefix}${into.size}` };
+    into.set(key, own);
+  }
+  if (own.sym !== entry.sym) names.set(entry.sym, own.sym);
+}
+
+registerReplay("jsIcSite", (emitter) => emitter.jsIcSite());
+registerReplay("dynReadIcSite", (emitter) => emitter.dynReadIcSite());
+registerReplay("speculativeLoopSite", (emitter) => emitter.speculativeLoopSite());
+for (const op of [
+  "dyn.collectionDynOps",
+  "dyn.dynMatchHelper",
+  "dyn.jsonSchema",
+  "dyn.recordNameTable",
+  "dyn.jsonParseHelper",
+  "dyn.dynCheckHelper",
+  "dyn.toDynHelper",
+  "dyn.promiseDynAdapterHelper",
+  "dyn.dynFuncThunkHelper",
+  "dyn.dynFuncBoxHelper",
+  "dyn.dynFuncAdapterHelper",
+  "dyn.dynToStrHelper",
+  "dyn.dynIterNHelper",
+  "dyn.dynDestrCheckHelper",
+  "dyn.dynKeyGetHelper",
+  "dyn.dynComputedKeyGetHelper",
+  "dyn.caughtToDynHelper",
+  "dyn.messageListenerHelper",
+  "dyn.messageReaderHelper",
+])
+  registerReplay(op, (emitter, args) => emitter.dyn.replayHelper(op, args));
+for (const op of [
+  "walkers.jsonWriteHelper",
+  "walkers.recordFieldWriter",
+  "walkers.unionJoinHelper",
+])
+  registerReplay(op, (emitter, args) => emitter.walkers.replayHelper(op, args));
+for (const op of ["publish.walker", "publish.refusal"])
+  registerReplay(op, (emitter, args) => emitter.publishWalkers.replayHelper(op, args));

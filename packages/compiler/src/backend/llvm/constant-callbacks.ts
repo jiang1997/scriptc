@@ -252,11 +252,13 @@ export function findConstantCallbacks(
   // entries actually used as indirect callees in each body. A module-wide
   // global/function cross product would dominate large-source emission.
   const globalTargets = new Map<string, string>();
+  const result = new Map<string, Map<string, string>>();
+  // Only indirect callees get targets: without one, nothing resolves.
+  if (![...indirectCallees.values()].some((callees) => callees.size > 0)) return result;
   for (const [id, value] of globals) {
     const target = resolve(null, value);
     if (target) globalTargets.set(id, target);
   }
-  const result = new Map<string, Map<string, string>>();
   for (const fn of mod.functions) {
     const needed = indirectCallees.get(fn.name)!;
     if (!needed.size) continue;

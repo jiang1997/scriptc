@@ -318,12 +318,23 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
   // statements the module carries): they compile, but executing one
   // throws its SC-coded error — the report lists them so a "compiling"
   // JS program never hides its dynamic gaps.
+  // Fences in a module's top-level code run when the module initializes:
+  // they are listed first, as sites that run at startup.
   const fences = input.runtimeFences ?? [];
-  if (fences.length > 0) {
+  const startup = fences.filter((d) => d.startup === true);
+  const later = fences.filter((d) => d.startup !== true);
+  if (startup.length > 0) {
     out.push(
-      `  ${c(YELLOW, "deferred to runtime")}   ${fences.length} site${fences.length === 1 ? "" : "s"} ${c(DIM, "(JS statements that throw their fence if executed)")}`,
+      `  ${c(YELLOW, "runs at startup")}   ${startup.length} site${startup.length === 1 ? "" : "s"} ${c(DIM, "(JS statements in module top-level code, which runs when the module loads)")}`,
     );
-    renderRows(groupBlockers(fences, "deferred"), YELLOW);
+    renderRows(groupBlockers(startup, "deferred"), YELLOW);
+    out.push("");
+  }
+  if (later.length > 0) {
+    out.push(
+      `  ${c(YELLOW, "deferred to runtime")}   ${later.length} site${later.length === 1 ? "" : "s"} ${c(DIM, "(JS statements that throw their fence if executed)")}`,
+    );
+    renderRows(groupBlockers(later, "deferred"), YELLOW);
     out.push("");
   }
 
