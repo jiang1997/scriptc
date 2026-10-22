@@ -125,6 +125,11 @@ export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([
   // binding types as any and reached uses fence instead of passing unchecked
   2307,
   2792,
+  // a write to a property declarations mark readonly (2540): `readonly` is
+  // a type annotation that Node never sees (Next.js's types mark
+  // process.env.NODE_ENV readonly; its server.js assigns it); the write
+  // lowers like any other and keeps its runtime behavior
+  2540,
   // a resolved JavaScript module without declarations (7016): Node loads
   // it like any other module; deployment trees such as Next.js standalone
   // output ship runtime files only, so the binding types as any and its

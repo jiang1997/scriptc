@@ -645,8 +645,41 @@ function undeclaredHandleType(lowerer: Lowerer, type: ts.Type): boolean {
   return containerType(lowerer, type);
 }
 
+/** Builtin classes whose native representation is not a JavaScript object
+ * (URLSearchParams, Headers, Request, …): an island instance of one has no
+ * native counterpart to convert into, so it stays a handle. */
+const BUILTIN_HANDLE_CLASSES: ReadonlySet<string> = new Set([
+  "URL",
+  "URLSearchParams",
+  "Headers",
+  "Request",
+  "Response",
+  "FormData",
+  "Blob",
+  "File",
+  "AbortController",
+  "AbortSignal",
+  "ReadableStream",
+  "WritableStream",
+  "TransformStream",
+  "TextEncoder",
+  "TextDecoder",
+]);
+
+/** Whether `type` is one of BUILTIN_HANDLE_CLASSES as declared by the
+ * standard library or @types/node (not a program class of the same name). */
+function builtinHandleClass(type: ts.Type): boolean {
+  const symbol = type.getSymbol();
+  if (symbol === undefined || !BUILTIN_HANDLE_CLASSES.has(String(symbol.escapedName))) return false;
+  return (
+    symbol.declarations.length > 0 &&
+    symbol.declarations.every((d) => ts.getSourceFileOfNode(d).isDeclarationFile)
+  );
+}
+
 /** Arrays, tuples, Maps and Sets (every arm of a union, nullish arms
- * aside): the object types an island hands back without declaring them. */
+ * aside), and the builtin classes of builtinHandleClass: the object types
+ * an island hands back without declaring them. */
 function containerType(lowerer: Lowerer, type: ts.Type): boolean {
   if (type.isUnionType())
     return ts
@@ -659,7 +692,7 @@ function containerType(lowerer: Lowerer, type: ts.Type): boolean {
   if ((type.flags & ts.TypeFlags.Object) === 0) return false;
   if (lowerer.checker.isArrayType(type) || lowerer.checker.isTupleType(type)) return true;
   const name = type.getSymbol()?.escapedName;
-  return name === "Map" || name === "Set";
+  return name === "Map" || name === "Set" || builtinHandleClass(type);
 }
 
 /** A member read, call, index or `new` whose receiver or callee is an
@@ -1495,6 +1528,20 @@ function islandReceiver(
     }
   }
   return { value: lowerer.coerceToExpected(lowerer.lowerExpr(receiver), FOREIGN) };
+}
+
+/** Whether `require(spec)` in `file` loads an island module. */
+export function isIslandRequireSpec(lowerer: Lowerer, file: string, spec: string): boolean {
+  const islands = lowerer.nodeIslands;
+  return islands !== null && islandModuleFile(islands, file, spec, "require") !== null;
+}
+
+/** `require("<island pkg>")` in a CommonJS module, at a call no other
+ * lowering claimed (inside a function, or as a subexpression): the island
+ * module loads at the call. Null when the package is not an island. */
+export function lowerIslandRequireCall(lowerer: Lowerer, call: ts.CallExpression): IrExpr | null {
+  if (lowerer.nodeIslands === null) return null;
+  return lowerIslandLoadCall(lowerer, call, locOf(call)) ?? null;
 }
 
 /** `require("pkg")` (the global require, anywhere) and `import("pkg")` of
