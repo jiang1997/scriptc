@@ -66,7 +66,13 @@
  *            likely-hot functions that use untyped values (SC6101,
  *            diagnostics/dynamic-tier.ts)
  *   SC8xxx  Node islands: the program calls into Node.js, and the build
- *            finds no usable libnode pack (SC8005)
+ *            finds no usable libnode pack (SC8005); Node island policy:
+ *            packages and modules outside the native subset that run (or,
+ *            in report-only mode, would run) in a Node island — unknown
+ *            project configuration (SC8004), a package required to be
+ *            native (SC8003) or every island refused (SC8002) while outside
+ *            the native subset, and the R2 object-model constructs in user
+ *            JavaScript (SC8101–SC8105, behind --strict-user-js)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/ir.js";
@@ -94,6 +100,11 @@ export interface ScrDiagnostic {
    * the error may not reproduce under the project's tsc. Machine-readable
    * output reports these under the "environment" category. */
   typeWorld?: boolean;
+  /** Why the construct is outside the native subset, as a Node island
+   * reason id (node-islands/rules.ts), at the refusal sites whose code
+   * alone does not say it (a computed require(), a native addon, `with`).
+   * Report-only: never part of the rendered message. */
+  reason?: string;
 }
 
 /** SC3002–SC3004 — native-helper target, installation, and execution
@@ -214,6 +225,60 @@ export function unrelatedClassCastDivergenceDiag(
     message: `this '${source}' reaches a cast to the unrelated class '${target}' in the callee: natively the checked cast throws a TypeError when it executes, while Node reads the members structurally`,
     loc,
     hint: `narrow with 'instanceof ${target}' before casting, or cast to a base class or interface both classes share`,
+  };
+}
+
+/* ── SC8xxx: Node island policy ───────────────────────────────────────── */
+
+/** SC8004 — an unknown key or value in `scriptc.packages` or
+ * `scriptc.nodeIslands`. */
+export function projectConfigDiag(
+  path: string,
+  detail: string,
+  hint: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC8004",
+    message: `package.json '${path}' ${detail}`,
+    loc,
+    hint,
+  };
+}
+
+/** SC8002 — Node islands are off (or limited to marked islands) and an
+ * npm package is outside the native subset. */
+export function nodeIslandsOffDiag(pkg: string, why: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC8002",
+    message: `npm package '${pkg}' is outside the native subset (${why}) and Node islands are off`,
+    loc,
+    hint: `allow Node islands (--node-islands=auto), mark it with --node-island=${pkg}, or replace the dependency`,
+  };
+}
+
+/** SC8003 — a package marked "native" is outside the native subset. */
+export function nativePackageDiag(pkg: string, why: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC8003",
+    message: `npm package '${pkg}' is marked native but is outside the native subset: ${why}`,
+    loc,
+    hint: `remove the "native" marking to let it run in a Node island, or replace the construct the reason names`,
+  };
+}
+
+/** SC8101–SC8105 — an R2 object-model construct in the program's own
+ * JavaScript (R2.1 constructor functions … R2.5 builtin patching). */
+export function userJsObjectModelDiag(
+  code: "SC8101" | "SC8102" | "SC8103" | "SC8104" | "SC8105",
+  construct: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code,
+    message: `${construct} needs a mutable JavaScript object model, which native code does not have`,
+    loc,
+    hint: "rewrite it as a class or typed object, or mark this module as a Node island in scriptc.nodeIslands.modules",
   };
 }
 
@@ -782,6 +847,7 @@ export function nativeAddonDiag(specifier: string, loc: SrcLoc): ScrDiagnostic {
     loc,
     milestone: "later",
     hint: "expose the native operation as a plain C ABI function in an object or static archive, then bind a signature-only TypeScript declaration with --ffi; Node-API callbacks themselves require Node (https://scriptc.dev/ffi#replacing-a-node-api-addon)",
+    reason: "native-addon",
   };
 }
 

@@ -9,6 +9,7 @@ import {
   coveragePasses,
   renderCoverage,
   renderExplainDynamic,
+  renderExplainIsland,
 } from "@scriptc/compiler";
 import { shardSelect, shardSuffix } from "./shard.js";
 
@@ -744,6 +745,92 @@ test("a cycle whose top level calls a builtin with a builtin function value is a
   const out = report(fixture("cycle-inert-builtin/main.ts"));
   expect(out).not.toContain("circular imports");
   expect(out).toContain("statements analyzed");
+});
+
+test("Node islands (report-only): one package per class, gap islands first", async () => {
+  // ni-gap (a fence inside the native subset), ni-eval (new Function),
+  // ni-ctor (a constructor function, carrying ni-dep), ni-minified (not
+  // compilable as shipped), ni-typed (native, also reached from ni-ctor).
+  const entry = fixture("node-islands/main.ts");
+  await expect(report(entry)).toMatchFileSnapshot("__snapshots__/coverage-node-islands.txt");
+  const { coverage, sourceTexts } = analyze(entry);
+  const islands = coverage.nodeIslands!;
+  expect(islands.islands.map((i) => [i.package, i.class])).toEqual([
+    ["ni-gap", "gap"],
+    ["ni-eval", "runtime"],
+    ["ni-ctor", "object-model"],
+    ["ni-minified", "packaging"],
+  ]);
+  expect(islands.packages.map((p) => [p.package, p.status, p.islands])).toEqual([
+    ["ni-dep", "inside", ["ni-ctor"]],
+    ["ni-typed", "shared", ["ni-ctor"]],
+  ]);
+  await expect(
+    renderExplainIsland(coverage.nodeIslands, "ni-ctor", { sourceTexts, root: repoRoot }),
+  ).toMatchFileSnapshot("__snapshots__/coverage-node-islands-explain.txt");
+  expect(renderExplainIsland(coverage.nodeIslands, "ni-dep", { root: repoRoot })).toContain(
+    "only ni-ctor imports it",
+  );
+  // The machine-readable form carries the same decisions.
+  const envelope = coverageEnvelope(coverage, { compilerVersion: "test", sourceTexts });
+  expect(envelope.nodeIslands?.mode).toBe("would-be");
+  expect(envelope.nodeIslands?.islands.map((i) => [i.package, i.class, i.at?.line])).toEqual([
+    ["ni-gap", "gap", 7],
+    ["ni-eval", "runtime", 4],
+    ["ni-ctor", "object-model", 9],
+    ["ni-minified", "packaging", undefined],
+  ]);
+  // The gates: the blocker gate is today's build (which refuses
+  // ni-minified with SC2013, and nothing else); the island gates fail on
+  // the would-be islands.
+  expect(coverage.diagnostics.every((d) => d.code === "SC2013")).toBe(true);
+  expect(coveragePasses(coverage, "island-gaps")).toBe(false);
+  expect(coveragePasses(coverage, "node-islands")).toBe(false);
+});
+
+test("Node island policy from the command line: native, forced, off", () => {
+  const entry = fixture("node-islands/main.ts");
+  const forced = analyze(entry, {
+    nodeIslands: { native: ["ni-eval"], islands: ["ni-typed", "not-a-dependency"] },
+  }).coverage.nodeIslands!;
+  expect(forced.islands.map((i) => [i.package, i.class, i.decision])).toEqual([
+    ["ni-gap", "gap", "auto"],
+    ["ni-ctor", "object-model", "auto"],
+    ["ni-minified", "packaging", "auto"],
+    ["ni-typed", "marked", "cli"],
+  ]);
+  expect(forced.violations.map((v) => v.code)).toEqual(["SC8003"]);
+  expect(forced.unknownPackages).toEqual(["not-a-dependency"]);
+  const off = analyze(entry, { nodeIslands: { mode: "off" } }).coverage;
+  expect(off.nodeIslands!.islands).toEqual([]);
+  expect(off.nodeIslands!.violations.map((v) => v.code)).toEqual([
+    "SC8002",
+    "SC8002",
+    "SC8002",
+    "SC8002",
+  ]);
+  expect(coveragePasses(off, "island-gaps")).toBe(false);
+});
+
+test("--strict-user-js reports R2 constructs in user JavaScript as SC8101–SC8105", async () => {
+  const entry = fixture("node-islands-user-js.cjs");
+  // Without the flag the user module is not part of any island report.
+  expect(analyze(entry).coverage.nodeIslands).toBeUndefined();
+  const { coverage } = analyze(entry, { nodeIslands: { strictUserJs: true } });
+  expect(coverage.diagnostics.map((d) => d.code).filter((c) => c.startsWith("SC81"))).toEqual([
+    "SC8101",
+    "SC8102",
+    "SC8103",
+    "SC8104",
+    "SC8105",
+    "SC8101",
+  ]);
+  await expect(
+    renderCoverage(
+      { ...coverage, file: coverage.file.replace(repoRoot + "/", "") },
+      { root: repoRoot },
+    ),
+  ).toMatchFileSnapshot("__snapshots__/coverage-node-islands-user-js.txt");
 });
 
 test(`every corpus program is 100% static (corpus and coverage agree${shardSuffix()})`, async () => {

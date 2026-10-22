@@ -203,11 +203,14 @@ export {
 export {
   renderCoverage,
   renderExplainDynamic,
+  renderExplainIsland,
   coverageEnvelope,
   coveragePasses,
   type CoverageInput,
   type CoverageFailOn,
 } from "./coverage/report.js";
+export type { NodeIslandReport, NodeIslandEntry } from "./node-islands/summary.js";
+export type { NodeIslandOptions, NodeIslandsMode } from "./node-islands/policy.js";
 export {
   TIER_MODES,
   type DemotedUnit,

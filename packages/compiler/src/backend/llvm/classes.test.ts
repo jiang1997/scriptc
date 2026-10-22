@@ -157,6 +157,44 @@ test("ProgramLifetime hierarchies are never freed and take no reference counts",
   expect(body(mangleClassRelease("Owner"))).toContain("load i32, ptr %bufp");
 });
 
+test("classes whose trace visits nothing start acyclic in a traced hierarchy", () => {
+  const mapper = { kind: "object" as const, className: "Mapper" };
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
+    classes: [
+      { name: "Mapper", fields: [], methods: [], loc },
+      // A dyn field can reach anything: the hierarchy carries collector headers.
+      {
+        name: "Linked",
+        base: "Mapper",
+        fields: [
+          { name: "next", type: mapper },
+          { name: "hook", type: DYN },
+        ],
+        methods: [],
+        loc,
+      },
+      { name: "Simple", base: "Mapper", fields: [{ name: "value", type: F64 }], methods: [], loc },
+    ],
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  const body = (name: string): string =>
+    new RegExp(`^define internal [a-z]+ @${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(llvm)?.[0] ?? "";
+  const descriptor = (cls: string): string =>
+    llvm.split("\n").find((line) => line.startsWith(`@${mangleClassTrace(cls)}.cyctype = `)) ?? "";
+  expect(descriptor("Simple")).toContain("{ ptr @scr_cyc_no_children, ");
+  expect(body(mangleClassNew("Simple"))).toContain("store i32 -1, ptr %sa.bufp");
+  expect(descriptor("Linked")).toContain(`{ ptr @${mangleClassTrace("Linked")}, `);
+  expect(body(mangleClassNew("Linked"))).toContain("store i32 0, ptr %sa.bufp");
+  // Releases share the hierarchy's possible-root step, which skips the
+  // call for SCR_CYC_ACYCLIC, and a death unbuffers only below -1.
+  expect(body(mangleClassRelease("Simple"))).toContain("icmp slt i32 %buf, 0");
+  expect(body(mangleClassReleaseDirect("Simple"))).toContain("icmp slt i32 %dbuf, -1");
+});
+
 test("ProgramLifetime classes pack their fields after a 32-bit header", () => {
   const node = { kind: "object" as const, className: "Node" };
   const leaf = { kind: "object" as const, className: "Leaf" };

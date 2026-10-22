@@ -434,12 +434,13 @@ export class PublishWalkers {
     let buf = classId || compact ? String(PUB_LOG_COUNT) : "0";
     if (cyc) {
       // ScrCycHdr.buf, the word before the object: its top bit while the
-      // object is a buffered candidate.
+      // object is a buffered candidate, and -1 (SCR_CYC_ACYCLIC) for an
+      // object that never is one.
       this.host.declare(`declare i32 @scr_cyc_pub_take(ptr)`);
       lines.push(
         `  %mbufp = getelementptr inbounds i8, ptr %o, i64 -4`,
         `  %mbufw = load i32, ptr %mbufp`,
-        `  %mfree = icmp sge i32 %mbufw, 0`,
+        `  %mfree = icmp sge i32 %mbufw, -1`,
         `  br i1 %mfree, label %mput, label %mtake`,
         `mtake:`,
         `  %mix = call i32 @scr_cyc_pub_take(ptr %o)`,

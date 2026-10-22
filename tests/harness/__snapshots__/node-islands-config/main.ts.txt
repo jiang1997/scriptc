@@ -1,0 +1,35 @@
+node-islands-config/package.json:6:7 - error SC8004: package.json 'scriptc.packages.encoding' has the unknown value "unloded"
+
+  5 |     "packages": {
+  6 |       "encoding": "unloded",
+    |       ^
+  7 |       "debug": { "run": "island" }
+
+  hint: use one of "unloaded", "node", "native", "auto", or an object with run, evaluate, share, marshal, schedule
+
+node-islands-config/package.json:7:18 - error SC8004: package.json 'scriptc.packages.debug.run' has the unknown value "island"
+
+  6 |       "encoding": "unloded",
+  7 |       "debug": { "run": "island" }
+    |                  ^
+  8 |     },
+
+  hint: use one of "native", "node", "auto"
+
+node-islands-config/package.json:10:7 - error SC8004: package.json 'scriptc.nodeIslands.auto' must be true or false, not "yes"
+
+   9 |     "nodeIslands": {
+  10 |       "auto": "yes",
+     |       ^
+  11 |       "mode": "auto"
+
+  hint: use a boolean
+
+node-islands-config/package.json:11:7 - error SC8004: package.json 'scriptc.nodeIslands.mode' is not a known Node island setting
+
+  10 |       "auto": "yes",
+  11 |       "mode": "auto"
+     |       ^
+  12 |     }
+
+  hint: the settings are auto, modules, node, nodeVersion, packaging, speculativeStart

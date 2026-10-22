@@ -36,7 +36,8 @@ import {
 import { identityPreservingWidening } from "./coercions/identity.js";
 import { scanDivergences } from "./divergences.js";
 import { applyKeyOrderWitnesses, KeyOrderNotes } from "./key-order-witness.js";
-import { observeRecordLiteralRebuilds } from "../../ir/traverse.js";
+import { exprFunctionReference } from "../../ir/function-references.js";
+import { everyStmtList, observeRecordLiteralRebuilds } from "../../ir/traverse.js";
 import { checkedClassAssertion } from "./class-assertions.js";
 import { narrowStoredClassValue, narrowGenericClassValue } from "./class-unions.js";
 import {
@@ -3269,11 +3270,13 @@ export class Lowerer {
     if (typeof helper === "string") this.sharedHelperNames.add(helper);
     else this.sharedHelpers.add(helper);
   }
-  /** Gives each shared helper the location of the entry file's start: the
-   * helpers marked by shareHelper, and those interned by key in the helper
-   * tables. */
-  private settleSharedHelperLocations(): void {
-    const loc: SrcLoc = { file: this.entry.fileName, start: 0, end: 0 };
+  /** Gives each shared helper (those marked by shareHelper, and those
+   * interned by key in the helper tables) one location for all its nodes:
+   * the earliest site in `functions` that uses it, by file and position, so
+   * reports such as --explain-dynamic point at a use whatever order bodies
+   * lowered in. A helper used only by other shared helpers takes their
+   * location; one with no use takes the entry file's start. */
+  private settleSharedHelperLocations(functions: readonly IrFunction[]): void {
     const interned = new Set<string>([...this.sharedHelperNames, ...this.classMethodValueHelpers]);
     for (const table of [
       this.equalityHelpers,
@@ -3296,21 +3299,68 @@ export class Lowerer {
       for (const name of table.values()) interned.add(name);
     for (const fn of [...this.liftedFns, ...this.implicitFns])
       if (interned.has(fn.name)) this.sharedHelpers.add(fn);
-    const seen = new Set<object>();
-    const visit = (node: unknown): void => {
-      if (typeof node !== "object" || node === null || seen.has(node)) return;
-      seen.add(node);
-      if (Array.isArray(node)) {
-        for (const item of node) visit(item);
-        return;
+    if (this.sharedHelpers.size === 0) return;
+    const shared = new Map([...this.sharedHelpers].map((fn) => [fn.name, fn]));
+    const earlier = (left: SrcLoc, right: SrcLoc): boolean =>
+      left.file < right.file || (left.file === right.file && left.start < right.start);
+    // The earliest use of each shared helper outside the shared helpers, and
+    // which shared helpers each shared helper uses.
+    const uses = new Map<string, SrcLoc>();
+    const usedBy = new Map<string, Set<string>>();
+    for (const fn of functions) {
+      const inShared = shared.has(fn.name) ? fn.name : undefined;
+      everyStmtList(fn.body, {
+        stmt: () => true,
+        expr: (expr) => {
+          const name = expr.kind === "call" ? expr.callee : exprFunctionReference(expr);
+          if (name === undefined || name === inShared || !shared.has(name)) return true;
+          if (inShared !== undefined) {
+            let users = usedBy.get(name);
+            if (users === undefined) usedBy.set(name, (users = new Set()));
+            users.add(inShared);
+          } else {
+            const current = uses.get(name);
+            if (current === undefined || earlier(expr.loc, current)) uses.set(name, expr.loc);
+          }
+          return true;
+        },
+      });
+    }
+    // Helpers reached only through other shared helpers take the earliest
+    // location among those, to a fixed point.
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [name, users] of usedBy) {
+        for (const user of users) {
+          const loc = uses.get(user);
+          const current = uses.get(name);
+          if (loc !== undefined && (current === undefined || earlier(loc, current))) {
+            uses.set(name, loc);
+            changed = true;
+          }
+        }
       }
-      const record = node as Record<string, unknown>;
-      for (const key of Object.keys(record)) {
-        if (key === "loc") record[key] = loc;
-        else if (key !== "type") visit(record[key]);
-      }
-    };
-    for (const fn of this.sharedHelpers) visit(fn);
+    }
+    const fallback: SrcLoc = { file: this.entry.fileName, start: 0, end: 0 };
+    for (const fn of this.sharedHelpers) {
+      const use = uses.get(fn.name) ?? fallback;
+      const loc: SrcLoc = { file: use.file, start: use.start, end: use.end };
+      const seen = new Set<object>();
+      const visit = (node: unknown): void => {
+        if (typeof node !== "object" || node === null || seen.has(node)) return;
+        seen.add(node);
+        if (Array.isArray(node)) {
+          for (const item of node) visit(item);
+          return;
+        }
+        const record = node as Record<string, unknown>;
+        for (const key of Object.keys(record)) {
+          if (key === "loc") record[key] = loc;
+          else if (key !== "type") visit(record[key]);
+        }
+      };
+      visit(fn);
+    }
   }
   /** The first lifted function named `name`, the one
    * `liftedFns.find((fn) => fn.name === name)` returns. */
@@ -7404,7 +7454,7 @@ export class Lowerer {
     // Lambdas lifted while lowering any of the above (plus synthetic
     // array-HOF loop functions, which ride the same list), and the
     // implicit-any instances lowered eagerly at their first call sites.
-    this.settleSharedHelperLocations();
+    this.settleSharedHelperLocations([...functions, ...this.liftedFns, ...this.implicitFns]);
     functions.push(...this.liftedFns);
     functions.push(...this.implicitFns);
     functions.push(...runtimeClassConstructs(this, functions));
@@ -8120,7 +8170,13 @@ export class Lowerer {
     ]);
     observeRecordLiteralRebuilds(null);
     for (const finalize of this.shapeOrderHelperFinalizers) finalize();
-    this.settleSharedHelperLocations();
+    this.settleSharedHelperLocations([
+      ...orderedUnits,
+      ...initFunctions,
+      ...instanceFunctions,
+      ...this.liftedFns,
+      ...this.implicitFns,
+    ]);
     // Lifted and implicit functions are created in lowering order; they
     // are assembled by name.
     const functions = [
@@ -8352,8 +8408,11 @@ export class Lowerer {
     node: ts.Node,
     featureOverride?: string,
     hintOverride?: string,
+    reason?: string,
   ): never {
-    this.pushDiag(unsupportedDiag(code, locOf(node), featureOverride, hintOverride));
+    const diag = unsupportedDiag(code, locOf(node), featureOverride, hintOverride);
+    if (reason !== undefined) diag.reason = reason;
+    this.pushDiag(diag);
     throw new PoisonError();
   }
 
@@ -8579,8 +8638,16 @@ export class Lowerer {
    * nothing lowers. Poisons the statement like every other rejection.
    * `sym`, when given, picks the wording: surface declared only by the
    * adopted @types/node is blamed at @types/node. */
-  noLowering(surface: string, node: ts.Node, hint?: string, sym?: ts.Symbol | null): never {
-    this.pushDiag(noLoweringDiag(surface, locOf(node), hint, this.nodeTypesOnlySymbol(sym)));
+  noLowering(
+    surface: string,
+    node: ts.Node,
+    hint?: string,
+    sym?: ts.Symbol | null,
+    reason?: string,
+  ): never {
+    const diag = noLoweringDiag(surface, locOf(node), hint, this.nodeTypesOnlySymbol(sym));
+    if (reason !== undefined) diag.reason = reason;
+    this.pushDiag(diag);
     throw new PoisonError();
   }
 

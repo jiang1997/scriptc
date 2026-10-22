@@ -906,6 +906,15 @@ export function emitClassShapes(
       })),
     ];
     const refFields = indexedFields.filter((f) => isRefCounted(f.type));
+    const tracedFields = traced
+      ? indexedFields.filter((f) => traceAdapter(host, f.type) !== null)
+      : [];
+    // A traced class whose trace visits nothing carries the collector header
+    // only because its hierarchy is traced: it is never on a cycle. Its
+    // descriptor names scr_cyc_no_children and its objects start out
+    // SCR_CYC_ACYCLIC, so releases never buffer them.
+    const acyclic =
+      traced && runtimePrefix === null && !isStreamRooted && tracedFields.length === 0;
     const bounded =
       runtimePrefix !== null ||
       isStreamRooted ||
@@ -1089,11 +1098,12 @@ export function emitClassShapes(
       `entry:`,
     ];
     const cycType = `@${mangleClassTrace(cls.name)}.cyctype`;
+    if (acyclic) host.declare(`declare void @scr_cyc_no_children(ptr, ptr, ptr)`);
     if (traced)
       defs.push(
         cycTypeDescriptor(
           cycType,
-          `@${mangleClassTrace(cls.name)}`,
+          acyclic ? "@scr_cyc_no_children" : `@${mangleClassTrace(cls.name)}`,
           `@${mangleClassGcFree(cls.name)}`,
           host.nextCycKind?.() ?? 0,
         ),
@@ -1113,7 +1123,7 @@ export function emitClassShapes(
         ...emitObjectAlloc(
           host,
           sizeOf,
-          traced && !lifetime ? { type: cycType } : null,
+          traced && !lifetime ? { type: cycType, acyclic } : null,
           storedHeaderBytes(meta),
         ),
       );
@@ -1188,7 +1198,6 @@ export function emitClassShapes(
       // exactly the complement, then free (the trace/teardown complement
       // contract in scr_runtime.h).
       const indexed = indexedFields;
-      const tracedFields = indexed.filter((f) => traceAdapter(host, f.type) !== null);
       const untracedRefFields = indexed.filter(
         (f) => isRefCounted(f.type) && traceAdapter(host, f.type) === null,
       );

@@ -141,6 +141,11 @@ typedef struct ScrCycType {
    * Emitted allocation paths read it and take the slow path while it is 0. */
   uint32_t id;
 } ScrCycType;
+/* The trace of a type that holds nothing cycle-capable: it visits nothing.
+ * Emitted classes whose fields hold no cycle-capable value but whose
+ * hierarchy is traced name it (llvm/classes.ts); their objects are
+ * allocated with `buf` SCR_CYC_ACYCLIC. */
+void scr_cyc_no_children(void *obj, ScrTraceVisit visit, void *ctx);
 /* Runtime families' kinds. Emitted descriptors count from
  * SCR_CYC_KIND_EMITTED (llvm/alloc.ts FIRST_EMITTED_CYC_KIND). */
 enum {
@@ -169,7 +174,7 @@ enum {
  * collector color (SCR_CYC_*) and generation (SCR_CYC_NURSERY..SCR_CYC_OLD,
  * the walk filter), and `buf`: SCR_CYC_BUFFERED_BIT while the object sits in
  * its generation's candidate buffer, with its position there below it (O(1)
- * removal when rc hits 0). */
+ * removal when rc hits 0), or SCR_CYC_ACYCLIC. */
 typedef struct ScrCycHdr {
   uint16_t id;
   uint8_t color;
@@ -177,13 +182,25 @@ typedef struct ScrCycHdr {
   uint32_t buf;
 } ScrCycHdr;
 #define SCR_CYC_BUFFERED_BIT 0x80000000u
+/* `buf` of an object whose type's trace is scr_cyc_no_children: it has no
+ * cycle-capable children, so it is never on a cycle and never a candidate.
+ * Such a type still carries the header when it shares a hierarchy with
+ * cycle-capable classes (headers are uniform per hierarchy). The value has
+ * the buffered bit set, so a release that leaves the object alive returns
+ * at the buffered test and makes no call; scr_cyc_is_buffered is false for
+ * it. No buffer position reaches it (scr_cyc_grow caps the buffers well
+ * below 2^31 entries). */
+#define SCR_CYC_ACYCLIC 0xffffffffu
 
 /* This layout is an ABI, not an implementation detail. The emitted
- * allocation stores the id and zeroes the rest; every emitted release of a
+ * allocation stores the id and zeroes the rest (`buf` SCR_CYC_ACYCLIC for a
+ * class whose trace is scr_cyc_no_children); every emitted release of a
  * headered object (llvm/shapes.ts cycleRootLines, used by the record, class
  * and inline RC helpers) mirrors scr_cyc_on_release's early return by
- * testing the sign of `buf` as an i32 at obj-4, and the emitted inline free
- * reads the generation as an i8 at obj-5. Hence the assertions. */
+ * testing the sign of `buf` as an i32 at obj-4, the emitted death mirrors
+ * scr_cyc_on_dead's by testing `buf` below -1 (cycleDeadLines), and the
+ * emitted inline free reads the generation as an i8 at obj-5. Hence the
+ * assertions. */
 _Static_assert(sizeof(ScrCycHdr) == 8, "LLVM backend expects an 8-byte cycle header");
 _Static_assert(offsetof(ScrCycHdr, id) == 0 && sizeof(((ScrCycHdr *)0)->id) == 2,
                "the emitted allocation stores the registry id as an i16 at the block start");
@@ -215,6 +232,11 @@ static inline void scr_cyc_set_color(ScrCycHdr *h, unsigned color) { h->color = 
 static inline unsigned scr_cyc_gen(const ScrCycHdr *h) { return h->gen; }
 static inline void scr_cyc_set_gen(ScrCycHdr *h, unsigned gen) { h->gen = (uint8_t)gen; }
 static inline bool scr_cyc_is_buffered(const ScrCycHdr *h) {
+  return (h->buf & SCR_CYC_BUFFERED_BIT) != 0 && h->buf != SCR_CYC_ACYCLIC;
+}
+/* A release that leaves the object alive has nothing to buffer: it is a
+ * candidate already, or it is never one (SCR_CYC_ACYCLIC). */
+static inline bool scr_cyc_release_done(const ScrCycHdr *h) {
   return (h->buf & SCR_CYC_BUFFERED_BIT) != 0;
 }
 static inline uint32_t scr_cyc_buf_index(const ScrCycHdr *h) {
@@ -608,7 +630,7 @@ static inline bool scr_cyc_append(ScrCycHdr *h, void *obj) {
  * Most releases of long-lived containers take the first early return. */
 static inline void scr_cyc_released(void *obj) {
   ScrCycHdr *h = scr_cyc_hdr(obj);
-  if (scr_cyc_is_buffered(h)) return;
+  if (scr_cyc_release_done(h)) return;
 #if SCR_CYC_INLINE_BUFFERING
   if (scr_cyc_append(h, obj)) return;
 #endif
