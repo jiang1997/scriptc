@@ -334,6 +334,7 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
     "scr_node_island_handle.c",
     "scr_node_island_export.c",
     "scr_node_island_boot.c",
+    "scr_node_island_gc.c",
   ),
 ];
 
