@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import type { Lowerer } from "../lowerer.js";
 import { isJsSourceFile, locOf } from "../../program.js";
@@ -285,7 +286,7 @@ export function truthyFilterCallback(
   const key = `filterBoolean:${typeKey(valueT)}`;
   let name = lowerer.arrHofHelpers.get(key);
   if (!name) {
-    name = `%arr.filterBoolean.${lowerer.arrHofHelpers.size}`;
+    name = keyedHelperName(lowerer, "%arr.filterBoolean", key);
     lowerer.arrHofHelpers.set(key, name);
     const value = varRef("v.0", valueT, loc);
     lowerer.liftedFns.push({

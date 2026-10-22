@@ -474,11 +474,11 @@ static ScrArrState scr_itable_element(ScrITableElements *w, size_t i, uint64_t *
     *slot = a->data[i];
     return (ScrArrState)*scr_arr_state_ptr(a, i);
   }
-  if (a->ext) {
-    while (w->sparse < a->ext->sparse_len && a->ext->sparse[w->sparse].index < i) w->sparse++;
-    if (w->sparse < a->ext->sparse_len && a->ext->sparse[w->sparse].index == i) {
-      *slot = a->ext->sparse[w->sparse].slot;
-      return (ScrArrState)a->ext->sparse[w->sparse].state;
+  if (scr_arr_ext_of(a)) {
+    while (w->sparse < scr_arr_ext_of(a)->sparse_len && scr_arr_ext_of(a)->sparse[w->sparse].index < i) w->sparse++;
+    if (w->sparse < scr_arr_ext_of(a)->sparse_len && scr_arr_ext_of(a)->sparse[w->sparse].index == i) {
+      *slot = scr_arr_ext_of(a)->sparse[w->sparse].slot;
+      return (ScrArrState)scr_arr_ext_of(a)->sparse[w->sparse].state;
     }
   }
   return SCR_ARR_HOLE;

@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
 import { locOf } from "../../program.js";
@@ -84,7 +85,7 @@ export function lowerDisposableStackUseCall(
   const key = `disposableStack.use:${className}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%disposableStack.use.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%disposableStack.use", key);
     lowerer.valueHelpers.set(key, helper);
     const context = newFnCtx(false, null, null, VOID);
     lowerer.fnStack.push(context);

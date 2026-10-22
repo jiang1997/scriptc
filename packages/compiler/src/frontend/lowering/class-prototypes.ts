@@ -6,6 +6,7 @@ import {
   DYN,
   STRING,
   SYMBOL_T,
+  VOID,
   isUnitType,
   type IrExpr,
   type IrFunction,
@@ -121,6 +122,7 @@ export function classPrototypeData(
     const globalId = `%g.${name}`;
     const readyId = `${globalId}.ready`;
     info.def.prototypeDataHelper = name;
+    lowerer.shareHelper(name);
     const className = info.def.jsName ?? info.def.name;
     lowerer.globalsList.push({
       id: globalId,
@@ -155,6 +157,18 @@ export function classPrototypeData(
                 : { kind: "dynObjLit", fields: [], type: DYN, loc },
               loc,
             },
+            // util.inspect prints an instance with its class's name.
+            {
+              kind: "exprStmt",
+              expr: {
+                kind: "libCall",
+                fn: "dyn.nameClassPrototype",
+                args: [value, { kind: "strLit", value: className, type: STRING, loc }],
+                type: VOID,
+                loc,
+              },
+              loc,
+            },
             {
               kind: "assign",
               localId: readyId,
@@ -172,7 +186,7 @@ export function classPrototypeData(
   }
   if (!metadataOnly && !info.prototypeObservedMethodsReady) {
     info.prototypeObservedMethodsReady = true;
-    const helper = lowerer.liftedFns.find((fn) => fn.name === info.def.prototypeDataHelper)!;
+    const helper = lowerer.liftedFnNamed(info.def.prototypeDataHelper)!;
     const value = varRef(`%g.${info.def.prototypeDataHelper}`, DYN, loc);
     // Materialize only observed method slots. Own declarations stop lookup
     // at the correct prototype even if an ancestor is replaced later. An
@@ -307,7 +321,7 @@ export function reflectClassPrototype(
     if (info.base.prototypeReflectionRefusal)
       return refuse("prototype reflection with this base class is not supported yet");
   }
-  const helper = lowerer.liftedFns.find((fn) => fn.name === info.def.prototypeDataHelper);
+  const helper = lowerer.liftedFnNamed(info.def.prototypeDataHelper);
   const initialization = helper?.body[0];
   if (!helper || initialization?.kind !== "if" || info.prototypeReflectionReady) return prototype;
   info.prototypeReflectionReady = true;

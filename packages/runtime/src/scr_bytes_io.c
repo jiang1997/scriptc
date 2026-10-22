@@ -6,8 +6,8 @@
  * exact source lists). */
 #include "scr_runtime.h"
 
-static const ScrArrOps scr_bytes_io_str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
-static const ScrArrOps scr_bytes_io_bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
+static ScrArrOps scr_bytes_io_str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
+static ScrArrOps scr_bytes_io_bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
 
 #include <errno.h>
 #include <math.h>
@@ -1366,66 +1366,6 @@ ScrBytes *scr_buffer_from_dyn_ref_pooled(const ScrDyn *value, const ScrStr *enco
     return out;
   }
   return scr_buffer_from_dyn_pooled(value, encoding);
-}
-
-/* ── the checked-dynamic Buffer compare/equals validators ──────────────
- * Node's argument ladders for buf.equals / buf.compare / Buffer.compare
- * over dyn-boxed arguments (the invalid-input probes: string needles,
- * '0' offsets, null/object range args). A well-typed dyn still computes
- * the real answer — validation, not a constant fence. */
-
-/* A bytes payload or the API's own ERR_INVALID_ARG_TYPE (borrowed). */
-static ScrBytes *scr_bytes_chk_u8(const ScrDyn *d, const char *argname) {
-  if (!scr_dyn_bytes_is(d, SCR_BYTES_U8)) {
-    scr_dyn_arg_type_fail(argname, "an instance of Buffer or Uint8Array", d);
-    return NULL;
-  }
-  return d->v.bytes;
-}
-
-double scr_buffer_compare_chk(const ScrDyn *a, const ScrDyn *b) {
-  ScrBytes *b1 = scr_bytes_chk_u8(a, "buf1");
-  if (!b1) return 0;
-  ScrBytes *b2 = scr_bytes_chk_u8(b, "buf2");
-  if (!b2) return 0;
-  return scr_bytes_compare(b1, b2, 0, 0, 0, 0, 0);
-}
-
-bool scr_bytes_equals_chk(const ScrBytes *recv, const ScrDyn *other) {
-  ScrBytes *o = scr_bytes_chk_u8(other, "otherBuffer");
-  if (!o) return false;
-  return scr_bytes_equals(recv, o);
-}
-
-/* One offset slot: undefined takes the Node default, non-numbers throw
- * ERR_INVALID_ARG_TYPE "of type number", numbers run validateOffset. */
-static bool scr_bytes_chk_off(const ScrDyn *d, const char *name, double max,
-                              double dflt, double *out) {
-  if (d->kind == SCR_DYN_UNDEF) {
-    *out = dflt;
-    return true;
-  }
-  if (d->kind != SCR_DYN_NUM) {
-    scr_dyn_arg_type_fail(name, "of type number", d);
-    return false;
-  }
-  *out = d->v.num;
-  return scr_bytes_validate_off(name, *out, max);
-}
-
-double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
-                             const ScrDyn *ts, const ScrDyn *te,
-                             const ScrDyn *ss, const ScrDyn *se) {
-  ScrBytes *t = scr_bytes_chk_u8(target, "target");
-  if (!t) return 0;
-  double tsv, tev, ssv, sev;
-  if (!scr_bytes_chk_off(ts, "targetStart", 9007199254740991.0, 0, &tsv)) return 0;
-  if (!scr_bytes_chk_off(te, "targetEnd", (double)t->len, (double)t->len, &tev)) return 0;
-  if (!scr_bytes_chk_off(ss, "sourceStart", 9007199254740991.0, 0, &ssv)) return 0;
-  if (!scr_bytes_chk_off(se, "sourceEnd", (double)src->len, (double)src->len, &sev)) return 0;
-  /* Every slot validated or defaulted above; nargs 4 revalidates the
-   * now-known-good numbers (a no-op) and keeps one comparison core. */
-  return scr_bytes_compare(src, t, 4, tsv, tev, ssv, sev);
 }
 
 /* new Buffer(number, encoding) — the deprecated ctor's string arm with a

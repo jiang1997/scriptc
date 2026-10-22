@@ -1,14 +1,20 @@
 import { declareTypedArguments } from "./typed-arguments.js";
-import { varRef } from "../../ir/build.js";
+import { dynUndefinedExpr, varRef } from "../../ir/build.js";
+import { everyStmtList, transformStmtList } from "../../ir/traverse.js";
+import { bindingNeverReassigned } from "./binding-analysis.js";
+import { declareContextLocal } from "./function-context.js";
+import { isErrorFirstErrorType } from "./builtins/arguments.js";
 import { InternalCompilerError } from "../../errors.js";
 import * as ts from "../ts7/adapter.js";
 import { isRebindableFunctionSymbol } from "./rebindable-functions.js";
 import { bodyReadsArguments } from "../arguments-usage.js";
 import type { Lowerer } from "./lowerer.js";
 import {
+  BOOL,
   DYN,
   type IrExpr,
   type IrFunction,
+  type IrLocal,
   type IrParam,
   type IrStmt,
   type SrcLoc,
@@ -253,10 +259,18 @@ export function lowerLambda(
       shapes,
       funcType,
     );
+  // An error-first callback that reads its Buffer result: undefined on the
+  // error path, as in Node.
+  const undefinedResult = undefinedResultParam(
+    lowerer,
+    node,
+    shapes,
+    lowerer.errorFirstLiterals.has(node),
+  );
   const nameIdent =
     !ts.isArrowFunction(node) && node.name && ts.isIdentifier(node.name) ? node.name : null;
   const baseName = nameIdent ? nameIdent.text : "";
-  const fnName = `%fn${lowerer.lambdaCounter++}${baseName ? `_${baseName}` : ""}`;
+  const fnName = lowerer.closureName(locOf(node), baseName ? `_${baseName}` : "");
   // Named function expressions/declarations can self-reference by name; an
   // object-literal method's name is a PROPERTY, not a binding — no self.
   const selfSymbol =
@@ -340,78 +354,84 @@ export function lowerLambda(
         !shapes.some((s) => s.mode === "dynRest"),
     );
 
-    let body: IrStmt[];
-    if (ts.isBlock(node.body!)) {
-      body = lowerer.lowerStmts(node.body!.statements.nodes);
-    } else {
-      // Bare-expression arrow body: `x => e` is `x => { return e; }`
-      // (or an expression statement when the signature returns void — or
-      // when a union-returning signature wraps a void expression, whose
-      // value is the implicit undefined arm appended below).
-      const bodyExpr = node.body as ts.Expression;
-      if (bodyReturn.kind === "void") {
-        // `() => undefined` — the return type maps to void (standalone
-        // undefined IS void in the type mapping) and the body value is a
-        // bare unit literal: a pure no-op, dropped rather than tripping
-        // the validator's bare-unitLit rule (typeCheckReturnExpression).
-        // A `void e` body rides the statement lowering (the value is
-        // discarded here, so the operand evaluates for effect alone —
-        // `(name) => void doThing(name)`, the fire-and-forget arrow). A
-        // conditional body does the same so its void arms become lazy
-        // statement branches instead of a forbidden void-valued ternary.
-        let stripped: ts.Expression = bodyExpr;
-        while (ts.isParenthesizedExpression(stripped)) stripped = stripped.expression;
-        if (ts.isVoidExpression(stripped) || ts.isConditionalExpression(stripped)) {
-          body = [lowerer.lowerExprStatement(stripped)];
+    const lowerBody = (): IrStmt[] => {
+      let body: IrStmt[];
+      if (ts.isBlock(node.body!)) {
+        body = lowerer.lowerStmts(node.body!.statements.nodes);
+      } else {
+        // Bare-expression arrow body: `x => e` is `x => { return e; }`
+        // (or an expression statement when the signature returns void — or
+        // when a union-returning signature wraps a void expression, whose
+        // value is the implicit undefined arm appended below).
+        const bodyExpr = node.body as ts.Expression;
+        if (bodyReturn.kind === "void") {
+          // `() => undefined` — the return type maps to void (standalone
+          // undefined IS void in the type mapping) and the body value is a
+          // bare unit literal: a pure no-op, dropped rather than tripping
+          // the validator's bare-unitLit rule (typeCheckReturnExpression).
+          // A `void e` body rides the statement lowering (the value is
+          // discarded here, so the operand evaluates for effect alone —
+          // `(name) => void doThing(name)`, the fire-and-forget arrow). A
+          // conditional body does the same so its void arms become lazy
+          // statement branches instead of a forbidden void-valued ternary.
+          let stripped: ts.Expression = bodyExpr;
+          while (ts.isParenthesizedExpression(stripped)) stripped = stripped.expression;
+          if (ts.isVoidExpression(stripped) || ts.isConditionalExpression(stripped)) {
+            body = [lowerer.lowerExprStatement(stripped)];
+          } else {
+            const value = lowerer.lowerExpr(bodyExpr);
+            // `async () => p` with a void result still resolves the
+            // function's promise with p (its settlement, rejections included);
+            // a maybe-promise value adopts only its promise arm.
+            const flattened = isAsync ? lowerer.maybePromiseReturn(bodyExpr, value, VOID) : null;
+            body = flattened
+              ? [flattened]
+              : value.kind === "unitLit"
+                ? []
+                : isAsync && value.type.kind === "promise"
+                  ? [lowerer.adoptingReturn(value, VOID, (e) => e)]
+                  : [{ kind: "exprStmt", expr: value, loc: locOf(node.body!) }];
+          }
         } else {
-          const value = lowerer.lowerExpr(bodyExpr);
-          // `async () => p` with a void result still resolves the
-          // function's promise with p (its settlement, rejections included);
-          // a maybe-promise value adopts only its promise arm.
-          const flattened = isAsync ? lowerer.maybePromiseReturn(bodyExpr, value, VOID) : null;
+          // Concise and block bodies use the same destination layout for
+          // fresh literals. Async bodies must inspect promises first.
+          let value =
+            isAsync || fnCtx.inferReturn
+              ? lowerer.lowerExpr(bodyExpr)
+              : lowerer.lowerExprExpecting(bodyExpr, bodyReturn);
+          // An async concise body whose value is itself a promise
+          // (`async () => p`): the async machinery RESOLVES the returned
+          // thenable into the function's own promise — lowerReturnValue's
+          // await-through, applied to the implicit return.
+          if (isAsync && value.type.kind === "promise" && bodyReturn.kind !== "promise") {
+            value = lowerer.returnedPromiseAwait(value);
+          }
+          const flattened =
+            isAsync && !fnCtx.inferReturn
+              ? lowerer.maybePromiseReturn(bodyExpr, value, bodyReturn)
+              : null;
           body = flattened
             ? [flattened]
-            : value.kind === "unitLit"
-              ? []
-              : isAsync && value.type.kind === "promise"
-                ? [lowerer.adoptingReturn(value, VOID, (e) => e)]
-                : [{ kind: "exprStmt", expr: value, loc: locOf(node.body!) }];
+            : value.type.kind === "void" && lowerer.wrappedUndefined(bodyReturn, locOf(node.body!))
+              ? [{ kind: "exprStmt", expr: value, loc: locOf(node.body!) }]
+              : [
+                  {
+                    kind: "return",
+                    value: fnCtx.inferReturn
+                      ? value
+                      : lowerer.coerceInto(bodyExpr, value, bodyReturn),
+                    loc: locOf(node.body!),
+                  },
+                ];
+          if (fnCtx.inferReturn && body[0]?.kind === "return")
+            fnCtx.inferReturn.entries.push({ stmt: body[0], node: bodyExpr });
         }
-      } else {
-        // Concise and block bodies use the same destination layout for
-        // fresh literals. Async bodies must inspect promises first.
-        let value =
-          isAsync || fnCtx.inferReturn
-            ? lowerer.lowerExpr(bodyExpr)
-            : lowerer.lowerExprExpecting(bodyExpr, bodyReturn);
-        // An async concise body whose value is itself a promise
-        // (`async () => p`): the async machinery RESOLVES the returned
-        // thenable into the function's own promise — lowerReturnValue's
-        // await-through, applied to the implicit return.
-        if (isAsync && value.type.kind === "promise" && bodyReturn.kind !== "promise") {
-          value = lowerer.returnedPromiseAwait(value);
-        }
-        const flattened =
-          isAsync && !fnCtx.inferReturn
-            ? lowerer.maybePromiseReturn(bodyExpr, value, bodyReturn)
-            : null;
-        body = flattened
-          ? [flattened]
-          : value.type.kind === "void" && lowerer.wrappedUndefined(bodyReturn, locOf(node.body!))
-            ? [{ kind: "exprStmt", expr: value, loc: locOf(node.body!) }]
-            : [
-                {
-                  kind: "return",
-                  value: fnCtx.inferReturn
-                    ? value
-                    : lowerer.coerceInto(bodyExpr, value, bodyReturn),
-                  loc: locOf(node.body!),
-                },
-              ];
-        if (fnCtx.inferReturn && body[0]?.kind === "return")
-          fnCtx.inferReturn.entries.push({ stmt: body[0], node: bodyExpr });
       }
-    }
+      return body;
+    };
+    let body = undefinedResult
+      ? lowerUndefinedResultBody(lowerer, node, undefinedResult, lowerBody)
+      : lowerBody();
     if (fnCtx.inferReturn) {
       bodyReturn = resolveInferredReturn(
         lowerer,
@@ -537,7 +557,14 @@ export function lowerFunction(lowerer: Lowerer, decl: ts.FunctionDeclaration): I
         "function declarations whose block body the frontend cannot locate",
       );
     }
-    const body = [...prologue, ...lowerer.lowerStmts(bodyBlock.statements.nodes)];
+    const undefinedResult = undefinedResultParam(lowerer, decl, sig.params, false);
+    const lowerBody = (): IrStmt[] => lowerer.lowerStmts(bodyBlock.statements.nodes);
+    const body = [
+      ...prologue,
+      ...(undefinedResult
+        ? lowerUndefinedResultBody(lowerer, decl, undefinedResult, lowerBody)
+        : lowerBody()),
+    ];
     appendImplicitUndefinedReturn(lowerer, body, bodyReturn, locOf(decl));
     const fn: IrFunction = {
       name: sig.name,
@@ -593,4 +620,241 @@ export function lowerFunction(lowerer: Lowerer, decl: ts.FunctionDeclaration): I
   } finally {
     lowerer.fnStack.pop();
   }
+}
+
+/** The parameters of an error-first callback whose Buffer result its body
+ * reads: `(err, out)` with err typed Error | null (or any) and out a
+ * Buffer. The callback adapters of zlib and crypto pass a NULL Buffer
+ * after an error, where Node passes undefined. `error` is the error
+ * parameter's symbol when nothing writes it; `onlyAdapterCalls` marks a
+ * literal passed straight to such a function, which nothing else calls. */
+interface UndefinedResultParam {
+  symbol: ts.Symbol;
+  name: ts.Identifier;
+  error: ts.Symbol | null;
+  onlyAdapterCalls: boolean;
+}
+
+function undefinedResultParam(
+  lowerer: Lowerer,
+  node: ts.SignatureDeclaration,
+  shapes: readonly ParamShape[],
+  onlyAdapterCalls: boolean,
+): UndefinedResultParam | null {
+  const params = node.parameters.nodes.filter((p) => !isThisParameter(p));
+  if (params.length !== 2 || shapes.length !== 2 || node.asteriskToken !== undefined) return null;
+  const [errorDecl, decl] = params as [ts.ParameterDeclaration, ts.ParameterDeclaration];
+  const [errorShape, shape] = shapes as [ParamShape, ParamShape];
+  if (
+    !ts.isIdentifier(decl.name) ||
+    decl.initializer !== undefined ||
+    decl.questionToken !== undefined ||
+    decl.dotDotDotToken !== undefined ||
+    shape.mode !== "required" ||
+    shape.type.kind !== "bytes" ||
+    shape.type.elem !== "u8" ||
+    errorShape.mode !== "required" ||
+    !isErrorFirstErrorType(lowerer, errorShape.type)
+  )
+    return null;
+  const symbol = lowerer.checker.getSymbolAtLocation(decl.name);
+  if (
+    symbol === undefined ||
+    node.body === undefined ||
+    !readsSymbol(lowerer, node.body, symbol, decl.name)
+  )
+    return null;
+  const errorSymbol = ts.isIdentifier(errorDecl.name)
+    ? lowerer.checker.getSymbolAtLocation(errorDecl.name)
+    : undefined;
+  const error =
+    errorSymbol !== undefined &&
+    errorDecl.initializer === undefined &&
+    bindingNeverReassigned(lowerer, errorSymbol, errorDecl)
+      ? errorSymbol
+      : null;
+  return { symbol, name: decl.name, error, onlyAdapterCalls };
+}
+
+/** Whether `body` reads `symbol` (other than at its declaration `name`). */
+function readsSymbol(
+  lowerer: Lowerer,
+  body: ts.Node,
+  symbol: ts.Symbol,
+  name: ts.Identifier,
+): boolean {
+  let read = false;
+  const visit = (n: ts.Node): void => {
+    if (read) return;
+    if (ts.isShorthandPropertyAssignment(n)) {
+      if (lowerer.checker.getShorthandAssignmentValueSymbol(n) === symbol) read = true;
+    } else if (ts.isIdentifier(n)) {
+      if (n !== name && lowerer.checker.getSymbolAtLocation(n) === symbol) read = true;
+    } else {
+      ts.forEachChild(n, visit);
+    }
+  };
+  visit(body);
+  return read;
+}
+
+/** The body of an error-first callback whose Buffer result may be absent.
+ * With a result, the body lowers as written. Without one (the adapter's
+ * NULL Buffer after an error), the body lowers again with the result read
+ * as `any` holding undefined and the error parameter holding an Error.
+ * Conditions on the error parameter fold in that copy (staticCondition),
+ * and in the first copy too, as null, for a literal only the adapter
+ * calls: a body that returns after `if (err)` then keeps the rest of its
+ * statements in the first copy only.
+ *
+ * Inside an error-path copy, a nested callback lowers once with the result
+ * read as `any`, so nested callbacks do not double at every level. An
+ * error-path copy with no lowering throws a coded error when it runs. */
+function lowerUndefinedResultBody(
+  lowerer: Lowerer,
+  node: ts.SignatureDeclaration,
+  result: UndefinedResultParam,
+  lowerBody: () => IrStmt[],
+): IrStmt[] {
+  const loc = locOf(node);
+  const param = lowerer.bindingIn(lowerer.ctx, result.symbol);
+  if (param === null) throw new InternalCompilerError("lowerer bug: callback result unbound");
+  const absent = (): IrExpr => ({
+    kind: "libCall",
+    fn: "bytes.isAbsent",
+    args: [varRef(param.id, param.type, loc)],
+    type: BOOL,
+    loc,
+  });
+  const fence: IrStmt = {
+    kind: "runtimeFence",
+    code: "SC2020",
+    message: `the callback's '${result.name.text}' is undefined after an error, and this callback has no lowering that reads it as undefined`,
+    loc,
+  };
+  const withKnownError = (error: boolean | null, lower: () => IrStmt[]): IrStmt[] => {
+    if (result.error === null || error === null) return lower();
+    lowerer.knownErrors.set(result.error, error);
+    try {
+      return lower();
+    } finally {
+      lowerer.knownErrors.delete(result.error);
+    }
+  };
+  /** The body with the result read as `any` from `slot`, or null when it
+   * has no such lowering or converts the result into a static slot. */
+  const lowerDynamic = (slot: IrLocal, knownError: boolean | null): IrStmt[] | null => {
+    const diags = lowerer.diags.length;
+    const stats = lowerer.suppressStats;
+    lowerer.scopes.push(new Map([[result.symbol, slot]]));
+    lowerer.anySymbols.add(result.symbol);
+    lowerer.suppressStats = true;
+    lowerer.errorPathCopies++;
+    try {
+      const lowered = withKnownError(knownError, lowerBody);
+      if (lowerer.diags.length > diags || !readsSlotDynamically(lowered, slot.id))
+        throw new PoisonError();
+      // Passed on into a Buffer slot, the result is the Buffer it holds
+      // (the adapter's, or one the body assigned), or, while it holds
+      // undefined, the absent Buffer, which a callee with this entry test
+      // reads as undefined.
+      const guarded = new Set<IrExpr>();
+      return transformStmtList(lowered, {
+        expr: (e) => {
+          if (!isBufferCheckOf(e, slot.id) || guarded.has(e)) return e;
+          guarded.add(e);
+          return {
+            kind: "ternary",
+            cond: {
+              kind: "dynTest",
+              test: "undefined",
+              value: varRef(slot.id, DYN, e.loc),
+              type: BOOL,
+              loc: e.loc,
+            },
+            then: { kind: "libCall", fn: "bytes.absent", args: [], type: e.type, loc: e.loc },
+            else_: e,
+            type: e.type,
+            loc: e.loc,
+          };
+        },
+        stmt: (stmt) => stmt,
+      });
+    } catch (error) {
+      if (error instanceof InternalCompilerError) throw error;
+      lowerer.diags.length = diags;
+      return null;
+    } finally {
+      lowerer.errorPathCopies--;
+      lowerer.anySymbols.delete(result.symbol);
+      lowerer.scopes.pop();
+      lowerer.suppressStats = stats;
+    }
+  };
+  // Mutable: the body may assign to its result (`if (!out) out = ...`).
+  const slot = declareContextLocal(lowerer.ctx, "%result", DYN, true, undefined, undefined);
+  const undefinedResult: IrStmt = {
+    kind: "varDecl",
+    localId: slot.id,
+    init: dynUndefinedExpr(loc),
+    loc,
+  };
+  if (lowerer.errorPathCopies > 0) {
+    // One copy for both paths, with the result boxed when present.
+    const dynamic = lowerDynamic(slot, null);
+    if (dynamic !== null)
+      return [
+        {
+          kind: "varDecl",
+          localId: slot.id,
+          init: {
+            kind: "ternary",
+            cond: absent(),
+            then: dynUndefinedExpr(loc),
+            else_: lowerer.coerceInto(result.name, varRef(param.id, param.type, loc), DYN),
+            type: DYN,
+            loc,
+          },
+          loc,
+        },
+        ...dynamic,
+      ];
+  }
+  const withResult = withKnownError(result.onlyAdapterCalls ? false : null, lowerBody);
+  const withoutResult = lowerDynamic(slot, true);
+  return [
+    {
+      kind: "if",
+      cond: absent(),
+      then: withoutResult === null ? [fence] : [undefinedResult, ...withoutResult],
+      else_: withResult,
+      loc,
+    },
+  ];
+}
+
+/** Whether the error-path copy reads the checked-dynamic result slot only as
+ * a checked-dynamic value, never converted into a static slot (where Node
+ * would hold undefined) other than a Buffer one. */
+function readsSlotDynamically(body: IrStmt[], slotId: string): boolean {
+  const isSlot = (e: IrExpr): boolean => e.kind === "varRef" && e.localId === slotId;
+  return everyStmtList(body, {
+    expr: (e) => {
+      if (isSlot(e)) return e.type.kind === "dyn";
+      if (e.kind === "dynCheck" && isSlot(e.value)) return isBufferCheckOf(e, slotId);
+      return true;
+    },
+    stmt: () => true,
+  });
+}
+
+/** Whether `e` converts the result slot into a Buffer slot. */
+function isBufferCheckOf(e: IrExpr, slotId: string): boolean {
+  return (
+    e.kind === "dynCheck" &&
+    e.value.kind === "varRef" &&
+    e.value.localId === slotId &&
+    e.type.kind === "bytes" &&
+    e.type.elem === "u8"
+  );
 }

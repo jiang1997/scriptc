@@ -57,6 +57,28 @@ static SCR_TL uint64_t scr_channel_poll_gen;
 /* the loop pass continues a phase (scr_channel_more answered true) */
 static SCR_TL bool scr_channel_continuing;
 static SCR_TL bool scr_channel_closing_phase;
+/* Messages from the thread's workers and its parent are delivered in
+ * batches, as Node's MessagePort delivers them: one callback takes the
+ * messages queued when it starts, and those that arrive meanwhile until it
+ * has taken SCR_WORKER_BATCH_MIN, with a microtask checkpoint after each,
+ * before the loop goes on to timers and immediates. A delivered message
+ * starts a batch; the loop pass continues it (scr_workers_more) while the
+ * next event is a message and the batch has room. Port messages that a
+ * listener posts meanwhile wait for the batch to end, and the pass then
+ * continues once more so they are delivered before immediates, as in Node. */
+#define SCR_WORKER_BATCH_MIN 1000
+static SCR_TL size_t scr_worker_batch_left;
+static SCR_TL bool scr_worker_batch_ended;
+/* scr_workers_more found the batch's next message at the head of the
+ * mailbox. Only this thread takes events and others append them, so it is
+ * still there when the pass dispatches. */
+static SCR_TL bool scr_worker_batch_queued;
+
+/* Whether a batch is open and its next message is queued. */
+static bool scr_worker_batch_next(void) {
+  return scr_worker_batch_left > 0 && scr_worker_events &&
+         scr_mailbox_head_kind(scr_worker_events) == SCR_WORKER_MESSAGE;
+}
 static const char *const scr_worker_method_names[] = {
   "ref", "unref", "hasRef", "terminate", "postMessage", "on", "once", "addListener",
   "prependListener", "prependOnceListener", "off", "removeListener", "removeAllListeners",
@@ -700,8 +722,30 @@ static bool scr_channel_more(void) {
   return more;
 }
 
+static bool scr_workers_more(void) {
+  if (scr_worker_batch_left > 0) {
+    if (scr_worker_batch_next()) {
+      scr_worker_batch_queued = true;
+      return true;
+    }
+    scr_worker_batch_left = 0;
+    scr_worker_batch_ended = true;
+  }
+  if (scr_channel_more()) return true;
+  /* One more pass after a batch when a port has something to deliver: the
+   * ports' poll phase for what its listeners posted. */
+  bool ended = scr_worker_batch_ended;
+  scr_worker_batch_ended = false;
+  if (ended)
+    for (ScrWorkerView *view = scr_channel_ports; view; view = view->next)
+      if (scr_channel_port_ready(view)) return true;
+  return false;
+}
+
 static void scr_worker_dispatch(void) {
-  if (scr_channel_dispatch()) return;
+  bool batch = scr_worker_batch_queued;
+  scr_worker_batch_queued = false;
+  if (!batch && scr_channel_dispatch()) return;
   ScrWorkerView *port = scr_worker_port;
   if (port && port->closing) {
     port->closing = false;
@@ -718,7 +762,16 @@ static void scr_worker_dispatch(void) {
     port->queued_head = event->next;
     if (!port->queued_head) port->queued_tail = NULL;
     event->next = NULL;
-  } else event = scr_mailbox_take(scr_worker_events);
+  } else {
+    event = scr_mailbox_take(scr_worker_events);
+    if (event && event->kind == SCR_WORKER_MESSAGE) {
+      if (scr_worker_batch_left == 0) {
+        size_t queued = 1 + scr_mailbox_count_kind(scr_worker_events, SCR_WORKER_MESSAGE);
+        scr_worker_batch_left = queued > SCR_WORKER_BATCH_MIN ? queued : SCR_WORKER_BATCH_MIN;
+      }
+      scr_worker_batch_left--;
+    }
+  }
   if (!event) return;
   if (event->kind == SCR_WORKER_WAKE) { scr_mail_event_free(event); return; }
   if (event->kind == SCR_WORKER_STDIN) {
@@ -869,7 +922,7 @@ static bool scr_worker_events_install(void) {
   if (scr_context_atexit(scr_worker_events_cleanup) != 0) scr_trap("scriptc: out of memory\n");
   scr_loop_set_workers(scr_workers_pending, scr_worker_events_ready, scr_worker_dispatch,
     scr_worker_events_pollfd, scr_worker_events_wait);
-  scr_loop_set_workers_more(scr_channel_more);
+  scr_loop_set_workers_more(scr_workers_more);
   return true;
 }
 

@@ -636,7 +636,7 @@ static void test_value_keys_and_copies(void) {
 }
 
 #ifdef SCR_RC_AUDIT
-static const ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
+static ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
 
 static void test_identity_cycles(void) {
   scr_collect_cycles();

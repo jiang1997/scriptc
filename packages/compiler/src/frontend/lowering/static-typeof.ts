@@ -63,9 +63,44 @@ export function staticTypeofComparison(lowerer: Lowerer, e: ts.BinaryExpression)
   }
 }
 
+/** Whether a callback's error parameter holds an Error (true) or null
+ * (false) in the copy of the callback body being lowered
+ * (lowerUndefinedResultBody), or null for other expressions. */
+function knownError(lowerer: Lowerer, e: ts.Expression): boolean | null {
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (lowerer.knownErrors.size === 0 || !ts.isIdentifier(e)) return null;
+  const symbol = lowerer.checker.getSymbolAtLocation(e);
+  return symbol === undefined ? null : (lowerer.knownErrors.get(symbol) ?? null);
+}
+
+/** A comparison of a known error parameter against `null`
+ * (`err !== null`, `err == null`), folded. Null for other shapes. */
+function knownErrorComparison(lowerer: Lowerer, e: ts.BinaryExpression): boolean | null {
+  const isNull = (x: ts.Expression): boolean => {
+    while (ts.isParenthesizedExpression(x)) x = x.expression;
+    return x.kind === ts.SyntaxKind.NullKeyword;
+  };
+  const error = isNull(e.right)
+    ? knownError(lowerer, e.left)
+    : isNull(e.left)
+      ? knownError(lowerer, e.right)
+      : null;
+  if (error === null) return null;
+  switch (e.operatorToken.kind) {
+    case ts.SyntaxKind.EqualsEqualsEqualsToken:
+    case ts.SyntaxKind.EqualsEqualsToken:
+      return !error;
+    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
+    case ts.SyntaxKind.ExclamationEqualsToken:
+      return error;
+    default:
+      return null;
+  }
+}
+
 /** The value of a condition built from statically answered typeof
- * comparisons, `!`, `&&` and `||` (the global-detection chains), or null
- * when any operand needs evaluation. */
+ * comparisons, known callback error parameters, `!`, `&&` and `||` (the
+ * global-detection chains), or null when any operand needs evaluation. */
 export function staticCondition(lowerer: Lowerer, expr: ts.Expression): boolean | null {
   let e = expr;
   while (ts.isParenthesizedExpression(e)) e = e.expression;
@@ -73,6 +108,7 @@ export function staticCondition(lowerer: Lowerer, expr: ts.Expression): boolean 
     const inner = staticCondition(lowerer, e.operand);
     return inner === null ? null : !inner;
   }
+  if (ts.isIdentifier(e)) return knownError(lowerer, e);
   if (!ts.isBinaryExpression(e)) return null;
   const op = e.operatorToken.kind;
   if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
@@ -82,7 +118,7 @@ export function staticCondition(lowerer: Lowerer, expr: ts.Expression): boolean 
     if (left !== isAnd) return left;
     return staticCondition(lowerer, e.right);
   }
-  return staticTypeofComparison(lowerer, e);
+  return staticTypeofComparison(lowerer, e) ?? knownErrorComparison(lowerer, e);
 }
 
 /** The expression a value reduces to once statically decided conditions

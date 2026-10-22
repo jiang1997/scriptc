@@ -1,4 +1,5 @@
 /* Property reads (`a.b`): lowerExprInner's property-access branch, intrinsic and union properties, field reads and targets, and match-group reads. */
+import { keyedHelperName } from "../stable-names.js";
 import { staticallySelected } from "../static-typeof.js";
 import * as ts from "../../ts7/adapter.js";
 import { lowerHistogramProperty } from "../builtins/performance.js";
@@ -2783,7 +2784,7 @@ export function lowerGroupsProjection(
   const key = `regexgroups:${shapeId}:${groups.map((g) => `${g.name}=${g.index}`).join(",")}:${recvKey}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%regex.groups.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%regex.groups", key);
     lowerer.valueHelpers.set(key, helper);
     const body: IrStmt[] = [];
     const locals: IrLocal[] = [{ id: "m.0", name: "m", type: recv.type, mutable: true }];

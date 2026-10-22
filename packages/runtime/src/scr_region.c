@@ -803,17 +803,17 @@ static void *scr_rgn_slot_ptr(uint64_t slot) {
 static void scr_rgn_walk_arr(ScrRgnWalk *w, ScrArr *a) {
   if (a->elem != SCR_ELEM_REF && a->elem != SCR_ELEM_ARR) return;
   ScrRgnSlotKind k = a->elem == SCR_ELEM_ARR ? (ScrRgnSlotKind){SCR_RGN_W_ARR, NULL}
-                                             : scr_rgn_slot_kind(a->ops ? a->ops->release : NULL);
+                                             : scr_rgn_slot_kind(scr_arr_ops(a) ? scr_arr_ops(a)->release : NULL);
   size_t dense = a->len < a->cap ? a->len : a->cap;
   const uint8_t *states = scr_arr_states_end(a);
   for (size_t i = 0; i < dense; i++)
     if (!states || *scr_arr_state_in(states, i) == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->data[i]), k);
-  if (!a->ext) return;
-  for (size_t i = 0; i < a->ext->sparse_len; i++)
-    if (a->ext->sparse[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->ext->sparse[i].slot), k);
-  for (size_t i = 0; i < a->ext->prop_len; i++)
-    if (a->ext->props[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(a->ext->props[i].slot), k);
-  scr_rgn_enter(w, a->ext->metadata, SCR_RGN_W_DYN, NULL);
+  if (!scr_arr_ext_of(a)) return;
+  for (size_t i = 0; i < scr_arr_ext_of(a)->sparse_len; i++)
+    if (scr_arr_ext_of(a)->sparse[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(scr_arr_ext_of(a)->sparse[i].slot), k);
+  for (size_t i = 0; i < scr_arr_ext_of(a)->prop_len; i++)
+    if (scr_arr_ext_of(a)->props[i].state == SCR_ARR_VALUE) scr_rgn_slot_as(w, scr_rgn_slot_ptr(scr_arr_ext_of(a)->props[i].slot), k);
+  scr_rgn_enter(w, scr_arr_ext_of(a)->metadata, SCR_RGN_W_DYN, NULL);
 }
 
 static void scr_rgn_walk_map(ScrRgnWalk *w, ScrMap *m) {
@@ -1362,6 +1362,18 @@ static void scr_rgn_thread_exit(void) {
     ScrRegion *r = i < t->nregions ? t->regions[i] : all[0];
     if (!r) continue;
     scr_rgn_spare_drop(r);
+#if defined(SCR_WORKERS) && SCR_RGN_MMAP && !defined(SCR_RGN_POISON)
+    /* Nothing is carved here after a script thread exits: the pages faulted
+     * in ahead of each chunk's bump go back while the program goes on, and
+     * its objects stay. */
+    if (!scr_context_is_main())
+      for (ScrRgnChunk *c = r->chunks; c; c = c->next) {
+        /* 64 KiB steps cover every page size, as in scr_rgn_chunk_retire. */
+        char *from = (char *)(((uintptr_t)c->bump + 0xffff) & ~(uintptr_t)0xffff);
+        if (c->touched > from) scr_mem_release_ahead(from, c->touched);
+        c->touched = c->bump;
+      }
+#endif
     for (ScrRgnSeg *s = r->segs, *next; s; s = next) {
       next = s->next;
       free(s);

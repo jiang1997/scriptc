@@ -1727,3 +1727,53 @@ console.log(util.inspect(extra));
     );
   });
 });
+
+describe("elements on Array.prototype", () => {
+  // Holes of native arrays read undefined without consulting
+  // Array.prototype, so storing an element there refuses instead of
+  // letting later hole reads diverge from Node. Named members stay
+  // writable.
+  test("an index write is a named fence (TS lane)", async () => {
+    const r = await compileAndRun(
+      "array-prototype-element-ts",
+      `const proto = Array.prototype as unknown as Record<string, unknown>;
+proto.label = "named";
+console.log(proto.label);
+(Array.prototype as unknown as Record<number, unknown>)[1] = "proto";
+console.log("unreachable");
+`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("named\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+  });
+
+  test("an index write and a mutating method are named fences (JS lane)", async () => {
+    const write = await compileAndRun(
+      "array-prototype-element-js",
+      `Array.prototype[0] = "proto";
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(write.exitCode).toBe(1);
+    expect(write.stdout).toBe("");
+    expect(write.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+    const push = await compileAndRun(
+      "array-prototype-push-js",
+      `Array.prototype.push("proto");
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(push.exitCode).toBe(1);
+    expect(push.stdout).toBe("");
+    expect(push.stderr).toMatch(
+      /^Uncaught Error: Elements on Array\.prototype are not supported yet \[SC2020[^\]]*\]\n$/,
+    );
+  });
+});

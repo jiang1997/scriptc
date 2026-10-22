@@ -2,7 +2,7 @@ import { dynUndefinedExpr, nodeThrowExpr } from "../../ir/build.js";
 import { InternalCompilerError } from "../../errors.js";
 
 import * as ts from "../ts7/adapter.js";
-import { lowerToNumberArgument } from "./lower-exprs.js";
+import { lowerToNumberArguments } from "./lower-exprs.js";
 import type { Lowerer } from "./lowerer.js";
 import { isDeclaredInAmbientNamespace } from "../type-mapper.js";
 import {
@@ -2278,7 +2278,7 @@ function lowerStaticNamespaceImport(
 ): IrExpr {
   const loc = locOf(call);
   const resultT: IrType & { kind: "promise" } = { kind: "promise", inner: ns };
-  const fnName = `%fn${lowerer.lambdaCounter++}_staticImport`;
+  const fnName = lowerer.closureName(loc, "_staticImport");
   const fnType: IrType & { kind: "func" } = { kind: "func", params: [], ret: resultT };
   const fnCtx = newFnCtx(true, null, fnType, ns);
   fnCtx.isAsync = true;
@@ -2415,8 +2415,14 @@ export function lowerStdlibMethodCall(
   const staticMath = isMath ? own(STATIC_MATH_FNS, name) : undefined;
   // A missing element (a hole bound by a loop, a local or field holding a
   // missing read, or the read itself) converts to NaN, ToNumber's answer
-  // for undefined, instead of trusting the checker's number type.
-  const mathArg = (a: ts.Expression): IrExpr => lowerToNumberArgument(lowerer, a);
+  // for undefined, instead of trusting the checker's number type. The
+  // arguments are all evaluated before any converts (lowerToNumberArguments).
+  const mathArgs = (
+    nodes: readonly ts.Expression[],
+    lowerOther?: (node: ts.Expression) => IrExpr | null,
+  ) => lowerToNumberArguments(lowerer, nodes, lowerOther);
+  const afterArguments = (stmts: IrStmt[], result: IrExpr): IrExpr =>
+    stmts.length === 0 ? result : { kind: "seqExpr", stmts, result, type: result.type, loc };
   // Math.hypot, and Math.max/Math.min with a spread among other arguments
   // (`Math.max(...xs, 5)`): the arguments in order, spreads flattened, as
   // one number[] the runtime folds.
@@ -2427,8 +2433,8 @@ export function lowerStdlibMethodCall(
         call.arguments.nodes.length > 1 &&
         call.arguments.nodes.some(ts.isSpreadElement)))
   ) {
-    const elems = call.arguments.nodes.map((a) =>
-      ts.isSpreadElement(a) ? lowerer.lowerExprExpecting(a.expression, arrayOf(F64)) : mathArg(a),
+    const { stmts, values: elems } = mathArgs(call.arguments.nodes, (a) =>
+      ts.isSpreadElement(a) ? lowerer.lowerExprExpecting(a.expression, arrayOf(F64)) : null,
     );
     const spreads = call.arguments.nodes.flatMap((a, i) => (ts.isSpreadElement(a) ? [i] : []));
     const packed: IrExpr = {
@@ -2439,7 +2445,7 @@ export function lowerStdlibMethodCall(
       loc,
     };
     const fn = name === "max" ? "math.maxArr" : name === "min" ? "math.minArr" : staticMath.fn;
-    return { kind: "libCall", fn, args: [packed], type: F64, loc };
+    return afterArguments(stmts, { kind: "libCall", fn, args: [packed], type: F64, loc });
   }
   if (staticMath && call.arguments.nodes.every((a) => !ts.isSpreadElement(a))) {
     // Math.max/Math.min at ANY plain arity — Node's are variadic. The
@@ -2455,16 +2461,16 @@ export function lowerStdlibMethodCall(
       if (call.arguments.nodes.length === 0) {
         return { kind: "numLit", value: name === "max" ? -Infinity : Infinity, type: F64, loc };
       }
-      const args = call.arguments.nodes.map(mathArg);
+      const { stmts, values: args } = mathArgs(call.arguments.nodes);
       let acc = args[0]!;
       for (let i = 1; i < args.length; i++) {
         acc = { kind: "libCall", fn: staticMath.fn, args: [acc, args[i]!], type: F64, loc };
       }
-      return acc;
+      return afterArguments(stmts, acc);
     }
     if (call.arguments.nodes.length === staticMath.arity) {
-      const args = call.arguments.nodes.map(mathArg);
-      return { kind: "libCall", fn: staticMath.fn, args, type: F64, loc };
+      const { stmts, values: args } = mathArgs(call.arguments.nodes);
+      return afterArguments(stmts, { kind: "libCall", fn: staticMath.fn, args, type: F64, loc });
     }
   }
   // `Math.max(...xs)` / `Math.min(...xs)` over a number[]: a STATIC

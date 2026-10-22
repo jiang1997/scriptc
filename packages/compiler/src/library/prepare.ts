@@ -1,5 +1,6 @@
 import { dirname, resolve } from "node:path";
 import type { CompileFailure } from "../compile-types.js";
+import { frontendDisposed } from "../frontend/dispose-hook.js";
 import {
   fenceSpeculativeWasiFunctions,
   moduleWasiUnavailableSurface,
@@ -585,6 +586,7 @@ export function prepareLibrary(
     sourceTexts = fe.sourceTexts();
   } finally {
     fe.dispose();
+    frontendDisposed();
   }
   const mod = lowered.module!;
   timing("frontend-dispose");

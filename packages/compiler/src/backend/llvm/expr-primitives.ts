@@ -524,8 +524,15 @@ export function emitOperatorExpr(
     case "seqExpr": {
       // Statements mid-expression: each emits in place (its own frame,
       // exactly statement position); the result is an ordinary temp of
-      // the current frame. No jump can leave the expression's region.
-      for (const s of e.stmts) host.emitStmt(s);
+      // the current frame. No jump can leave the expression's region. A
+      // statement can still end the block (a call that always throws):
+      // what follows then emits in a block with no predecessors, so every
+      // value it reads is defined there, and LLVM deletes it.
+      for (const s of e.stmts) {
+        if (host.B.isTerminated()) host.B.startBlock(host.B.newLabel("seq.dead"));
+        host.emitStmt(s);
+      }
+      if (host.B.isTerminated()) host.B.startBlock(host.B.newLabel("seq.dead"));
       return host.emitExpr(e.result);
     }
     default: {
@@ -855,11 +862,15 @@ export function emitContainerExpr(
       const elem = e.type.elem;
       const arr = B.tmp();
       const small = host.appendedArrayLiterals.has(e);
-      const capacity = small ? 0 : (e.capacity ?? e.elems.length);
+      const spreadSet = new Set(e.spreads ?? []);
+      // With spreads, storage starts at the plain elements before the first
+      // spread, and each spread reserves exactly its source's length plus
+      // the plain elements up to the next one (scr_arr_reserve_spread).
+      const firstSpread = e.elems.findIndex((_, i) => spreadSet.has(i));
+      const capacity = small ? 0 : (e.capacity ?? (firstSpread < 0 ? e.elems.length : firstSpread));
       B.line(`${arr} = ${arrNewCall(host.shapeHost, elem, String(capacity), small)}`);
       const out = host.own({ name: arr, type: e.type });
       const acc = elemAccess(elem);
-      const spreadSet = new Set(e.spreads ?? []);
       let pending: LlValue[] = [];
       let buffer: string | undefined;
       const flush = (): void => {
@@ -874,6 +885,12 @@ export function emitContainerExpr(
         if (spreadSet.has(i)) {
           flush();
           const v = host.emitExpr(el);
+          let plain = 0;
+          for (let j = i + 1; j < e.elems.length && !spreadSet.has(j); j++) plain++;
+          host.declare(`declare void @scr_arr_reserve_spread(ptr, ptr, ${host.sizeType})`);
+          B.line(
+            `call void @scr_arr_reserve_spread(ptr ${arr}, ptr ${v.name}, ${host.sizeType} ${plain})`,
+          );
           host.emitArrayCopyLoop(arr, v.name, acc);
           return;
         }
@@ -895,6 +912,8 @@ export function emitContainerExpr(
       const n = host.emitExpr(e.length);
       const arr = B.tmp();
       B.line(`${arr} = ${arrNewCall(host.shapeHost, elem, "0")}`);
+      host.declare(`declare void @scr_arr_reserve_len(ptr, double)`);
+      B.line(`call void @scr_arr_reserve_len(ptr ${arr}, double ${n.name})`);
       const out = host.own({ name: arr, type: e.type });
       const acc = elemAccess(elem);
       let fill = acc === "f64" ? f64Lit(0) : acc === "bool" ? "false" : "null";
@@ -1045,13 +1064,17 @@ export function emitRecordExpr(
   switch (e.kind) {
     case "fieldGet": {
       const obj = host.emitReadReceiver(e.obj);
-      const { ptr, type, inline } = host.classFieldPtr(obj.name, e.className, e.field);
+      const { ptr, type, inline } = host.classFieldPtr(
+        obj.name,
+        e.className,
+        e.field,
+        "compressed",
+      );
       if (host.int32Slots.isField(e.className, e.field)) return host.loadInt32Field(ptr, e.type);
       if (inline) return host.own({ name: host.inlineFieldUnion(ptr, type), type: e.type });
       const nullable = host.nullableFieldGet(e);
       if (nullable) {
-        const p = B.tmp();
-        B.line(`${p} = load ptr, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+        const p = host.loadRef(ptr);
         return host.own({ name: host.nullableToOwnedUnion(p, nullable), type: e.type });
       }
       const v = host.loadField(ptr, type, false);

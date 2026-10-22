@@ -1,4 +1,5 @@
 /* instanceof and in, including private-name and runtime-key in. */
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { builtinClassInstanceOfAny, builtinClassKind } from "../builtins/builtin-class-dyn.js";
 import {
@@ -647,7 +648,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
       const key = `instanceof.union:${unionId}:${target.def.name}`;
       let helper = lowerer.valueHelpers.get(key);
       if (!helper) {
-        helper = `%instanceof.union.${lowerer.valueHelpers.size}`;
+        helper = keyedHelperName(lowerer, "%instanceof.union", key);
         lowerer.valueHelpers.set(key, helper);
         const value: IrExpr = { kind: "varRef", localId: "value.0", type: left.type, loc };
         const body: IrStmt[] = [];
@@ -1847,7 +1848,7 @@ function lowerRuntimeKeyIn(
   const hkey = `haskey:${recvT.shapeId}`;
   let helper = lowerer.valueHelpers.get(hkey);
   if (!helper) {
-    helper = `%rec.haskey.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%rec.haskey", hkey);
     lowerer.valueHelpers.set(hkey, helper);
     const recT: IrType = { kind: "record", shapeId: recvT.shapeId };
 

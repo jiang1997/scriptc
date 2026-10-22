@@ -702,11 +702,18 @@ static void scr_map_compact(ScrMap *m, bool reindex) {
  * range. */
 #define SCR_MAP_MAX_ENTRIES ((size_t)1 << 30)
 
-/* The first entry gets an array of one, so a one-entry map keeps no unused
- * slots; the second grows it to four, and capacity doubles after that. */
+/* The entry capacity after `cap`: 1, 2, 3, 4, 6, 8, 12, 16, then doubling.
+ * Most maps hold one to four entries, so a small map keeps at most a third
+ * of its slots unused, and appends stay amortized constant. */
+static size_t scr_map_next_ecap(size_t cap) {
+  if (cap < 4) return cap + 1;
+  if (cap < 16) return cap < 8 ? cap + 2 : cap + 4;
+  return cap * 2;
+}
+
 static void scr_map_grow_entries(ScrMap *m) {
-  size_t cap = m->ecap == 0 ? 1 : m->ecap < 4 ? 4 : m->ecap;
-  while (cap < m->nentries + 1) cap *= 2;
+  size_t cap = scr_map_next_ecap(m->ecap);
+  while (cap < m->nentries + 1) cap = scr_map_next_ecap(cap);
   if (cap > SCR_MAP_MAX_ENTRIES) scr_map_oom();
   ScrMapEntry *entries = scr_mem_realloc(m->entries, cap * scr_map_entry_size(m));
   if (!entries) scr_map_oom();
@@ -1551,7 +1558,7 @@ void scr_map_values_into(ScrMap *set, const ScrMap *source, bool checked) {
 }
 
 ScrArr *scr_set_to_arr_dyn(const ScrMap *map) {
-  static const ScrArrOps dyn_ops = { scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v };
+  static ScrArrOps dyn_ops = { scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v };
   ScrArr *out = scr_arr_new_ops(&dyn_ops, map->nlive);
   for (size_t i = 0; i < map->nentries; i++) {
     if (scr_map_iter_live(map, (double)i)) scr_arr_push_ref(out, scr_map_dyn_key(map, (double)i));

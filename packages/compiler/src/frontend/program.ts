@@ -76,10 +76,12 @@ import {
   reportNpmStaticOffender,
   setNpmStaticDeclarationOverloads,
   setNpmStaticPackages,
+  setNpmStaticTypeExports,
 } from "./npm-static.js";
 import { setMinifiedEntryHost } from "./npm-static-minified.js";
 import { moduleEdgesOfFile, moduleExportsOfFile } from "./npm-static-minified-syntax.js";
 import { isPrunedNpmReexport, planNpmStaticReexports } from "./npm-static-prune.js";
+import { npmStaticTypeExportPlan } from "./npm-static-type-exports-host.js";
 import { isNpmStaticSubclassArgument } from "./npm-static-subtyping.js";
 import {
   npmStaticDeclarationReexports,
@@ -1042,6 +1044,10 @@ export function loadProgram(
     resolveBare: (fromFile, specifier, kind) =>
       resolveBareModule(fromFile, specifier, "js-only", kind)?.typesFile ?? null,
   });
+  // Types only the packages' .d.ts declares keep their declarations
+  // (npm-static-type-exports.ts).
+  const typeExports = npmStaticTypeExportPlan(services, entryPath, npmStaticPackages);
+  setNpmStaticTypeExports(typeExports.copies, typeExports.typedefs);
   // Workspace-package registrations reset per load (same discipline as the
   // npm-static set), then the opted-in names are probed UP FRONT: a
   // workspace-linked opt-in resolves to files whose realpaths carry no

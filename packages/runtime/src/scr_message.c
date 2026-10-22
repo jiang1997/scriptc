@@ -21,7 +21,7 @@ typedef enum {
   /* A typed value published with @scriptc/threads (immortal), delivered as
    * a fresh typed-ref capsule over the same pointer. */
   SCR_MESSAGE_TYPED_REF,
-  /* A transferred MessagePort: its channel end (+1), the side in number. */
+  /* A transferred MessagePort: its channel end (+1) and side. */
   SCR_MESSAGE_PORT,
   /* A native handle cloned through its unit's ScrDynHandleTransfer. */
   SCR_MESSAGE_HANDLE,
@@ -30,57 +30,86 @@ typedef enum {
 const ScrMessagePortOps *scr_message_port_ops = NULL;
 
 typedef struct {
-  char *key;
+  const char *key;
   size_t length;
   size_t value;
   bool hidden; /* an Error's non-enumerable or inherited property */
 } ScrMessageProperty;
 
+/* SCR_MESSAGE_TYPED_REF: the capsule's process-wide adapters and type key
+ * (vtables, adapters and type keys are shared by every thread). */
 typedef struct {
-  ScrMessageKind kind;
-  double number;
-  unsigned char *data;
-  ScrSharedBytes *shared;
-  size_t length;
-  ScrMessageProperty *properties;
-  size_t count;
-  size_t capacity;
-  size_t storage;
-  size_t offset;
-  ScrBytesElem element;
-  bool data_view;
-  ScrDyn *published; /* SCR_MESSAGE_PUBLISHED: immortal root, owns nothing */
-  ScrChannel *channel; /* SCR_MESSAGE_PORT */
-  /* SCR_MESSAGE_HANDLE: the owning unit's hooks and its payload (+1). */
-  const ScrDynHandleTransfer *transfer;
-  void *payload;
-  /* SCR_MESSAGE_TYPED_REF: the capsule's process-wide adapters and type key
-   * (vtables, adapters and type keys are shared by every thread). */
-  struct {
-    void *ptr;
-    void *(*retain)(void *);
-    void (*release)(void *);
-    const char *type_key;
-    size_t type_key_len;
-    ScrDyn *(*materialize)(void *);
-    void (*commit)(void *, const ScrDyn *);
-    bool traced;
-  } typed;
+  void *ptr;
+  void *(*retain)(void *);
+  void (*release)(void *);
+  const char *type_key;
+  size_t type_key_len;
+  ScrDyn *(*materialize)(void *);
+  void (*commit)(void *, const ScrDyn *);
+  bool traced;
+} ScrMessageTyped;
+
+typedef struct {
+  unsigned char kind; /* ScrMessageKind */
+  unsigned char element; /* SCR_MESSAGE_BYTES: ScrBytesElem */
+  bool data_view; /* SCR_MESSAGE_BYTES */
+  uint32_t count; /* properties */
+  const ScrMessageProperty *properties;
+  union {
+    double number; /* BOOL and NUMBER; ERROR: the error kind */
+    /* STRING and BIGINT: the text, in the message block. STORAGE: the
+     * copied bytes (owned) or the shared backing (+1). */
+    struct {
+      char *data;
+      ScrSharedBytes *shared;
+      size_t length;
+    } text;
+    /* BYTES and ARRAY_BUFFER: the STORAGE node; BYTES: the view. */
+    struct {
+      size_t storage;
+      size_t offset;
+      size_t length;
+    } view;
+    size_t length; /* ARRAY */
+    ScrDyn *published; /* PUBLISHED: immortal root, owns nothing */
+    struct {
+      ScrChannel *channel; /* +1 */
+      int side;
+    } port;
+    /* HANDLE: the owning unit's hooks and its payload (+1). */
+    struct {
+      const ScrDynHandleTransfer *transfer;
+      void *payload;
+    } handle;
+    const ScrMessageTyped *typed; /* TYPED_REF, in the message block */
+    size_t typed_index; /* TYPED_REF while encoding */
+  } v;
 } ScrMessageNode;
 
+/* A message is one allocation: this header, then the nodes, the
+ * properties, the typed records and the text (keys, strings and bigints),
+ * sized to the message. A queued message holds nothing else, apart from
+ * the bytes of STORAGE nodes. */
 struct ScrMessage {
   ScrMessageNode *nodes;
   size_t count;
-  size_t capacity;
+  bool storage; /* has STORAGE nodes */
+  bool releases; /* has STORAGE, PORT or HANDLE nodes, which own resources */
 };
 
 typedef struct {
   const ScrDyn *input;
   ScrDyn *view;
   ScrDyn *keys;
+  ScrStr *text; /* a STRING or BIGINT node's text, until the message is packed */
   size_t cursor;
   bool uncaught; /* an Error encoded as an uncaught exception */
 } ScrMessageVisit;
+
+typedef struct {
+  ScrMessageProperty property;
+  size_t owner;
+} ScrMessagePending;
 
 typedef struct {
   const void *identity;
@@ -88,9 +117,22 @@ typedef struct {
   size_t node;
 } ScrMessageIdentity;
 
+/* The encoder's arrays start inline, so a message of up to this many nodes
+ * and properties allocates only its block. */
+#define SCR_MESSAGE_INLINE 8
+
 typedef struct {
-  ScrMessage *message;
+  ScrMessageNode *nodes;
   ScrMessageVisit *visits;
+  size_t count;
+  size_t capacity;
+  ScrMessagePending *properties; /* in the order they were reached */
+  size_t property_count;
+  size_t property_capacity;
+  ScrMessageTyped *typed;
+  size_t typed_count;
+  size_t typed_capacity;
+  size_t text; /* bytes of text in the message block */
   ScrMessageIdentity *identities;
   size_t identity_count;
   size_t identity_capacity;
@@ -99,7 +141,35 @@ typedef struct {
   size_t stack_capacity;
   const ScrDyn *transfer; /* the transfer list (a dyn array), or NULL */
   bool uncaught; /* the next value is an uncaught exception or its cause */
+  bool storage;
+  bool releases;
+  ScrMessageNode inline_nodes[SCR_MESSAGE_INLINE];
+  ScrMessageVisit inline_visits[SCR_MESSAGE_INLINE];
+  ScrMessagePending inline_properties[SCR_MESSAGE_INLINE];
+  ScrMessageIdentity inline_identities[2 * SCR_MESSAGE_INLINE];
+  size_t inline_stack[SCR_MESSAGE_INLINE];
 } ScrMessageEncoder;
+
+static void scr_message_encoder_init(ScrMessageEncoder *encoder, const ScrDyn *transfer, bool uncaught) {
+  encoder->nodes = encoder->inline_nodes;
+  encoder->visits = encoder->inline_visits;
+  encoder->count = 0;
+  encoder->capacity = SCR_MESSAGE_INLINE;
+  encoder->properties = encoder->inline_properties;
+  encoder->property_count = 0;
+  encoder->property_capacity = SCR_MESSAGE_INLINE;
+  encoder->typed = NULL;
+  encoder->typed_count = encoder->typed_capacity = 0;
+  encoder->text = 0;
+  encoder->identities = NULL;
+  encoder->identity_count = encoder->identity_capacity = 0;
+  encoder->stack = encoder->inline_stack;
+  encoder->depth = 0;
+  encoder->stack_capacity = SCR_MESSAGE_INLINE;
+  encoder->transfer = transfer;
+  encoder->uncaught = uncaught;
+  encoder->storage = encoder->releases = false;
+}
 
 static bool scr_message_listed(const ScrMessageEncoder *encoder, const ScrDyn *value) {
   if (!encoder->transfer) return false;
@@ -122,30 +192,42 @@ static size_t scr_message_grow(size_t capacity) {
   return capacity ? capacity * 2 : 4;
 }
 
-static unsigned char *scr_message_copy(const void *data, size_t length) {
+/* Moves an encoder array of count items to a new one of capacity items,
+ * freeing the old one unless it is the inline array. */
+static void *scr_message_regrow(void *items, size_t count, size_t capacity, size_t size,
+                                const void *inline_items) {
+  void *grown = scr_message_alloc(capacity, size);
+  if (count) memcpy(grown, items, count * size);
+  if (items != inline_items) free(items);
+  return grown;
+}
+
+static char *scr_message_copy(const void *data, size_t length) {
   if (length == SIZE_MAX) scr_trap("scriptc: message too large\n");
-  unsigned char *copy = scr_message_alloc(length + 1, 1);
+  char *copy = scr_message_alloc(length + 1, 1);
   if (length) memcpy(copy, data, length);
   return copy;
 }
 
+/* Reserves text (and its terminator) in the message block. */
+static void scr_message_text(ScrMessageEncoder *encoder, size_t length) {
+  if (length >= SIZE_MAX - encoder->text) scr_trap("scriptc: message too large\n");
+  encoder->text += length + 1;
+}
+
 static size_t scr_message_node(ScrMessageEncoder *encoder) {
-  ScrMessage *message = encoder->message;
-  if (message->count == message->capacity) {
-    size_t capacity = scr_message_grow(message->capacity);
-    ScrMessageNode *nodes = scr_message_alloc(capacity, sizeof(*nodes));
-    ScrMessageVisit *visits = scr_message_alloc(capacity, sizeof(*visits));
-    if (message->count) {
-      memcpy(nodes, message->nodes, message->count * sizeof(*nodes));
-      memcpy(visits, encoder->visits, message->count * sizeof(*visits));
-    }
-    free(message->nodes);
-    free(encoder->visits);
-    message->nodes = nodes;
-    encoder->visits = visits;
-    message->capacity = capacity;
+  if (encoder->count == encoder->capacity) {
+    size_t capacity = scr_message_grow(encoder->capacity);
+    encoder->nodes = scr_message_regrow(encoder->nodes, encoder->count, capacity,
+                                        sizeof(*encoder->nodes), encoder->inline_nodes);
+    encoder->visits = scr_message_regrow(encoder->visits, encoder->count, capacity,
+                                         sizeof(*encoder->visits), encoder->inline_visits);
+    encoder->capacity = capacity;
   }
-  return message->count++;
+  size_t id = encoder->count++;
+  memset(&encoder->nodes[id], 0, sizeof(encoder->nodes[id]));
+  memset(&encoder->visits[id], 0, sizeof(encoder->visits[id]));
+  return id;
 }
 
 static size_t scr_message_hash(const void *identity, unsigned domain) {
@@ -171,7 +253,11 @@ static size_t scr_message_find(const ScrMessageEncoder *encoder, const void *ide
 static void scr_message_identify(ScrMessageEncoder *encoder, const void *identity,
                                   unsigned domain, size_t node) {
   if (!identity) return;
-  if (encoder->identity_count >= encoder->identity_capacity / 2) {
+  if (!encoder->identity_capacity) {
+    encoder->identity_capacity = sizeof encoder->inline_identities / sizeof encoder->inline_identities[0];
+    encoder->identities = encoder->inline_identities;
+    memset(encoder->identities, 0, sizeof encoder->inline_identities);
+  } else if (encoder->identity_count >= encoder->identity_capacity / 2) {
     size_t capacity = scr_message_grow(encoder->identity_capacity);
     ScrMessageIdentity *entries = scr_message_alloc(capacity, sizeof(*entries));
     for (size_t i = 0; i < encoder->identity_capacity; i++) {
@@ -181,7 +267,7 @@ static void scr_message_identify(ScrMessageEncoder *encoder, const void *identit
       while (entries[slot].identity) slot = (slot + 1) & (capacity - 1);
       entries[slot] = entry;
     }
-    free(encoder->identities);
+    if (encoder->identities != encoder->inline_identities) free(encoder->identities);
     encoder->identities = entries;
     encoder->identity_capacity = capacity;
   }
@@ -194,10 +280,8 @@ static void scr_message_identify(ScrMessageEncoder *encoder, const void *identit
 static void scr_message_push(ScrMessageEncoder *encoder, size_t node) {
   if (encoder->depth == encoder->stack_capacity) {
     size_t capacity = scr_message_grow(encoder->stack_capacity);
-    size_t *stack = scr_message_alloc(capacity, sizeof(*stack));
-    if (encoder->depth) memcpy(stack, encoder->stack, encoder->depth * sizeof(*stack));
-    free(encoder->stack);
-    encoder->stack = stack;
+    encoder->stack = scr_message_regrow(encoder->stack, encoder->depth, capacity,
+                                        sizeof(*encoder->stack), encoder->inline_stack);
     encoder->stack_capacity = capacity;
   }
   encoder->stack[encoder->depth++] = node;
@@ -209,13 +293,14 @@ static size_t scr_message_storage(ScrMessageEncoder *encoder, const ScrBytes *by
   if (found != SIZE_MAX) return found;
   size_t node = scr_message_node(encoder);
   scr_message_identify(encoder, owner, SCR_MESSAGE_STORAGE + 1, node);
-  ScrMessageNode *storage = &encoder->message->nodes[node];
+  ScrMessageNode *storage = &encoder->nodes[node];
   storage->kind = SCR_MESSAGE_STORAGE;
   size_t size = scr_bytes_elem_size(owner->elem);
   if (owner->len > SIZE_MAX / size) scr_trap("scriptc: message too large\n");
-  storage->length = owner->len * size;
-  if (owner->shared) storage->shared = scr_shared_retain(owner->shared);
-  else storage->data = scr_message_copy(owner->data, storage->length);
+  storage->v.text.length = owner->len * size;
+  if (owner->shared) storage->v.text.shared = scr_shared_retain(owner->shared);
+  else storage->v.text.data = scr_message_copy(owner->data, storage->v.text.length);
+  encoder->storage = encoder->releases = true;
   return node;
 }
 
@@ -282,42 +367,46 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
   /* Published values (immortal) travel by pointer: a typed value as a
    * capsule over the same object, a dyn graph as itself. */
   if (input->kind == SCR_DYN_TYPED_REF && input->v.typed_ref.ptr &&
-      SCR_RC_COUNT(input->v.typed_ref.ptr) == SCR_RC_IMMORTAL) {
+      SCR_RC_PUBLISHED(input->v.typed_ref.ptr)) {
     scr_sa_thread_shares();
     encoder->visits[id].view = (ScrDyn *)input;
-    ScrMessageNode *node = &encoder->message->nodes[id];
+    ScrMessageNode *node = &encoder->nodes[id];
+    if (encoder->typed_count == encoder->typed_capacity) {
+      size_t capacity = scr_message_grow(encoder->typed_capacity);
+      encoder->typed = scr_message_regrow(encoder->typed, encoder->typed_count, capacity,
+                                          sizeof(*encoder->typed), NULL);
+      encoder->typed_capacity = capacity;
+    }
     node->kind = SCR_MESSAGE_TYPED_REF;
-    node->typed.ptr = input->v.typed_ref.ptr;
-    node->typed.retain = input->v.typed_ref.retain;
-    node->typed.release = input->v.typed_ref.release;
-    node->typed.type_key = input->v.typed_ref.type_key;
-    node->typed.type_key_len = input->v.typed_ref.type_key_len;
-    node->typed.materialize = input->v.typed_ref.materialize;
-    node->typed.commit = input->v.typed_ref.commit;
-    node->typed.traced = input->v.typed_ref.traced;
+    node->v.typed_index = encoder->typed_count;
+    encoder->typed[encoder->typed_count++] = (ScrMessageTyped){
+      input->v.typed_ref.ptr, input->v.typed_ref.retain, input->v.typed_ref.release,
+      input->v.typed_ref.type_key, input->v.typed_ref.type_key_len, input->v.typed_ref.materialize,
+      input->v.typed_ref.commit, input->v.typed_ref.traced,
+    };
     if (getenv("SCRIPTC_PUBLISH_TRACE"))
-      fprintf(stderr, "scriptc: published %.*s shared by reference\n", (int)node->typed.type_key_len,
-              node->typed.type_key);
+      fprintf(stderr, "scriptc: published %.*s shared by reference\n", (int)input->v.typed_ref.type_key_len,
+              input->v.typed_ref.type_key);
     return id;
   }
   if ((input->kind == SCR_DYN_OBJ || input->kind == SCR_DYN_ARR) && input->rc == SIZE_MAX) {
     scr_sa_thread_shares();
     encoder->visits[id].view = (ScrDyn *)input;
-    ScrMessageNode *node = &encoder->message->nodes[id];
+    ScrMessageNode *node = &encoder->nodes[id];
     node->kind = SCR_MESSAGE_PUBLISHED;
-    node->published = (ScrDyn *)input;
+    node->v.published = (ScrDyn *)input;
     return id;
   }
   ScrDyn *value = input->kind == SCR_DYN_TYPED_REF
       ? scr_dyn_typed_ref_materialize(input) : (ScrDyn *)input;
   encoder->visits[id].view = value;
   if (!value || scr_exc_pending()) return SIZE_MAX;
-  ScrMessageNode *node = &encoder->message->nodes[id];
+  ScrMessageNode *node = &encoder->nodes[id];
   ScrError *error = scr_errdyn_err_of(input);
   if (!error && value != input) error = scr_errdyn_err_of(value);
   if (error && uncaught && error->vt != &scr_error_vts[SCR_ERR_DOMEX]) {
     node->kind = SCR_MESSAGE_ERROR;
-    node->number = scr_message_error_kind(error);
+    node->v.number = scr_message_error_kind(error);
     scr_error_release(error);
     encoder->visits[id].uncaught = true;
     encoder->visits[id].keys = scr_message_uncaught_keys(value);
@@ -327,7 +416,7 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
   }
   if (error) {
     node->kind = SCR_MESSAGE_ERROR;
-    node->number = SCR_ERR_ERROR;
+    node->v.number = SCR_ERR_ERROR;
     static const char *const names[] = {
       "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError",
     };
@@ -336,7 +425,7 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
     };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
       if (error->name->len == strlen(names[i]) && !memcmp(error->name->data, names[i], error->name->len))
-        node->number = kinds[i];
+        node->v.number = kinds[i];
     ScrDyn *keys = scr_dyn_new_arr();
     static const char *const fields[] = {"message", "stack", "cause"};
     for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
@@ -353,26 +442,28 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
   switch (value->kind) {
   case SCR_DYN_UNDEF: node->kind = SCR_MESSAGE_UNDEFINED; break;
   case SCR_DYN_NULL: node->kind = SCR_MESSAGE_NULL; break;
-  case SCR_DYN_BOOL: node->kind = SCR_MESSAGE_BOOL; node->number = value->v.b; break;
-  case SCR_DYN_NUM: node->kind = SCR_MESSAGE_NUMBER; node->number = value->v.num; break;
+  case SCR_DYN_BOOL: node->kind = SCR_MESSAGE_BOOL; node->v.number = value->v.b; break;
+  case SCR_DYN_NUM: node->kind = SCR_MESSAGE_NUMBER; node->v.number = value->v.num; break;
   case SCR_DYN_STR:
+    /* The text is copied into the message block when it is packed. */
     node->kind = SCR_MESSAGE_STRING;
-    node->length = value->v.str->len;
-    node->data = scr_message_copy(value->v.str->data, node->length);
+    encoder->visits[id].text = scr_str_retain(value->v.str);
+    node->v.text.length = value->v.str->len;
+    scr_message_text(encoder, node->v.text.length);
     break;
   case SCR_DYN_BIGINT: {
     ScrStr *text = scr_bigint_to_string(value->v.bigint, 10);
     if (!text) return SIZE_MAX;
     node->kind = SCR_MESSAGE_BIGINT;
-    node->length = text->len;
-    node->data = scr_message_copy(text->data, text->len);
-    scr_str_release(text);
+    encoder->visits[id].text = text;
+    node->v.text.length = text->len;
+    scr_message_text(encoder, node->v.text.length);
     break;
   }
   case SCR_DYN_ARR:
   case SCR_DYN_OBJ:
     node->kind = value->kind == SCR_DYN_ARR ? SCR_MESSAGE_ARRAY : SCR_MESSAGE_OBJECT;
-    node->length = value->kind == SCR_DYN_ARR ? value->v.arr.len : 0;
+    if (value->kind == SCR_DYN_ARR) node->v.length = value->v.arr.len;
     encoder->visits[id].keys = scr_dyn_own_keys(value);
     if (!encoder->visits[id].keys) return SIZE_MAX;
     scr_message_push(encoder, id);
@@ -389,8 +480,9 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
         return SIZE_MAX;
       }
       node->kind = SCR_MESSAGE_PORT;
-      node->channel = channel;
-      node->number = side;
+      node->v.port.channel = channel;
+      node->v.port.side = side;
+      encoder->releases = true;
       break;
     }
     bool buffer = scr_buffer_storage_is(value);
@@ -402,21 +494,22 @@ static size_t scr_message_value(ScrMessageEncoder *encoder, const ScrDyn *input)
         if (scr_exc_pending()) return SIZE_MAX;
         goto unsupported;
       }
-      node = &encoder->message->nodes[id];
+      node = &encoder->nodes[id];
       node->kind = SCR_MESSAGE_HANDLE;
-      node->transfer = transfer;
-      node->payload = payload;
+      node->v.handle.transfer = transfer;
+      node->v.handle.payload = payload;
+      encoder->releases = true;
       break;
     }
     const ScrBytes *bytes = buffer ? value->v.handle.ptr : value->v.bytes;
     size_t storage = scr_message_storage(encoder, bytes);
     /* Adding the storage node can reallocate the node array. */
-    node = &encoder->message->nodes[id];
+    node = &encoder->nodes[id];
     node->kind = buffer ? SCR_MESSAGE_ARRAY_BUFFER : SCR_MESSAGE_BYTES;
-    node->storage = storage;
-    node->element = bytes->elem;
-    node->length = bytes->len;
-    node->offset = (size_t)(bytes->data - (bytes->backing ? bytes->backing : bytes)->data);
+    node->v.view.storage = storage;
+    node->element = (unsigned char)bytes->elem;
+    node->v.view.length = bytes->len;
+    node->v.view.offset = (size_t)(bytes->data - (bytes->backing ? bytes->backing : bytes)->data);
     node->data_view = bytes->is_data_view;
     break;
   }
@@ -430,20 +523,19 @@ unsupported:
 
 static void scr_message_property(ScrMessageEncoder *encoder, size_t id,
                                   const ScrStr *key, size_t value, bool hidden) {
-  ScrMessageNode *node = &encoder->message->nodes[id];
-  if (node->count == node->capacity) {
-    size_t capacity = scr_message_grow(node->capacity);
-    ScrMessageProperty *properties = scr_message_alloc(capacity, sizeof(*properties));
-    if (node->count) memcpy(properties, node->properties, node->count * sizeof(*properties));
-    free(node->properties);
-    node->properties = properties;
-    node->capacity = capacity;
+  if (encoder->property_count == encoder->property_capacity) {
+    size_t capacity = scr_message_grow(encoder->property_capacity);
+    encoder->properties = scr_message_regrow(encoder->properties, encoder->property_count, capacity,
+                                             sizeof(*encoder->properties), encoder->inline_properties);
+    encoder->property_capacity = capacity;
   }
-  node->properties[node->count++] = (ScrMessageProperty){
-    (char *)scr_message_copy(key->data, key->len), key->len, value, hidden,
-  };
+  ScrMessageNode *node = &encoder->nodes[id];
+  if (node->count == UINT32_MAX) scr_trap("scriptc: message too large\n");
+  node->count++;
+  scr_message_text(encoder, key->len);
+  /* The key stays alive in the owner's key list until the message is packed. */
+  encoder->properties[encoder->property_count++] = (ScrMessagePending){{key->data, key->len, value, hidden}, id};
 }
-
 
 /* ── publication: zero-copy delivery of deeply frozen plain-data graphs ──
  * Structured clone of a graph that is immutable on BOTH sides is observably
@@ -558,7 +650,8 @@ static ScrMessage *scr_message_try_publish(const ScrDyn *value) {
   if (!scr_publish_enabled || (value->kind != SCR_DYN_OBJ && value->kind != SCR_DYN_ARR)) return NULL;
   ScrMessage *message = NULL;
   ScrPublish p = {0};
-  if (value->rc == SIZE_MAX || scr_publish_collect(&p, (ScrDyn *)value)) {
+  /* Most messages are not frozen: check the root before collecting. */
+  if (value->rc == SIZE_MAX || (scr_publish_container_ok(value) && scr_publish_collect(&p, (ScrDyn *)value))) {
     for (size_t i = 0; i < p.count; i++) {
       ScrDyn *d = p.nodes[i];
       if ((uintptr_t)d & 1) {
@@ -582,11 +675,11 @@ static ScrMessage *scr_message_try_publish(const ScrDyn *value) {
       }
     }
     scr_sa_thread_shares();
-    message = scr_message_alloc(1, sizeof(*message));
-    message->nodes = scr_message_alloc(1, sizeof(*message->nodes));
-    message->count = message->capacity = 1;
+    message = scr_message_alloc(1, sizeof(*message) + sizeof(*message->nodes));
+    message->nodes = (ScrMessageNode *)(message + 1);
+    message->count = 1;
     message->nodes[0].kind = SCR_MESSAGE_PUBLISHED;
-    message->nodes[0].published = (ScrDyn *)value;
+    message->nodes[0].v.published = (ScrDyn *)value;
     if (getenv("SCRIPTC_PUBLISH_TRACE"))
       fprintf(stderr, "scriptc: published %zu nodes zero-copy%s\n", p.count,
               value->rc == SIZE_MAX && !p.count ? " (already published)" : "");
@@ -599,13 +692,14 @@ static ScrMessage *scr_message_try_publish(const ScrDyn *value) {
 }
 
 static ScrMessage *scr_message_encode_with(const ScrDyn *value, const ScrDyn *transfer);
-static ScrMessage *scr_message_encode_run(ScrMessageEncoder encoder, const ScrDyn *value);
+static ScrMessage *scr_message_encode_run(ScrMessageEncoder *encoder, const ScrDyn *value);
 
 ScrMessage *scr_message_encode(const ScrDyn *value) { return scr_message_encode_with(value, NULL); }
 
 ScrMessage *scr_message_encode_uncaught(const ScrDyn *value) {
-  ScrMessage *message = scr_message_alloc(1, sizeof(*message));
-  return scr_message_encode_run((ScrMessageEncoder){.message = message, .uncaught = true}, value);
+  ScrMessageEncoder encoder;
+  scr_message_encoder_init(&encoder, NULL, true);
+  return scr_message_encode_run(&encoder, value);
 }
 
 ScrMessage *scr_message_encode_transfer(const ScrDyn *value, const ScrDyn *transfer) {
@@ -635,19 +729,87 @@ ScrMessage *scr_message_encode_transfer(const ScrDyn *value, const ScrDyn *trans
 static ScrMessage *scr_message_encode_with(const ScrDyn *value, const ScrDyn *transfer) {
   ScrMessage *published = transfer ? NULL : scr_message_try_publish(value);
   if (published) return published;
-  ScrMessage *message = scr_message_alloc(1, sizeof(*message));
-  return scr_message_encode_run((ScrMessageEncoder){.message = message, .transfer = transfer}, value);
+  ScrMessageEncoder encoder;
+  scr_message_encoder_init(&encoder, transfer, false);
+  return scr_message_encode_run(&encoder, value);
 }
 
-static ScrMessage *scr_message_encode_run(ScrMessageEncoder encoder, const ScrDyn *value) {
-  ScrMessage *message = encoder.message;
-  if (scr_message_value(&encoder, value) == SIZE_MAX) goto done;
-  while (encoder.depth && !scr_exc_pending()) {
-    size_t id = encoder.stack[encoder.depth - 1];
-    ScrMessageVisit *visit = &encoder.visits[id];
-    if (visit->cursor == visit->keys->v.arr.len) { encoder.depth--; continue; }
+/* Releases what a node owns: a STORAGE node's bytes, a PORT node's
+ * channel end and a HANDLE node's payload. */
+static void scr_message_drop(ScrMessageNode *node) {
+  switch (node->kind) {
+  case SCR_MESSAGE_STORAGE:
+    free(node->v.text.data);
+    scr_shared_release(node->v.text.shared);
+    break;
+  case SCR_MESSAGE_PORT: scr_message_port_ops->release(node->v.port.channel); break;
+  case SCR_MESSAGE_HANDLE: node->v.handle.transfer->drop(node->v.handle.payload); break;
+  default: break;
+  }
+}
+
+/* Copies the encoded nodes into one block: the header, the nodes, the
+ * properties grouped by node (in the order they were reached), the typed
+ * records and the text. */
+static ScrMessage *scr_message_pack(ScrMessageEncoder *encoder) {
+  size_t count = encoder->count;
+  size_t properties = encoder->property_count;
+  size_t typed = encoder->typed_count;
+  size_t size = sizeof(ScrMessage);
+  size_t sizes[] = {
+    count, sizeof(ScrMessageNode), properties, sizeof(ScrMessageProperty), typed, sizeof(ScrMessageTyped),
+  };
+  for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i += 2) {
+    if (sizes[i] > (SIZE_MAX - size) / sizes[i + 1]) scr_trap("scriptc: message too large\n");
+    size += sizes[i] * sizes[i + 1];
+  }
+  if (encoder->text > SIZE_MAX - size) scr_trap("scriptc: message too large\n");
+  ScrMessage *message = malloc(size + encoder->text);
+  if (!message) scr_trap("scriptc: out of memory\n");
+  ScrMessageNode *nodes = (ScrMessageNode *)(message + 1);
+  ScrMessageProperty *slots = (ScrMessageProperty *)(nodes + count);
+  ScrMessageTyped *records = (ScrMessageTyped *)(slots + properties);
+  char *text = (char *)(records + typed);
+  *message = (ScrMessage){nodes, count, encoder->storage, encoder->releases};
+  memcpy(nodes, encoder->nodes, count * sizeof(*nodes));
+  if (typed) memcpy(records, encoder->typed, typed * sizeof(*records));
+  size_t first = 0;
+  for (size_t i = 0; i < count; i++) {
+    ScrMessageNode *node = &nodes[i];
+    node->properties = slots + first;
+    first += node->count;
+    node->count = 0;
+    if (node->kind == SCR_MESSAGE_STRING || node->kind == SCR_MESSAGE_BIGINT) {
+      memcpy(text, encoder->visits[i].text->data, node->v.text.length);
+      text[node->v.text.length] = 0;
+      node->v.text.data = text;
+      text += node->v.text.length + 1;
+    } else if (node->kind == SCR_MESSAGE_TYPED_REF) {
+      node->v.typed = &records[node->v.typed_index];
+    }
+  }
+  for (size_t i = 0; i < properties; i++) {
+    const ScrMessagePending *pending = &encoder->properties[i];
+    ScrMessageNode *node = &nodes[pending->owner];
+    ScrMessageProperty *slot = (ScrMessageProperty *)&node->properties[node->count++];
+    *slot = pending->property;
+    memcpy(text, pending->property.key, pending->property.length);
+    text[pending->property.length] = 0;
+    slot->key = text;
+    text += pending->property.length + 1;
+  }
+  return message;
+}
+
+static ScrMessage *scr_message_encode_run(ScrMessageEncoder *encoder, const ScrDyn *value) {
+  ScrMessage *message = NULL;
+  if (scr_message_value(encoder, value) == SIZE_MAX) goto done;
+  while (encoder->depth && !scr_exc_pending()) {
+    size_t id = encoder->stack[encoder->depth - 1];
+    ScrMessageVisit *visit = &encoder->visits[id];
+    if (visit->cursor == visit->keys->v.arr.len) { encoder->depth--; continue; }
     ScrDyn *key = visit->keys->v.arr.items[visit->cursor++];
-    bool error = message->nodes[id].kind == SCR_MESSAGE_ERROR;
+    bool error = encoder->nodes[id].kind == SCR_MESSAGE_ERROR;
     if (key->kind != SCR_DYN_STR || (!error && !scr_dyn_property_is_enumerable(visit->view, key->v.str))) continue;
     ScrDyn *child = scr_dyn_bag_get(visit->view, key->v.str, visit->view);
     if (!child || scr_exc_pending()) { scr_dyn_release(child); break; }
@@ -657,33 +819,30 @@ static ScrMessage *scr_message_encode_run(ScrMessageEncoder encoder, const ScrDy
        * and symbols, and serializes its cause the same way. */
       if (child->kind == SCR_DYN_FUNC || child->kind == SCR_DYN_SYMBOL) { scr_dyn_release(child); continue; }
       hidden = !scr_dyn_has_own(visit->view, key->v.str) || !scr_dyn_property_is_enumerable(visit->view, key->v.str);
-      encoder.uncaught = key->v.str->len == 5 && !memcmp(key->v.str->data, "cause", 5);
+      encoder->uncaught = key->v.str->len == 5 && !memcmp(key->v.str->data, "cause", 5);
     }
-    size_t next = scr_message_value(&encoder, child);
+    size_t next = scr_message_value(encoder, child);
     scr_dyn_release(child);
     if (next == SIZE_MAX) break;
-    scr_message_property(&encoder, id, key->v.str, next, hidden);
+    scr_message_property(encoder, id, key->v.str, next, hidden);
   }
 done:
-  for (size_t i = 0; i < message->count; i++) {
-    ScrMessageVisit *visit = &encoder.visits[i];
+  if (!scr_exc_pending()) message = scr_message_pack(encoder);
+  else
+    for (size_t i = 0; i < encoder->count; i++) scr_message_drop(&encoder->nodes[i]);
+  for (size_t i = 0; i < encoder->count; i++) {
+    ScrMessageVisit *visit = &encoder->visits[i];
     scr_dyn_release(visit->keys);
     if (visit->view != visit->input) scr_dyn_release(visit->view);
     scr_dyn_release((ScrDyn *)visit->input);
+    scr_str_release(visit->text);
   }
-  free(encoder.visits);
-  free(encoder.identities);
-  free(encoder.stack);
-  if (scr_exc_pending()) { scr_message_free(message); return NULL; }
-  /* A queued message keeps its nodes until it is received: drop the
-   * growth slack. */
-  if (message->count && message->count < message->capacity) {
-    ScrMessageNode *nodes = realloc(message->nodes, message->count * sizeof(*nodes));
-    if (nodes) {
-      message->nodes = nodes;
-      message->capacity = message->count;
-    }
-  }
+  if (encoder->nodes != encoder->inline_nodes) free(encoder->nodes);
+  if (encoder->visits != encoder->inline_visits) free(encoder->visits);
+  if (encoder->properties != encoder->inline_properties) free(encoder->properties);
+  if (encoder->identities != encoder->inline_identities) free(encoder->identities);
+  if (encoder->stack != encoder->inline_stack) free(encoder->stack);
+  free(encoder->typed);
   return message;
 }
 
@@ -732,26 +891,31 @@ static void scr_message_tag_document(const ScrMessage *message, ScrDyn **values)
 
 ScrDyn *scr_message_decode(const ScrMessage *message) {
   if (message->count == 1 && message->nodes[0].kind == SCR_MESSAGE_PUBLISHED)
-    return scr_dyn_retain(message->nodes[0].published);
-  ScrDyn **values = scr_message_alloc(message->count, sizeof(*values));
-  ScrBytes **storage = scr_message_alloc(message->count, sizeof(*storage));
-  for (size_t i = 0; i < message->count; i++) {
+    return scr_dyn_retain(message->nodes[0].v.published);
+  ScrDyn *inline_values[SCR_MESSAGE_INLINE];
+  ScrDyn **values = message->count <= SCR_MESSAGE_INLINE
+      ? inline_values : scr_message_alloc(message->count, sizeof(*values));
+  memset(values, 0, message->count * sizeof(*values));
+  ScrBytes **storage = message->storage ? scr_message_alloc(message->count, sizeof(*storage)) : NULL;
+  for (size_t i = 0; storage && i < message->count; i++) {
     const ScrMessageNode *node = &message->nodes[i];
     if (node->kind != SCR_MESSAGE_STORAGE) continue;
-    storage[i] = node->shared ? scr_shared_wrap(node->shared) : scr_bytes_new(SCR_BYTES_U8, (double)node->length);
+    storage[i] = node->v.text.shared ? scr_shared_wrap(node->v.text.shared)
+                                     : scr_bytes_new(SCR_BYTES_U8, (double)node->v.text.length);
     if (!storage[i]) goto done;
-    if (!node->shared && node->length) memcpy(storage[i]->data, node->data, node->length);
+    if (!node->v.text.shared && node->v.text.length)
+      memcpy(storage[i]->data, node->v.text.data, node->v.text.length);
   }
   for (size_t i = 0; i < message->count; i++) {
     const ScrMessageNode *node = &message->nodes[i];
     switch (node->kind) {
     case SCR_MESSAGE_UNDEFINED: values[i] = scr_dyn_retain(scr_dyn_undefined()); break;
     case SCR_MESSAGE_NULL: values[i] = scr_dyn_new_null(); break;
-    case SCR_MESSAGE_BOOL: values[i] = scr_dyn_new_bool(node->number != 0); break;
-    case SCR_MESSAGE_NUMBER: values[i] = scr_dyn_new_num(node->number); break;
+    case SCR_MESSAGE_BOOL: values[i] = scr_dyn_new_bool(node->v.number != 0); break;
+    case SCR_MESSAGE_NUMBER: values[i] = scr_dyn_new_num(node->v.number); break;
     case SCR_MESSAGE_STRING:
     case SCR_MESSAGE_BIGINT: {
-      ScrStr *text = scr_str_new((const char *)node->data, node->length);
+      ScrStr *text = scr_str_new(node->v.text.data, node->v.text.length);
       if (node->kind == SCR_MESSAGE_STRING) values[i] = scr_dyn_new_str(text);
       else {
         ScrBigInt *integer = scr_bigint_parse(text);
@@ -762,19 +926,19 @@ ScrDyn *scr_message_decode(const ScrMessage *message) {
     }
     case SCR_MESSAGE_ARRAY:
       values[i] = scr_dyn_new_arr();
-      for (size_t j = 0; j < node->length; j++) scr_dyn_arr_push_hole(values[i]);
+      for (size_t j = 0; j < node->v.length; j++) scr_dyn_arr_push_hole(values[i]);
       break;
     case SCR_MESSAGE_OBJECT: values[i] = scr_dyn_new_obj(); break;
     case SCR_MESSAGE_ERROR: {
       scr_error_set_traced();
-      ScrError *error = scr_error_new((int)node->number, NULL);
+      ScrError *error = scr_error_new((int)node->v.number, NULL);
       values[i] = scr_dyn_from_error(error);
       scr_error_release(error);
       break;
     }
     case SCR_MESSAGE_BYTES: {
-      ScrBytes *bytes = scr_bytes_buffer_view(storage[node->storage], node->element,
-          (double)node->offset, true, (double)node->length);
+      ScrBytes *bytes = scr_bytes_buffer_view(storage[node->v.view.storage], (ScrBytesElem)node->element,
+          (double)node->v.view.offset, true, (double)node->v.view.length);
       if (bytes) {
         bytes->is_data_view = node->data_view;
         values[i] = scr_dyn_new_bytes(bytes);
@@ -783,19 +947,21 @@ ScrDyn *scr_message_decode(const ScrMessage *message) {
       break;
     }
     case SCR_MESSAGE_ARRAY_BUFFER:
-      values[i] = scr_array_buffer_from_bytes(storage[node->storage]);
+      values[i] = scr_array_buffer_from_bytes(storage[node->v.view.storage]);
       break;
     case SCR_MESSAGE_STORAGE: continue;
-    case SCR_MESSAGE_PUBLISHED: values[i] = scr_dyn_retain(node->published); break;
-    case SCR_MESSAGE_TYPED_REF:
-      values[i] = (node->typed.traced ? scr_dyn_new_typed_ref_traced : scr_dyn_new_typed_ref)(
-          node->typed.ptr, node->typed.retain, node->typed.release, node->typed.type_key,
-          node->typed.type_key_len, node->typed.materialize, node->typed.commit);
+    case SCR_MESSAGE_PUBLISHED: values[i] = scr_dyn_retain(node->v.published); break;
+    case SCR_MESSAGE_TYPED_REF: {
+      const ScrMessageTyped *typed = node->v.typed;
+      values[i] = (typed->traced ? scr_dyn_new_typed_ref_traced : scr_dyn_new_typed_ref)(
+          typed->ptr, typed->retain, typed->release, typed->type_key, typed->type_key_len,
+          typed->materialize, typed->commit);
       break;
+    }
     case SCR_MESSAGE_PORT:
-      values[i] = scr_message_port_ops->adopt(node->channel, (int)node->number);
+      values[i] = scr_message_port_ops->adopt(node->v.port.channel, node->v.port.side);
       break;
-    case SCR_MESSAGE_HANDLE: values[i] = node->transfer->adopt(node->payload); break;
+    case SCR_MESSAGE_HANDLE: values[i] = node->v.handle.transfer->adopt(node->v.handle.payload); break;
     }
     if (!values[i] || scr_exc_pending()) goto done;
   }
@@ -805,7 +971,7 @@ ScrDyn *scr_message_decode(const ScrMessage *message) {
       const ScrMessageProperty *property = &node->properties[j];
       ScrDyn *value = scr_dyn_retain(values[property->value]);
       if (node->kind == SCR_MESSAGE_ARRAY) {
-        size_t index = scr_message_array_index(property->key, property->length, node->length);
+        size_t index = scr_message_array_index(property->key, property->length, node->v.length);
         if (index != SIZE_MAX) {
           values[i]->v.arr.items[index] = value;
           values[i]->v.arr.presence[index] = 1;
@@ -841,24 +1007,16 @@ done:;
   ScrDyn *result = !scr_exc_pending() ? scr_dyn_retain(values[0]) : NULL;
   for (size_t i = 0; i < message->count; i++) {
     scr_dyn_release(values[i]);
-    scr_bytes_release(storage[i]);
+    if (storage) scr_bytes_release(storage[i]);
   }
-  free(values);
+  if (values != inline_values) free(values);
   free(storage);
   return result;
 }
 
 void scr_message_free(ScrMessage *message) {
   if (!message) return;
-  for (size_t i = 0; i < message->count; i++) {
-    ScrMessageNode *node = &message->nodes[i];
-    for (size_t j = 0; j < node->count; j++) free(node->properties[j].key);
-    free(node->properties);
-    free(node->data);
-    scr_shared_release(node->shared);
-    if (node->kind == SCR_MESSAGE_PORT) scr_message_port_ops->release(node->channel);
-    if (node->kind == SCR_MESSAGE_HANDLE) node->transfer->drop(node->payload);
-  }
-  free(message->nodes);
+  if (message->releases)
+    for (size_t i = 0; i < message->count; i++) scr_message_drop(&message->nodes[i]);
   free(message);
 }

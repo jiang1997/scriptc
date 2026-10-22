@@ -3245,7 +3245,8 @@ export class LlDyn {
   /* ── the dyn ToString pair (dynToStrHelper, ported) ────────────────── */
 
   /** Node's String() over a dyn value — sc_ds (+1 result) over the
-   * recursive sc_ds_buf walker. Borrowed operand; never throws. */
+   * recursive sc_ds_buf walker. Borrowed operand; an exception that an
+   * object's toString or valueOf throws stays pending. */
   dynToStrHelper(): string {
     if (this.dynToStrFn) return this.dynToStrFn;
     const name = "sc_ds";
@@ -3348,9 +3349,9 @@ export class LlDyn {
       B.startBlock(labels.get(DYN_KIND.ARR)!);
       {
         // Array.prototype.toString: join(",") — null/undefined ELEMENTS
-        // print empty (unlike top level), nested arrays flatten.
+        // print empty (unlike top level), nested arrays flatten. The length
+        // is read once, as join reads it.
         const n = this.lenOf(B, "%d");
-        const items = this.itemsOf(B, "%d");
         this.i64Loop(B, "ds.ar", n, (i, brNext) => {
           const nz = B.tmp();
           B.line(`${nz} = icmp ugt ${this.S} ${i}, 0`);
@@ -3361,7 +3362,22 @@ export class LlDyn {
           B.line(`call void @scr_jb_putc(ptr %b, i8 44)`);
           B.br(lel);
           B.startBlock(lel);
-          const e = this.itemAt(B, items, i);
+          // Each index reads the element as join does (scr_dyn_arr_at, +1):
+          // from the current storage, undefined past the current length,
+          // and through the prototype for a hole. An element's toString
+          // can append to, shrink or reallocate the array; a getter that
+          // throws answers NULL with the exception pending.
+          host.declare(`declare ptr @scr_dyn_arr_at(ptr, double)`);
+          host.declare(`declare void @scr_dyn_release_v(ptr)`);
+          const index = B.tmp();
+          B.line(`${index} = uitofp ${this.S} ${i} to double`);
+          const e = B.tmp();
+          B.line(`${e} = call ptr @scr_dyn_arr_at(ptr %d, double ${index})`);
+          const missing = B.tmp();
+          B.line(`${missing} = icmp eq ptr ${e}, null`);
+          const lGot = B.newLabel("ds.gt");
+          B.condBr(missing, done, lGot);
+          B.startBlock(lGot);
           const ek = this.kindOf(B, e);
           const isU = B.tmp();
           const isN = B.tmp();
@@ -3369,20 +3385,30 @@ export class LlDyn {
           B.line(`${isU} = icmp eq i32 ${ek}, ${DYN_KIND.UNDEF}`);
           B.line(`${isN} = icmp eq i32 ${ek}, ${DYN_KIND.NULL}`);
           B.line(`${unit} = or i1 ${isU}, ${isN}`);
-          const lSkip = B.newLabel("ds.sk");
           const lRec = B.newLabel("ds.rc");
+          const lSkip = B.newLabel("ds.sk");
           B.condBr(unit, lSkip, lRec);
           B.startBlock(lSkip);
+          B.line(`call void @scr_dyn_release_v(ptr ${e})`);
           brNext();
           B.startBlock(lRec);
           B.line(`call void @sc_ds_buf(ptr %b, ptr ${e})`);
+          B.line(`call void @scr_dyn_release_v(ptr ${e})`);
+          // The first exception an element's conversion throws ends the
+          // conversion; later elements are not read.
+          const thrown = B.tmp();
+          for (const line of host.pendingTestLines(thrown)) B.line(line.trimStart());
+          const lMore = B.newLabel("ds.mo");
+          B.condBr(thrown, done, lMore);
+          B.startBlock(lMore);
         });
         B.br(done);
       }
       B.startBlock(labels.get(DYN_KIND.OBJ)!);
       {
         // The checked-dynamic tree's error encoding renders Error.prototype.toString;
-        // plain objects are "[object Object]".
+        // other objects convert with ToPrimitive's string hint: a toString or
+        // valueOf of their own or of their prototypes, else "[object Object]".
         const marker = this.objGetLit(B, "%d", "%error");
         const isErr = B.tmp();
         B.line(`${isErr} = icmp ne ptr ${marker}, null`);
@@ -3390,8 +3416,21 @@ export class LlDyn {
         const lPlain = B.newLabel("ds.pl");
         B.condBr(isErr, lErr, lPlain);
         B.startBlock(lPlain);
-        this.puts(B, "%b", "[object Object]");
-        B.br(done);
+        {
+          // Null leaves the exception the conversion threw pending.
+          host.declare(`declare ptr @scr_dyn_string_coerce_js(ptr)`);
+          host.declare(`declare void @scr_str_release(ptr)`);
+          const text = B.tmp();
+          B.line(`${text} = call ptr @scr_dyn_string_coerce_js(ptr %d)`);
+          const converted = B.tmp();
+          B.line(`${converted} = icmp ne ptr ${text}, null`);
+          const lPut = B.newLabel("ds.pp");
+          B.condBr(converted, lPut, done);
+          B.startBlock(lPut);
+          this.putScrStr(B, "%b", text);
+          B.line(`call void @scr_str_release(ptr ${text})`);
+          B.br(done);
+        }
         B.startBlock(lErr);
         // Error.prototype.toString, reading name and message through the
         // prototype. Null leaves the exception its conversion threw pending.

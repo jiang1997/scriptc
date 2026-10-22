@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { liftedFreshSpread } from "../coercions/fresh-spread.js";
 import { lowerArrayIteratorValue } from "../iterator-adapters.js";
 import { identityPreservingWidening } from "../coercions/identity.js";
@@ -1616,7 +1617,7 @@ function arraySearchHelper(
   const key = `${method}:${typeKey(elem)}:${typeKey(valueT)}:${typeKey(needleT)}:${directNeedle}:${typeKey(fromT)}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%arr.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   const arrT = arrayOf(elem);
   const resultT = method === "includes" ? BOOL : F64;
@@ -1972,7 +1973,7 @@ export function lowerTupleReadMethodCall(
     let helper = lowerer.arrHofHelpers.get(key);
     const resultType = method === "includes" ? BOOL : F64;
     if (!helper) {
-      helper = `%tuple.${method}.${lowerer.arrHofHelpers.size}`;
+      helper = keyedHelperName(lowerer, `%tuple.${method}`, key);
       lowerer.arrHofHelpers.set(key, helper);
       const params = [
         { localId: "a.0", name: "a", type: receiver.type },
@@ -2034,7 +2035,7 @@ export function lowerTupleReadMethodCall(
     const key = `tuple.slice:${typeKey(receiver.type)}:${args.length}`;
     let helper = lowerer.arrHofHelpers.get(key);
     if (!helper) {
-      helper = `%tuple.slice.${lowerer.arrHofHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%tuple.slice", key);
       lowerer.arrHofHelpers.set(key, helper);
       const params = [receiver, ...args].map((arg, i) => ({
         localId: i === 0 ? "a.0" : `arg.${i}`,
@@ -2125,7 +2126,7 @@ export function lowerTupleReadMethodCall(
   const key = `tuple.${method}:${typeKey(receiver.type)}:${typeKey(fnArg.type)}:${typeKey(outElem)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%tuple.${method}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%tuple.${method}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const out = varRef("out.0", outType, loc);
     const result = varRef("r.0", ret, loc);
@@ -2253,7 +2254,7 @@ function lowerArrayAtCall(
   const key = `at:${typeKey(elem)}:${typeKey(resultT)}:${typeKey(index.type)}`;
   let name = lowerer.arrHofHelpers.get(key);
   if (!name) {
-    name = `%arr.at.${lowerer.arrHofHelpers.size}`;
+    name = keyedHelperName(lowerer, "%arr.at", key);
     lowerer.arrHofHelpers.set(key, name);
     const arrT = arrayOf(elem);
 

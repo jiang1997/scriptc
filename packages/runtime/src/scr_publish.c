@@ -42,7 +42,8 @@ typedef struct {
 } ScrPubLog;
 
 /* In ScrPubLog.buf: the object keeps its class id in the high half of
- * its rc word (SCR_PUB_CLASS_ID), and `rc` is the count of the low half. */
+ * its rc word (SCR_PUB_CLASS_ID), and `rc` is the count of the low half,
+ * or it is compact (SCR_PUB_COMPACT), and `rc` is its header word. */
 #define SCR_PUB_LOG_COUNT UINT32_C(0x80000000)
 
 #define SCR_PUB_DYN ((uintptr_t)1)
@@ -108,7 +109,7 @@ static void *scr_pub_grow(void *p, size_t *cap, size_t size, void *inline_buf) {
 void scr_pub_str_fn(void *v, ScrPub *ctx);
 
 void scr_pub_push(ScrPub *ctx, void *v, ScrPubFn fn) {
-  if (!v || SCR_RC_COUNT(v) == SCR_RC_IMMORTAL || ctx->refusal) return;
+  if (!v || SCR_RC_PUBLISHED(v) || ctx->refusal) return;
   if (fn == scr_pub_str_fn) { /* a leaf: mark it now */
     scr_pub_str_fn(v, ctx);
     return;
@@ -125,9 +126,11 @@ void scr_pub_push(ScrPub *ctx, void *v, ScrPubFn fn) {
  * touch the objects again. */
 bool scr_pub_mark(ScrPub *ctx, void *obj, bool cyc, int kind) {
   size_t *rc = obj;
-  if (SCR_RC_COUNT(obj) == SCR_RC_IMMORTAL || ctx->refusal) return false;
-  bool class_id = (kind & SCR_PUB_CLASS_ID) != 0;
-  kind &= ~SCR_PUB_CLASS_ID;
+  if (SCR_RC_PUBLISHED(obj) || ctx->refusal) return false;
+  bool compact = (kind & SCR_PUB_COMPACT) != 0;
+  /* Both log the low 32 bits: a count, or a compact header word. */
+  bool class_id = compact || (kind & SCR_PUB_CLASS_ID) != 0;
+  kind &= ~(SCR_PUB_CLASS_ID | SCR_PUB_COMPACT);
   if (ctx->logged == ctx->log_cap)
     ctx->log = scr_pub_grow(ctx->log, &ctx->log_cap, sizeof *ctx->log, ctx->log_inline);
 #ifdef SCR_RC_AUDIT
@@ -156,7 +159,8 @@ bool scr_pub_mark(ScrPub *ctx, void *obj, bool cyc, int kind) {
   }
 #endif
   *e = (ScrPubLog){(uintptr_t)obj, logged, buf};
-  if (class_id) SCR_RC_COUNT(obj) = SCR_RC_IMMORTAL;
+  if (compact) SCR_RC_COUNT(obj) |= SCR_RC_COMPACT_PUBLISHED;
+  else if (class_id) SCR_RC_COUNT(obj) = SCR_RC_IMMORTAL;
   else *rc = SIZE_MAX;
   return true;
 }
@@ -197,7 +201,7 @@ static void scr_pub_slot(ScrPub *ctx, uint64_t slot, ScrPubFn fn) {
 
 void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem) {
   ScrArr *a = v;
-  if (a->ext && (a->ext->props || a->ext->metadata)) {
+  if (scr_arr_ext_of(a) && (scr_arr_ext_of(a)->props || scr_arr_ext_of(a)->metadata)) {
     scr_pub_refuse(ctx, "Cannot publish an array with non-index properties");
     return;
   }
@@ -208,9 +212,9 @@ void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem) {
   const uint8_t *states = scr_arr_states_end(a);
   for (size_t i = 0; i < dense; i++)
     if (!states || *scr_arr_state_in(states, i)) scr_pub_slot(ctx, a->data[i], fn);
-  if (a->ext)
-    for (size_t i = 0; i < a->ext->sparse_len; i++)
-      if (a->ext->sparse[i].state) scr_pub_slot(ctx, a->ext->sparse[i].slot, fn);
+  if (scr_arr_ext_of(a))
+    for (size_t i = 0; i < scr_arr_ext_of(a)->sparse_len; i++)
+      if (scr_arr_ext_of(a)->sparse[i].state) scr_pub_slot(ctx, scr_arr_ext_of(a)->sparse[i].slot, fn);
 }
 
 /* publish() of a scalar Node.js refuses (a Date): nothing to walk. */
@@ -382,7 +386,7 @@ static bool scr_pub_keep_ok(size_t bytes) {
 }
 
 void scr_publish(void *root, ScrPubFn fn) {
-  if (!root || SCR_RC_COUNT(root) == SCR_RC_IMMORTAL) return;
+  if (!root || SCR_RC_PUBLISHED(root)) return;
   ScrPub ctx;
   if (scr_pub_keep.stack) {
     ctx.stack = scr_pub_keep.stack;
@@ -460,7 +464,7 @@ void scr_publish(void *root, ScrPubFn fn) {
         /* Other threads share the object; its shape belongs to this one
          * (scr_js.h). */
         if (d->kind == SCR_DYN_OBJ) d->v.obj.shape = NULL;
-        scr_dyn_release(scr_dyn_freeze(d));
+        scr_dyn_release(scr_dyn_freeze_data(d));
       }
 #ifdef SCR_RC_AUDIT
       scr_pub_audit_forget(ctx.kinds[i]);

@@ -333,7 +333,7 @@ static void test_exec_groups(void) {
   check(full && lean && full->len == lean->len && lean->len == 2, "exec_groups keeps the capture count");
   check(*scr_arr_state_ptr(lean, 0) == SCR_ARR_UNDEFINED && *scr_arr_state_ptr(lean, 1) == SCR_ARR_UNDEFINED,
         "exec_groups: unselected and nonparticipating captures are undefined");
-  check(lean->ext == NULL || lean->ext->metadata == NULL, "exec_groups: no index/input properties");
+  check(scr_arr_ext_of(lean) == NULL || scr_arr_ext_of(lean)->metadata == NULL, "exec_groups: no index/input properties");
   scr_arr_release(full);
   scr_arr_release(lean);
   ScrStr *ab = S("ab");

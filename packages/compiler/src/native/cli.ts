@@ -10,6 +10,7 @@ import {
 } from "../backend/runtime-pack-native.js";
 import { mergeNativeProfiles } from "../backend/native-tools.js";
 import { setDeclarationRoot } from "../frontend/dts-paths.js";
+import { setFrontendDisposedHook } from "../frontend/dispose-hook.js";
 import { FrontendServices } from "../frontend/services.js";
 import { createNativeTs7Api } from "../frontend/ts7/native-api.js";
 import { resolveProvenanceSourcesWithParser } from "../frontend/provenance-core.js";
@@ -21,8 +22,10 @@ import { buildSanitizedRuntime } from "./sanitizer.js";
 import { runCompilerTask } from "./task.js";
 
 declare function compilerNativePrivateDirectory(path: string, harden: boolean): boolean;
+declare function compilerNativeCollectCycles(): void;
 
 async function main(): Promise<number> {
+  setFrontendDisposedHook(() => compilerNativeCollectCycles());
   const manifestPath = process.env["SCRIPTC_TOOLCHAIN"] ?? process.execPath + ".json";
   let compiler: NativeCompiler | null = null;
   let cache: ReturnType<typeof openNativeCache> = null;

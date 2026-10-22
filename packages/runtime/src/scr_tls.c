@@ -255,6 +255,93 @@ void scr_secure_ctx_release_v(void *p) { scr_secure_ctx_release((ScrSecureCtx *)
 
 /* ── the server config (one per created server, rc'd) ────────────────── */
 
+/* An owned ALPN name list (NULL-terminated; NULL frees nothing). */
+static void scr_tls_alpn_free(char **names) {
+  if (names == NULL) return;
+  for (char **n = names; *n != NULL; n++) free(*n);
+  free(names);
+}
+
+static bool scr_tls_alpn_dyn(const ScrDyn *v, char ***out);
+static void scr_tls_opt_fence(const char *api, const char *key, const char *hint);
+static bool scr_tls_dyn_truthy(const ScrDyn *v);
+
+/* Node's toV over a minVersion/maxVersion value: 'TLSv1' through 'TLSv1.3'
+ * as 10 through 13, null or undefined as `def`. Anything else throws
+ * ERR_TLS_INVALID_PROTOCOL_VERSION ("%j is not a valid <which> TLS protocol
+ * version"). False with the exception pending. */
+static bool scr_tls_version_dyn(const ScrDyn *v, const char *which, int def, int *out) {
+  if (v == NULL || v->kind == SCR_DYN_UNDEF || v->kind == SCR_DYN_NULL) {
+    *out = def;
+    return true;
+  }
+  if (v->kind == SCR_DYN_STR) {
+    static const struct { const char *name; int version; } names[] = {
+      { "TLSv1", 10 }, { "TLSv1.1", 11 }, { "TLSv1.2", 12 }, { "TLSv1.3", 13 },
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+      if (v->v.str->len == strlen(names[i].name) &&
+          memcmp(v->v.str->data, names[i].name, v->v.str->len) == 0) {
+        *out = names[i].version;
+        return true;
+      }
+    }
+  }
+  ScrStr *shown = scr_util_format_j(v);
+  if (shown == NULL) return false;
+  char msg[300];
+  int m = snprintf(msg, sizeof msg, "%.*s is not a valid %s TLS protocol version",
+                   (int)(shown->len < 200 ? shown->len : 200), shown->data, which);
+  scr_str_release(shown);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)m, "ERR_TLS_INVALID_PROTOCOL_VERSION");
+  return false;
+}
+
+/* The version range on an mbedTLS config. mbedTLS implements TLS 1.2 and
+ * 1.3, so a minimum of TLSv1 or TLSv1.1 offers from 1.2, the lowest version
+ * Node's default security level allows too. Answers false when no version
+ * in [min, max] is available (a maximum below 1.2, or min above max), which
+ * Node reports as ERR_SSL_NO_PROTOCOLS_AVAILABLE when the handshake starts. */
+static bool scr_tls_conf_versions(mbedtls_ssl_config *conf, int min, int max) {
+  if (min < 12) min = 12;
+  if (max < min) return false;
+  mbedtls_ssl_conf_min_tls_version(conf, min == 13 ? MBEDTLS_SSL_VERSION_TLS1_3 : MBEDTLS_SSL_VERSION_TLS1_2);
+  mbedtls_ssl_conf_max_tls_version(conf, max == 13 ? MBEDTLS_SSL_VERSION_TLS1_3 : MBEDTLS_SSL_VERSION_TLS1_2);
+  return true;
+}
+
+/* Node's SecureContext checks, in its order: secureProtocol conflicts with
+ * an explicit minVersion or maxVersion, then each version. The range lands
+ * in *min / *max (Node's defaults TLSv1.2 and TLSv1.3). False with the
+ * exception pending. */
+static bool scr_tls_versions_dyn(const ScrDyn *opts, int *min, int *max) {
+  const ScrDyn *vmin = opts != NULL && opts->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(opts, "minVersion", 10) : NULL;
+  const ScrDyn *vmax = opts != NULL && opts->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(opts, "maxVersion", 10) : NULL;
+  const ScrDyn *proto = opts != NULL && opts->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(opts, "secureProtocol", 14) : NULL;
+  if (proto != NULL && scr_tls_dyn_truthy(proto)) {
+    const ScrDyn *version = vmin != NULL && vmin->kind != SCR_DYN_UNDEF && vmin->kind != SCR_DYN_NULL ? vmin
+                            : vmax != NULL && vmax->kind != SCR_DYN_UNDEF && vmax->kind != SCR_DYN_NULL ? vmax
+                                                                                                        : NULL;
+    if (version != NULL) {
+      ScrStr *a = scr_util_format_j(version);
+      if (a == NULL) return false;
+      ScrStr *b = scr_util_format_j(proto);
+      if (b == NULL) {
+        scr_str_release(a);
+        return false;
+      }
+      char msg[400];
+      int m = snprintf(msg, sizeof msg, "TLS protocol version %.*s conflicts with secureProtocol %.*s",
+                       (int)(a->len < 150 ? a->len : 150), a->data, (int)(b->len < 150 ? b->len : 150), b->data);
+      scr_str_release(a);
+      scr_str_release(b);
+      scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)m, "ERR_TLS_PROTOCOL_VERSION_CONFLICT");
+      return false;
+    }
+  }
+  return scr_tls_version_dyn(vmin, "minimum", 12, min) && scr_tls_version_dyn(vmax, "maximum", 13, max);
+}
+
 typedef struct ScrTlsSrv {
   size_t rc;
   mbedtls_ssl_config conf;
@@ -275,6 +362,12 @@ typedef struct ScrTlsSrv {
    * thunk that becomes each minted answer closure's fn */
   ScrClosure *sni_cb;
   void *sni_answer_fn;
+  /* tls.createServer's ALPNProtocols (owned; NULL when none), in the
+   * server's preference order. */
+  char **alpn;
+  /* maxVersion TLSv1.2: the ClientHello is pre-parsed so a hello that
+   * offers only later versions gets OpenSSL's protocol_version alert. */
+  bool max_tls12;
 } ScrTlsSrv;
 
 /* The ALPN answers (static storage — mbedTLS keeps the pointers). Plain
@@ -325,6 +418,7 @@ static void scr_tls_srv_release(ScrTlsSrv *s) {
   mbedtls_ssl_config_free(&s->conf);
   mbedtls_x509_crt_free(&s->cert);
   mbedtls_pk_free(&s->pk);
+  scr_tls_alpn_free(s->alpn);
   free(s);
 }
 
@@ -342,6 +436,13 @@ typedef struct ScrTlsCli {
    * VERIFY_NONE socket (the https client's rejectUnauthorized:false)
    * never verified, so authorized answers false like Node's. */
   bool verify_recorded;
+  /* The ALPNProtocols option's names, NULL-terminated, in the caller's
+   * order (mbedtls_ssl_conf_alpn_protocols keeps the pointer); NULL when
+   * none are offered. */
+  char **alpn;
+  /* No TLS version is in the configured range: the handshake fails as
+   * soon as it starts (Node's ERR_SSL_NO_PROTOCOLS_AVAILABLE). */
+  bool no_protocols;
 } ScrTlsCli;
 
 /* The default trust anchors when no `ca` option is given: the host trust
@@ -490,6 +591,7 @@ static ScrTlsCli *scr_tls_cli_new(ScrStr *host, bool reject_unauthorized, const 
 
 static void scr_tls_cli_free(ScrTlsCli *c) {
   mbedtls_ssl_config_free(&c->conf);
+  scr_tls_alpn_free(c->alpn);
   mbedtls_x509_crt_free(&c->ca);
   free(c->hostname);
   free(c->verify_name);
@@ -725,8 +827,13 @@ static int scr_tls_f_sni(void *p, mbedtls_ssl_context *ssl, const unsigned char 
  * random, session id, cipher suites, compression, then the extension list
  * — server_name (type 0) holds one host_name (type 0) entry. Answers 1
  * with `out` set, 2 for a well-formed hello without SNI or anything
- * malformed (the real handshake will judge it). */
-static int scr_tls_parse_ch_body(const unsigned char *b, size_t n, char *out, size_t out_cap) {
+ * malformed (the real handshake will judge it). *offers12 answers whether
+ * the hello offers TLS 1.2: true without a supported_versions extension
+ * (type 43), else whether its list holds 0x0303. */
+static int scr_tls_parse_ch_body(const unsigned char *b, size_t n, char *out, size_t out_cap,
+                                 bool *offers12) {
+  *offers12 = true;
+  int found = 2;
   size_t i = 34; /* version(2) + random(32) */
   if (i + 1 > n) return 2;
   i += 1 + b[i]; /* session id: length byte + body */
@@ -744,24 +851,35 @@ static int scr_tls_parse_ch_body(const unsigned char *b, size_t n, char *out, si
     size_t el = ((size_t)b[i + 2] << 8) | b[i + 3];
     i += 4;
     if (i + el > end) return 2;
-    if (et == 0) {
+    if (et == 0 && found == 2) {
       /* server_name: list length(2), then entry type(1) + length(2) + name */
-      if (el < 5 || b[i + 2] != 0) return 2;
-      size_t nl = ((size_t)b[i + 3] << 8) | b[i + 4];
-      if (nl == 0 || nl + 5 > el || nl + 1 > out_cap) return 2;
-      memcpy(out, b + i + 5, nl);
-      out[nl] = 0;
-      return 1;
+      if (el >= 5 && b[i + 2] == 0) {
+        size_t nl = ((size_t)b[i + 3] << 8) | b[i + 4];
+        if (nl > 0 && nl + 5 <= el && nl + 1 <= out_cap) {
+          memcpy(out, b + i + 5, nl);
+          out[nl] = 0;
+          found = 1;
+        }
+      }
+    } else if (et == 43 && el >= 1) {
+      /* supported_versions: list length(1), then 2-byte versions */
+      size_t vl = b[i] < el - 1 ? b[i] : el - 1;
+      *offers12 = false;
+      for (size_t v = 0; v + 1 < vl; v += 2) {
+        if (b[i + 1 + v] == 0x03 && b[i + 2 + v] == 0x03) *offers12 = true;
+      }
     }
     i += el;
   }
-  return 2;
+  return found;
 }
 
 /* Reassemble the handshake stream from the raw record flight and look for
  * the server_name extension. 0 = need more bytes; 1 = found (out set);
  * 2 = no SNI / not parseable (serve the default cert). */
-static int scr_tls_parse_sni(const unsigned char *buf, size_t len, char *out, size_t out_cap) {
+static int scr_tls_parse_sni(const unsigned char *buf, size_t len, char *out, size_t out_cap,
+                             bool *offers12) {
+  *offers12 = true;
   unsigned char *hs = NULL;
   size_t hs_len = 0, hs_cap = 0;
   size_t off = 0;
@@ -785,7 +903,7 @@ static int scr_tls_parse_sni(const unsigned char *buf, size_t len, char *out, si
       size_t chlen = ((size_t)hs[1] << 16) | ((size_t)hs[2] << 8) | hs[3];
       if (chlen > 131072) { free(hs); return 2; }
       if (hs_len >= 4 + chlen) {
-        int r = scr_tls_parse_ch_body(hs + 4, chlen, out, out_cap);
+        int r = scr_tls_parse_ch_body(hs + 4, chlen, out, out_cap, offers12);
         free(hs);
         return r;
       }
@@ -811,8 +929,19 @@ static int scr_tls_sni_collect(ScrTlsSock *t) {
   char servername[256];
   for (;;) {
     if (t->hello_len > 0) {
-      int r = scr_tls_parse_sni(t->hello, t->hello_len, servername, sizeof servername);
-      if (r == 2 || t->hello_len > 65536) {
+      bool offers12;
+      int r = scr_tls_parse_sni(t->hello, t->hello_len, servername, sizeof servername, &offers12);
+      if (r != 0 && t->srv->max_tls12 && !offers12) {
+        /* A TLS 1.2 server and a hello offering only later versions:
+         * OpenSSL answers with a fatal protocol_version alert, which the
+         * client reports as ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION. */
+        static const unsigned char alert[] = { 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46 };
+        int fd = scr_net_sock_fd(t->sock);
+        if (fd >= 0) (void)!write(fd, alert, sizeof alert);
+        scr_net_sock_transport_error(t->sock, NULL);
+        return -1;
+      }
+      if (r == 2 || t->hello_len > 65536 || (r == 1 && t->srv->sni_cb == NULL)) {
         /* no SNI (or unparseable): skip the callback, serve the default
          * pair — Node's SNICallback never fires without a server_name */
         t->sni_state = SCR_SNI_DONE;
@@ -899,6 +1028,12 @@ void scr_tls_sni_answer(ScrClosure *self, bool has_err, ScrSecureCtx *ctx /*move
 
 static int scr_tls_handshake(void *tctx) {
   ScrTlsSock *t = (ScrTlsSock *)tctx;
+  if (t->cli != NULL && t->cli->no_protocols) {
+    /* OpenSSL's reason without its per-process prefix (SEMANTICS.md
+     * divergence 55); scr_error_message_code gives Node's code. */
+    scr_net_sock_transport_error(t->sock, "error:0A0000BF:SSL routines::no protocols available");
+    return -1;
+  }
   if (t->sni_state == SCR_SNI_COLLECT) {
     t->in_handshake = true;
     int c = scr_tls_sni_collect(t);
@@ -922,11 +1057,25 @@ static int scr_tls_handshake(void *tctx) {
   if (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
     scr_tls_verify_msg(t, msg, sizeof msg);
   } else if (r == MBEDTLS_ERR_SSL_CONN_EOF || r == MBEDTLS_ERR_NET_CONN_RESET) {
-    /* the peer died mid-handshake: the http layer's own premature-close
-     * shape ('socket hang up') is Node's message — tear down without an error
-     * at this level and let the closed hook classify it */
-    scr_net_sock_transport_error(t->sock, NULL);
+    /* The peer closed or reset the connection mid-handshake: Node's
+     * ECONNRESET for tls.connect and https.request alike. */
+    scr_net_sock_transport_error(
+        t->sock, "Client network socket disconnected before secure TLS connection was established");
     return -1;
+  } else if (r == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE &&
+             t->ssl.MBEDTLS_PRIVATE(in_msg) != NULL &&
+             t->ssl.MBEDTLS_PRIVATE(in_msg)[1] == MBEDTLS_SSL_ALERT_MSG_NO_APPLICATION_PROTOCOL) {
+    /* The server shares none of the ALPNProtocols: OpenSSL's reason, which
+     * Node reports as ERR_SSL_TLSV1_ALERT_NO_APPLICATION_PROTOCOL
+     * (scr_error_message_code), without its per-process prefix and source
+     * location (SEMANTICS.md divergence 55). */
+    snprintf(msg, sizeof msg,
+             "error:0A000460:SSL routines:ssl3_read_bytes:tlsv1 alert no application protocol");
+  } else if (r == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE &&
+             t->ssl.MBEDTLS_PRIVATE(in_msg) != NULL &&
+             t->ssl.MBEDTLS_PRIVATE(in_msg)[1] == MBEDTLS_SSL_ALERT_MSG_PROTOCOL_VERSION) {
+    /* The server accepts none of the offered versions. */
+    snprintf(msg, sizeof msg, "error:0A00042E:SSL routines:ssl3_read_bytes:tlsv1 alert protocol version");
   } else {
     /* non-verify handshake failures: honest but not Node's exact openssl
      * string (SEMANTICS.md divergence 55) */
@@ -1012,19 +1161,65 @@ static void scr_tls_srv_on_conn(void *ctx, ScrNetSocket *sock) {
   if (mbedtls_ssl_setup(&t->ssl, &srv->conf) != 0) scr_tls_oom();
   t->sock = sock;
   t->srv = scr_tls_srv_retain(srv);
-  if (srv->sni_cb != NULL) t->sni_state = SCR_SNI_COLLECT; /* pre-parse the hello */
+  if (srv->sni_cb != NULL || srv->max_tls12) t->sni_state = SCR_SNI_COLLECT; /* pre-parse the hello */
   mbedtls_ssl_set_bio(&t->ssl, t, scr_tls_bio_send, scr_tls_bio_recv, NULL);
   scr_net_sock_set_transport(sock, &SCR_TLS_OPS, t);
+}
+
+static ScrNetServer *scr_tls_create_server_alpn(const char *cert, size_t cert_len,
+                                                const char *key, size_t key_len,
+                                                ScrClosure *handler /*moves, nullable*/,
+                                                ScrNetConnFn fn, char **alpn /*moves, nullable*/,
+                                                int min_version, int max_version,
+                                                ScrClosure *sni_cb /*moves, nullable*/,
+                                                void *sni_answer_fn) {
+  ScrTlsSrv *srv = scr_tls_srv_new(cert, cert_len, key, key_len, false);
+  if (sni_cb != NULL) {
+    srv->sni_cb = sni_cb; /* moves; released with srv */
+    srv->sni_answer_fn = sni_answer_fn;
+    mbedtls_ssl_conf_sni(&srv->conf, &scr_tls_f_sni, NULL);
+  }
+  srv->max_tls12 = max_version == 12;
+  if (!scr_tls_conf_versions(&srv->conf, min_version, max_version)) {
+    /* Node's server then fails every handshake; nothing here models
+     * that, so it stays a refusal. */
+    scr_tls_srv_release(srv);
+    scr_closure_release(handler);
+    scr_tls_alpn_free(alpn);
+    scr_tls_opt_fence("tls.createServer", "maxVersion",
+                      "a version range with neither TLSv1.2 nor TLSv1.3 has no lowering");
+    return NULL;
+  }
+  if (alpn != NULL) {
+    /* mbedTLS picks the first of these the client offers (Node's server
+     * preference) and sends no_application_protocol when it offers none. */
+    srv->alpn = alpn;
+    mbedtls_ssl_conf_alpn_protocols(&srv->conf, (const char **)srv->alpn);
+  }
+  ScrNetServer *s = scr_net_create_server(handler, fn);
+  scr_net_server_set_native_conn(s, &scr_tls_srv_on_conn, srv, &scr_tls_srv_release_v);
+  scr_net_server_defer_connections(s); /* the handler is 'secureConnection' */
+  return s;
 }
 
 ScrNetServer *scr_tls_create_server(const char *cert, size_t cert_len, const char *key,
                                      size_t key_len, ScrClosure *handler /*moves, nullable*/,
                                      ScrNetConnFn fn) {
-  ScrTlsSrv *srv = scr_tls_srv_new(cert, cert_len, key, key_len, false);
-  ScrNetServer *s = scr_net_create_server(handler, fn);
-  scr_net_server_set_native_conn(s, &scr_tls_srv_on_conn, srv, &scr_tls_srv_release_v);
-  scr_net_server_defer_connections(s); /* the handler is 'secureConnection' */
-  return s;
+  return scr_tls_create_server_alpn(cert, cert_len, key, key_len, handler, fn, NULL, 12, 13, NULL,
+                                    NULL);
+}
+
+/* tls.createServer({ cert, key, SNICallback }): the pre-parse machinery
+ * (design note atop the SNI section) hands each ClientHello's servername
+ * to the callback and serves the context it answers, or the default pair
+ * for none. A NULL sni_cb (the callback union's undefined arm) is
+ * scr_tls_create_server. */
+ScrNetServer *scr_tls_create_server_sni(const char *cert, size_t cert_len, const char *key,
+                                         size_t key_len, ScrClosure *handler /*moves, nullable*/,
+                                         ScrNetConnFn fn, ScrClosure *sni_cb /*moves, nullable*/,
+                                         void *sni_answer_fn) {
+  return scr_tls_create_server_alpn(cert, cert_len, key, key_len, handler, fn, NULL, 12, 13, sni_cb,
+                                    sni_answer_fn);
 }
 
 ScrNetServer *scr_https_create_server(const char *cert, size_t cert_len, const char *key,
@@ -1639,38 +1834,11 @@ static bool scr_tls_opts_validate(const ScrDyn *opts) {
       return false;
     }
   }
-  static const char *const VERSION_OPTS[] = { "minVersion", "maxVersion", NULL };
-  for (size_t i = 0; VERSION_OPTS[i] != NULL; i++) {
-    const ScrDyn *v = scr_dyn_obj_get(opts, VERSION_OPTS[i], strlen(VERSION_OPTS[i]));
-    if (v == NULL || v->kind == SCR_DYN_UNDEF) continue;
-    bool valid = false;
-    if (v->kind == SCR_DYN_STR) {
-      static const char *const KNOWN[] = { "TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3", NULL };
-      for (size_t k = 0; KNOWN[k] != NULL; k++) {
-        if (v->v.str->len == strlen(KNOWN[k]) && memcmp(v->v.str->data, KNOWN[k], v->v.str->len) == 0) {
-          valid = true;
-          break;
-        }
-      }
-    }
-    if (!valid) {
-      /* %j: strings render JSON-quoted, everything else inspect-lite. */
-      char rendered[96];
-      if (v->kind == SCR_DYN_STR) {
-        snprintf(rendered, sizeof rendered, "\"%.*s\"",
-                 (int)(v->v.str->len < 80 ? v->v.str->len : 80), v->v.str->data);
-      } else {
-        /* %j over non-strings: JSON.stringify's scalar renderings. */
-        char lite[64];
-        snprintf(rendered, sizeof rendered, "%s", scr_dyn_inspect_lite(v, lite, sizeof lite));
-      }
-      char msg[192];
-      int len = snprintf(msg, sizeof msg, "%s is not a valid %s TLS protocol version",
-                         rendered, VERSION_OPTS[i][2] == 'n' ? "minimum" : "maximum");
-      scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_TLS_INVALID_PROTOCOL_VERSION");
-      return false;
-    }
-  }
+  /* Node's toV: null and undefined select the default bound. */
+  int version;
+  if (!scr_tls_version_dyn(scr_dyn_obj_get(opts, "minVersion", 10), "minimum", 12, &version) ||
+      !scr_tls_version_dyn(scr_dyn_obj_get(opts, "maxVersion", 10), "maximum", 13, &version))
+    return false;
   static const char *const NUM_OPTS[] = { "handshakeTimeout", "keepAliveInitialDelay", NULL };
   for (size_t i = 0; NUM_OPTS[i] != NULL; i++) {
     const ScrDyn *v = scr_dyn_obj_get(opts, NUM_OPTS[i], strlen(NUM_OPTS[i]));
@@ -1730,8 +1898,10 @@ static bool scr_tls_opts_validate(const ScrDyn *opts) {
  * dyn options record; false = exception pending (partial results released).
  * Exported runtime-internally: scr_http2.c's createSecureServerDyn rides
  * the same walk (scr_http2.c always links alongside this unit). */
-bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
-                            ScrBytes **key_out) {
+/* `server_ok`: tls.createServer reads ALPNProtocols, minVersion and
+ * maxVersion itself; the walk's other callers keep their fences. */
+static bool scr_tls_srv_opts_walk_ex(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
+                                     ScrBytes **key_out, bool server_ok) {
   *cert_out = NULL;
   *key_out = NULL;
   if (opts == NULL || opts->kind != SCR_DYN_OBJ) {
@@ -1770,6 +1940,9 @@ bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_
     if (strcmp(e->key, "rejectUnauthorized") == 0) {
       continue; /* meaningful only with requestCert, which fences */
     }
+    if (server_ok && (strcmp(e->key, "ALPNProtocols") == 0 || strcmp(e->key, "minVersion") == 0 ||
+                      strcmp(e->key, "maxVersion") == 0))
+      continue;
     if (strcmp(e->key, "SNICallback") == 0) {
       scr_tls_opt_fence(api, "SNICallback",
                         "SNICallback lowers only on http2.createSecureServer({ allowHTTP1: true, ... }) with a literal options object");
@@ -1801,6 +1974,11 @@ bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_
     *key_out = NULL;
   }
   return ok;
+}
+
+bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
+                            ScrBytes **key_out) {
+  return scr_tls_srv_opts_walk_ex(opts, api, cert_out, key_out, false);
 }
 
 /* createSecureContext over a RUNTIME options record: Node's typed
@@ -1845,13 +2023,29 @@ void scr_tls_ca_certs_chk(const ScrDyn *type, const ScrStr *fence) {
 ScrNetServer *scr_tls_create_server_dyn(const ScrDyn *opts /*borrowed*/,
                                          ScrClosure *handler /*moves, nullable*/,
                                          ScrNetConnFn fn) {
-  ScrBytes *cert, *key;
-  if (!scr_tls_srv_opts_walk(opts, "tls.createServer", &cert, &key)) {
+  int min_version = 12, max_version = 13;
+  if (!scr_tls_versions_dyn(opts, &min_version, &max_version)) {
     scr_closure_release(handler);
     return NULL;
   }
-  ScrNetServer *s = scr_tls_create_server((const char *)cert->data, cert->len,
-                                           (const char *)key->data, key->len, handler, fn);
+  ScrBytes *cert, *key;
+  if (!scr_tls_srv_opts_walk_ex(opts, "tls.createServer", &cert, &key, true)) {
+    scr_closure_release(handler);
+    return NULL;
+  }
+  /* The Server constructor converts ALPNProtocols after the secure
+   * context validates (Node's order). */
+  char **alpn = NULL;
+  const ScrDyn *protocols = scr_dyn_obj_get(opts, "ALPNProtocols", 13);
+  if (protocols != NULL && !scr_tls_alpn_dyn(protocols, &alpn)) {
+    scr_bytes_release(cert);
+    scr_bytes_release(key);
+    scr_closure_release(handler);
+    return NULL;
+  }
+  ScrNetServer *s = scr_tls_create_server_alpn((const char *)cert->data, cert->len,
+                                                (const char *)key->data, key->len, handler, fn,
+                                                alpn, min_version, max_version, NULL, NULL);
   scr_bytes_release(cert);
   scr_bytes_release(key);
   return s;
@@ -1896,20 +2090,157 @@ ScrNetServer *scr_https_create_server_dyn(const ScrDyn *opts /*borrowed*/,
 
 /* ── tls.connect (the TLS client socket) ──────────────────────────────── */
 
+/* Node's inspect of a Buffer inside ERR_INVALID_ARG_VALUE's message:
+ * "<Buffer 00 01 ...>" with at most 50 bytes, the whole rendering cut at
+ * 128 characters with "...". */
+static void scr_tls_alpn_value_fail(const char *reason, const uint8_t *data, size_t len) {
+  char inspected[400];
+  size_t n = (size_t)snprintf(inspected, sizeof inspected, "<Buffer");
+  size_t shown = len < 50 ? len : 50;
+  for (size_t i = 0; i < shown; i++) n += (size_t)snprintf(inspected + n, sizeof inspected - n, " %02x", data[i]);
+  if (len > shown) n += (size_t)snprintf(inspected + n, sizeof inspected - n, " ... %zu more byte%s", len - shown, len - shown == 1 ? "" : "s");
+  snprintf(inspected + n, sizeof inspected - n, ">");
+  if (strlen(inspected) > 128) strcpy(inspected + 128, "...");
+  char msg[600];
+  int m = snprintf(msg, sizeof msg, "The argument 'ALPNProtocols' %s. Received %s", reason, inspected);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)m, "ERR_INVALID_ARG_VALUE");
+}
+
+/* The wire list (<len><name>...) as mbedTLS's NULL-terminated names, after
+ * Node's validateALPNBuffer. An empty list offers nothing (*out stays
+ * NULL). False with the exception pending. */
+static bool scr_tls_alpn_from_wire(const uint8_t *data, size_t len, char ***out) {
+  size_t count = 0;
+  for (size_t at = 0; at < len;) {
+    size_t n = data[at];
+    if (n == 0) {
+      scr_tls_alpn_value_fail("must not contain zero-length protocol", data, len);
+      return false;
+    }
+    if (at + 1 + n > len) {
+      scr_tls_alpn_value_fail("contains truncated protocol", data, len);
+      return false;
+    }
+    at += 1 + n;
+    count++;
+  }
+  if (count == 0) return true;
+  char **names = calloc(count + 1, sizeof *names);
+  if (!names) scr_tls_oom();
+  size_t k = 0;
+  for (size_t at = 0; at < len; at += 1 + data[at]) {
+    names[k] = malloc((size_t)data[at] + 1);
+    if (!names[k]) scr_tls_oom();
+    memcpy(names[k], data + at + 1, data[at]);
+    names[k][data[at]] = '\0';
+    k++;
+  }
+  *out = names;
+  return true;
+}
+
+/* tls.connect's ALPNProtocols (Node's convertALPNProtocols, then
+ * setALPNProtocols): an array of non-empty strings of at most 255 bytes, a
+ * Uint8Array or other ArrayBufferView in the wire format, or a falsy value
+ * (no ALPN). Any other truthy value is the binding's TypeError. False with
+ * the exception pending. */
+static bool scr_tls_alpn_dyn(const ScrDyn *v, char ***out) {
+  *out = NULL;
+  ScrDyn *own = NULL;
+  if (v->kind == SCR_DYN_TYPED_REF) {
+    own = scr_dyn_typed_ref_materialize(v);
+    if (own == NULL) return false;
+    v = own;
+  }
+  bool ok = true;
+  if (v->kind == SCR_DYN_ARR) {
+    /* convertProtocols: Buffer.byteLength of every entry first (strings,
+     * or the ArrayBuffer and view entries byteLength also measures), then
+     * each length's checks, then buff.write, which takes strings only. */
+    size_t count = v->v.arr.len;
+    size_t total = 0;
+    for (size_t i = 0; ok && i < count; i++) {
+      const ScrDyn *e = v->v.arr.items[i];
+      size_t n;
+      if (e->kind == SCR_DYN_STR) {
+        n = e->v.str->len;
+      } else if (e->kind == SCR_DYN_BYTES || scr_buffer_storage_is(e)) {
+        ScrBytes *view = scr_bytes_buffer_source(e);
+        if (view == NULL) {
+          ok = false;
+          break;
+        }
+        n = view->len;
+        scr_bytes_release(view);
+      } else {
+        scr_dyn_arg_type_fail("string", "of type string or an instance of Buffer or ArrayBuffer", e);
+        ok = false;
+        break;
+      }
+      if (n == 0) {
+        char name[32];
+        snprintf(name, sizeof name, "protocols[%zu]", i);
+        scr_dyn_arg_value_fail(name, "must be a non-empty string", e);
+        ok = false;
+        break;
+      }
+      if (n > 255) {
+        char msg[160];
+        int m = snprintf(msg, sizeof msg,
+                         "The byte length of the protocol at index %zu exceeds the maximum length. It must be <= 255. Received %zu",
+                         i, n);
+        scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)m, "ERR_OUT_OF_RANGE");
+        ok = false;
+        break;
+      }
+      total += 1 + n;
+    }
+    uint8_t *wire = ok ? malloc(total + 1) : NULL;
+    if (ok && !wire) scr_tls_oom();
+    size_t at = 0;
+    for (size_t i = 0; ok && i < count; i++) {
+      const ScrDyn *e = v->v.arr.items[i];
+      if (e->kind != SCR_DYN_STR) {
+        static const char msg[] = "argument must be a string";
+        scr_throw_error_msg_code(SCR_ERR_TYPE, msg, sizeof msg - 1, "ERR_INVALID_ARG_TYPE");
+        ok = false;
+        break;
+      }
+      wire[at++] = (uint8_t)e->v.str->len;
+      memcpy(wire + at, e->v.str->data, e->v.str->len);
+      at += e->v.str->len;
+    }
+    if (ok) ok = scr_tls_alpn_from_wire(wire, at, out);
+    free(wire);
+  } else if (v->kind == SCR_DYN_BYTES) {
+    ScrBytes *view = scr_bytes_buffer_source(v);
+    if (view == NULL) ok = false;
+    else {
+      ok = scr_tls_alpn_from_wire(view->data, view->len, out);
+      scr_bytes_release(view);
+    }
+  } else if (scr_tls_dyn_truthy(v)) {
+    static const char msg[] = "Must give a Buffer as first argument";
+    scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+    ok = false;
+  }
+  scr_dyn_release(own);
+  return ok;
+}
+
 /* tls.connect's documented keys outside the implemented set: present
  * throws (the server walk's stance). */
 static const char *const SCR_TLS_CONNECT_FENCED_OPTIONS[] = {
-  "ALPNProtocols", "allowHalfOpen", "autoSelectFamily",
+  "allowHalfOpen", "autoSelectFamily",
   "autoSelectFamilyAttemptTimeout", "cert", "certificateCompression", "checkServerIdentity",
   "ciphers", "clientCertEngine", "crl", "dhparam", "ecdhCurve",
   "enableTrace", "family", "fd", "hints", "highWaterMark",
   "honorCipherOrder", "keepAlive", "keepAliveInitialDelay", "key",
-  "localAddress", "localPort", "lookup", "maxVersion", "minDHSize",
-  "minVersion", "noDelay", "onread", "passphrase", "path", "pfx",
+  "localAddress", "localPort", "lookup", "minDHSize", "noDelay", "onread", "passphrase", "path", "pfx",
   "privateKeyEngine", "privateKeyIdentifier", "pskCallback", "readable",
   "secureContext", "secureOptions", "secureProtocol", "session",
   "sessionIdContext", "sigalgs", "signal", "socket", "ticketKeys",
-  "timeout", "writable", NULL,
+  "writable", NULL,
 };
 
 ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable*/,
@@ -1920,12 +2251,19 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
   ScrBytes *ca = NULL;
   const ScrStr *servername = NULL;
   const ScrStr *opt_host = NULL;
+  char **alpn = NULL;
+  const ScrDyn *alpn_value = NULL;
+  const ScrDyn *timeout_value = NULL;
+  int min_version = 12, max_version = 13;
   bool ok = true;
   if (opts != NULL && opts->kind != SCR_DYN_UNDEF && opts->kind != SCR_DYN_NULL) {
     if (opts->kind != SCR_DYN_OBJ) {
       scr_dyn_arg_type_fail("options", "of type object", opts);
       ok = false;
     }
+    /* createSecureContext's version checks come before its other options
+     * (Node's SecureContext constructor). */
+    if (ok && !scr_tls_versions_dyn(opts, &min_version, &max_version)) ok = false;
     for (size_t i = 0; ok && i < opts->v.obj.len; i++) {
       const ScrDynEntry *e = &opts->v.obj.entries[i];
       const ScrDyn *v = e->value;
@@ -1974,6 +2312,16 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
         if (ca == NULL) ok = false;
         continue;
       }
+      if (strcmp(e->key, "ALPNProtocols") == 0) {
+        alpn_value = v; /* converted after the context options, as TLSSocket does */
+        continue;
+      }
+      if (strcmp(e->key, "minVersion") == 0 || strcmp(e->key, "maxVersion") == 0) continue;
+      if (strcmp(e->key, "timeout") == 0) {
+        /* `if (options.timeout) tlssock.setTimeout(options.timeout)` */
+        timeout_value = scr_tls_dyn_truthy(v) ? v : NULL;
+        continue;
+      }
       if (strcmp(e->key, "servername") == 0) {
         if (v->kind == SCR_DYN_STR) servername = v->v.str;
         else {
@@ -1985,12 +2333,32 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
       for (size_t k = 0; SCR_TLS_CONNECT_FENCED_OPTIONS[k] != NULL; k++) {
         if (strcmp(e->key, SCR_TLS_CONNECT_FENCED_OPTIONS[k]) == 0) {
           scr_tls_opt_fence("tls.connect", e->key,
-                            "port/host/rejectUnauthorized/ca/servername are the honestly-implemented members of a runtime options record");
+                            "port/host/rejectUnauthorized/ca/servername/ALPNProtocols/minVersion/maxVersion/timeout are the implemented members of a runtime options record");
           ok = false;
           break;
         }
       }
       /* anything else: an undocumented key, dropped like Node drops it */
+    }
+  }
+  if (ok && alpn_value != NULL && !scr_tls_alpn_dyn(alpn_value, &alpn)) ok = false;
+  /* socket.setTimeout(msecs) runs after the TLSSocket exists and before it
+   * connects: Node's msecs checks, then the inactivity timer below. */
+  double timeout_ms = 0;
+  if (ok && timeout_value != NULL) {
+    if (timeout_value->kind != SCR_DYN_NUM) {
+      scr_dyn_arg_type_fail("msecs", "of type number", timeout_value);
+      ok = false;
+    } else if (!isfinite(timeout_value->v.num) || timeout_value->v.num < 0) {
+      char recv[48], msg[160];
+      scr_num_received(timeout_value->v.num, recv);
+      int m = snprintf(msg, sizeof msg,
+                       "The value of \"msecs\" is out of range. It must be a non-negative finite number. Received %s",
+                       recv);
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)m, "ERR_OUT_OF_RANGE");
+      ok = false;
+    } else {
+      timeout_ms = timeout_value->v.num;
     }
   }
   if (ok && port < 0) {
@@ -2000,6 +2368,7 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
   ScrStr *dial_host = (ScrStr *)(host != NULL && host->len > 0 ? host : opt_host);
   if (ok && !scr_net_host_chk(dial_host)) ok = false;
   if (!ok) {
+    scr_tls_alpn_free(alpn);
     scr_bytes_release(ca);
     scr_closure_release(cb);
     return NULL;
@@ -2022,7 +2391,13 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
                                      ca != NULL ? (const char *)ca->data : NULL,
                                      ca != NULL ? ca->len : 0, !reject);
   if (servername != NULL) scr_tls_cli_set_servername(cli, servername);
+  if (alpn != NULL) {
+    cli->alpn = alpn; /* moves */
+    mbedtls_ssl_conf_alpn_protocols(&cli->conf, (const char **)cli->alpn);
+  }
+  cli->no_protocols = !scr_tls_conf_versions(&cli->conf, min_version, max_version);
   scr_tls_cli_wrap(s, cli);
+  if (timeout_ms > 0) scr_net_sock_set_timeout(s, timeout_ms);
   scr_str_release(localhost_fallback);
   scr_bytes_release(ca);
   return s;

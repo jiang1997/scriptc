@@ -365,6 +365,8 @@
     { "chapter": "stream", "signatures": ["`writable` Type: {boolean}"], "status": "partial", "evidence": ["tests/corpus/2893-child-stdin-duplex.ts", "tests/corpus/2895-child-stdin-write-after-end.ts"] },
     { "chapter": "stream", "signatures": ["Event: `'drain'`"], "status": "partial", "evidence": ["tests/corpus/2894-child-stdin-backpressure.ts"] },
     { "chapter": "console", "signatures": ["Class: `Console`"], "status": "partial", "evidence": ["tests/corpus/4900-console-instances.ts", "tests/corpus/4901-console-instance-errors.ts"] },
+    { "chapter": "tls", "signatures": ["`alpnProtocol` Type: {string|boolean|null}"], "status": "partial", "evidence": ["tests/corpus/6721-tls-alpn-protocols.ts"] },
+    { "chapter": "tls", "signatures": ["`tlsSocket.getProtocol()`"], "status": "partial", "evidence": ["tests/corpus/6722-tls-min-max-version.ts"] },
     { "chapter": "webstreams", "signatures": ["`readableStream.values([options])`"], "status": "partial", "evidence": ["tests/corpus/2862-web-readable-async-iteration.ts"] },
     { "chapter": "webstreams", "signatures": ["`streamConsumers.text(stream)`", "`streamConsumers.json(stream)`", "`streamConsumers.buffer(stream)`"], "status": "partial", "evidence": ["tests/corpus/2629-stream-consumers.ts", "tests/corpus/2630-stream-consumers-errors.ts"] },
     { "chapter": "webstreams", "signatures": ["`streamConsumers.arrayBuffer(stream)`"], "status": "partial", "evidence": ["tests/corpus/4875-stream-consumers-array-buffer.ts"] },

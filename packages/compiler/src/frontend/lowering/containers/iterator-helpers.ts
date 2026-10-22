@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { boolLit, numLit, varRef } from "../../../ir/build.js";
 import { InternalCompilerError } from "../../../errors.js";
 import * as ts from "../../ts7/adapter.js";
@@ -966,7 +967,7 @@ function lowerFusedChain(
   const key = `iter:${srcKey}:${stageKeys.join(",")}:${terminal}:${termArgs.map((a) => typeKey(a.type)).join(",")}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%iter.${terminal}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%iter.${terminal}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     lowerer.liftedFns.push(
       buildIterChainFn(
@@ -1038,7 +1039,7 @@ function lowerHelperObject(
   const key = `iterHelper:${stage.kind}:${srcKey}:${typeKey(srcElem)}:${typeKey(arg.type)}:${typeKey(outT)}`;
   let name = lowerer.arrHofHelpers.get(key);
   if (!name) {
-    name = `%iter.${stage.kind}.${lowerer.arrHofHelpers.size}`;
+    name = keyedHelperName(lowerer, `%iter.${stage.kind}`, key);
     lowerer.arrHofHelpers.set(key, name);
     lowerer.liftedFns.push(
       buildHelperGenFn(lowerer, name, source, srcElem, stage, arg.type, outT, resultType, loc),
@@ -1058,7 +1059,7 @@ function internBudgetChecker(lowerer: Lowerer, loc: SrcLoc, srcT: GenType | null
   const key = srcT === null ? "iter:budget" : `iter:budget:close:${typeKey(srcT)}`;
   let name = lowerer.arrHofHelpers.get(key);
   if (name !== undefined) return name;
-  name = srcT === null ? "%iter.budget" : `%iter.budget.close.${lowerer.arrHofHelpers.size}`;
+  name = srcT === null ? "%iter.budget" : keyedHelperName(lowerer, "%iter.budget.close", key);
   lowerer.arrHofHelpers.set(key, name);
   const v = (): IrExpr => ({ kind: "varRef", localId: "v.0", type: F64, loc });
 

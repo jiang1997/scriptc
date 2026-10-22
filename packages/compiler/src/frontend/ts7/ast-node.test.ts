@@ -101,6 +101,8 @@ const cases: Record<string, string> = {
     '/** @typedef {Object} Options\n * @property {string} name\n * @property {number} count\n */\n/** @type {Options} */ const options = { name: "x", count: 2 };',
   "missing.ts": "const incomplete = ;\nfunction f( {\n",
   "empty.ts": "",
+  "targets.ts":
+    "let x: number | undefined = 1;\nconst a = [1];\n(x) = 2;\nx! = 3;\na[0]! += 1;\n(a[0])!++;\n--(x!);\nfor ((x) of a) {}\nconst y = (x!) + 1;\n",
   "lists.ts":
     "const trailing = [1, 2 /* last */, ];\nconst plain = [1, 2];\nf(1, 2,);\nexport abstract class Flags { protected static readonly value = 1; }\n",
 };
@@ -166,6 +168,38 @@ function ids(
 ): (number | undefined)[] | undefined {
   return nodes?.map((n) => (n as OracleNode).index);
 }
+
+test("the writeTargets option answers write targets without their wrappers", () => {
+  const { bytes, file: plain } = decoded.get("targets.ts")!;
+  const file = new AstFile(bytes, undefined, { writeTargets: true });
+  const statements = (root: AstNode) =>
+    (root.childList("statements") as AstNodeList).nodes.map((statement) =>
+      statement.kind === SyntaxKind.ExpressionStatement ? statement.expression : statement,
+    );
+  const text = (node: AstNode | undefined) => node?.getText();
+  const writes = statements(file.root);
+  const raw = statements(plain.root);
+  // Assignment left sides, update operands and a for-of head.
+  const targets = [writes[2]!.left, writes[3]!.left, writes[4]!.left, writes[5]!.operand];
+  expect(targets.map(text)).toEqual(["x", "x", "a[0]", "a[0]"]);
+  expect(text(writes[6]!.operand)).toBe("x");
+  expect(text(writes[7]!.initializer)).toBe("x");
+  for (const [index, target] of targets.entries())
+    expect(target!.parent, `target ${index}`).toBe(writes[index + 2]);
+  expect(writes[7]!.initializer!.parent).toBe(writes[7]);
+  // The reference keeps its own source span.
+  expect(writes[4]!.left!.getStart()).toBe(raw[4]!.left!.getStart());
+  expect(writes[4]!.left!.end).toBe(raw[4]!.left!.end - 1);
+  // A wrapper outside a write target is kept.
+  const init = (writes[8]!.childNode("declarationList")!.childList("declarations") as AstNodeList)
+    .nodes[0]!.initializer!;
+  expect(text(init.left)).toBe("(x!)");
+  expect(init.left!.kind).toBe(SyntaxKind.ParenthesizedExpression);
+  // Without the option, the file is TypeScript's exact tree.
+  expect(raw[3]!.left!.kind).toBe(SyntaxKind.NonNullExpression);
+  expect(raw[2]!.left!.kind).toBe(SyntaxKind.ParenthesizedExpression);
+  expect(raw[5]!.operand!.kind).toBe(SyntaxKind.NonNullExpression);
+});
 
 test("node lists report a trailing comma and modifier lists their flags", () => {
   const { file } = decoded.get("lists.ts")!;
@@ -475,6 +509,40 @@ test("preorder traversal preserves depth, skipped subtrees and early termination
     return node.kind === AstKind.ClassDeclaration ? "skip" : undefined;
   });
   expect(prefix).toEqual(expected.slice(0, 7));
+});
+
+test("preorder walks from every node match a recursive visit of every file", () => {
+  const kinds = new Set<AstNode["kind"]>([AstKind.Identifier, AstKind.JSDocTypeLiteral]);
+  for (const [name, { file, oracle }] of decoded) {
+    expect(file.wire.preorder(), name).not.toBeNull();
+    for (let index = 1; index < file.wire.nodeCount; index++) {
+      if (file.wire.kind(index) === KIND_NODE_LIST) continue;
+      const expected: [number, number][] = [];
+      const selected: [number, number][] = [];
+      const visit = (node: OracleNode, depth: number): void => {
+        expected.push([node.index, depth]);
+        if (kinds.has(node.kind)) selected.push([node.index, depth]);
+        node.forEachChild((child) => {
+          visit(child as OracleNode, depth + 1);
+        });
+      };
+      visit(oracle.getOrCreateNodeAtIndex(index), 0);
+      const actual: [number, number][] = [];
+      walkPreorder(file.node(index), (node, depth) => {
+        actual.push([node.index, depth]);
+      });
+      expect(actual, `${name}:${index}`).toEqual(expected);
+      const actualSelected: [number, number][] = [];
+      walkPreorder(
+        file.node(index),
+        (node, depth) => {
+          actualSelected.push([node.index, depth]);
+        },
+        kinds,
+      );
+      expect(actualSelected, `${name}:${index}`).toEqual(selected);
+    }
+  }
 });
 
 test("child traversal still rejects a sibling belonging to another parent", () => {

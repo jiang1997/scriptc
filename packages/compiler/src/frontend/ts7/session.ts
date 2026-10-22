@@ -298,9 +298,13 @@ export class Ts7SessionProgram {
     if (source === undefined) {
       const bytes = this.session.binary("getSourceFile", JSON.stringify(this.query(file)));
       if (bytes.length !== 0) {
-        const ast = new AstFile(bytes, () => {
-          this.session.timing.materialized();
-        });
+        const ast = new AstFile(
+          bytes,
+          () => {
+            this.session.timing.materialized();
+          },
+          { writeTargets: true },
+        );
         this.session.timing.fetched(Math.max(0, ast.wire.nodeCount - 2));
         source = this.session.cache.set(path, ast.sourceFile, this.snapshot.id, this.project.id);
       }

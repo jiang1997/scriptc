@@ -15,6 +15,9 @@
  * (port 443 default, `ca` / rejectUnauthorized for local-CA flows —
  * cert/key/ca all arrive as borrowed PEM bytes). */
 ScrNetServer *scr_tls_create_server(const char *cert, size_t cert_len, const char *key, size_t key_len, ScrClosure *handler /*moves, nullable*/, ScrNetConnFn fn); /* +1 */
+/* The SNICallback form: sni_cb (moves, nullable) receives (servername, answer), and
+ * sni_answer_fn is the emitted thunk that hands the answer to scr_tls_sni_answer. */
+ScrNetServer *scr_tls_create_server_sni(const char *cert, size_t cert_len, const char *key, size_t key_len, ScrClosure *handler /*moves, nullable*/, ScrNetConnFn fn, ScrClosure *sni_cb /*moves, nullable*/, void *sni_answer_fn); /* +1 */
 
 /* ── RUNTIME tls/https options records (the divergence-66 stance: a
  * non-literal options value reads its members at runtime; members whose

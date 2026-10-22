@@ -24,6 +24,7 @@ export function errorPropertyRead(
 ): IrExpr {
   const name = `%error.${property}.read`,
     loc = receiver.loc;
+  lowerer.shareHelper(name);
   if (!lowerer.liftedFns.some((fn) => fn.name === name))
     lowerer.liftedFns.push({
       name,
@@ -50,6 +51,7 @@ export function errorPropertyWrite(
 ): IrStmt {
   const name = `%error.${property}.write`,
     loc = receiver.loc;
+  lowerer.shareHelper(name);
   if (!lowerer.liftedFns.some((fn) => fn.name === name))
     lowerer.liftedFns.push({
       name,
@@ -392,6 +394,7 @@ export function errorToStringMethod(
   receiver: IrExpr,
 ): Extract<IrExpr, { kind: "call" }> {
   const loc = receiver.loc;
+  lowerer.shareHelper(helperName);
   if (!lowerer.liftedFns.some((fn) => fn.name === helperName)) {
     lowerer.liftedFns.push({
       name: helperName,
@@ -415,6 +418,7 @@ export function errorToStringCall(lowerer: Lowerer, receiver: IrExpr): IrExpr {
   const loc = receiver.loc;
   const method = errorToStringMethod(lowerer, receiver);
   const name = "%error.toString.virtual";
+  lowerer.shareHelper(name);
   if (!lowerer.liftedFns.some((fn) => fn.name === name)) {
     const value = varRef("error.0", errorType, loc);
     lowerer.liftedFns.push({

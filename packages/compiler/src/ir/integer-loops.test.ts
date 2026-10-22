@@ -209,6 +209,45 @@ test("a string read at the counter is an integer consumer", () => {
   expect(matchIntegerCountedForLoop(s, withText)).toBeNull();
 });
 
+test("a string length bounds a counted loop while its binding is unchanged", () => {
+  const withText = new Map(locals);
+  withText.set("s", { id: "s", name: "s", type: STRING, mutable: true });
+  const text = (): IrExpr => ({ kind: "varRef", localId: "s", type: STRING, loc });
+  const length: IrExpr = {
+    kind: "strIntrinsic",
+    method: "length",
+    receiver: text(),
+    args: [],
+    type: F64,
+    loc,
+  };
+  const s = counted(length);
+  s.body = [
+    {
+      kind: "exprStmt",
+      expr: {
+        kind: "strIntrinsic",
+        method: "charCodeAt",
+        receiver: text(),
+        args: [ref("i")],
+        type: F64,
+        loc,
+      },
+      loc,
+    },
+  ];
+  expect(matchIntegerCountedForLoop(s, withText)?.localId).toBe("i");
+  // Rebinding the string in the body changes the length the condition reads.
+  const rebinding = {
+    ...s,
+    body: [...s.body, { kind: "assign", localId: "s", value: text(), loc } as IrStmt],
+  };
+  expect(matchIntegerCountedForLoop(rebinding, withText)).toBeNull();
+  const boxed = new Map(withText);
+  boxed.set("s", { ...withText.get("s")!, boxed: true });
+  expect(matchIntegerCountedForLoop(s, boxed)).toBeNull();
+});
+
 test("a stable array length bounds a counted loop; a resizing body keeps it a condition", () => {
   const ARR = arrayOf(F64);
   const array = (localId: string): IrExpr => ({ kind: "varRef", localId, type: ARR, loc });

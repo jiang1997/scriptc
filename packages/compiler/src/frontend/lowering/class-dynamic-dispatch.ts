@@ -68,7 +68,11 @@ import { isClassCallback } from "./class-callbacks.js";
 import { CaughtValueDispatch } from "./caught-value-dispatch.js";
 import { refreshDescriptorGuards } from "./class-descriptors.js";
 import { ClassConstructionDispatch } from "./class-construction.js";
-import { emitterRooted } from "./lower-event-emitter.js";
+import {
+  emitterRooted,
+  lowerDynamicEmitterEmit,
+  lowerDynamicEmitterOn,
+} from "./lower-event-emitter.js";
 import { protocolArm, protocolFieldArm } from "./class-protocol-dispatch.js";
 import { STREAM_OPERATORS } from "./lower-stream.js";
 import { deletedPropertyNames, fixedFieldFamily } from "./js-class-fields.js";
@@ -97,6 +101,24 @@ const EMITTER_METHODS = new Set([
   "off",
   "removeListener",
 ]);
+/** The rest of EventEmitter.prototype, answered through an untyped value
+ * on emitters that are not streams (streams keep their own surface). */
+const EMITTER_INTROSPECTION_METHODS = new Set([
+  "listenerCount",
+  "eventNames",
+  "removeAllListeners",
+  "listeners",
+  "rawListeners",
+  "setMaxListeners",
+  "getMaxListeners",
+]);
+/** True when the class is or extends one of the runtime stream classes. */
+function streamRooted(info: ClassInfo): boolean {
+  for (let c: ClassInfo | null = info; c; c = c.base) {
+    if (c.builtinStream !== undefined) return true;
+  }
+  return false;
+}
 const STREAM_BOOL_PROPERTIES = new Set([
   "readable",
   "readableEnded",
@@ -259,6 +281,7 @@ export function classInstanceOf(
   classValue?: IrExpr,
 ): IrExpr {
   const name = `%dyn.class.${classValue ? "valueInstanceof" : "instanceof"}:${info.def.name}`;
+  lowerer.shareHelper(name);
   const params = [
     { localId: "value", name: "value", type: DYN },
     ...(classValue ? [{ localId: "class", name: "class", type: classValue.type }] : []),
@@ -364,9 +387,55 @@ function readOnlyBagBody(body: IrStmt[], orEmpty = false): IrStmt[] {
   return body;
 }
 
+/** `value` with the class branch's checked receiver (`p.0` as a dynamic
+ * value, possibly cast to the branch's class) replaced by `receiver`, the
+ * typed receiver of a per-class helper. */
+function withTypedReceiver(value: IrExpr, receiver: IrExpr): IrExpr {
+  const checked = (e: IrExpr): boolean =>
+    e.kind === "dynCheck" && e.value.kind === "varRef" && e.value.localId === "p.0";
+  return transformExpr(value, {
+    stmt: (stmt) => stmt,
+    expr: (expr) =>
+      (expr.kind === "downcast" &&
+        checked(expr.value) &&
+        expr.type.kind === "object" &&
+        receiver.type.kind === "object" &&
+        expr.type.className === receiver.type.className) ||
+      checked(expr)
+        ? receiver
+        : expr,
+  });
+}
+
+/** Re-adds the classes of `set` after the first `from` in a fixed order:
+ * the program's classes by name, then the classes the runtime implements by
+ * name. The dispatch helpers add each class's branch in front of the
+ * earlier ones, so a runtime class's branch, which answers its methods for
+ * instances of the program's subclasses too, is tested before the
+ * subclasses' own branches. */
+function sortAdded(lowerer: Lowerer, set: Set<string>, from: number): void {
+  const runtime = (name: string): boolean => {
+    const info = lowerer.classes.get(name);
+    return !!(
+      info &&
+      (info.def.runtime || info.builtinEmitter || info.builtinStream || info.builtinError)
+    );
+  };
+  const added = [...set]
+    .slice(from)
+    .sort(
+      (left, right) =>
+        Number(runtime(left)) - Number(runtime(right)) ||
+        (left < right ? -1 : left > right ? 1 : 0),
+    );
+  for (const name of added) set.delete(name);
+  for (const name of added) set.add(name);
+}
+
 export function classPropertiesHelper(lowerer: Lowerer, loc: SrcLoc, readOnly = false): IrFunction {
   const name = readOnly ? READ_PROPERTIES : "%dyn.class.properties";
-  const existing = lowerer.liftedFns.find((fn) => fn.name === name);
+  lowerer.shareHelper(name);
+  const existing = lowerer.liftedFnNamed(name);
   if (existing) return existing;
   const helper: IrFunction = {
     name,
@@ -405,6 +474,8 @@ export function classForInHasKey(
   loc: SrcLoc,
 ): IrExpr {
   const name = "%dyn.class.forInHasKey";
+  lowerer.shareHelper(name);
+  lowerer.shareHelper("%dyn.class.forInBagHas");
   if (!lowerer.liftedFns.some((fn) => fn.name === name)) {
     // The read-only table: a recheck never creates an instance's table, which
     // is undefined while the instance has no own dynamic properties.
@@ -706,7 +777,11 @@ export class ClassDynamicDispatch {
   private readonly readPropertyBags: {
     helper: IrFunction;
     initialize: Extract<IrStmt, { kind: "fieldSet" }>;
+    orEmpty?: boolean;
   }[] = [];
+  /** Read-only bags of exactly one class (exactPropertyBag), by class and
+   * whether an absent bag reads as a fresh empty object. */
+  private readonly exactPropertyBags = new Map<string, IrFunction>();
   private readonly generated = new Set<IrFunction>();
   /** Protocol dispatch helpers and callee reads whose receivers normalize. */
   private readonly protocols: IrFunction[] = [];
@@ -762,6 +837,7 @@ export class ClassDynamicDispatch {
     const rewrite = new Set<IrFunction>();
     const toPrimitiveSites = new Set<IrFunction>();
     const hasKeySites = new Set<IrFunction>();
+    const caughtSites = new Set<IrFunction>();
     const discover = (type: IrType): void => {
       const key = typeKey(type);
       if (seenTypes.has(key)) return;
@@ -778,6 +854,8 @@ export class ClassDynamicDispatch {
       else if (type.kind === "func") discover(type.ret);
       else if (type.kind === "promise") discover(type.inner);
     };
+    const boxedBefore = this.boxed.size;
+    const boxedConstructorsBefore = this.boxedConstructors.size;
     for (const fn of functions)
       everyStmtList(fn.body, {
         stmt: (statement) => {
@@ -827,6 +905,13 @@ export class ClassDynamicDispatch {
             case "dynHasKey":
               hasKeySites.add(fn);
               break;
+            case "caughtTest":
+              if (expr.test === "instanceof") caughtSites.add(fn);
+              break;
+            case "caughtNarrow":
+            case "caughtCheck":
+              if (expr.type.kind === "object") caughtSites.add(fn);
+              break;
             case "dynKeyGet":
             case "dynInvoke":
               rewrite.add(fn);
@@ -865,6 +950,11 @@ export class ClassDynamicDispatch {
           return true;
         },
       });
+    // The classes this pass found join the tables in a fixed order, not in
+    // the order the scan met them.
+    sortAdded(lowerer, this.boxed, boxedBefore);
+    sortAdded(lowerer, this.boxedConstructors, boxedConstructorsBefore);
+    changed = this.caughtDispatch.dynamicPayloads(lowerer, caughtSites, this.boxed) || changed;
     if (this.boxed.size === 0 && rewrite.size === 0) return changed;
     const converting = this.convertingHints(lowerer);
     const calling = this.calledConversions(lowerer);
@@ -1003,7 +1093,7 @@ export class ClassDynamicDispatch {
         const loc = this.propertyBag.loc;
         const method = classMethodValue(lowerer, info.decl, info, "toJSON", loc);
         const prototype = method ? classPrototypeData(lowerer, info, loc) : null;
-        const helper = lowerer.liftedFns.find((fn) => fn.name === info.def.prototypeDataHelper);
+        const helper = lowerer.liftedFnNamed(info.def.prototypeDataHelper);
         const init = helper?.body[0];
         if (
           !info.prototypeReflectionReady &&
@@ -1223,6 +1313,13 @@ export class ClassDynamicDispatch {
       const matching = this.propertyReceivers(lowerer, true).flatMap(({ info }) => {
         if (!info || info.fields.has(method) || info.builtinError) return [];
         if (emitterRooted(lowerer, info) && EMITTER_METHODS.has(method)) return [info];
+        if (
+          emitterRooted(lowerer, info) &&
+          !streamRooted(info) &&
+          EMITTER_INTROSPECTION_METHODS.has(method) &&
+          !findMethodOn(lowerer, info, method)
+        )
+          return [info];
         if (info.builtinStream) {
           return STREAM_METHODS.has(method) ||
             (STREAM_OPERATORS.has(method) && info.builtinStream !== "w")
@@ -1235,6 +1332,15 @@ export class ClassDynamicDispatch {
       });
       byMethod.set(method, matching);
       return matching;
+    };
+    const candidateSets = new Map<string, ReadonlySet<ClassInfo>>();
+    const candidateSet = (method: string): ReadonlySet<ClassInfo> => {
+      let set = candidateSets.get(method);
+      if (!set) {
+        set = new Set(candidates(method));
+        candidateSets.set(method, set);
+      }
+      return set;
     };
     for (const fn of functions) {
       // Discovery already visits every expression. Preserve bodies without
@@ -2220,16 +2326,16 @@ export class ClassDynamicDispatch {
             : expr.kind === "dynInvoke"
               ? expr
               : null;
-          const staticCandidates =
-            invoke &&
+          // Static methods matter only for methods no instance answers.
+          const staticCandidates = (method: string): boolean =>
             [...this.boxedConstructors].some((name) => {
               const info = lowerer.classes.get(name);
-              return info && findStaticOn(lowerer, info, invoke.method)?.method;
+              return info && findStaticOn(lowerer, info, method)?.method;
             });
           if (
             !invoke ||
             (candidates(invoke.method).length === 0 &&
-              !staticCandidates &&
+              !staticCandidates(invoke.method) &&
               !(invoke.method === "toString" && lowerer.classes.has("%Error")))
           )
             return expr;
@@ -2501,13 +2607,15 @@ export class ClassDynamicDispatch {
         });
         changed = true;
       }
-      for (const plan of this.propertyReceivers(lowerer, true)) {
+      // Compute the candidates where the first plan would have, so the
+      // memoized set is the same whichever plans are already answered.
+      const plans = this.propertyReceivers(lowerer, true);
+      const matching = plans.length ? candidateSet(dispatch.source.method) : null;
+      for (const plan of plans) {
         const { info } = plan;
-        if (!candidates(dispatch.source.method).includes(info) || dispatch.classes.has(plan.key))
-          continue;
+        if (dispatch.classes.has(plan.key) || !matching!.has(info)) continue;
         dispatch.classes.add(plan.key);
         const loc = dispatch.source.loc;
-        const value = varRef("p.0", DYN, loc);
         const { receiver, condition } = this.propertyReceiver(plan, loc);
         if (isClassCallback(lowerer, info, dispatch.source.method)) {
           const prototypeMethod = observedPrototypeMethod(
@@ -2517,7 +2625,28 @@ export class ClassDynamicDispatch {
             loc,
             receiver,
           );
-          const bag = this.readPropertyBagOrEmpty(lowerer, value, loc);
+          const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
+          const methodKey: IrExpr = {
+            kind: "strLit",
+            value: dispatch.source.method,
+            type: STRING,
+            loc,
+          };
+          const bagHas: IrExpr = {
+            kind: "libCall",
+            fn: "dyn.hasKey",
+            args: [bag, methodKey],
+            type: BOOL,
+            loc,
+          };
+          // An observed prototype slot answers through the bag when the bag
+          // holds the name (own or through its prototype). A bag read as a
+          // fresh empty object (an instance with no own dynamic properties
+          // whose bag initializer predates the class's prototype data) does
+          // not, so the method then comes from the class's prototype data.
+          const prototype = prototypeMethod
+            ? classPrototypeData(lowerer, info, loc, receiver)
+            : null;
           dispatch.callback.body.unshift({
             kind: "if",
             cond: condition,
@@ -2526,18 +2655,7 @@ export class ClassDynamicDispatch {
                 kind: "return",
                 value: {
                   kind: "ternary",
-                  cond: prototypeMethod
-                    ? { kind: "boolLit", value: true, type: BOOL, loc }
-                    : {
-                        kind: "libCall",
-                        fn: "dyn.hasKey",
-                        args: [
-                          bag,
-                          { kind: "strLit", value: dispatch.source.method, type: STRING, loc },
-                        ],
-                        type: BOOL,
-                        loc,
-                      },
+                  cond: prototype ? { kind: "boolLit", value: true, type: BOOL, loc } : bagHas,
                   then: {
                     kind: "dynObjLit",
                     fields: [
@@ -2545,8 +2663,17 @@ export class ClassDynamicDispatch {
                         key: { kind: "strLit", value: "value", type: STRING, loc },
                         value: {
                           kind: "dynKeyGet",
-                          value: bag,
-                          key: { kind: "strLit", value: dispatch.source.method, type: STRING, loc },
+                          value: prototype
+                            ? {
+                                kind: "ternary",
+                                cond: bagHas,
+                                then: bag,
+                                else_: prototype,
+                                type: DYN,
+                                loc,
+                              }
+                            : bag,
+                          key: methodKey,
                           type: DYN,
                           loc,
                         },
@@ -2648,7 +2775,7 @@ export class ClassDynamicDispatch {
         if (
           plan.info !== plan.capsule ||
           dispatch.classes.has(plan.key) ||
-          (!dispatch.field && !candidates(dispatch.method).includes(plan.info))
+          (!dispatch.field && !candidateSet(dispatch.method).has(plan.info))
         )
           continue;
         dispatch.classes.add(plan.key);
@@ -2738,6 +2865,8 @@ export class ClassDynamicDispatch {
         }
       for (const plan of this.propertyReceivers(lowerer, true)) {
         const { info } = plan;
+        // Classes answered in an earlier pass skip the member lookups.
+        if (dispatch.classes.has(plan.key)) continue;
         if (
           !isClassOwnEnumerableFieldName(dispatch.name) ||
           (!(info.builtinStream !== undefined && streamProperty(dispatch.name)) &&
@@ -2751,14 +2880,22 @@ export class ClassDynamicDispatch {
             !findMethodOn(lowerer, info, `set:${dispatch.name}`))
         )
           continue;
-        if (dispatch.classes.has(plan.key)) continue;
         dispatch.classes.add(plan.key);
         const loc = dispatch.fn.loc;
         const { receiver, condition } = this.propertyReceiver(plan, loc);
+        // The branch checks its receiver once: each use of the checked
+        // receiver would repeat the check.
+        const local = `receiver.${dispatch.fn.locals.length}`;
+        dispatch.fn.locals.push({
+          id: local,
+          name: "receiver",
+          type: receiver.type,
+          mutable: false,
+        });
         const before = lowerer.diags.length;
         let branch: IrStmt[];
         try {
-          branch = this.propertyBody(lowerer, dispatch, info, receiver);
+          branch = this.propertyBody(lowerer, dispatch, info, varRef(local, receiver.type, loc));
         } catch (error) {
           if (!(error instanceof PoisonError) || !info.decl) throw error;
           const fence = lowerer.deferToRuntimeFence(before, info.decl, { kind: "statement" });
@@ -2768,7 +2905,7 @@ export class ClassDynamicDispatch {
         dispatch.fn.body.unshift({
           kind: "if",
           cond: condition,
-          then: branch,
+          then: [{ kind: "varDecl", localId: local, init: receiver, loc }, ...branch],
           else_: null,
           loc,
         });
@@ -2868,11 +3005,7 @@ export class ClassDynamicDispatch {
             !info.fields.has(name) && observedPrototypeMethod(lowerer, info, name, loc, receiver);
           if (info.fields.has(name) || (dispatch.probe === "in" && !prototypeMethod)) {
             if (info.fields.has(name) && info.def.tracksOwnFields) {
-              const bag = this.readPropertyBagOrEmpty(
-                lowerer,
-                lowerer.coerceToExpected(receiver, DYN),
-                loc,
-              );
+              const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
               const symbol = symbolMemberKey(lowerer, info, name, loc);
               const fn =
                 dispatch.probe === "in"
@@ -2898,11 +3031,7 @@ export class ClassDynamicDispatch {
               { kind: "return", value: { kind: "boolLit", value: true, type: BOOL, loc }, loc },
             ];
           }
-          const bag = this.readPropertyBagOrEmpty(
-            lowerer,
-            lowerer.coerceToExpected(receiver, DYN),
-            loc,
-          );
+          const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
           const symbol = name.startsWith("sym:") || name.startsWith("%symbol:");
           const fn =
             dispatch.probe === "in"
@@ -2972,9 +3101,8 @@ export class ClassDynamicDispatch {
           }
           const branches: IrStmt[] = [];
           if (!dispatch.write && !dispatch.reflect && !info.def.tracksOwnFields) {
-            const value = varRef("p.0", DYN, loc);
             const key = varRef("p.key", DYN, loc);
-            const bag = this.readPropertyBagOrEmpty(lowerer, value, loc);
+            const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
             branches.push({
               kind: "if",
               cond: {
@@ -3310,7 +3438,7 @@ export class ClassDynamicDispatch {
     loc: SrcLoc,
   ): IrExpr {
     const name = fn === "dyn.hasKey" ? "%dyn.class.bagHas" : "%dyn.class.bagHasComputed";
-    let helper = lowerer.liftedFns.find((item) => item.name === name);
+    let helper = lowerer.liftedFnNamed(name);
     if (!helper) {
       const keyType = fn === "dyn.hasKey" ? STRING : DYN;
       const value = varRef("p.0", DYN, loc);
@@ -3907,7 +4035,7 @@ export class ClassDynamicDispatch {
   private readPropertyBagOrEmpty(lowerer: Lowerer, receiver: IrExpr, loc: SrcLoc): IrExpr {
     // One call per read site: large JS programs have a branch per class and
     // property, so the absent-bag handling lives in the shared helper.
-    let helper = lowerer.liftedFns.find((fn) => fn.name === READ_PROPERTIES_OR_EMPTY);
+    let helper = lowerer.liftedFnNamed(READ_PROPERTIES_OR_EMPTY);
     if (!helper) {
       // Settled by finalize; until then, the read-only bag's own dispatch.
       helper = {
@@ -4000,6 +4128,98 @@ export class ClassDynamicDispatch {
     return helper;
   }
 
+  /** The read-only bag a class branch reads for its receiver: the
+   * receiver's own field when the branch selected the receiver's exact
+   * class, otherwise the dispatch over every class (readPropertyBag, or
+   * readPropertyBagOrEmpty with `orEmpty`). */
+  private branchPropertyBag(
+    lowerer: Lowerer,
+    info: ClassInfo,
+    receiver: IrExpr,
+    orEmpty: boolean,
+    loc: SrcLoc,
+  ): IrExpr {
+    const helper = this.exactPropertyBag(lowerer, info, receiver, orEmpty, loc);
+    if (helper) return { kind: "call", callee: helper.name, args: [receiver], type: DYN, loc };
+    return orEmpty
+      ? this.readPropertyBagOrEmpty(lowerer, lowerer.coerceToExpected(receiver, DYN), loc)
+      : this.readPropertyBag(lowerer, receiver, loc);
+  }
+
+  /** `%class.branchProperties[OrEmpty]:<class>(receiver)`: the read-only bag of
+   * an instance of exactly `info`. A class branch of the dispatch helpers
+   * selects a canonical receiver (normalizeDispatches gives an instance its
+   * actual class's capsule), so its branch for `info` sees only instances
+   * of `info`; instances of its subclasses take their own branches. Such a
+   * receiver needs neither the dispatch over every class nor a boxed copy of
+   * itself. Null
+   * when `receiver` is not typed as `info`, when a runtime or builtin class
+   * in the family keeps its own property contract, or before the class has
+   * a bag. */
+  private exactPropertyBag(
+    lowerer: Lowerer,
+    info: ClassInfo,
+    receiver: IrExpr,
+    orEmpty: boolean,
+    loc: SrcLoc,
+  ): IrFunction | null {
+    const type = receiver.type;
+    if (type.kind !== "object" || type.className !== info.def.name) return null;
+    for (let current: ClassInfo | null = info; current; current = current.base)
+      if (
+        current.def.runtime ||
+        current.builtinEmitter ||
+        current.builtinStream ||
+        current.builtinError
+      )
+        return null;
+    const key = `${type.className}:${orEmpty}`;
+    const existing = this.exactPropertyBags.get(key);
+    if (existing) return existing;
+    const initializers = this.bagInitializers.get(type.className);
+    if (!initializers) return null;
+    const self = varRef("p.0", type, loc);
+    const bag: IrExpr = {
+      kind: "fieldGet",
+      obj: self,
+      className: type.className,
+      field: PROPERTY_BAG,
+      type: DYN,
+      loc,
+    };
+    const initialize: Extract<IrStmt, { kind: "fieldSet" }> = {
+      ...initializers[0]!,
+      obj: self,
+      value: withTypedReceiver(initializers[0]!.value, self),
+      loc,
+    };
+    const helper: IrFunction = {
+      name: `%class.branchProperties${orEmpty ? "OrEmpty" : ""}:${type.className}`,
+      params: [{ localId: "p.0", name: "value", type }],
+      returnType: DYN,
+      locals: [{ id: "p.0", name: "value", type, mutable: false }],
+      loc,
+      body: [
+        {
+          kind: "if",
+          cond: { kind: "dynTest", test: "undefined", value: bag, type: BOOL, loc },
+          then: [initialize],
+          else_: null,
+          loc,
+        },
+        { kind: "return", value: bag, loc },
+      ],
+    };
+    // Initializers gain their prototype as subclasses become constructible;
+    // finalize then turns the lazy store into the read's result.
+    initializers.push(initialize);
+    this.exactPropertyBags.set(key, helper);
+    this.readPropertyBags.push({ helper, initialize, orEmpty });
+    this.generated.add(helper);
+    lowerer.liftedFns.push(helper);
+    return helper;
+  }
+
   /** The prototype a new property bag of `current` (or of the subclass the
    * receiver is) starts from, or null when `current` has no prototype data.
    * A class with constructible subclasses that have prototype data selects
@@ -4079,9 +4299,11 @@ export class ClassDynamicDispatch {
    * prototype-backed bag is produced for this read only. A published object
    * cannot take the store, and Node's reads never write. */
   finalize(lowerer?: Lowerer): void {
-    for (const { helper, initialize } of this.readPropertyBags) {
+    // Each table serves every site that reaches it.
+    if (lowerer) for (const fn of this.generated) lowerer.shareHelper(fn);
+    for (const { helper, initialize, orEmpty } of this.readPropertyBags) {
       const absent = helper.body[0];
-      if (isEmptyBag(initialize.value)) helper.body.shift();
+      if (isEmptyBag(initialize.value) && !orEmpty) helper.body.shift();
       else if (absent?.kind === "if")
         absent.then = [{ kind: "return", value: initialize.value, loc: initialize.loc }];
     }
@@ -4256,17 +4478,38 @@ export class ClassDynamicDispatch {
     add(root);
   }
 
+  /** propertyReceivers results by mode, with the class graph they were
+   * computed from: the boxed classes, the registered classes, the subclass
+   * links and the constructed classes only grow, so equal counts and the
+   * same capsules give the same plans. */
+  private readonly receiverPlans = new Map<
+    string,
+    { revision: string; capsules: (ClassInfo | undefined)[]; plans: readonly PropertyReceiver[] }
+  >();
+
   /** A capsule retains its static type, while its object may be a subclass.
    * Preorder insertion lets later branches test the most derived layout first. */
   private propertyReceivers(
     lowerer: Lowerer,
     streams = false,
     normalize = true,
-  ): PropertyReceiver[] {
+  ): readonly PropertyReceiver[] {
+    const mode = `${streams}:${normalize}`;
+    const revision = `${this.boxed.size}:${lowerer.classes.size}:${lowerer.subclassLinks}:${lowerer.constructedClassCount()}`;
+    const cached = this.receiverPlans.get(mode);
+    if (cached?.revision === revision) {
+      let i = 0;
+      let same = true;
+      for (const name of this.boxed)
+        if (lowerer.classes.get(name) !== cached.capsules[i++]) same = false;
+      if (same) return cached.plans;
+    }
+    const capsules: (ClassInfo | undefined)[] = [];
     const plans: PropertyReceiver[] = [];
     const seen = new Set<string>();
     for (const name of this.boxed) {
       const capsule = lowerer.classes.get(name);
+      capsules.push(capsule);
       if (
         !capsule ||
         ((capsule.builtinEmitter || capsule.builtinStream) && !streams) ||
@@ -4275,10 +4518,10 @@ export class ClassDynamicDispatch {
         continue;
       const canonical = normalize && !capsule.builtinStream && !capsule.builtinEmitter;
       const visit = (info: ClassInfo): void => {
-        if (
-          (!canonical || !seen.has(info.def.name)) &&
-          (info === capsule || lowerer.classCanBeConstructed(info))
-        ) {
+        // A seen class was visited with its whole subtree, and a canonical
+        // visit adds no plan for a seen class.
+        if (canonical && seen.has(info.def.name)) return;
+        if (info === capsule || lowerer.classCanBeConstructed(info)) {
           seen.add(info.def.name);
           plans.push({
             info,
@@ -4290,6 +4533,7 @@ export class ClassDynamicDispatch {
       };
       visit(capsule);
     }
+    this.receiverPlans.set(mode, { revision, capsules, plans });
     return plans;
   }
 
@@ -4641,7 +4885,7 @@ export class ClassDynamicDispatch {
                 cond: this.readBagHas(
                   lowerer,
                   "dyn.hasKey",
-                  this.readPropertyBag(lowerer, receiver, loc),
+                  this.branchPropertyBag(lowerer, info, receiver, false, loc),
                   key,
                   loc,
                 ),
@@ -4656,7 +4900,7 @@ export class ClassDynamicDispatch {
           { kind: "return", value: null, loc },
         ];
       }
-      const bag = this.readPropertyBag(lowerer, receiver, loc);
+      const bag = this.branchPropertyBag(lowerer, info, receiver, false, loc);
       return [
         {
           kind: "return",
@@ -4724,7 +4968,7 @@ export class ClassDynamicDispatch {
       ) {
         this.constructors.set(info.def.name, info);
         const cls = lowerer.coerceToExpected(classValueRef(lowerer, info, info.decl), DYN);
-        const bag = this.readPropertyBag(lowerer, receiver, loc);
+        const bag = this.branchPropertyBag(lowerer, info, receiver, false, loc);
         const key: IrExpr = { kind: "strLit", value: name, type: STRING, loc };
         return [
           {
@@ -4802,7 +5046,7 @@ export class ClassDynamicDispatch {
           if (symbol || (isClassOwnEnumerableFieldName(name) && !name.startsWith("sym:"))) {
             const prototypeMethod = observedPrototypeMethod(lowerer, info, name, loc, receiver);
             // Selecting the method must not give the object own storage.
-            const bag = this.readPropertyBag(lowerer, receiver, loc);
+            const bag = this.branchPropertyBag(lowerer, info, receiver, false, loc);
             const key: IrExpr = symbol ?? { kind: "strLit", value: name, type: STRING, loc };
             body.push({
               kind: "if",
@@ -4870,7 +5114,7 @@ export class ClassDynamicDispatch {
       }
       if (!field && !accessor) {
         const instance = lowerer.coerceToExpected(receiver, DYN);
-        const bag = this.readPropertyBagOrEmpty(lowerer, instance, loc);
+        const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
         const key: IrExpr = { kind: "strLit", value: name, type: STRING, loc };
         const own: IrExpr = {
           kind: "libCall",
@@ -4917,11 +5161,7 @@ export class ClassDynamicDispatch {
         (t.kind === "union" && (getUnion(t.unionId)?.arms.some(mutable) ?? false));
       if (boxed.kind === "dynFrom" && mutable(boxed.value.type)) boxed.liveRef = true;
       if (accessor) {
-        const bag = this.readPropertyBagOrEmpty(
-          lowerer,
-          lowerer.coerceToExpected(receiver, DYN),
-          loc,
-        );
+        const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
         const key: IrExpr = { kind: "strLit", value: name, type: STRING, loc };
         return [
           {
@@ -4948,7 +5188,7 @@ export class ClassDynamicDispatch {
       }
       if (field && info.def.tracksOwnFields) {
         const instance = lowerer.coerceToExpected(receiver, DYN);
-        const bag = this.readPropertyBagOrEmpty(lowerer, instance, loc);
+        const bag = this.branchPropertyBag(lowerer, info, receiver, true, loc);
         const symbol = symbolMemberKey(lowerer, info, name, loc);
         const key: IrExpr = symbol ?? { kind: "strLit", value: name, type: STRING, loc };
         return [
@@ -5055,6 +5295,66 @@ export class ClassDynamicDispatch {
     return [store, { kind: "return", value: null, loc }];
   }
 
+  /** EventEmitter.prototype's introspection and bookkeeping members on an
+   * emitter seen through an untyped value: Node's results over the native
+   * listener registry. */
+  private emitterIntrospection(lowerer: Lowerer, dispatch: Dispatch, receiver: IrExpr): IrStmt[] {
+    const { method, loc } = dispatch.source;
+    const incoming = dispatch.source.args.map((_, i) => varRef(`p.${i + 1}`, DYN, loc));
+    const ret = (value: IrExpr): IrStmt[] => [
+      { kind: "return", value: lowerer.coerceToExpected(value, DYN), loc },
+    ];
+    const call = (fn: IrLibFn, args: IrExpr[], type: IrType): IrExpr => ({
+      kind: "libCall",
+      fn,
+      args: [receiver, ...args],
+      type,
+      loc,
+    });
+    // Node indexes _events with the argument itself: an omitted name is
+    // the key "undefined".
+    const eventName = (): IrExpr =>
+      incoming.length
+        ? lowerer.coerceToExpected(incoming[0]!, STRING)
+        : { kind: "strLit", value: "undefined", type: STRING, loc };
+    switch (method) {
+      case "listenerCount":
+        return ret(
+          incoming.length >= 2
+            ? call("emitter.countDyn", [eventName(), incoming[1]!], F64)
+            : call("emitter.count", [eventName()], F64),
+        );
+      case "eventNames":
+        return ret(call("emitter.names", [], { kind: "array", elem: STRING }));
+      case "removeAllListeners":
+        return ret(
+          incoming.length
+            ? call(
+                "emitter.removeAll",
+                [eventName(), { kind: "boolLit", value: false, type: BOOL, loc }],
+                receiver.type,
+              )
+            : call(
+                "emitter.removeAll",
+                [
+                  { kind: "strLit", value: "", type: STRING, loc },
+                  { kind: "boolLit", value: true, type: BOOL, loc },
+                ],
+                receiver.type,
+              ),
+        );
+      case "listeners":
+      case "rawListeners":
+        return ret(call("emitter.listenersDyn", [eventName()], DYN));
+      case "setMaxListeners":
+        return ret(
+          call("emitter.setMaxChk", [incoming[0] ?? dynUndefinedExpr(loc)], receiver.type),
+        );
+      default:
+        return ret(call("emitter.getMax", [], F64));
+    }
+  }
+
   private methodBody(
     lowerer: Lowerer,
     dispatch: Dispatch,
@@ -5070,6 +5370,14 @@ export class ClassDynamicDispatch {
         loc,
       },
     ];
+    if (
+      emitterRooted(lowerer, info) &&
+      !streamRooted(info) &&
+      EMITTER_INTROSPECTION_METHODS.has(method) &&
+      !findMethodOn(lowerer, info, method)
+    ) {
+      return this.emitterIntrospection(lowerer, dispatch, receiver);
+    }
     if (
       info.builtinStream ||
       (emitterRooted(lowerer, info) &&
@@ -5090,18 +5398,37 @@ export class ClassDynamicDispatch {
       ];
       if (method === "emit") {
         if (!incoming.length) return fence();
-        return ret({
-          kind: "libCall",
-          fn: "emitter.emitFlex",
-          args: [receiver, lowerer.coerceToExpected(incoming[0]!, STRING), ...incoming.slice(1)],
-          type: BOOL,
-          loc,
-        });
+        const event = lowerer.coerceToExpected(incoming[0]!, STRING);
+        const bridged = streamRooted(info)
+          ? null
+          : lowerDynamicEmitterEmit(lowerer, receiver, event, incoming.slice(1), loc);
+        return ret(
+          bridged ?? {
+            kind: "libCall",
+            fn: "emitter.emitAny",
+            args: [receiver, event, ...incoming.slice(1)],
+            type: BOOL,
+            loc,
+          },
+        );
       }
       if (registering || removing) {
         if (incoming.length < 2) return fence();
         const event = lowerer.coerceToExpected(incoming[0]!, STRING);
         const cb = incoming[1]!;
+        const bridged =
+          registering && !streamRooted(info)
+            ? lowerDynamicEmitterOn(
+                lowerer,
+                receiver,
+                event,
+                cb,
+                method === "once" || method === "prependOnceListener",
+                method.startsWith("prepend"),
+                loc,
+              )
+            : null;
+        if (bridged) return ret(bridged);
         return [
           {
             kind: "exprStmt",
@@ -5113,7 +5440,7 @@ export class ClassDynamicDispatch {
             fn: registering
               ? info.builtinStream
                 ? "stream.onDyn"
-                : "emitter.onFlex"
+                : "emitter.onAny"
               : "emitter.offDyn",
             args: [
               receiver,

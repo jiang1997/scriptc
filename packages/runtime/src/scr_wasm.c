@@ -5,7 +5,9 @@
  * WebAssembly.compile, instantiate, validate and new Module hash the bytes
  * they are given and look the module up by SHA-256 and length in
  * scr_wasm_registry, which the compiler emits; bytes that were not
- * translated at build time reject with a CompileError that says so.
+ * translated at build time reject with a CompileError that says so, and
+ * that names the reason for modules the build saw but does not translate
+ * (scr_wasm_untranslated).
  * Nothing is interpreted or compiled at run time, and a translated
  * module's bytes were validated when the program was built.
  *
@@ -1668,12 +1670,35 @@ static const ScrWasmModuleDesc *scr_wasm_lookup(const uint8_t *data, size_t len)
   return NULL;
 }
 
-static void scr_wasm_not_translated(const char *what) {
-  char msg[400];
-  snprintf(msg, sizeof msg,
-           "%s: this module was not translated when the program was built (scriptc compiles WebAssembly ahead of "
-           "time and cannot compile modules whose bytes it did not see; see https://scriptc.dev/limitations)",
-           what);
+/* The CompileError for bytes the registry does not hold: the reason the
+ * build recorded for a module it saw but does not translate, or the
+ * message for bytes it did not see. */
+static void scr_wasm_not_translated(const char *what, const uint8_t *data, size_t len) {
+  const ScrWasmUntranslatedDesc *found = NULL;
+  uint8_t digest[32];
+  bool hashed = false;
+  for (uint64_t i = 0; i < scr_wasm_untranslated.count && !found; i++) {
+    const ScrWasmUntranslatedDesc *d = &scr_wasm_untranslated.modules[i];
+    if (d->byte_length != len) continue;
+    if (!hashed) {
+      scr_wasm_sha256(data, len, digest);
+      hashed = true;
+    }
+    if (!memcmp(d->sha256, digest, 32)) found = d;
+  }
+  char msg[800];
+  if (found) {
+    int reason_len = found->reason_len > 600 ? 600 : (int)found->reason_len;
+    snprintf(msg, sizeof msg,
+             "%s: this module was found when the program was built but not translated (%.*s; see "
+             "https://scriptc.dev/limitations)",
+             what, reason_len, found->reason);
+  } else {
+    snprintf(msg, sizeof msg,
+             "%s: this module was not translated when the program was built (scriptc compiles WebAssembly ahead of "
+             "time and cannot compile modules whose bytes it did not see; see https://scriptc.dev/limitations)",
+             what);
+  }
   scr_wasm_throw_kind(SCR_WASM_COMPILE_ERROR, msg);
 }
 
@@ -1683,7 +1708,7 @@ static ScrDyn *scr_wasm_module_from(ScrDyn *bytes, const char *what, const char 
   if (!scr_wasm_bytes_of(bytes, what, expected, &data, &len)) return NULL;
   const ScrWasmModuleDesc *desc = scr_wasm_lookup(data, len);
   if (!desc) {
-    scr_wasm_not_translated(what);
+    scr_wasm_not_translated(what, data, len);
     return NULL;
   }
   ScrWasmObj *o = scr_wasm_obj_new(SCR_WASM_K_MODULE);
@@ -2043,7 +2068,7 @@ static ScrDyn *scr_wasm_instance_from(const ScrWasmModuleDesc *desc, ScrDyn *imp
     }
     scr_dyn_obj_set(exports, ex->name, (size_t)ex->name_len, value);
   }
-  ScrDyn *frozen = scr_dyn_freeze(exports);
+  ScrDyn *frozen = scr_dyn_freeze_data(exports);
   scr_dyn_release(frozen);
   host->exports = exports;
   ScrWasmObj *o = scr_wasm_obj_new(SCR_WASM_K_INSTANCE);

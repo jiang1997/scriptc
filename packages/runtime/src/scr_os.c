@@ -1327,7 +1327,7 @@ ScrDyn *scr_os_constants(void) {
   scr_os_constant(os, "UV_UDP_REUSEADDR", 4);
   scr_dyn_obj_set(os, "dlopen", 6, dlopen);
   scr_dyn_obj_set(os, "errno", 5, errnos);
-  scr_dyn_release(scr_dyn_freeze(signals));
+  scr_dyn_release(scr_dyn_freeze_data(signals));
   scr_dyn_obj_set(os, "signals", 7, signals);
   scr_dyn_obj_set(os, "priority", 8, priority);
   scr_os_constants_value = os;
@@ -1521,7 +1521,7 @@ ScrDyn *scr_node_constants(const ScrDyn *crypto_table) {
     }
   }
   scr_dyn_release(crypto);
-  scr_dyn_release(scr_dyn_freeze(o));
+  scr_dyn_release(scr_dyn_freeze_data(o));
   scr_node_constants_value = o;
   scr_atexit(scr_node_constants_clear);
   return scr_dyn_retain(o);

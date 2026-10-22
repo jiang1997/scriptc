@@ -7,18 +7,11 @@ retired-engine-2104-computed-key-destructuring.ts:30:38 - error SC2009: values o
 
   hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
 
-retired-engine-2104-computed-key-destructuring.ts:33:8 - error SC1031: destructuring with computed keys that do not fold to one property name is not supported yet
-
-  32 | traceS = "";
-  33 | let [{ [order(1)]: y } = order(0)] = [{}];
-     |        ^~~~~~~~~~~~~
-  34 | console.log(traceS);
-
-retired-engine-2104-computed-key-destructuring.ts:36:7 - error SC1031: destructuring with computed keys that do not fold to one property name is not supported yet
+retired-engine-2104-computed-key-destructuring.ts:36:58 - error SC1031: destructuring declaration from an `any` source whose expression spelling is unsupported (use a variable, ordinary property chain, or ordinary call) is not supported yet
 
   35 | traceS = "";
   36 | let { [order(0)]: { [order(2)]: z } = order(1), ...w } = {} as any;
-     |       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     |                                                          ^~~~~~~~~
   37 | console.log(traceS);
 
 retired-engine-2104-computed-key-destructuring.ts:39:8 - error SC1031: rest bindings whose packed type has no static mapping (only plain record types pack) is not supported yet

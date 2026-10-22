@@ -1,5 +1,6 @@
 /* Static immutability facts the backend uses to drop run-time immutability
  * checks (see computeConstructionFacts). Pure functions of the IR module. */
+import type { DynamicFieldStores } from "../ir/int32-slots.js";
 import type { IrExpr, IrModule, IrStmt } from "../ir/ir.js";
 import { everyExprChild, everyStmtChild } from "../ir/traverse.js";
 import {
@@ -44,7 +45,10 @@ export class ImmutableFields {
   }
 }
 
-export function computeImmutableFields(mod: IrModule): ImmutableFields | null {
+export function computeImmutableFields(
+  mod: IrModule,
+  stores?: DynamicFieldStores,
+): ImmutableFields | null {
   if (mod.lib !== undefined) return null;
   const baseOf = new Map((mod.classes ?? []).map((c) => [c.name, c.base ?? null] as const));
   const roots = new Map<string, string>();
@@ -58,7 +62,7 @@ export function computeImmutableFields(mod: IrModule): ImmutableFields | null {
     return cur;
   };
   const unitOfClass = (name: string): string => `object:${rootOf(name)}`;
-  const mutability = computeCycleMutability(mod, unitOfClass);
+  const mutability = computeCycleMutability(mod, unitOfClass, stores);
   return mutability.all ? null : new ImmutableFields(mutability, unitOfClass);
 }
 

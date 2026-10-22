@@ -1489,8 +1489,10 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
 static void scr_bytes_to_str_bounds(const ScrBytes *b, double start, double end,
                                     size_t *s0_out, size_t *e0_out) {
   size_t len = b->len;
-  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
-  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
+  /* Clamped before the conversion: NaN and values at or below 0 are 0,
+   * values at or past the length (Infinity included) are the length. */
+  size_t s0 = !(start > 0) ? 0 : start >= (double)len ? len : (size_t)start;
+  size_t e0 = !(end > 0) ? 0 : end >= (double)len ? len : (size_t)end;
   if (e0 < s0) e0 = s0;
   *s0_out = s0;
   *e0_out = e0;
@@ -2519,7 +2521,7 @@ static bool scr_enc_eq_ci(const ScrStr *raw, const char *name) {
   return true;
 }
 
-static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
+ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
   static const struct { const char *from; const char *to; } map[] = {
     {"utf8", "utf8"}, {"utf-8", "utf8"}, {"hex", "hex"},
     {"base64", "base64"}, {"base64url", "base64url"},
@@ -3204,15 +3206,61 @@ double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nar
   return sn < tn ? -1 : 1;
 }
 
+/* node_buffer.cc's IndexOfBuffer/IndexOfString for the UCS2 encoding over
+ * an encoded needle: buffer.js clamps the byteOffset to the int32 range,
+ * IndexOfOffset picks the start, the search runs over whole 2-byte units of
+ * the haystack (an odd trailing byte of either side is ignored), and a match
+ * is reported at its byte position. */
+static double scr_bytes_index_of_ucs2(const ScrBytes *haystack, const ScrBytes *needle, double at, bool fwd) {
+  int64_t length = (int64_t)haystack->len, needle_length = (int64_t)needle->len;
+  /* NaN (an omitted or non-numeric byteOffset) searches everything. */
+  if (at > 2147483647.0) at = 2147483647.0;
+  else if (at < -2147483648.0) at = -2147483648.0;
+  int64_t offset_i64 = at != at ? (fwd ? 0 : length) : (int64_t)trunc(at);
+  int64_t opt_offset;
+  if (offset_i64 < 0) {
+    if (offset_i64 + length >= 0) opt_offset = length + offset_i64;
+    else opt_offset = fwd || needle_length == 0 ? 0 : -1;
+  } else if (offset_i64 + needle_length <= length) {
+    opt_offset = offset_i64;
+  } else if (needle_length == 0) {
+    opt_offset = length;
+  } else {
+    opt_offset = fwd ? -1 : length - 1;
+  }
+  size_t search_end = haystack->len & ~(size_t)1;
+  if (needle_length == 0) return (double)(opt_offset < (int64_t)search_end ? opt_offset : (int64_t)search_end);
+  if (length == 0 || opt_offset <= -1) return -1;
+  size_t offset = (size_t)opt_offset;
+  if (offset >= search_end) {
+    if (fwd || search_end == 0) return -1;
+    offset = search_end - 1;
+  }
+  if ((fwd && needle->len + offset > search_end) || needle->len > search_end) return -1;
+  if (search_end < 2 || needle->len < 2) return -1;
+  size_t units = search_end / 2, needle_units = needle->len / 2, start = offset / 2;
+  if (units < needle_units) return -1;
+  size_t last = units - needle_units;
+  if (fwd) {
+    for (size_t p = start; p <= last; p++)
+      if (!memcmp(haystack->data + 2 * p, needle->data, 2 * needle_units)) return (double)(2 * p);
+    return -1;
+  }
+  for (size_t p = start < last ? start : last;; p--) {
+    if (!memcmp(haystack->data + 2 * p, needle->data, 2 * needle_units)) return (double)(2 * p);
+    if (p == 0) return -1;
+  }
+}
+
 /* The shared search core: needle bytes, a coerced byteOffset (trunc; NaN
  * means 'search everything' — 0 forward, the end backward; negatives
  * count from the end, and a still-negative backward search answers -1),
- * and the utf16le alignment stride. */
+ * and the alignment: 2 searches utf16le units (scr_bytes_index_of_ucs2). */
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd) {
   SCR_BYTES_SNAPSHOT(b);
   SCR_BYTES_SNAPSHOT(needle);
+  if (align == 2) return scr_bytes_index_of_ucs2(b, needle, off, fwd);
   size_t len = b->len, nlen = needle->len;
-  size_t step = align == 2 ? 2 : 1;
   double o = (off != off) ? (fwd ? 0 : (double)len) : trunc(off);
   if (o < 0) {
     o += (double)len;
@@ -3225,17 +3273,15 @@ double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off,
   if (nlen > len) return -1;
   if (fwd) {
     size_t start = o > (double)len ? len : (size_t)o;
-    if (step == 2) start += start % 2;
-    for (size_t i = start; i + nlen <= len; i += step) {
+    for (size_t i = start; i + nlen <= len; i++) {
       if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
     }
     return -1;
   }
   size_t start = o > (double)(len - nlen) ? len - nlen : (size_t)o;
-  if (step == 2) start -= start % 2;
-  for (size_t i = start;; i -= step) {
+  for (size_t i = start;; i--) {
     if (memcmp(b->data + i, needle->data, nlen) == 0) return (double)i;
-    if (i < step) break;
+    if (i == 0) break;
   }
   return -1;
 }
@@ -3910,4 +3956,64 @@ ScrStr *scr_bytes_join(const ScrBytes *b, const ScrStr *separator) {
   ScrStr *out = scr_arr_join(values, (ScrStr *)separator);
   scr_arr_release(values);
   return out;
+}
+
+/* ── the checked-dynamic Buffer compare/equals validators ──────────────
+ * Node's argument ladders for buf.equals / buf.compare / Buffer.compare
+ * over dyn-boxed arguments (the invalid-input probes: string needles,
+ * '0' offsets, null/object range args). A well-typed dyn still computes
+ * the real answer — validation, not a constant fence. */
+
+/* A bytes payload or the API's own ERR_INVALID_ARG_TYPE (borrowed). */
+static ScrBytes *scr_bytes_chk_u8(const ScrDyn *d, const char *argname) {
+  if (!scr_dyn_bytes_is(d, SCR_BYTES_U8)) {
+    scr_dyn_arg_type_fail(argname, "an instance of Buffer or Uint8Array", d);
+    return NULL;
+  }
+  return d->v.bytes;
+}
+
+double scr_buffer_compare_chk(const ScrDyn *a, const ScrDyn *b) {
+  ScrBytes *b1 = scr_bytes_chk_u8(a, "buf1");
+  if (!b1) return 0;
+  ScrBytes *b2 = scr_bytes_chk_u8(b, "buf2");
+  if (!b2) return 0;
+  return scr_bytes_compare(b1, b2, 0, 0, 0, 0, 0);
+}
+
+bool scr_bytes_equals_chk(const ScrBytes *recv, const ScrDyn *other) {
+  ScrBytes *o = scr_bytes_chk_u8(other, "otherBuffer");
+  if (!o) return false;
+  return scr_bytes_equals(recv, o);
+}
+
+/* One offset slot: undefined takes the Node default, non-numbers throw
+ * ERR_INVALID_ARG_TYPE "of type number", numbers run validateOffset. */
+static bool scr_bytes_chk_off(const ScrDyn *d, const char *name, double max,
+                              double dflt, double *out) {
+  if (d->kind == SCR_DYN_UNDEF) {
+    *out = dflt;
+    return true;
+  }
+  if (d->kind != SCR_DYN_NUM) {
+    scr_dyn_arg_type_fail(name, "of type number", d);
+    return false;
+  }
+  *out = d->v.num;
+  return scr_bytes_validate_off(name, *out, max);
+}
+
+double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
+                             const ScrDyn *ts, const ScrDyn *te,
+                             const ScrDyn *ss, const ScrDyn *se) {
+  ScrBytes *t = scr_bytes_chk_u8(target, "target");
+  if (!t) return 0;
+  double tsv, tev, ssv, sev;
+  if (!scr_bytes_chk_off(ts, "targetStart", 9007199254740991.0, 0, &tsv)) return 0;
+  if (!scr_bytes_chk_off(te, "targetEnd", (double)t->len, (double)t->len, &tev)) return 0;
+  if (!scr_bytes_chk_off(ss, "sourceStart", 9007199254740991.0, 0, &ssv)) return 0;
+  if (!scr_bytes_chk_off(se, "sourceEnd", (double)src->len, (double)src->len, &sev)) return 0;
+  /* Every slot validated or defaulted above; nargs 4 revalidates the
+   * now-known-good numbers (a no-op) and keeps one comparison core. */
+  return scr_bytes_compare(src, t, 4, tsv, tev, ssv, sev);
 }

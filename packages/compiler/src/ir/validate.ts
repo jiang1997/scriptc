@@ -1117,7 +1117,7 @@ function validateFunction(
   // helpers. They are not source-level types and never return as values.
   if (fn.returnType.kind === "caught") err("return type is caught", fn.loc);
   for (const p of fn.params) {
-    if (p.type.kind === "caught" && fn.name !== "%caught.dynamicValue")
+    if (p.type.kind === "caught" && !fn.name.startsWith("%caught."))
       err(`param "${p.name}" is caught-typed`, fn.loc);
     if (!locals.has(p.localId)) {
       err(`param "${p.name}" has no local entry "${p.localId}"`, fn.loc);
@@ -4080,6 +4080,8 @@ function validateFunction(
     const variadic =
       e.fn === "emitter.emit" ||
       e.fn === "emitter.emitFlex" ||
+      e.fn === "emitter.emitAny" ||
+      e.fn === "emitter.emitMixed" ||
       e.fn === "readable.new" ||
       e.fn === "writable.new" ||
       e.fn === "duplex.new" ||
@@ -4258,6 +4260,12 @@ function validateFunction(
         field("0")?.kind === "string" &&
         field("1")?.kind === "dyn";
       if (!ok) err(`libCall dyn.objEntryPairs must return a [string, any] tuple array`, e.loc);
+      return true;
+    }
+    if (e.fn === "array.namedKeys" || e.fn === "array.hasNamedKey") {
+      if (e.args[0]?.type.kind !== "array") {
+        err(`libCall ${e.fn} arg 0: expected an array, got ${e.args[0]?.type.kind}`, e.loc);
+      }
       return true;
     }
     if (e.fn === "fetch.streamFrom") {
@@ -5847,6 +5855,7 @@ function validateFunction(
         e.fn === "emitter.off" ||
         e.fn === "emitter.onDyn" ||
         e.fn === "emitter.onFlex" ||
+        e.fn === "emitter.onAny" ||
         e.fn === "stream.onDyn" ||
         e.fn === "emitter.offDyn" ||
         e.fn === "emitter.onData" ||
@@ -5901,14 +5910,27 @@ function validateFunction(
         if (!ok) err(`libCall emitter.listeners must return a func array`, e.loc);
         return true;
       }
-      if (e.fn === "emitter.emitFlex") {
+      if (e.fn === "emitter.emitFlex" || e.fn === "emitter.emitAny") {
         if (e.args.slice(2).some((arg) => arg.type.kind !== "dyn")) {
-          err("libCall emitter.emitFlex payloads must be checked-dynamic", e.loc);
+          err(`libCall ${e.fn} payloads must be checked-dynamic`, e.loc);
+        }
+      }
+      if (e.fn === "emitter.emitMixed") {
+        const count = e.args[2];
+        const k = count?.kind === "numLit" ? count.value : -1;
+        if (!Number.isInteger(k) || k < 0 || e.args.length < 3 + k) {
+          err("libCall emitter.emitMixed needs a literal argument count", e.loc);
+        } else if (e.args.slice(3, 3 + k).some((arg) => arg.type.kind !== "dyn")) {
+          err("libCall emitter.emitMixed untyped arguments must be checked-dynamic", e.loc);
         }
       }
       if (
         e.fn === "emitter.emit" ||
         e.fn === "emitter.emitFlex" ||
+        e.fn === "emitter.emitAny" ||
+        e.fn === "emitter.emitMixed" ||
+        e.fn === "emitter.hasTyped" ||
+        e.fn === "emitter.listenersDyn" ||
         e.fn === "emitter.count" ||
         e.fn === "emitter.getMax" ||
         e.fn === "emitter.ctor" ||

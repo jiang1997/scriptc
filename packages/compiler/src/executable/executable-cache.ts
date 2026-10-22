@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import type { FrontendInputSnapshot } from "../frontend/input-tracker.js";
 import { frontendInputsStillMatch, validFrontendInputSnapshot } from "../frontend/input-tracker.js";
 import { compilerReleaseVersion } from "../library/sidecar.js";
@@ -70,7 +71,7 @@ export interface EarlyExecutableNativeFeatures {
   handleProps?: boolean;
   dynForAwait?: boolean;
   eventsOnceSignal?: boolean;
-  dynBufferNum?: boolean;
+  dynBuffer?: boolean;
   builtinValues?: boolean;
   events: boolean;
   emitter: boolean;
@@ -112,6 +113,8 @@ interface EarlyExecutableCacheStamp {
   };
   nativeDependencies: NativeArtifactDependency[] | null;
   native: EarlyExecutableNativeFeatures;
+  /** The build's performance warnings (SC61xx), which a cache hit repeats. */
+  performance?: ScrDiagnostic[];
   integrity: string;
 }
 
@@ -181,6 +184,8 @@ export interface EarlyExecutableCacheHit {
   executableRestored: boolean;
   native: EarlyExecutableNativeFeatures;
   frontend: FrontendInputSnapshot;
+  /** The performance warnings the build reported (SC61xx), repeated on a hit. */
+  performance?: ScrDiagnostic[];
 }
 
 export interface EarlyExecutableCachePublish extends EarlyExecutableCacheHit {
@@ -330,6 +335,39 @@ function routePath(
   options: Omit<EarlyExecutableRouteOptions, "nativeEnvironment">,
 ): string {
   return join(root, "early-exe-route", routeKey(options));
+}
+
+function nativeBuildMarkerPath(
+  root: string,
+  options: Omit<EarlyExecutableRouteOptions, "nativeEnvironment">,
+): string {
+  return join(root, "early-exe-native-build", routeKey(options));
+}
+
+/** Records that a build of the invocation `options` emitted its native program object, so the
+ * native helper's partition cache holds its partitions. Unlike the route, the record does not
+ * depend on the build publishing its executable. */
+export async function recordEarlyExecutableNativeBuild(
+  root: string | null,
+  options: Omit<EarlyExecutableRouteOptions, "nativeEnvironment">,
+): Promise<void> {
+  if (root === null) return;
+  const marker = nativeBuildMarkerPath(root, options);
+  await mkdir(dirname(marker), { recursive: true, mode: 0o700 });
+  await writeFile(marker, "", { mode: 0o600 });
+}
+
+/** Whether an earlier build of the invocation `options` recorded its native program object
+ * (`recordEarlyExecutableNativeBuild`). False when there is no cache. */
+export async function hasEarlyExecutableNativeBuild(
+  root: string | null,
+  options: Omit<EarlyExecutableRouteOptions, "nativeEnvironment">,
+): Promise<boolean> {
+  if (root === null) return false;
+  return stat(nativeBuildMarkerPath(root, options)).then(
+    (info) => info.isFile(),
+    () => false,
+  );
 }
 
 function routeIntegrity(stamp: Omit<EarlyExecutableRouteStamp, "integrity">): string {
@@ -577,6 +615,9 @@ async function readExecutableCache(
       native: stamp.native,
       executableRestored,
       frontend: stamp.frontend,
+      ...(Array.isArray(stamp.performance) && stamp.performance.length > 0
+        ? { performance: stamp.performance }
+        : {}),
       ...(ir === null ? {} : { irPath: paths.irPath }),
     };
   } catch {
@@ -760,6 +801,9 @@ export async function publishEarlyExecutableCache(
       },
       nativeDependencies: executable === null ? null : result.nativeDependencies!,
       native: result.native,
+      ...(result.performance === undefined || result.performance.length === 0
+        ? {}
+        : { performance: result.performance }),
     };
     const stamp: EarlyExecutableCacheStamp = { ...unsigned, integrity: stampIntegrity(unsigned) };
     await writeFile(join(stage, "stamp.json"), `${JSON.stringify(stamp)}\n`, { mode: 0o600 });

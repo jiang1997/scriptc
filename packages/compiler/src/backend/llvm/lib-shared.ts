@@ -793,6 +793,8 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "fsp.rename": "scr_fsp_rename",
   "fsp.readdir": "scr_fsp_readdir",
   "fsp.rm": "scr_fsp_rm",
+  "fsp.rmOpts": "scr_fsp_rm_opts",
+  "fsp.rmRetry": "scr_fsp_rm_opts_retry",
   "fsp.stat": "scr_fsp_stat",
   "fsp.realpath": "scr_fsp_realpath",
   "fsp.lstat": "scr_fsp_lstat",
@@ -1068,6 +1070,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "emitter.off": "scr_emitter_off",
   "emitter.offDyn": "scr_emitter_off_dyn",
   "emitter.onFlex": "scr_emitter_on_flex",
+  "emitter.onAny": "scr_emitter_on_any",
   "emitter.checkListener": "scr_emitter_check_listener",
   "emitter.removeAll": "scr_emitter_remove_all",
   "emitter.emitError": "scr_emitter_emit_error",
@@ -1076,6 +1079,8 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "emitter.countDyn": "scr_emitter_listener_count_dyn",
   "emitter.names": "scr_emitter_event_names",
   "emitter.listeners": "scr_emitter_listeners",
+  "emitter.listenersDyn": "scr_emitter_listeners_dyn",
+  "emitter.hasTyped": "scr_emitter_has_typed",
   "emitter.setMax": "scr_emitter_set_max",
   "emitter.setMaxChk": "scr_emitter_set_max_chk",
   "emitter.setDefaultMaxChk": "scr_emitter_set_default_max_chk",
@@ -1488,6 +1493,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "dyn.bagGet": "scr_dyn_bag_get",
   "dyn.bagSet": "scr_dyn_bag_set",
   "dyn.objCreate": "scr_dyn_obj_create",
+  "dyn.nameClassPrototype": "scr_dyn_name_class_prototype",
   "dyn.objCreateWithProperties": "scr_dyn_obj_create_with_properties",
   "dyn.getPrototype": "scr_dyn_get_prototype",
   "dyn.setPrototype": "scr_dyn_set_prototype",
@@ -1514,6 +1520,8 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "regex.groupNumber": "scr_regex_group_number",
   "regex.groupParseInt": "scr_regex_group_parse_int",
   "regex.resultProp": "scr_regex_result_prop",
+  "array.namedKeys": "scr_arr_named_keys",
+  "array.hasNamedKey": "scr_arr_has_named_key",
   // queueMicrotask's checked-dynamic form (borrowed dyn; a non-function
   // throws synchronously), the minted setImmediate value, and the
   // timers/promises immediate — all mark the loop live.

@@ -2104,6 +2104,8 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<
     glob: ["fsp.globTypes"],
     // The Uint8Array/Buffer-data form.
     appendFile: ["fsp.appendFileBytes"],
+    // The options forms.
+    rm: ["fsp.rmOpts", "fsp.rmRetry"],
   },
   crypto: {
     // The composed randomBytes(n).toString(enc) chain keeps its one-libCall

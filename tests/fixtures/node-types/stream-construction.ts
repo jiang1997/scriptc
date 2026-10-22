@@ -42,17 +42,21 @@ function gunzipThrough(payload: Buffer): Promise<string> {
   });
 }
 
+// Resolves after 'close', which follows 'end' once the descriptor is
+// closed: the result never races the child processes started next.
 function readFileStream(file: string): Promise<string> {
   return new Promise((resolve) => {
     const stream = fs.createReadStream(file);
     let text = "";
-    const release = () => console.log("released");
+    const release = () => {
+      console.log("released");
+      resolve(text);
+    };
     stream.on("close", release);
     stream.on("error", release);
     stream.on("data", (chunk) => {
       text += chunk.toString();
     });
-    stream.on("end", () => resolve(text));
   });
 }
 

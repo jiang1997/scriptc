@@ -1052,6 +1052,10 @@ export interface IrModule {
    * API (possibly empty). The backend appends each module's translation
    * and emits the registry the runtime looks modules up in. */
   wasmModules?: IrWasmModule[];
+  /** The modules the build saw but does not translate, with the reason,
+   * present with wasmModules. The backend emits them in a second table, so
+   * loading one rejects with a CompileError that names the reason. */
+  wasmUntranslated?: IrWasmUntranslated[];
   /** The program calls WebAssembly.Module.customSections, so translated
    * modules keep their custom sections (otherwise they carry none, and
    * debug sections cost nothing). */
@@ -1065,6 +1069,16 @@ export interface IrWasmModule {
   sha256: string;
   /** The bytes, base64. */
   bytes: string;
+}
+
+/** A WebAssembly module whose bytes the build saw but does not translate. */
+export interface IrWasmUntranslated {
+  /** Hex SHA-256 of the bytes. */
+  sha256: string;
+  /** The byte length. */
+  size: number;
+  /** Why the module is not translated, as a clause ("it uses simd, ..."). */
+  reason: string;
 }
 
 /** Verified contract facts, keyed by IR names. */
@@ -3544,11 +3558,13 @@ export type IrExpr =
    * excluding callable and primitive references;
    * "instanceof" requires `className`: hierarchy payloads use the vtable
    * interval, while standalone classes use their exact retain adapter.
-   * Other payloads answer false. `negated` flips the result (the `!==` spelling). */
+   * Other payloads answer false. "dynamic" is a value thrown as unknown
+   * (the payload caughtToDyn returns by reference). `negated` flips the
+   * result (the `!==` spelling). */
   | {
       kind: "caughtTest";
       value: IrExpr;
-      test: "string" | "number" | "boolean" | "object" | "instanceof";
+      test: "string" | "number" | "boolean" | "object" | "instanceof" | "dynamic";
       className?: string;
       negated?: boolean;
       type: IrType;
@@ -4332,7 +4348,9 @@ function canBoxDynCompositeAt(
       }
     }
     default:
-      return false;
+      // Runtime handles (a socket in a diagnostics message) box by
+      // reference wherever the walker meets them, as at the top level.
+      return DYN_HANDLE_KINDS.has(t.kind);
   }
 }
 

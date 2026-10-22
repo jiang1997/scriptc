@@ -764,6 +764,35 @@ test("node-types: exec's numeric ExecException.code remains a named fence", asyn
   }
 });
 
+test("node-types: fs functions take URL paths under @types/node's PathLike", async () => {
+  const dir = outDirFor("node-fs-url-paths");
+  const result = await compile(join(nodeTypesDir, "fs-url-paths.ts"), {
+    outPath: join(dir, "fs-url-paths"),
+    outDir: dir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const { stdout } = await execFileAsync(result.binaryPath);
+  expect(stdout).toBe("hello 5 5\n");
+});
+
+test("node-types: existsSync and fs.promises URL paths remain named fences", async () => {
+  const dir = outDirFor("node-fs-url-path-fences");
+  const result = await compile(join(nodeTypesDir, "fs-url-path-fences.ts"), {
+    outPath: join(dir, "fs-url-path-fences"),
+    outDir: dir,
+    sanitize,
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message])).toEqual([
+    ["SC2020", expect.stringContaining("'existsSync with a URL path'")],
+    ["SC2020", expect.stringContaining("'fs.promises.readFile with a URL path'")],
+    ["SC2020", expect.stringContaining("'fs.promises.stat with a URL path'")],
+  ]);
+});
+
 test("node-types: path and os lower statically under @types/node's shapes", async () => {
   const outDir = outDirFor("node-path-os");
   const result = await compile(join(nodeTypesDir, "path-os.ts"), {

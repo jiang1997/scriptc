@@ -901,6 +901,12 @@ export function emitAsyncExpr(
       // the callee's adopting entry. Past finally regions, the return has
       // already produced the promise (adoptedOperand).
       const adopted = e.adopt === true ? host.takeAdoptedOperand() : null;
+      // A stackless coroutine body runs the entries of `Promise.all` of
+      // never-suspending calls in place and takes Promise.all's turns.
+      if (adopted === null && e.value.kind === "intrinsic" && host.currentCoro?.kind === "async") {
+        const entries = host.inlinePromiseAllEntries(e.value);
+        if (entries !== null) return host.emitCoroInlinePromiseAll(entries, e.type);
+      }
       // A stackless coroutine body runs a never-suspending callee in place
       // and takes the await's turn itself.
       if (adopted === null && e.value.kind === "call" && host.inlineAwaitEligible(e.value.callee)) {
@@ -910,6 +916,22 @@ export function emitAsyncExpr(
           !host.callLifetimes.borrowed.has(e.value.callee)
         ) {
           return host.emitCoroInlineAwait(e.value, e.adopt === true);
+        }
+      }
+      // A stackless coroutine body awaits a stackless callee's fiber record
+      // instead of its promise.
+      if (
+        adopted === null &&
+        e.adopt !== true &&
+        e.value.kind === "call" &&
+        host.directAwaitEligible(e.value.callee)
+      ) {
+        const callee = host.fnByName.get(e.value.callee)!;
+        if (
+          typeEquals(callee.returnType, e.type) &&
+          !host.callLifetimes.borrowed.has(e.value.callee)
+        ) {
+          return host.emitCoroDirectAwait(e.value, e.type);
         }
       }
       if (adopted === null && e.value.kind === "call" && host.awaitCallEligible(e.value.callee)) {

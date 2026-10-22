@@ -36,6 +36,7 @@
  * of the compiler already takes (a body running before the declaring
  * statement is not modeled — same as top-level const reads through early
  * calls). */
+import { positionTag, type PositionTagOwner } from "./structural-positions.js";
 import * as ts from "../ts7/adapter.js";
 import { packageShimFor } from "../package-shims.js";
 import type { Lowerer } from "./lowerer.js";
@@ -164,7 +165,11 @@ function registerTypeOnlyBlocks(lowerer: Lowerer, decl: ts.ModuleDeclaration): v
  * distinct (resolution is by symbol; names only need uniqueness and
  * determinism). `modifierDecl` carries the declaration whose modifiers
  * decide exportedness (the first declarator of a variable statement). */
-export function nsPathPrefix(node: ts.Node, modifierDecl?: ts.Node): string {
+export function nsPathPrefix(
+  owner: PositionTagOwner,
+  node: ts.Node,
+  modifierDecl?: ts.Node,
+): string {
   const parent = node.parent;
   if (parent === undefined || !ts.isModuleBlock(parent)) return "";
   const flagsHost = modifierDecl ?? node;
@@ -179,10 +184,10 @@ export function nsPathPrefix(node: ts.Node, modifierDecl?: ts.Node): string {
       const nested = p.parent !== undefined && ts.isModuleBlock(p.parent);
       const nonExported =
         nested && (ts.getCombinedModifierFlags(p) & ts.ModifierFlags.Export) === 0;
-      segs.unshift(p.name.text + (nonExported ? `%${ts.tokenStartOfNode(p)}` : ""));
+      segs.unshift(p.name.text + (nonExported ? `%${positionTag(owner, p)}` : ""));
     }
   }
-  return `${segs.join("%")}${exported ? "" : `%${ts.tokenStartOfNode(parent)}`}.`;
+  return `${segs.join("%")}${exported ? "" : `%${positionTag(owner, parent)}`}.`;
 }
 
 /** The registered namespace-block kind a symbol's declaration sits in

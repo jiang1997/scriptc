@@ -1,4 +1,5 @@
 /* Binary operators: arithmetic, comparisons and equality, logical and nullish pairs, and string conversion for concatenation. */
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { cleanFuncAdaptable } from "../coercions/function-adapters.js";
 import { type Lowerer, jsFuncNameOf } from "../lowerer.js";
@@ -801,7 +802,7 @@ function nullProtoToString(lowerer: Lowerer, e: IrExpr, t: IrType & { kind: "rec
   const key = `nullProtoToString:${t.shapeId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%rec.tostr.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%rec.tostr", key);
     lowerer.valueHelpers.set(key, helper);
     const r = varRef("r.0", t, loc);
     lowerer.liftedFns.push({

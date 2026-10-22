@@ -1,4 +1,5 @@
 /* LlEmitter's module-level output: module parts, helper definitions, library declarations and FFI callback definitions. */
+import { relieveHeapPressure } from "../../heap-pressure.js";
 import { emitWasmModules } from "./wasm-modules.js";
 import { type LlEmitter, ffiCallbackDummyLl, llStrBytes } from "./emitter.js";
 import { JS_IC_WORDS } from "./js-ic.js";
@@ -29,7 +30,6 @@ import {
   vAdapters,
 } from "./shapes.js";
 import { emitLlvmLayouts } from "./layouts.js";
-import { moduleRuntimeFeatures } from "../../ir/runtime-features.js";
 import { emitArraySearchHelpers } from "./array-search.js";
 import { emitClassMembershipHelper } from "./classes.js";
 import { type RegexMatcherCode, compileRegexMatcher } from "./regex-matchers.js";
@@ -67,6 +67,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     const def = emitter.emitFunction(fn);
     fnDefs.push(def);
     emitter.fnDefText.set(fn.name, def);
+    relieveHeapPressure();
   }
   emitter.selectStacklessAsync(fnDefs);
   const errorViews: string[] = [];
@@ -138,7 +139,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
   // outlive the RC audit — release it with the globals (the runtime ABI’s
   // sc_release_globals tail). Only when the dispatch unit is even
   // linked (defineProps is the only writer).
-  const runtimeFeatures = moduleRuntimeFeatures(emitter.mod);
+  const runtimeFeatures = emitter.runtimeFeatures;
   const fnValueProps = [...emitter.fnValues];
   if (fnValueProps.length > 0) emitter.declare(`declare void @scr_box_release(ptr)`);
   if (emitter.classObjs.size > 0)
@@ -440,15 +441,17 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     `%ScrFfiTable = type { ptr, ${emitter.sizeType}, ${emitter.sizeType}, ptr, i8, ptr, ptr, ${emitter.sizeType}, ${emitter.sizeType}, ${emitter.sizeType}, ptr, ptr }`,
     `%ScrRegex = type { ${emitter.sizeType}, ptr, ptr, ptr, double, ptr, ptr, ptr }`,
     // ScrArr mirrors scr_runtime.h field-for-field: { rc, len (i32), cap
-    // (i32), elem, cyc, spare, filled, ops, data, ext } (field numbers in
+    // (i32), elem, cyc, spare, filled, data } (field numbers in
     // SCR_ARR_FIELD), where the dense states follow the cap value slots at
-    // data, filled bounds the hole-free prefix, ops points at the element type's constant RC descriptor
-    // (%ScrArrOps, SCR_ELEM_REF only) and ext at the out-of-line sparse,
-    // property and metadata storage (NULL until first used). Live dynamic
-    // stream commits swap its dense, presence and out-of-line storage while
+    // data, filled bounds the hole-free prefix, and spare holds the storage
+    // flags and the registry id of the element type's RC descriptor
+    // (%ScrArrOps, SCR_ELEM_REF only; the runtime assigns ids). An array
+    // with out-of-line sparse, property or metadata storage keeps a pointer
+    // to it in the word before its dense allocation. Live dynamic stream
+    // commits swap its dense, presence and out-of-line storage while
     // preserving the target object's identity.
-    `%ScrArr = type { ${emitter.sizeType}, i32, i32, i8, i8, i16, i32, ptr, ptr, ptr }`,
-    `%ScrArrOps = type { ptr, ptr, ptr }`,
+    `%ScrArr = type { ${emitter.sizeType}, i32, i32, i8, i8, i16, i32, ptr }`,
+    `%ScrArrOps = type { ptr, ptr, ptr, i32 }`,
     // The ScrMap prefix { rc, key_kind, val_kind, traced } — the inline
     // RC fast paths test the traced byte (shapes.ts).
     ...(emitter.rcHelpers === null ? [] : [`%ScrMapRc = type { ${emitter.sizeType}, i8, i8, i8 }`]),
@@ -542,6 +545,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ``,
     `@scr_error_vts = external ${tl}global [${RUNTIME_ERROR_CLASSES.size} x %ScrVt]`,
     `declare void @scr_init()`,
+    ...(emitter.usesCompactRefs ? [`declare void @scr_plr_init()`] : []),
     `declare void @scr_lib_init(i32, ptr)`,
     ...(emitter.mod.workers ? [`declare void @scr_runtime_workers_v8()`] : []),
     ...(emitter.stackChecks?.size ? [`declare void @scr_stack_guard_init()`] : []),
@@ -710,7 +714,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
       wide ? `ptr ${s}` : `<{ ptr, i32 }> <{ ptr ${s}, i32 0 }>`;
     out.push(
       `@${inst.sym}_data = internal constant <{ [${n} x ${slot}], [${n} x i8] }> <{ [${n} x ${slot}] [ ${inst.slots.map(slotValue).join(", ")} ], [${n} x i8] ${present} }>, align 8`,
-      `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, i32 ${n}, i32 ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr null, ptr @${inst.sym}_data, ptr null }`,
+      `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, i32 ${n}, i32 ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr @${inst.sym}_data }`,
     );
   }
   if (emitter.templateStringsInstances.size > 0) out.push(``);
@@ -834,6 +838,9 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ...(emitter.runtimeAbiMarker ? [`  call void @${RUNTIME_ABI_MARKER}()`] : []),
     ...(emitter.mod.workers ? [`  call void @scr_runtime_workers_v8()`] : []),
     `  call void @scr_init()`,
+    // Compressed fields hold addresses in the program-lifetime region, which
+    // is reserved below 32 GiB before compiled code runs.
+    ...(emitter.usesCompactRefs ? [`  call void @scr_plr_init()`] : []),
     // Each context (the main thread, every worker) installs its stack
     // guard before running compiled code that checks it.
     ...(emitter.stackChecks?.size ? [`  call void @scr_stack_guard_init()`] : []),

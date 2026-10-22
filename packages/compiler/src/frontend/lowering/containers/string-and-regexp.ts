@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { matchAllRowsReadByElements } from "./match-row-uses.js";
 import {
   boolLit,
@@ -159,7 +160,7 @@ export function lowerStringSplitCall(
   const key = `str.split:${receiver.type.kind === "union" ? typeKey(receiver.type) : receiver.type.kind}:${typeKey(separator.type)}:${typeKey(limit.type)}:${absent}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%str.split.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%str.split", key);
     const values = [receiver, separator, limit];
     const params = values.map((value, index) => ({
       localId: `arg.${index}`,
@@ -395,7 +396,7 @@ function stringIndexHelperCall(
   const key = `str.index:${method}:${typeKey(receiver.type)}:${typeKey(index.type)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%str.index.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%str.index", key);
     lowerer.valueHelpers.set(key, helper);
     const rawReceiver = varRef("arg.0", receiver.type, loc);
     const rawIndex = varRef("arg.1", index.type, loc);
@@ -673,7 +674,7 @@ export function lowerStringPaddingCall(
   const key = `str.pad:${method}:${values.map((value) => typeKey(value.type)).join(":")}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%str.pad.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%str.pad", key);
     const params = values.map((value, index) => ({
       localId: `arg.${index}`,
       name: `arg${index}`,
@@ -1309,7 +1310,7 @@ export function lowerStringMethodCall(
     const key = `str.positions:${entry.method}:${typeKey(needle.type)}:${typeKey(position.type)}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%str.positions.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%str.positions", key);
       const params = [receiver, needle, position].map((arg, index) => ({
         localId: `arg.${index}`,
         name: `arg${index}`,
@@ -1411,7 +1412,7 @@ export function lowerStringMethodCall(
     const key = `str.positions:${entry.method}:${args.map((arg) => typeKey(arg.type)).join(":")}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%str.positions.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%str.positions", key);
       const params = [receiver, ...args].map((arg, index) => ({
         localId: `arg.${index}`,
         name: `arg${index}`,

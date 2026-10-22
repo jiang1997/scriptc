@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { lowerValueReturningConstructorNew } from "./js-dynamic-objects.js";
 import { adaptPromiseExecutor } from "./promise-executor-adapter.js";
 import { dynUndefinedExpr, nodeThrowExpr, varRef } from "../../ir/build.js";
@@ -688,6 +689,9 @@ export interface ClassInfo {
     path: InstantiationPath;
     family: ClassInfo;
     bindings: Map<ts.Symbol, IrType>;
+    /** The type arguments as checker types, for the resolutions that need
+     * literal identity (a conditional type over a literal argument). */
+    tsBindings: Map<ts.Symbol, ts.Type>;
     typeArgsText: string;
     ordinal: number;
   };
@@ -767,6 +771,9 @@ export interface GenericClassInfo {
   typeParams: ts.Symbol[];
   family: ClassInfo;
   instances: Map<string, { name: string; info: ClassInfo | null; poisoned?: boolean }>;
+  /** The type parameters a conditional type in the class depends on
+   * (literalSensitiveTypeParams), computed on first instantiation. */
+  literalSensitive?: Set<ts.Symbol>;
 }
 
 /** The KEY symbol behind a LATE-BOUND (`__@name@id`) property: resolved
@@ -946,7 +953,10 @@ export function registerBuiltinErrorClasses(lowerer: Lowerer): void {
       throwingSetters: [],
       staticFields: [],
     };
-    if (base) base.subclasses.push(info);
+    if (base) {
+      base.subclasses.push(info);
+      lowerer.subclassLinks++;
+    }
     lowerer.classes.set(irName, info);
   }
 }
@@ -1026,7 +1036,10 @@ export function registerBuiltinStreamClasses(lowerer: Lowerer): void {
       throwingSetters: [],
       staticFields: [],
     };
-    if (base) base.subclasses.push(info);
+    if (base) {
+      base.subclasses.push(info);
+      lowerer.subclassLinks++;
+    }
     lowerer.classes.set(irName, info);
   }
 }
@@ -1766,6 +1779,7 @@ export function collectClassShapeInner(
     family: ClassInfo;
     name: string;
     bindings: Map<ts.Symbol, IrType>;
+    tsBindings: Map<ts.Symbol, ts.Type>;
     typeArgsText: string;
     ordinal: number;
   },
@@ -4442,6 +4456,7 @@ export function collectClassShapeInner(
         path: inst.path,
         family: inst.family,
         bindings: inst.bindings,
+        tsBindings: inst.tsBindings,
         typeArgsText: inst.typeArgsText,
         ordinal: inst.ordinal,
       };
@@ -4471,7 +4486,10 @@ export function collectClassShapeInner(
       };
       lowerer.genericClassByDecl.set(decl, info.generic);
     }
-    if (base) base.subclasses.push(info);
+    if (base) {
+      base.subclasses.push(info);
+      lowerer.subclassLinks++;
+    }
     lowerer.classes.set(className, info);
     if (computedBase && !functionLocalClass(decl)) {
       info.def.baseValueGlobal = `%g.${className}.computedBase`;
@@ -4582,8 +4600,10 @@ export function genericClassInstanceType(
     .getTypeArguments(ref as ts.TypeReference)
     .slice(0, gci.typeParams.length);
   const mapped: IrType[] = [];
+  const tsArgs: ts.Type[] = [];
   if (args.length === gci.typeParams.length) {
     for (const a of args) {
+      tsArgs.push(lowerer.typeParamTsResolver(a) ?? a);
       const m = lowerer.mapTypeOf(a, mapArgument);
       if (!m || m.kind === "void") {
         // An UNBOUND type parameter argument (`Box<T>` outside any
@@ -4602,9 +4622,32 @@ export function genericClassInstanceType(
       const b = lowerer.typeParamBindings?.get(tp);
       if (!b) return null;
       mapped.push(b);
+      const bound = lowerer.typeParamTsBindings?.get(tp);
+      if (bound) tsArgs.push(bound);
     }
   }
-  const key = mapped.map(typeKey).join(",");
+  // A type parameter that a conditional type in the class depends on
+  // (`K extends "required" ? T : T | undefined`) is bound to its checker
+  // type for the members, and that type keys the instance: mapType alone
+  // widens a literal, so Field<string, "required"> and Field<string,
+  // "optional"> would otherwise share one layout. The other parameters get
+  // no checker binding, so nothing in the members depends on a literal
+  // the key does not carry.
+  gci.literalSensitive ??= literalSensitiveTypeParams(lowerer, gci);
+  const sensitive = (i: number): boolean =>
+    tsArgs.length === gci.typeParams.length && gci.literalSensitive!.has(gci.typeParams[i]!);
+  const checkerKey = gci.typeParams
+    .map((_, i) => (sensitive(i) ? `#${tsArgs[i]!.id}` : "*"))
+    .join(",");
+  const key =
+    mapped.map(typeKey).join(",") + (gci.literalSensitive.size > 0 ? `@${checkerKey}` : "");
+  const literalText = (i: number): string | null => {
+    const arg = sensitive(i) ? tsArgs[i] : undefined;
+    if (arg?.isStringLiteralType()) return JSON.stringify(arg.value);
+    if (arg?.isNumberLiteralType()) return String(arg.value);
+    if (arg && arg.flags & ts.TypeFlags.BooleanLiteral) return lowerer.checker.typeToString(arg);
+    return null;
+  };
   const existing = gci.instances.get(key);
   if (existing) {
     if (existing.info) lowerer.noteGenericClassInstanceDemand(existing.info);
@@ -4621,18 +4664,24 @@ export function genericClassInstanceType(
     );
   }
   const ordinal = gci.instances.size;
-  const name = `${gci.family.def.name}%${ordinal}`;
+  const name = keyedHelperName(lowerer, `${gci.family.def.name}%`, key, "");
   const entry: { name: string; info: ClassInfo | null; poisoned?: boolean } = { name, info: null };
   gci.instances.set(key, entry);
   const bindings = new Map<ts.Symbol, IrType>();
   gci.typeParams.forEach((tp, i) => bindings.set(tp, mapped[i]!));
-  const rendered = mapped.map((m) => lowerer.fmt(m)).join(", ");
+  const tsBindings = new Map<ts.Symbol, ts.Type>();
+  gci.typeParams.forEach((tp, i) => {
+    if (sensitive(i)) tsBindings.set(tp, tsArgs[i]!);
+  });
+  const rendered = mapped.map((m, i) => literalText(i) ?? lowerer.fmt(m)).join(", ");
   const typeArgsText = `<${rendered.length > 80 ? rendered.slice(0, 77) + "..." : rendered}>`;
   const prevBindings = lowerer.typeParamBindings;
+  const prevTsBindings = lowerer.typeParamTsBindings;
   const prevContext = lowerer.instantiationContext;
   const previousPath = lowerer.genericInstantiationPath;
   lowerer.genericInstantiationPath = path;
   lowerer.typeParamBindings = bindings;
+  lowerer.typeParamTsBindings = tsBindings;
   lowerer.instantiationContext = `instantiating class '${gci.baseName}' with ${typeArgsText}`;
   try {
     lowerer.collectClassShapeInner(decl, undefined, {
@@ -4640,6 +4689,7 @@ export function genericClassInstanceType(
       family: gci.family,
       name,
       bindings,
+      tsBindings,
       typeArgsText,
       ordinal,
     });
@@ -4651,6 +4701,7 @@ export function genericClassInstanceType(
     return null;
   } finally {
     lowerer.typeParamBindings = prevBindings;
+    lowerer.typeParamTsBindings = prevTsBindings;
     lowerer.instantiationContext = prevContext;
     lowerer.genericInstantiationPath = previousPath;
   }
@@ -4664,6 +4715,63 @@ export function genericClassInstanceType(
   lowerer.noteGenericClassInstanceDemand(info);
   lowerer.onLateClassCollected?.(info);
   return { kind: "object", className: name };
+}
+
+/** The class's type parameters that a conditional type inside it depends
+ * on: the parameters named within a type node that is a conditional type
+ * or reaches one through the type aliases and interfaces it refers to
+ * (`get(): Value<T, K>` with `type Value<T, K> = K extends "required" ? T
+ * : T | undefined`, also when the alias wraps the conditional in a union
+ * or another alias). Their arguments pick the conditional's branch. */
+function literalSensitiveTypeParams(lowerer: Lowerer, gci: GenericClassInfo): Set<ts.Symbol> {
+  const params = new Set(gci.typeParams);
+  const found = new Set<ts.Symbol>();
+  const reaches = new Map<ts.Symbol, boolean>();
+  const declarationsReach = (symbol: ts.Symbol): boolean => {
+    const target =
+      symbol.flags & ts.SymbolFlags.Alias ? lowerer.checker.getAliasedSymbol(symbol) : symbol;
+    const known = reaches.get(target);
+    if (known !== undefined) return known;
+    reaches.set(target, false); // a recursive alias reaches through its other parts
+    const result = target.declarations.some((d) =>
+      ts.isTypeAliasDeclaration(d)
+        ? reachesConditional(d.type)
+        : ts.isInterfaceDeclaration(d)
+          ? d.members.nodes.some(reachesConditional)
+          : false,
+    );
+    reaches.set(target, result);
+    return result;
+  };
+  const reachesConditional = (node: ts.Node): boolean => {
+    if (ts.isConditionalTypeNode(node)) return true;
+    if (ts.isTypeReferenceNode(node)) {
+      const name = ts.isIdentifier(node.typeName) ? node.typeName : node.typeName.right;
+      const symbol = lowerer.checker.getSymbolAtLocation(name);
+      if (symbol && !params.has(symbol) && declarationsReach(symbol)) return true;
+    }
+    let found = false;
+    ts.forEachChild(node, (child) => {
+      if (!found && reachesConditional(child)) found = true;
+    });
+    return found;
+  };
+  const collect = (node: ts.Node): void => {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
+      const symbol = lowerer.checker.getSymbolAtLocation(node.typeName);
+      if (symbol && params.has(symbol)) found.add(symbol);
+    }
+    ts.forEachChild(node, collect);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeNode(node) && reachesConditional(node)) {
+      collect(node);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const member of gci.decl.members.nodes) visit(member);
+  return found;
 }
 
 /** Runs a member-lowering thunk under an INSTANTIATION's type-parameter
@@ -4699,17 +4807,20 @@ function withInstanceBindings<T>(lowerer: Lowerer, info: ClassInfo, fn: () => T)
     }
   }
   const prevBindings = lowerer.typeParamBindings;
+  const prevTsBindings = lowerer.typeParamTsBindings;
   const prevContext = lowerer.instantiationContext;
   const prevSuppress = lowerer.suppressStats;
   const previousPath = lowerer.genericInstantiationPath;
   lowerer.genericInstantiationPath = gi.path;
   lowerer.typeParamBindings = gi.bindings;
+  lowerer.typeParamTsBindings = gi.tsBindings;
   lowerer.instantiationContext = `instantiating class '${gi.family.generic?.baseName ?? info.def.jsName ?? ""}' with ${gi.typeArgsText}`;
   lowerer.suppressStats = prevSuppress || gi.ordinal > 0;
   try {
     return fn();
   } finally {
     lowerer.typeParamBindings = prevBindings;
+    lowerer.typeParamTsBindings = prevTsBindings;
     lowerer.instantiationContext = prevContext;
     lowerer.suppressStats = prevSuppress;
     lowerer.genericInstantiationPath = previousPath;
@@ -7800,7 +7911,7 @@ export function classIteratorDrainCall(
   const key = `${cit.className}:${typeKey(outElem)}`;
   let name = lowerer.iterDrainHelpers.get(key);
   if (!name) {
-    name = `%iter.drain.${lowerer.iterDrainHelpers.size}`;
+    name = keyedHelperName(lowerer, "%iter.drain", key);
     lowerer.iterDrainHelpers.set(key, name);
     const recvT: IrType = { kind: "object", className: cit.className };
     const recvRef: IrExpr = { kind: "varRef", localId: "r.0", type: recvT, loc };
@@ -7914,7 +8025,7 @@ export function classIteratorRestDrainCall(
   const key = `it:${cit.iterT.className}`;
   let name = lowerer.iterDrainHelpers.get(key);
   if (!name) {
-    name = `%iter.drain.${lowerer.iterDrainHelpers.size}`;
+    name = keyedHelperName(lowerer, "%iter.drain", key);
     lowerer.iterDrainHelpers.set(key, name);
     const itRef: IrExpr = { kind: "varRef", localId: "it.0", type: cit.iterT, loc };
     const outRef: IrExpr = { kind: "varRef", localId: "out.0", type: outT, loc };
@@ -8428,11 +8539,38 @@ function superCallInStatementPosition(call: ts.CallExpression): boolean {
   for (;;) {
     const parent = node.parent;
     if (ts.isExpressionStatement(parent)) return true;
+    if (ts.isIfStatement(parent)) {
+      const lead = superConditionLead(parent.expression);
+      return lead !== null && call.pos >= lead.left.pos && call.end <= lead.left.end;
+    }
     const comma =
       ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.CommaToken;
     if (!comma && !ts.isParenthesizedExpression(parent)) return false;
     node = parent;
   }
+}
+
+/** The comma chain of an `if` condition whose leading operands hold a
+ * super() call (`if (super(), r === 0) throw ...`, as minifiers join a
+ * super statement with the next test), or null. The if statement runs the
+ * chain's left operand as a statement first and tests its right operand,
+ * which is what the comma evaluates. */
+export function superConditionLead(cond: ts.Expression): ts.BinaryExpression | null {
+  let expr = cond;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if (!ts.isBinaryExpression(expr) || expr.operatorToken.kind !== ts.SyntaxKind.CommaToken)
+    return null;
+  const holdsSuperCall = (operand: ts.Expression): boolean => {
+    let e = operand;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    if (ts.isCallExpression(e)) return e.expression.kind === ts.SyntaxKind.SuperKeyword;
+    return (
+      ts.isBinaryExpression(e) &&
+      e.operatorToken.kind === ts.SyntaxKind.CommaToken &&
+      (holdsSuperCall(e.left) || holdsSuperCall(e.right))
+    );
+  };
+  return holdsSuperCall(expr.left) ? expr : null;
 }
 
 /** Super statements initialize the base and then the derived fields on
@@ -10395,7 +10533,7 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
       const key = `x509.record:${isBytes ? "bytes" : "str"}`;
       let helper = lowerer.valueHelpers.get(key);
       if (!helper) {
-        helper = `%x509.record.${lowerer.valueHelpers.size}`;
+        helper = keyedHelperName(lowerer, "%x509.record", key);
         lowerer.valueHelpers.set(key, helper);
         const dataT = data.type;
         const dRef: IrExpr = { kind: "varRef", localId: "d.0", type: dataT, loc };

@@ -112,6 +112,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.assert && opts.bigint ? ["scr_bigint_assert.c"] : []),
     ...(opts.emitter ? ["scr_events_emitter.c", "scr_dyn_handle.c"] : []),
     ...(opts.dynInvoke ? ["scr_dyn_invoke.c"] : []),
+    ...(opts.dynInvoke && opts.dynBuffer ? ["scr_bytes_dyn.c"] : []),
     ...(opts.dynTier === true ? ["scr_js_value.c", "scr_js_object.c"] : []),
     ...(opts.zlib ? ["scr_zlib.c"] : []),
     ...(opts.copying ? ["scr_copying.c"] : []),

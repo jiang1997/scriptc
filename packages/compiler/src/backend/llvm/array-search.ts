@@ -23,6 +23,7 @@
  * is little-endian, which the short-string words assume.
  */
 import type { IrType } from "../../ir/ir.js";
+import { SCR_ARR_FIELD } from "./common.js";
 import { FN_ATTRS } from "./shapes.js";
 
 export type ArraySearchKind = "ptr" | "str";
@@ -72,7 +73,7 @@ export function emitArraySearchHelpers(
       `  %dense = icmp eq ${sz} %f, %len`,
       `  br i1 %dense, label %scan, label %slow`,
       `scan:`,
-      `  %dp = getelementptr inbounds %ScrArr, ptr %a, i32 0, i32 8`,
+      `  %dp = getelementptr inbounds %ScrArr, ptr %a, i32 0, i32 ${SCR_ARR_FIELD.data}`,
       `  %data = load ptr, ptr %dp`,
     );
     if (kind === "ptr") {

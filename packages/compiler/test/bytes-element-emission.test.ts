@@ -335,11 +335,17 @@ test("a body mutation keeps the byte loop on the general f64 path", () => {
 
 test("worker programs read and write shared views at the checked integer index", () => {
   const ll = emitLlvmModule({ ...fixture(), workers: true });
-  // The shared path receives the index the inline path checked, as an integer,
-  // and integer elements come back as 32-bit values.
-  expect(ll).toMatch(/call i32 @scr_bytes_shared_get_int\(ptr %\w+, i64 %?\w+\) cold/);
-  expect(ll).toMatch(/call double @scr_bytes_shared_get_f64\(ptr %\w+, i64 %?\w+\) cold/);
-  expect(ll).toMatch(/call void @scr_bytes_shared_set\(ptr %\w+, i64 %?\w+, double %?[\w.]+\)/);
+  // The shared path uses the index the inline path checked, as an integer:
+  // each element is one relaxed atomic access of its width, aligned to it.
+  expect(ll).toMatch(/load atomic i8, ptr %\w+ monotonic, align 1/);
+  expect(ll).toMatch(/load atomic i32, ptr %\w+ monotonic, align 4/);
+  expect(ll).toMatch(/load atomic float, ptr %\w+ monotonic, align 4/);
+  expect(ll).toMatch(/store atomic i8 [%\w.]+, ptr %\w+ monotonic, align 1/);
+  expect(ll).toMatch(/store atomic i32 [%\w.]+, ptr %\w+ monotonic, align 4/);
+  expect(ll).toMatch(/store atomic float [%\w.]+, ptr %\w+ monotonic, align 4/);
+  expect(ll).not.toContain("@scr_bytes_shared_get_int");
+  expect(ll).not.toContain("@scr_bytes_shared_get_f64");
+  expect(ll).not.toContain("@scr_bytes_shared_set");
   expect(ll).not.toContain("@scr_bytes_get_or_nan");
   expect(ll).not.toContain("@scr_bytes_set(");
   // Both paths join as one integer, which converts to a number after the join.

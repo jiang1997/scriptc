@@ -7,7 +7,7 @@ import type {
   CompileLibraryOptions,
   CompileRequestOptions,
 } from "../compile-types.js";
-import { emitLlvmModule } from "../backend/llvm/emitter.js";
+import { emitLlvmModule, lowRegionTarget } from "../backend/llvm/emitter.js";
 import { inlineRcOption } from "../backend/llvm/shapes.js";
 import { executableLinkFeatures } from "../backend/executable-features.js";
 import type { NativeLinkFeatures } from "../backend/native-link-info-core.js";
@@ -293,6 +293,7 @@ export function prepareNativeExecutable(
           wasi: toolchain.target.platform === "wasi",
           runtimeAbiMarker: outputKind === "obj" || outputKind === "exe",
           objectAudit: options.sanitize === true,
+          lowRegion: lowRegionTarget(toolchain.target.platform, options.sanitize === true),
           ...inlineRcOption(options.optimization, options.sanitize === true),
           ...(options.detachedExit === true && outputKind === "exe" ? { detachedExit: true } : {}),
           ...(options.optimization === "dev" && !options.strip

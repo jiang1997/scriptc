@@ -195,6 +195,11 @@ export function mangleAsyncAdoptCall(fnName: string): string {
 export function mangleAsyncInlineAwaitCall(fnName: string): string {
   return `sc_ai_${sanitize(fnName)}`;
 }
+/** A stackless coroutine body's `await f(...)` of a stackless async f: the
+ * spawn of f's fiber record, which keeps its promise inside (direct await). */
+export function mangleAsyncDirectSpawn(fnName: string): string {
+  return `sc_dw_${sanitize(fnName)}`;
+}
 export function mangleTrampoline(fnName: string): string {
   return `sc_tr_${sanitize(fnName)}`;
 }

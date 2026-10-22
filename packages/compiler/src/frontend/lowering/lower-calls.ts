@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { isForwardedTupleSpread, lowerForwardingApply } from "./typed-arguments.js";
 import { guardNullProto, nullProtoRecordShape } from "./null-prototype.js";
 import { lowerDynStreamMemberCall } from "./dyn-streams.js";
@@ -166,7 +167,6 @@ import { lowerReflectCall } from "./builtins/reflection.js";
 import {
   lowerAbsenceProbe,
   v8CalleeText,
-  lowerOptionalNumber,
   lowerPromiseAllTupleCall,
   lowerPromiseRejectCall,
   lowerToNumberArgument,
@@ -1008,10 +1008,9 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     // excludes shadowed names. parseInt's omitted radix completes
     // to 0 — the spec's "undefined" (base 10 with the 0x hex escape);
     // parseFloat lowers the STRING form only (Node would ToString other
-    // values — no static story); isNaN/isFinite's arguments are
-    // checker-pinned (or checked) to number, where the global's ToNumber
-    // coercion is the identity and the tests are Number.isNaN /
-    // Number.isFinite exactly (ms's `isFinite(val)` guard).
+    // values — no static story); isNaN/isFinite apply the global's
+    // ToNumber to any argument, then test like Number.isNaN /
+    // Number.isFinite.
     if (
       (expr.expression.text === "parseInt" ||
         expr.expression.text === "isNaN" ||
@@ -1130,18 +1129,14 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     }
     if (islFn && expr.arguments.nodes.length === islFn.args.length) {
       // The static forms above already took the exactly-typed argument
-      // (a string for parseFloat, a number for isFinite): name the
-      // argument type that refused the call, so the message states the
-      // condition rather than reading as if the global itself were
-      // unsupported.
+      // (a string for parseFloat): name the argument type that refused
+      // the call, so the message states the condition rather than
+      // reading as if the global itself were unsupported.
       const argText = loweredArgumentText(lowerer, expr.arguments.nodes[0]!);
-      const exact = expr.expression.text === "isFinite" ? "number" : "string";
       lowerer.refuseUnsupportedApi(
         `'${expr.expression.text}' with a '${argText}' argument`,
         expr,
-        exact === "string"
-          ? "only a string argument compiles statically: convert the argument explicitly first (for example String(x), or narrow the union)"
-          : "only a number argument compiles statically: narrow the argument to a number first",
+        "only a string argument compiles statically: convert the argument explicitly first (for example String(x), or narrow the union)",
       );
     }
   }
@@ -2100,7 +2095,7 @@ function lowerOptionalNumberDefault(
   const key = `number.optionalDefault:${widened.unionId}:${dflt}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%number.optionalDefault.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%number.optionalDefault", key);
     lowerer.valueHelpers.set(key, helper);
     const input = varRef("value.0", widened, loc);
     lowerer.liftedFns.push({
@@ -2209,7 +2204,7 @@ function primitiveConversionHandler(
   const key = `then.${name}:${typeKey(inner)}`;
   let fnName = lowerer.arrHofHelpers.get(key);
   if (fnName === undefined) {
-    fnName = `%then.${name}.${lowerer.arrHofHelpers.size}`;
+    fnName = keyedHelperName(lowerer, `%then.${name}`, key);
     lowerer.arrHofHelpers.set(key, fnName);
     const value = varRef("v.0", inner, loc);
     let body: IrExpr;
@@ -2378,7 +2373,7 @@ function lowerBigIntConstructorValue(lowerer: Lowerer, arg: IrExpr, loc: SrcLoc)
   const key = `bigint.scalar:${unionId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%bigint.scalar.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%bigint.scalar", key);
     lowerer.valueHelpers.set(key, helper);
     const value = varRef("value.0", arg.type, loc);
     const body: IrStmt[] = [];
@@ -3207,6 +3202,20 @@ function lowerStringPrototypeCall(
   );
 }
 
+/** ToNumber of a union of strings, numbers, booleans, null and undefined, as
+ * `Number(value)` converts it; null for other types. Unary `+` takes it too:
+ * the two conversions differ only for BigInt, which such unions don't hold. */
+export function lowerPrimitiveUnionNumber(
+  lowerer: Lowerer,
+  arg: IrExpr,
+  node: ts.Expression,
+  loc: SrcLoc,
+): IrExpr | null {
+  return (
+    lowerOptionalStringNumber(lowerer, arg, loc) ?? lowerScalarUnionNumber(lowerer, arg, node, loc)
+  );
+}
+
 function lowerScalarUnionNumber(
   lowerer: Lowerer,
   arg: IrExpr,
@@ -3226,7 +3235,7 @@ function lowerScalarUnionNumber(
   const key = `number.scalar:${arg.type.unionId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%number.scalar.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%number.scalar", key);
     lowerer.valueHelpers.set(key, helper);
     const value = varRef("value.0", arg.type, loc);
     const nan: IrExpr = {
@@ -3271,7 +3280,7 @@ function lowerOptionalStringNumber(
   const key = `${label}.optionalString:${arg.type.unionId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%${label}.optionalString.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%${label}.optionalString`, key);
     lowerer.valueHelpers.set(key, helper);
     const value = varRef("value.0", arg.type, loc);
     lowerer.liftedFns.push({
@@ -4090,6 +4099,12 @@ const DYN_DISPATCH_METHODS = new Set([
   "prependOnceListener",
   "listeners",
   "listenerCount",
+  // The rest of EventEmitter.prototype, which compiled emitters answer
+  // through the class dispatch (class-dynamic-dispatch.ts).
+  "rawListeners",
+  "eventNames",
+  "setMaxListeners",
+  "getMaxListeners",
   "write",
   "end",
   "destroy",
@@ -4692,7 +4707,7 @@ function lowerDefaultToStringCall(
   const key = `objToStr:${typeKey(recv.type)}${missing ? `:${missing}` : ""}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%obj.tostr.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%obj.tostr", key);
     lowerer.valueHelpers.set(key, helper);
     const o = varRef("o.0", recv.type, loc);
     lowerer.liftedFns.push({
@@ -5379,7 +5394,7 @@ function loweredTemplateStrings(
     const site = lowerer.globalsList.length;
     const globalId = `%g.templateStrings.${site}`;
     const readyId = `%g.templateStringsReady.${site}`;
-    getter = `%templateStrings.get.${lowerer.valueHelpers.size}`;
+    getter = keyedHelperName(lowerer, "%templateStrings.get", key);
     lowerer.valueHelpers.set(key, getter);
     lowerer.globalsList.push(
       { id: globalId, name: "%templateStrings", type, mutable: true },
@@ -5560,7 +5575,7 @@ export function lowerPromiseMethodCall(
     // IS the spec's identity/thrower/no-op substitution for all three
     // members. An argument expression, when present, is undefined/null
     // by construction — nothing to evaluate.
-    const fnName = `%fn${lowerer.lambdaCounter++}_${member}pass`;
+    const fnName = lowerer.closureName(loc, `_${member}pass`);
     const funcType: IrType & { kind: "func" } = { kind: "func", params: [promT], ret: promT };
     const fnCtx = newFnCtx(true, null, funcType, inner);
     fnCtx.isAsync = true;
@@ -5657,7 +5672,7 @@ export function lowerPromiseMethodCall(
       // Evaluate both callback expressions before the wrapper runs, in source order.
       const fulfilled = fulfilledAbsent ? null : boxHandler(fulfilledNode, true);
       const rejected = rejectedAbsent ? null : boxHandler(rejectedNode, false);
-      const fnName = `%fn${lowerer.lambdaCounter++}_then2`;
+      const fnName = lowerer.closureName(loc, "_then2");
       const paramTypes: IrType[] = [
         promT,
         ...(fulfilled ? [fulfilled.value.type] : []),
@@ -5906,7 +5921,7 @@ export function lowerPromiseMethodCall(
         );
       };
       const resultT: IrType & { kind: "promise" } = { kind: "promise", inner: DYN };
-      const fnName = `%fn${lowerer.lambdaCounter++}_then`;
+      const fnName = lowerer.closureName(loc, "_then");
       const funcType: IrType & { kind: "func" } = {
         kind: "func",
         params: [promT, DYN],
@@ -6001,7 +6016,7 @@ export function lowerPromiseMethodCall(
       );
     }
     const R = resultT.inner;
-    const fnName = `%fn${lowerer.lambdaCounter++}_then`;
+    const fnName = lowerer.closureName(loc, "_then");
     const funcType: IrType & { kind: "func" } = {
       kind: "func",
       params: [promT, cb.type],
@@ -6104,7 +6119,7 @@ export function lowerPromiseMethodCall(
         "finally callbacks with parameters or a return value (use () => { ... })",
       );
     }
-    const fnName = `%fn${lowerer.lambdaCounter++}_finally`;
+    const fnName = lowerer.closureName(loc, "_finally");
     const funcType: IrType & { kind: "func" } = {
       kind: "func",
       params: [promT, cb.type],
@@ -6207,7 +6222,7 @@ export function lowerPromiseMethodCall(
     }
     if (cb.type.kind === "dyn") {
       const resultT: IrType & { kind: "promise" } = { kind: "promise", inner: DYN };
-      const fnName = `%fn${lowerer.lambdaCounter++}_catchdyn`;
+      const fnName = lowerer.closureName(loc, "_catchdyn");
       const funcType: IrType & { kind: "func" } = {
         kind: "func",
         params: [promT, DYN],
@@ -6337,7 +6352,7 @@ export function lowerPromiseMethodCall(
     );
   }
   const R = resultT.inner;
-  const fnName = `%fn${lowerer.lambdaCounter++}_catch`;
+  const fnName = lowerer.closureName(loc, "_catch");
   const funcType: IrType & { kind: "func" } = { kind: "func", params: [promT], ret: resultT };
   const fnCtx = newFnCtx(true, null, funcType, R);
   fnCtx.isAsync = true;
@@ -6574,7 +6589,7 @@ function filterNarrowHelper(
   const key = `filterNarrow:${test}:${typeKey(elem)}:${typeKey(outElem)}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%arr.filterNarrow.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%arr.filterNarrow", key);
   lowerer.arrHofHelpers.set(key, name);
 
   const arrT = arrayOf(elem);
@@ -6820,7 +6835,7 @@ export function recordKeysArrayCall(
   const key = `obj.keys:${argIr.shapeId}:${typeKey(resultT)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%obj.keys.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%obj.keys", key);
     const ref: IrExpr = { kind: "varRef", localId: "r.0", type: argIr, loc };
     const outRef: IrExpr = { kind: "varRef", localId: "out.0", type: resultT, loc };
     lowerer.arrHofHelpers.set(key, helper);
@@ -6890,7 +6905,7 @@ function recordHasOwnHelper(lowerer: Lowerer, shapeId: string, loc: SrcLoc): str
   const key = `obj.hasOwn:${shapeId}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const helper = `%obj.hasOwn.${lowerer.arrHofHelpers.size}`;
+  const helper = keyedHelperName(lowerer, "%obj.hasOwn", key);
   lowerer.arrHofHelpers.set(key, helper);
   const shape = lowerer.shapes.get(shapeId)!;
   const recT: IrType = { kind: "record", shapeId };
@@ -6975,7 +6990,7 @@ function classAssignHelper(
   const key = `obj.assignClass:${className}:${srcShapeId}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const helper = `%obj.assignClass.${lowerer.arrHofHelpers.size}`;
+  const helper = keyedHelperName(lowerer, "%obj.assignClass", key);
   lowerer.arrHofHelpers.set(key, helper);
   const sShape = lowerer.shapes.get(srcShapeId)!;
   const oT: IrType = { kind: "object", className };
@@ -7043,7 +7058,7 @@ function recordAssignHelper(
   const key = `obj.assign:${targetShapeId}:${srcShapeId}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const helper = `%obj.assign.${lowerer.arrHofHelpers.size}`;
+  const helper = keyedHelperName(lowerer, "%obj.assign", key);
   lowerer.arrHofHelpers.set(key, helper);
   const sShape = lowerer.shapes.get(srcShapeId)!;
   const tShape = lowerer.shapes.get(targetShapeId)!;
@@ -7668,6 +7683,10 @@ function lowerObjectStaticCall(
         const target = lowerer.lowerExpr(call.arguments.nodes[0]!);
         const rawSource = lowerer.lowerExpr(call.arguments.nodes[1]!);
         fenceSymbolFieldCopy(lowerer, call.arguments.nodes[1]!, rawSource.type);
+        let targetNode: ts.Expression = call.arguments.nodes[0]!;
+        while (ts.isParenthesizedExpression(targetNode)) targetNode = targetNode.expression;
+        if (ts.isObjectLiteralExpression(targetNode))
+          fenceClassCopyIntoFreshObject(lowerer, call, call.arguments.nodes[1]!, rawSource);
         const source = lowerer.coerceToExpected(rawSource, DYN);
         if (target.type.kind === "dyn" && source.type.kind === "dyn") {
           return { kind: "libCall", fn: "dyn.assign", args: [target, source], type: DYN, loc };
@@ -7821,25 +7840,8 @@ function lowerObjectStaticCall(
             const srcNode = spread ? argNode.expression : argNode;
             const rawSource = lowerer.lowerExpr(srcNode);
             fenceSymbolFieldCopy(lowerer, srcNode, rawSource.type, spread);
-            // A class instance copied into a fresh object
-            // (`Object.assign({}, instance)`): the result is a plain
-            // object holding the instance's own fields, never an
-            // instance, so a result the checker types as the class has
-            // no representation (the checked cast would throw).
-            if (
-              rawSource.type.kind === "object" &&
-              freshLiteralTarget &&
-              !ts.isExpressionStatement(call.parent)
-            ) {
-              const resultT = lowerer.mapTypeOf(lowerer.typeOf(call));
-              if (resultT !== null && resultT.kind === "object") {
-                lowerer.unsupported(
-                  "SC1090",
-                  srcNode,
-                  `Object.assign copying a '${lowerer.fmt(rawSource.type)}' instance into a fresh object typed as the class (the copy is a plain object holding the instance's own fields, not an instance — build the object literal from the fields you need)`,
-                );
-              }
-            }
+            if (freshLiteralTarget)
+              fenceClassCopyIntoFreshObject(lowerer, call, srcNode, rawSource);
             const src = lowerer.coerceToExpected(rawSource, DYN);
             if (src.type.kind !== "dyn") {
               ok = false;
@@ -8071,6 +8073,14 @@ function lowerObjectStaticCall(
             loc,
           };
     }
+    const fnIntegrity = functionIntegrity(
+      lowerer,
+      member,
+      value,
+      call.arguments.nodes[0]!,
+      locOf(call),
+    );
+    if (fnIntegrity) return fnIntegrity;
     if (member === "preventExtensions" || member === "seal") {
       const integrity = lowerClassIntegrity(lowerer, call, member, value);
       if (integrity) return integrity;
@@ -8154,6 +8164,8 @@ function lowerObjectStaticCall(
         )
     )
       return value;
+    const fnIntegrity = functionIntegrity(lowerer, "freeze", value, argNode, locOf(call));
+    if (fnIntegrity) return fnIntegrity;
     const integrity = lowerClassIntegrity(lowerer, call, "freeze", value);
     if (integrity) return integrity;
     lowerer.noLowering(
@@ -8503,7 +8515,7 @@ function lowerObjectStaticCall(
   const key = `obj.${member}:${argIr.shapeId}:${typeKey(resultT)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%obj.${member}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%obj.${member}`, key);
     const recT = argIr;
     const ref: IrExpr = { kind: "varRef", localId: "r.0", type: recT, loc };
     const outRef: IrExpr = { kind: "varRef", localId: "out.0", type: resultT, loc };
@@ -9139,7 +9151,7 @@ function lowerInlineArrowBind(
   const length = firstDefault < 0 ? arrow.parameters.nodes.length : firstDefault;
   const key = `arrow.bind:${typeKey(type)}:${length}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%arrow.bind.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%arrow.bind", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     lowerer.freshClosureAdapters.add(name);
@@ -10068,7 +10080,7 @@ function lowerUnionObjectDynFieldCall(
   const receiverRef = varRef(receiverLocal.id, receiverT, loc);
   let helper = lowerer.unionCallHelpers.get(key);
   if (!helper) {
-    helper = `%union.call.${lowerer.unionCallHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%union.call", key);
     lowerer.unionCallHelpers.set(key, helper);
     const receiverRef = varRef("this.0", receiverT, loc);
     const branch = (plan: (typeof plans)[number]): IrStmt[] => {
@@ -10161,7 +10173,7 @@ function unionObjectMethodHelper(
   const key = `${receiverT.unionId}:${method}:${shapes.map((shape) => `${shape.mode}:${typeKey(shape.type)}`).join(",")}:${typeKey(resultT)}`;
   const existing = lowerer.unionCallHelpers.get(key);
   if (existing) return existing;
-  const name = `%union.call.${lowerer.unionCallHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%union.call", key);
   lowerer.unionCallHelpers.set(key, name);
   // A probe that catches a refusal while the body lowers must not leave
   // the name registered for a helper that was never emitted.
@@ -10298,7 +10310,7 @@ export function lowerStaticNumberGlobal(
   args: readonly ts.Expression[],
   loc: SrcLoc,
 ): IrExpr | null {
-  if (name === "parseInt" || name === "isNaN") {
+  if (name === "parseInt" || name === "isNaN" || name === "isFinite") {
     const maxArgs = name === "parseInt" ? 2 : 1;
     if (args.length < 1 || args.length > maxArgs) {
       lowerer.noLowering(
@@ -10306,10 +10318,12 @@ export function lowerStaticNumberGlobal(
         call,
       );
     }
-    if (name === "isNaN") {
-      // The global's ToNumber turns a missing value into NaN.
+    if (name === "isNaN" || name === "isFinite") {
+      // The global's ToNumber turns a missing value into NaN, converts
+      // strings, booleans and null, and calls valueOf/toString on objects.
       const x = lowerToNumberArgument(lowerer, args[0]!);
-      return { kind: "libCall", fn: "num.isNaN", args: [x], type: BOOL, loc };
+      const fn = name === "isNaN" ? "num.isNaN" : "number.isFinite";
+      return { kind: "libCall", fn, args: [x], type: BOOL, loc };
     }
     const radix: IrExpr = args[1]
       ? lowerer.lowerExprExpecting(args[1], F64)
@@ -10353,7 +10367,7 @@ export function lowerStaticNumberGlobal(
         const key = `parseInt.optional:${unionT.unionId}`;
         let helper = lowerer.valueHelpers.get(key);
         if (!helper) {
-          helper = `%parseInt.optional.${lowerer.valueHelpers.size}`;
+          helper = keyedHelperName(lowerer, "%parseInt.optional", key);
           lowerer.valueHelpers.set(key, helper);
           const value: IrExpr = { kind: "varRef", localId: "value.0", type: unionT, loc };
           const radixRef: IrExpr = { kind: "varRef", localId: "radix.0", type: F64, loc };
@@ -10445,32 +10459,28 @@ export function lowerStaticNumberGlobal(
         : lowerer.lowerExprExpecting(args[0]!, STRING);
     return { kind: "libCall", fn: "num.parseInt", args: [s, radix], type: F64, loc };
   }
-  // STATIC parseFloat/isFinite over exactly-typed arguments —
-  // parseInt's siblings (num.parseFloat is ECMA 19.2.4's decimal-
-  // literal prefix parse in scr_string.c; a number-typed isFinite IS
-  // Number.isFinite — the global's ToNumber coercion is the identity
-  // there, ms's `isFinite(val)` guard). Other argument types retain
-  // their native coercion checks or the SC2012 refusal. The probe never
-  // emits — lowering is IR construction.
-  if ((name === "parseFloat" || name === "isFinite") && args.length === 1) {
-    if (name === "parseFloat") {
-      const optional = optionalCallValue(lowerer, args[0]!);
-      if (optional) {
-        const parsed = lowerOptionalStringNumber(
-          lowerer,
-          optional,
-          loc,
-          "num.parseFloat",
-          "parseFloat",
-        );
-        if (parsed) return parsed;
-      }
+  // STATIC parseFloat over string arguments — parseInt's sibling
+  // (num.parseFloat is ECMA 19.2.4's decimal-literal prefix parse in
+  // scr_string.c). Other argument types retain their native coercion
+  // checks or the SC2012 refusal. The probe never emits — lowering is IR
+  // construction.
+  if (name === "parseFloat" && args.length === 1) {
+    const optional = optionalCallValue(lowerer, args[0]!);
+    if (optional) {
+      const parsed = lowerOptionalStringNumber(
+        lowerer,
+        optional,
+        loc,
+        "num.parseFloat",
+        "parseFloat",
+      );
+      if (parsed) return parsed;
     }
     const probed = tryLowerExpression(lowerer, args[0]!);
-    if (name === "parseFloat" && probed?.type.kind === "string") {
+    if (probed?.type.kind === "string") {
       return { kind: "libCall", fn: "num.parseFloat", args: [probed], type: F64, loc };
     }
-    if (name === "parseFloat" && probed?.type.kind === "dyn") {
+    if (probed?.type.kind === "dyn") {
       return {
         kind: "libCall",
         fn: "num.parseFloat",
@@ -10478,20 +10488,6 @@ export function lowerStaticNumberGlobal(
         type: F64,
         loc,
       };
-    }
-    if (name === "isFinite" && probed?.type.kind === "f64") {
-      return { kind: "libCall", fn: "number.isFinite", args: [probed], type: BOOL, loc };
-    }
-    // A number the checker trusts but storage may hold missing (an
-    // out-of-range read): the global's ToNumber makes undefined NaN.
-    if (
-      name === "isFinite" &&
-      probed?.type.kind === "union" &&
-      lowerer.armTag(probed.type.unionId, UNDEFINED_T) >= 0 &&
-      lowerer.stripUndefinedArm(probed.type).kind === "f64"
-    ) {
-      const x = lowerOptionalNumber(lowerer, probed, loc, args[0]);
-      return { kind: "libCall", fn: "number.isFinite", args: [x], type: BOOL, loc };
     }
   }
   return null;
@@ -10638,4 +10634,76 @@ function lowerObjectAssignOntoError(lowerer: Lowerer, call: ts.CallExpression): 
     type: target.type,
     loc,
   };
+}
+
+/** `Object.freeze(fn)` and the other integrity operations on a function
+ * value: the function's checked-dynamic face holds its own properties (the
+ * ones a program assigns, `name`, `length`, `prototype`) and their
+ * integrity state, which the runtime keeps on its property table. The
+ * mutators answer the function itself; the queries answer from the table.
+ * Null for other values. */
+function functionIntegrity(
+  lowerer: Lowerer,
+  member: string,
+  value: IrExpr,
+  node: ts.Expression,
+  loc: SrcLoc,
+): IrExpr | null {
+  if (value.type.kind !== "func" || !lowerer.dynConvertible(value.type)) return null;
+  const operations = {
+    freeze: "dyn.freeze",
+    seal: "dyn.seal",
+    preventExtensions: "dyn.preventExtensions",
+    isSealed: "dyn.isSealed",
+    isExtensible: "dyn.isExtensible",
+  } as const;
+  if (!(member in operations)) return null;
+  const fn = operations[member as keyof typeof operations];
+  // The first operation on a function creates its property table, whose
+  // `name` comes from the box: give the box the function's JS name, as a
+  // closure flowing into any checked-dynamic slot gets.
+  const name = jsFuncNameOf(node, lowerer);
+  const boxed = (e: IrExpr): IrExpr => {
+    const box = lowerer.coerceToExpected(e, DYN);
+    return box.kind === "dynFrom" && name !== null ? { ...box, fnName: name } : box;
+  };
+  if (fn === "dyn.isSealed" || fn === "dyn.isExtensible") {
+    return { kind: "libCall", fn, args: [boxed(value)], type: BOOL, loc };
+  }
+  const held = lowerer.declareHiddenLocal("%integrityFn", value.type);
+  const ref = (): IrExpr => ({ kind: "varRef", localId: held.id, type: value.type, loc });
+  return {
+    kind: "seqExpr",
+    stmts: [
+      { kind: "varDecl", localId: held.id, init: value, loc },
+      {
+        kind: "exprStmt",
+        expr: { kind: "libCall", fn, args: [boxed(ref())], type: DYN, loc },
+        loc,
+      },
+    ],
+    result: ref(),
+    type: value.type,
+    loc,
+  };
+}
+
+/** A class instance copied into a fresh object (`Object.assign({},
+ * instance)`): the result is a plain object holding the instance's own
+ * fields, never an instance, so a result the checker types as the class has
+ * no representation (the checked cast would throw). */
+function fenceClassCopyIntoFreshObject(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  srcNode: ts.Expression,
+  rawSource: IrExpr,
+): void {
+  if (rawSource.type.kind !== "object" || ts.isExpressionStatement(call.parent)) return;
+  const resultT = lowerer.mapTypeOf(lowerer.typeOf(call));
+  if (resultT === null || resultT.kind !== "object") return;
+  lowerer.unsupported(
+    "SC1090",
+    srcNode,
+    `Object.assign copying a '${lowerer.fmt(rawSource.type)}' instance into a fresh object typed as the class (the copy is a plain object holding the instance's own fields, not an instance — build the object literal from the fields you need)`,
+  );
 }

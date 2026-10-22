@@ -22,6 +22,9 @@ const fixturesRoot = join(repoRoot, "tests/fixtures");
 const pilotRoot = join(fixturesRoot, "npm-static");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
+/* Sanitized builds of the published Effect pilots alone take 290 to 330 s on a 16-vCPU host, most of it in
+ * the sanitized native link: near or past the suite's 300 s default. */
+const effectBuildTimeout = sanitize ? 900_000 : undefined;
 // Measured milliseconds per test on a CI runner (scripts/ci-test-costs.mjs).
 const testCosts = (
   JSON.parse(readFileSync(new URL("./npm-static-costs.json", import.meta.url), "utf8")) as {
@@ -1135,34 +1138,42 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 180_000);
 
-  test("the published Effect generator logs and completes statically", async () => {
-    const entry = join(pilotRoot, "effect-gen-cli.ts");
-    const binary = await buildStatic(entry, ["effect"]);
-    const [reference, native] = await Promise.all([
-      runBinary(process.execPath, [entry]),
-      runBinary(binary, []),
-    ]);
-    const log =
-      /^timestamp=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z level=INFO fiber=#0 message="Hello, world!"\n$/;
-    expect(reference.stdout.toString()).toMatch(log);
-    expect(native.stdout.toString()).toMatch(log);
-    expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
-    expect(native.exitCode).toBe(reference.exitCode);
-    expect(native.exitCode).toBe(0);
-  });
+  test(
+    "the published Effect generator logs and completes statically",
+    async () => {
+      const entry = join(pilotRoot, "effect-gen-cli.ts");
+      const binary = await buildStatic(entry, ["effect"]);
+      const [reference, native] = await Promise.all([
+        runBinary(process.execPath, [entry]),
+        runBinary(binary, []),
+      ]);
+      const log =
+        /^timestamp=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z level=INFO fiber=#0 message="Hello, world!"\n$/;
+      expect(reference.stdout.toString()).toMatch(log);
+      expect(native.stdout.toString()).toMatch(log);
+      expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
+      expect(native.exitCode).toBe(reference.exitCode);
+      expect(native.exitCode).toBe(0);
+    },
+    effectBuildTimeout,
+  );
 
-  test("the published Effect generator has deterministic native results", async () => {
-    const entry = join(pilotRoot, "effect-gen-result-cli.ts");
-    const binary = await buildStatic(entry, ["effect"]);
-    const [reference, native] = await Promise.all([
-      runBinary(process.execPath, [entry]),
-      runBinary(binary, []),
-    ]);
-    expect(reference.stdout.toString()).toBe("Hello, world!\n42\n");
-    expect(native.stdout).toEqual(reference.stdout);
-    expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
-    expect(native.exitCode).toBe(reference.exitCode);
-  });
+  test(
+    "the published Effect generator has deterministic native results",
+    async () => {
+      const entry = join(pilotRoot, "effect-gen-result-cli.ts");
+      const binary = await buildStatic(entry, ["effect"]);
+      const [reference, native] = await Promise.all([
+        runBinary(process.execPath, [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(reference.stdout.toString()).toBe("Hello, world!\n42\n");
+      expect(native.stdout).toEqual(reference.stdout);
+      expect(comparableStderr(native.stderr)).toEqual(reference.stderr);
+      expect(native.exitCode).toBe(reference.exitCode);
+    },
+    effectBuildTimeout,
+  );
 
   test("inferred variadic factories preserve checked callable results", async () => {
     const entry = join(pilotRoot, "variadic-factory-cli.ts");

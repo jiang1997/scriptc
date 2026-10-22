@@ -1,3 +1,4 @@
+import type { DynamicFieldStores } from "../ir/int32-slots.js";
 import type { IrModule, IrType } from "../ir/ir.js";
 import {
   DYN,
@@ -34,8 +35,11 @@ import { computeCycleMutability, fieldKey } from "./cycle-mutability.js";
  * subclass and retain touches the cycle header, so header presence must be
  * uniform across an extends tree): a unit is cycle-capable iff ANY member
  * is — every backend uses the same grouping. */
-export function computeTraced(mod: IrModule): { shapes: Set<string>; unions: Set<string> } {
-  const { shapes, unions } = analyzeCycles(mod, false);
+export function computeTraced(
+  mod: IrModule,
+  stores?: DynamicFieldStores,
+): { shapes: Set<string>; unions: Set<string> } {
+  const { shapes, unions } = analyzeCycles(mod, false, stores);
   return { shapes, unions };
 }
 
@@ -88,6 +92,7 @@ export function explainCycle(mod: IrModule, key: string): CycleExplanation | nul
 function analyzeCycles(
   mod: IrModule,
   labels: boolean,
+  stores?: DynamicFieldStores,
 ): {
   shapes: Set<string>;
   unions: Set<string>;
@@ -120,7 +125,7 @@ function analyzeCycles(
   const lifetimeRoots = new Set(mod.contracts?.programLifetime ?? []);
   const programLifetime = (className: string): boolean =>
     lifetimeRoots.size > 0 && lifetimeRoots.has(rootOf(className));
-  const mutability = computeCycleMutability(mod, unitOfClass);
+  const mutability = computeCycleMutability(mod, unitOfClass, stores);
   const shapeDefs = [
     ...classes.map((c) => ({
       key: `object:${c.name}`,

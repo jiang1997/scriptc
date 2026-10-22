@@ -667,7 +667,7 @@ static void scr_regex_defer_metadata(ScrArr *row, ScrDyn *source, int index) {
 
 /* The pending match source of a result, or NULL once its metadata exists. */
 static ScrRegexMatchSource *scr_regex_pending(const ScrArr *a) {
-  const ScrDyn *metadata = a->ext ? a->ext->metadata : NULL;
+  const ScrDyn *metadata = scr_arr_ext_of(a) ? scr_arr_ext_of(a)->metadata : NULL;
   if (!metadata || metadata->kind != SCR_DYN_HANDLE || metadata->v.handle.tag != SCR_DYNH_MATCH_SOURCE)
     return NULL;
   return metadata->v.handle.ptr;
@@ -707,7 +707,7 @@ static ScrDyn *scr_regex_groups_of(const ScrArr *a, uint8_t *bc) {
 static void scr_regex_materialize_metadata(ScrArr *a) {
   ScrRegexMatchSource *src = scr_regex_pending(a);
   if (!src) return;
-  ScrArrExt *x = a->ext;
+  ScrArrExt *x = scr_arr_ext_of(a);
   ScrDyn *source = x->metadata;
   ScrDyn *props = scr_dyn_new_obj();
   scr_dyn_obj_set(props, "index", 5, scr_dyn_new_num(x->match_index));
@@ -724,7 +724,7 @@ static bool scr_regex_copy_pending_metadata(ScrArr *a, ScrDyn *target) {
     scr_regex_materialize_metadata(a);
     return false;
   }
-  scr_dyn_arr_named_put(target, "index", 5, scr_dyn_new_num(a->ext->match_index));
+  scr_dyn_arr_named_put(target, "index", 5, scr_dyn_new_num(scr_arr_ext_of(a)->match_index));
   scr_dyn_arr_named_put(target, "input", 5, scr_regex_source_input(src));
   scr_dyn_arr_named_put(target, "groups", 6, scr_regex_groups_of(a, scr_regex_bc(src->re)));
   return true;
@@ -734,11 +734,11 @@ ScrDyn *scr_regex_result_prop(ScrArr *a, ScrStr *key) {
   ScrRegexMatchSource *src = scr_regex_pending(a);
   if (src) {
     if (key->len == 5 && memcmp(key->data, "index", 5) == 0)
-      return scr_dyn_new_num(a->ext->match_index);
+      return scr_dyn_new_num(scr_arr_ext_of(a)->match_index);
     if (key->len == 5 && memcmp(key->data, "input", 5) == 0) return scr_regex_source_input(src);
     scr_regex_materialize_metadata(a);
   }
-  ScrDyn *metadata = a->ext ? a->ext->metadata : NULL;
+  ScrDyn *metadata = scr_arr_ext_of(a) ? scr_arr_ext_of(a)->metadata : NULL;
   ScrDyn *value = metadata ? scr_dyn_obj_get(metadata, key->data, key->len) : NULL;
   return scr_dyn_retain(value ? value : scr_dyn_undefined());
 }

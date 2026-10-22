@@ -510,9 +510,13 @@ export function emitOptionalChainReceiver(
     // pointer itself, through a private stack box when the union's own
     // representation is boxed (emitUnionProjection's form).
     const owner = host.emitReadReceiver(e.receiver.obj);
-    const { ptr } = host.classFieldPtr(owner.name, e.receiver.className, e.receiver.field);
-    const p = B.tmp();
-    B.line(`${p} = load ptr, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+    const { ptr } = host.classFieldPtr(
+      owner.name,
+      e.receiver.className,
+      e.receiver.field,
+      "compressed",
+    );
+    const p = host.loadRef(ptr);
     r = {
       name: host.nullableUnions.get(def.id) ? p : host.stackNullableBox(p, nullableField),
       type: e.receiver.type,

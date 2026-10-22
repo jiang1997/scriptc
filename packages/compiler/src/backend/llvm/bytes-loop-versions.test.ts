@@ -209,6 +209,47 @@ test("emitted loops version the body and tag typed-array memory", () => {
   expect(elements).not.toBe(header);
 });
 
+test("loops to a typed array's length version the other typed arrays they index", () => {
+  const length = (receiver: IrExpr): IrExpr => ({
+    kind: "bytesIntrinsic",
+    method: "length",
+    receiver,
+    args: [],
+    type: F64,
+    loc,
+  });
+  const emit = (body: IrStmt[]): string => {
+    const mod: IrModule = {
+      irVersion: 17,
+      sourceFile: loc.file,
+      entry: "__main",
+      functions: [
+        { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+        fn(body),
+      ],
+    };
+    return /^define internal [^\n]*@sc_bf_kernel[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  };
+  // for (let i = 0; i < out.length; i++) out[i] = src[i] * 2
+  const scaled = set(ref("out", f64s), ref("i"), bin("*", get(ref("src", f64s), ref("i")), num(2)));
+  const body = emit([counted([scaled], length(ref("out", f64s)))]);
+  const fast = /^bytes\.version\.fast\d+:$[^]*?^bytes\.version\.done\d+:$/m.exec(body)![0];
+  // The loop keeps its integer induction, and the fast copy reads `src`
+  // unchecked.
+  expect(body).toContain("integer induction i");
+  expect(fast).not.toContain("bytes.index");
+  expect(body.slice(0, body.indexOf(fast))).toContain("bytes.index.invalid");
+  // A body that rebinds `src` keeps one checked loop.
+  const rebound = emit([
+    counted(
+      [scaled, { kind: "assign", localId: "src", value: ref("out", f64s), loc }],
+      length(ref("out", f64s)),
+    ),
+  ]);
+  expect(rebound).not.toContain("bytes.version.fast");
+  expect(rebound).toContain("bytes.index.invalid");
+});
+
 test("Float16Array accesses version in elements and share the element tag", () => {
   const f16s: IrType = { kind: "bytes", elem: "f16" };
   const withHalves = (body: IrStmt[]): IrFunction => {

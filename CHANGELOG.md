@@ -6,6 +6,79 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.4.1
+
+### Highlights
+
+- **Profile-guided optimization:** `scriptc build --profile-generate` builds an instrumented executable, `scriptc merge-profiles` (with `--sparse`) merges the profiles its runs write, and `--profile-use` optimizes a release or speed build with the merged profile. tsc-ts built with a profile from its own type check checks other projects 1.15 to 1.2 times as fast, with the same diagnostics and memory. Builds without a profile are unchanged.
+- **Faster cold builds of large programs:** large class-based programs build in partitions instead of as one module, so their cold builds are 25 to 32% faster, and an edit to one function recompiles only its partition.
+- **npm packages:** more packages that pass builtins, classes and promises around as values now compile from their JavaScript. Among them are execa 5, hot-shots, @opentelemetry/api, async-sema, buffer-crc32, yazl, tar-stream, smol-toml and truncate-utf8-bytes. `undici` 5.x and 7.x compile from an implementation that ships with scriptc, and `isarray`, `safe-buffer` and `process-nextick-args` compile as the Node builtins they stand in for.
+- **Dynamic-tier property access goes through per-site inline caches** keyed on object shapes. On constructor-and-prototype code, the code that reads several object shapes at one site and an AST interpreter, untyped code runs 1.4 to 3 times as fast as in 0.4.0. Typed programs compile to the same code as before.
+- **Smaller arrays, class instances and number-keyed maps:**
+  - The array header is 48 bytes instead of 64.
+  - Small arrays start with three inline slots.
+  - Instances of program class hierarchies keep their class id in the reference-count word instead of a vtable pointer.
+  - `Map`s and `Set`s with number keys store 16-byte entries.
+  - Together they lower the peak memory of a large TypeScript type checker by 8 to 10%, with the same output and wall time.
+
+### Features
+
+- **`for await` iterates untyped values,** including async generators, `Symbol.asyncIterator` results and synchronous iterators, whose values are awaited. `yield*` delegates inside async generators. A JavaScript generator whose return type is inferred as `any` compiles, including one that delegates to itself.
+- **`crypto.createECDH` and `ECDH.convertKey`** are supported for the 11 short Weierstrass curves mbedTLS implements, with Node 24's key formats, encodings and errors. Other curves are refused.
+- **`undici` 5.x and 7.x:** `Client`, `Pool`, `Agent`, `request`, the global dispatcher, `fetch` through a dispatcher, the error classes and the `undici:` diagnostics channels follow each version's behavior. Each importing package compiles against its own installed version. The limitations page lists the parts that differ.
+- **Packages marked as never loaded:** `"scriptc": { "packages": { "<name>": "unloaded" } }` in the entry's `package.json` makes `require("<name>")` throw Node's `MODULE_NOT_FOUND`, so optional dependencies take their absent branch.
+- **`util.promisify` of an untyped function** returns a promise-returning wrapper at run time.
+- **Destructuring with runtime computed keys** (`const { [name]: v } = source`) reads records and untyped values. A missing key gives `undefined` and the element default applies.
+- **Import cycles compile when a class is used only after both modules finish initializing.** Reaching the class earlier throws Node's `ReferenceError: Cannot access 'X' before initialization`.
+- **`await` of an untyped value adopts thenables,** including objects that define `then` at run time. `Promise.prototype` and `promise.constructor` can be read as values. A child process can be given new properties and awaited as a thenable.
+- **Function values convert their results and arguments** when they are stored in a slot whose signature has the same structure but a different shape, such as a function returning `Promise<Message>` stored in a `() => Promise<Message | undefined>` slot.
+- **Declarations from SDKs and shared type packages:** index signatures of `any`, `any[]` members, classes that a package only declares, and `Pick` views of classes compile.
+- **Builtins as values:** `bind`, `call` and `apply` work on builtin functions, and `Buffer.byteLength`, `Buffer.compare`, `Buffer.alloc`, `JSON.parse`, `fs.realpathSync` and `String.prototype` methods can be read as values. `events` and `EventEmitter` can be used as untyped constructor values.
+- **JavaScript sources:**
+  - Bitwise operators convert boolean operands as `ToNumber` does.
+  - `arguments.length` can be read in sloppy-mode functions with named parameters.
+  - A function value in an untyped slot may have any signature.
+  - Prototype methods take their JSDoc parameter types.
+  - A top-level function declaration that its module reassigns works.
+  - A `var` can be overwritten with a different kind of value.
+  - A default-export object literal can hold class values.
+- **Index-signature records answer `"k" in record`** for literal keys. A fresh array literal spreads into an array of a wider element type. A `const` annotated with a type that resolves to `any` holds an untyped object.
+- **`Set.prototype.add` returns the Set** when its result is used, so `s.add(a).add(b)` compiles.
+- **`exec` works on regular expressions held as `any`,** and a numeric enum from a package can be read by a runtime key (`DiagLogLevel[level]`).
+- **`dns.lookup` answers that are decided at run time** can be read as untyped values, `net.connect` accepts Node's `lookup` option, and `dns.lookup` passes the `ADDRCONFIG`, `V4MAPPED` and `ALL` hints.
+- **`util.inspect`, `console.log` and `util.format` print program-declared `Error` subclasses** with Node's constructor-name header (`[Plain [Error]: m]`).
+- **Typed arrays:** `forEach`, `map`, `filter`, `some`, `every`, `find`, `findIndex`, `findLast`, `findLastIndex`, `reduce` and `reduceRight` compile on every typed-array kind. `map` and `filter` return the receiver's kind (a Buffer for a Buffer), and callbacks receive the element, index and array. `BYTES_PER_ELEMENT` reads answer the element size, including on untyped values. Reads and `in` tests of members Node 24's typed-array and Buffer prototypes lack answer `undefined` and `false`, as in Node. Destructuring assignment into typed-array elements compiles.
+- **`Math.max` and `Math.min` with spreads among other arguments** (`Math.max(...xs, 5)`) compile, with Node's NaN and ±0 rules.
+- **Generic arrow and function-expression bindings inside functions** compile when they use nothing from the enclosing function's frame.
+- **`const xs = []` inside a function** takes the element type its later writes give it, as TypeScript evolves it, instead of `number[]`. Bindings whose reads disagree or that are reassigned become dynamic arrays, as at module scope.
+
+### Performance
+
+- **Loop counters stay integers in more loops:** counters compared as `i + c` with a bound, and for-loop counters that are reset or copied inside the loop. A record-boundary scan takes 104 ms (Node: 260 ms), and a typed-array scan takes 318 ms (Node: 801 ms).
+- **Indexed reads of non-ASCII strings are inline in worker executables,** and strings of up to 2^24 UTF-16 units keep their unit table. A lexer over a 2.7 MB non-ASCII source takes 190 ms (Node: 327 ms).
+- **Worker messages:** a thread that finds its mailbox empty spins for up to 20 µs before it blocks. 100,000 round trips between the main thread and a worker take 360 ms, a quarter of Node's time.
+- **Local-time `Date` getters cache the zone offset,** UTC getters reuse the last decomposition, and integers 0 to 99 convert to strings without allocating. Local-time date formatting takes 0.81 times Node's time.
+- **Untyped code:** `%` and the bitwise operators run on integers for integral operands, `o.x += d` updates a number property in place, and array `length` reads answer from the element count.
+- **Sorts by several keys** (comparators that chain field differences with `||`, including optional number fields with a default) sort by key in the runtime instead of calling the comparator, about 24% faster on a benchmark of such sorts.
+- **Worker executables start their threads faster:** the allocator marks its memory for core dumps only when the system would write a core, which removes about 680 calls that hold the address-space lock as threads start. tsc-ts checks tRPC 6% faster at 16 checkers.
+- **The native compiler walks IR without a closure per node,** about 3 to 10% faster in the frontend and LLVM emission phases of large builds.
+- **Full cycle collections that the death rule requests run at the event loop's idle moments.** Watch-mode rebuilds of large projects are 6 to 11% faster.
+
+### Fixes
+
+- **`a?.b.c` on an `any` value short-circuits only the guarded step,** as in Node: it is `undefined` when `a` is nullish and throws when `a.b` is undefined.
+- **A failed checked cast to an optional record names the deepest failing path,** for example `expected string at $.order.owner.id, got number`.
+- **Spreading a non-iterable value held as `any`** throws Node's `x is not iterable` message.
+- **`process.versions` entries that the runtime doesn't have read as `undefined`** in projects that use `@types/node`.
+- **Functions stored in JavaScript object literals get Node's names,** taken from the property key.
+- **`monitorEventLoopDelay().percentile()` returns 511** on an empty histogram, as Node does.
+- **A CommonJS `var` statement that mixes `require()` declarators with other bindings** no longer crashes.
+- **Untyped async methods called through overrides or untyped receivers return their promises,** which fixes internal compiler errors in programs that use zod's `parseAsync` this way.
+- **TypeScript enum exports in compiled packages stay `undefined` until they are assigned,** as in Node.
+- **Element writes accept a possibly undefined index** (typed-array writes, compound and update writes, element assignments used as values and destructuring targets) and convert it with ToNumber, as element reads already did.
+
+<!-- release:end -->
+
 ## 0.4.0
 
 ### Breaking changes
@@ -70,8 +143,6 @@ All notable changes to scriptc will be documented in this file.
 - **Sockets:** `'data'` listeners get strings after `setEncoding`, socket and stream chunks are Buffers, and an idle pooled http socket that receives data is destroyed.
 - **Diagnostic code frames window long source lines.**
 - **npm crashes, internal errors and false TDZ errors** found while compiling popular packages are fixed.
-
-<!-- release:end -->
 
 ## 0.3.6
 

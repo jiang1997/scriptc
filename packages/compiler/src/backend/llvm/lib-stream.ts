@@ -274,10 +274,9 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
       .filter((a) => a.tag >= 0);
     if (present.length === 0)
       throw new InternalCompilerError(`llvm emitter bug: ${e.fn} union lacks its arms`);
-    const tagP = B.tmp();
-    const tag = B.tmp();
-    B.line(`${tagP} = getelementptr inbounds %ScrUnion, ptr ${args[1]!.name}, i64 0, i32 1`);
-    B.line(`${tag} = load i32, ptr ${tagP}`);
+    // A tagged box, or the arm pointer itself for a nullable union
+    // (`string | null`, `Buffer | null`).
+    const tag = host.unionTag(args[1]!.name, t.unionId);
     const slot = B.slot();
     B.entryAllocas.push(`${slot} = alloca i1`);
     const lj = B.newLabel("scu.j");
@@ -290,10 +289,7 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
         B.line(`store i1 ${r}, ptr ${slot}`);
         return;
       }
-      const pk = B.tmp();
-      const pv = B.tmp();
-      B.line(`${pk} = getelementptr inbounds %ScrUnion, ptr ${args[1]!.name}, i64 0, i32 5`);
-      B.line(`${pv} = load ptr, ptr ${pk} ; borrowed payload`);
+      const pv = host.unionPeek(args[1]!.name, t.unionId); // borrowed payload
       const r = B.tmp();
       if (pushing) {
         host.declare(`declare zeroext i1 @${entry}(ptr, ptr)`);

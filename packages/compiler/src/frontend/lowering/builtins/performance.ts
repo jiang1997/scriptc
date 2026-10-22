@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
 import { locOf } from "../../program.js";
@@ -330,7 +331,7 @@ function lowerPerfTimelineCall(
   const key = `perf.${many ? "entries" : timeline.fn}:${typeKey(result)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%perf.${many ? "entries" : member}.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%perf.${many ? "entries" : member}`, key);
     lowerer.valueHelpers.set(key, helper);
     const argsRef = varRef("a.0", DYN, loc);
     const whichRef = varRef("w.0", F64, loc);
@@ -461,7 +462,7 @@ export function perfEntryTag(
   const key = `perf.tag:${entryT.shapeId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%perf.tag.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%perf.tag", key);
     lowerer.valueHelpers.set(key, helper);
     const e = varRef("e.0", entryT, loc);
     lowerer.liftedFns.push({

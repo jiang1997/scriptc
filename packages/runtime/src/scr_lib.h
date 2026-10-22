@@ -238,7 +238,8 @@ double scr_process_memory_usage_field(double k);
 double scr_process_rss(void);
 /* The runtime heap's footprint (scr_alloc.c): bytes held from the system
  * and bytes in live allocations, for the calling thread's allocator plus
- * the system allocator where it reports them. */
+ * the system allocator where it reports them, plus the program-lifetime
+ * region's chunks (compact class instances). */
 void scr_heap_stats(double *total, double *used);
 /* process.ppid: the parent's pid at the time of the read. */
 double scr_process_ppid(void);
@@ -306,6 +307,7 @@ void scr_fs_rm_opts(ScrStr *path, bool recursive, bool force);
  * EPERM failures up to maxRetries times with Node's linear backoff
  * (retryDelay ms longer per try); everything else throws immediately. */
 void scr_fs_rm_opts_retry(ScrStr *path, bool recursive, bool force, double max_retries, double retry_delay);
+bool scr_fs_rm_retry_options_ok(double max_retries, double retry_delay);
 ScrStr *scr_fs_mkdtemp(ScrStr *prefix);
 ScrStr *scr_fs_mkdtemp_async(ScrStr *prefix); /* the callback and promise error path */
 void scr_fs_access(ScrStr *path, double mode);
@@ -493,6 +495,9 @@ ScrPromise *scr_fsp_utimes(const ScrDyn *path, const ScrDyn *atime, const ScrDyn
 ScrPromise *scr_fsp_lutimes(const ScrDyn *path, const ScrDyn *atime, const ScrDyn *mtime);
 ScrPromise *scr_fsp_readdir(ScrStr *path);
 ScrPromise *scr_fsp_rm(ScrStr *path);
+ScrPromise *scr_fsp_rm_opts(ScrStr *path, bool recursive, bool force);
+ScrPromise *scr_fsp_rm_opts_retry(ScrStr *path, bool recursive, bool force, double max_retries,
+                                  double retry_delay);
 ScrPromise *scr_fsp_stat(ScrStr *path);
 ScrPromise *scr_fsp_realpath(ScrStr *path);
 ScrPromise *scr_fsp_lstat(ScrStr *path);

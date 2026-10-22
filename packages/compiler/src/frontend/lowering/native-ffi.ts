@@ -562,7 +562,7 @@ export function lowerFfiMemoryModule(lowerer: Lowerer, loc: SrcLoc): IrExpr {
   const entries = lowerer.ffiImports
     .filter((entry) => entry.library !== undefined)
     .map((entry) => {
-      const name = `%ffi.module.${lowerer.lambdaCounter++}`;
+      const name = lowerer.closureName(loc, "", "%ffi.module");
       const sourceTypes = ffiSourceParamTypes(entry.params);
       const locals: IrLocal[] = sourceTypes.map((_, i) => ({
         id: `%arg${i}`,

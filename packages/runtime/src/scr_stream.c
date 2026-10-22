@@ -4420,7 +4420,7 @@ static ScrPromise *scr_sc_consume(ScrStream *s, int kind) {
     scr_promise_reject_pending(p);
     return p;
   }
-  static const ScrArrOps bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
+  static ScrArrOps bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
   ScrArr *chunks = scr_arr_new_ops(&bytes_ops, 4);
   ScrStreamErrInv fin_inv = kind == SCR_SC_TEXT    ? &scr_sc_fin_text
                             : kind == SCR_SC_JSON  ? &scr_sc_fin_json

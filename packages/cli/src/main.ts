@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   analyzeCached,
+  collectGarbageUnderHeapPressure,
   compile,
   compileLibrary,
   mergeProfiles,
@@ -25,6 +26,9 @@ function version(): string {
   };
   return manifest.version ?? "unknown";
 }
+
+// The compiler process collects its heap as lowering and LLVM emission grow it.
+collectGarbageUnderHeapPressure();
 
 process.exitCode = await runCli(process.argv.slice(2), {
   version,

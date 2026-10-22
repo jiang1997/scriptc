@@ -4596,6 +4596,13 @@ void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath) {
 
 static int scr_rm_unlink(const char *path, size_t len);
 
+/* Node's ERR_FS_EISDIR for rm on a directory without `recursive`. */
+static void scr_fs_rm_throw_eisdir(const ScrStr *path) {
+  ScrStr *message = scr_str_new("is a directory", 14);
+  scr_fs_throw_system_error("ERR_FS_EISDIR", "Path is a directory", EISDIR, "rm", message, path);
+  scr_str_release(message);
+}
+
 void scr_fs_rm(ScrStr *path) {
   if (!scr_fs_path_ok(path, "path")) return;
 #ifdef _WIN32
@@ -4603,16 +4610,15 @@ void scr_fs_rm(ScrStr *path) {
   if (link != 0) { if (link < 0) scr_fs_throw(errno, "unlink", path); return; }
 #endif
   /* Node's rmSync: lstat first (a missing path reports the lstat syscall),
-   * refuse directories (Node requires `recursive`, which the scriptc
-   * surface doesn't declare — the message wording diverges from Node's
-   * ERR_FS_EISDIR, see SEMANTICS.md), then unlink. */
+   * refuse directories (ERR_FS_EISDIR: removing one requires `recursive`),
+   * then unlink. */
   struct stat st;
   if (lstat(path->data, &st) != 0) {
     scr_fs_throw(errno, "lstat", path);
     return;
   }
   if (S_ISDIR(st.st_mode)) {
-    scr_fs_throw(EISDIR, "rm", path);
+    scr_fs_rm_throw_eisdir(path);
     return;
   }
   if (scr_rm_unlink(path->data, path->len) != 0) scr_fs_throw(errno, "unlink", path);
@@ -4766,6 +4772,13 @@ typedef struct {
   ScrStr *path;
 } ScrRmFail;
 
+/* Throws the recorded failure and releases its path. */
+static void scr_rm_fail_throw(ScrRmFail *f) {
+  if (f->err == EISDIR && strcmp(f->op, "rm") == 0) scr_fs_rm_throw_eisdir(f->path);
+  else scr_fs_throw(f->err, f->op, f->path);
+  scr_str_release(f->path);
+}
+
 static void scr_rm_fail_set(ScrRmFail *f, int err, const char *op, const char *path, size_t len) {
   if (f->err != 0) return; /* first failure wins, exactly like the old unwind */
   f->err = err;
@@ -4861,8 +4874,6 @@ static void scr_fs_rm_attempt(ScrStr *path, bool recursive, bool force, ScrRmFai
   }
   if (S_ISDIR(st.st_mode)) {
     if (!recursive) {
-      /* Node throws ERR_FS_EISDIR here; the EISDIR-prefixed wording is
-       * divergence 13's documented difference. */
       scr_rm_fail_set(f, EISDIR, "rm", path->data, path->len);
       return;
     }
@@ -4876,18 +4887,24 @@ void scr_fs_rm_opts(ScrStr *path, bool recursive, bool force) {
   if (!scr_fs_path_ok(path, "path")) return;
   ScrRmFail f = {0, NULL, NULL};
   scr_fs_rm_attempt(path, recursive, force, &f);
-  if (f.err != 0) {
-    scr_fs_throw(f.err, f.op, f.path);
-    scr_str_release(f.path);
-  }
+  if (f.err != 0) scr_rm_fail_throw(&f);
+}
+
+/* Node's validateRmdirOptions range checks: retryDelay is an int32 >= 0,
+ * then maxRetries is a uint32 (ERR_OUT_OF_RANGE). */
+bool scr_fs_rm_retry_options_ok(double max_retries, double retry_delay) {
+  return scr_bytes_validate_off("options.retryDelay", retry_delay, 2147483647.0) &&
+         scr_bytes_validate_off("options.maxRetries", max_retries, 4294967295.0);
 }
 
 /* rmSync(p, { recursive, force, maxRetries, retryDelay }): Node retries
  * the operation on EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM up to maxRetries
  * times, waiting retryDelay ms LONGER on each try (linear backoff — the
  * fs.rmSync documented semantics). Everything else throws immediately
- * with the failing path, exactly like the plain options form. */
+ * with the failing path, exactly like the plain options form. rmSync
+ * validates the options before the path. */
 void scr_fs_rm_opts_retry(ScrStr *path, bool recursive, bool force, double max_retries, double retry_delay) {
+  if (!scr_fs_rm_retry_options_ok(max_retries, retry_delay)) return;
   if (!scr_fs_path_ok(path, "path")) return;
   long tries = max_retries > 0 ? (long)max_retries : 0;
   double delay_ms = retry_delay > 0 ? retry_delay : 0;
@@ -4912,8 +4929,7 @@ void scr_fs_rm_opts_retry(ScrStr *path, bool recursive, bool force, double max_r
       nanosleep(&ts, NULL);
     }
   }
-  scr_fs_throw(f.err, f.op, f.path);
-  scr_str_release(f.path);
+  scr_rm_fail_throw(&f);
 }
 
 #if defined(_WIN32) || defined(__wasi__)
@@ -5772,7 +5788,7 @@ void scr_fs_symlink(ScrStr *target, ScrStr *destination, int kind) {
   if (!scr_fs_path_ok(target, "target")) return;
   if (!scr_fs_path_ok(destination, "path")) return;
 #ifdef _WIN32
-  static const ScrArrOps str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
+  static ScrArrOps str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
   ScrArr *parts = scr_arr_new_ops(&str_ops, 3);
   scr_arr_push_ref(parts, scr_str_retain(destination));
   scr_arr_push_ref(parts, scr_str_new("..", 2));
@@ -6805,6 +6821,17 @@ double scr_math_round(double x) {
  * powers, follow libm. */
 double scr_math_pow(double base, double exponent) {
   if (isnan(exponent) || (isinf(exponent) && fabs(base) == 1.0)) return NAN;
+  /* 2 ** n for an integer n in the double range is an exact power of two,
+   * the value pow returns; its bits are the exponent alone. */
+  if (base == 2.0 && exponent >= -1074.0 && exponent <= 1023.0) {
+    int32_t n = (int32_t)exponent;
+    if ((double)n == exponent) {
+      uint64_t bits = n >= -1022 ? (uint64_t)(n + 1023) << 52 : UINT64_C(1) << (n + 1074);
+      double result;
+      memcpy(&result, &bits, sizeof result);
+      return result;
+    }
+  }
   return pow(base, exponent);
 }
 

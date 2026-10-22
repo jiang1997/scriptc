@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { dynUndefinedExpr } from "../../../ir/build.js";
 import { buildFunctionAdapter } from "./builders.js";
 import { InternalCompilerError } from "../../../errors.js";
@@ -33,7 +34,7 @@ export function funcReturnWidthAdapter(
   const key = `fn:${typeKey(fromT.ret.elem)}:${typeKey(toT.ret.elem)}`;
   const existing = lowerer.valueHelpers.get(key);
   if (existing) return existing;
-  const name = `%fn.width.${lowerer.valueHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%fn.width", key);
   lowerer.valueHelpers.set(key, name);
   lowerer.freshClosureAdapters.add(name);
   // The returned closure's body: call the captured original, width-map.
@@ -163,7 +164,7 @@ function restPackingAdapter(
   const key = `fnrestadapt:${typeKey(fromT)}:${typeKey(toT)}`;
   const existing = lowerer.coercions.retags.get(key);
   if (existing) return existing;
-  const name = `%fn.adapt.${lowerer.coercions.retags.size}`;
+  const name = keyedHelperName(lowerer, "%fn.adapt", key);
   lowerer.coercions.retags.set(key, name);
   lowerer.freshClosureAdapters.add(name);
   const fixed = fromT.params.length - 1;
@@ -220,7 +221,7 @@ function funcIntoDynRestAdapter(
   const key = `fnadapt:${typeKey(fromT)}:${typeKey(toT)}`;
   const existing = lowerer.coercions.retags.get(key);
   if (existing) return existing;
-  const name = `%fn.adapt.${lowerer.coercions.retags.size}`;
+  const name = keyedHelperName(lowerer, "%fn.adapt", key);
   lowerer.coercions.retags.set(key, name);
   lowerer.freshClosureAdapters.add(name);
   const params: IrParam[] = [{ localId: "rest.0", name: "args", type: DYN }];
@@ -376,7 +377,7 @@ export function funcCoerceAdapter(
   const key = `fnadapt:${typeKey(fromT)}:${typeKey(toT)}`;
   const existing = lowerer.coercions.retags.get(key);
   if (existing) return existing;
-  const name = `%fn.adapt.${lowerer.coercions.retags.size}`;
+  const name = keyedHelperName(lowerer, "%fn.adapt", key);
   lowerer.coercions.retags.set(key, name);
   lowerer.freshClosureAdapters.add(name);
   const params: IrParam[] = toT.params.map((t, i) => ({
@@ -604,7 +605,7 @@ export function spawnResFnAdapter(
   const key = `fnspawn:${typeKey(fromT)}:${typeKey(toT)}`;
   const existing = lowerer.valueHelpers.get(key);
   if (existing) return existing;
-  const name = `%fnval.spawnres.${lowerer.valueHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%fnval.spawnres", key);
   lowerer.valueHelpers.set(key, name);
   lowerer.freshClosureAdapters.add(name);
   const params: IrParam[] = toT.params.map((p, i) => ({

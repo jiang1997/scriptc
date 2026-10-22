@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { boolLit, dynUndefinedExpr, numLit, varRef } from "../../../ir/build.js";
 import { BUF_NUM_METHODS } from "./buffer-numeric-methods.js";
 import * as ts from "../../ts7/adapter.js";
@@ -38,7 +39,7 @@ import {
   lowerOptionalArgument,
   lowerStaticallyUndefinedArgument,
 } from "../optional-arguments.js";
-import { lowerCheckedArrayFrom } from "./array-construction.js";
+import { lowerArraySpreadItems, lowerCheckedArrayFrom } from "./array-construction.js";
 import { lowerToNumberArgument } from "../lower-exprs.js";
 import { lowerBytesIteratorValue } from "../iterator-adapters.js";
 import { lowerArrayCallback } from "./callback-arguments.js";
@@ -77,7 +78,7 @@ function lowerBytesSortCall(
     const cacheKey = `bytes.${method}:${bytesT.elem}:${key}`;
     let helper = lowerer.arrHofHelpers.get(cacheKey);
     if (!helper) {
-      helper = `%bytes.${method}.${lowerer.arrHofHelpers.size}`;
+      helper = keyedHelperName(lowerer, `%bytes.${method}`, cacheKey);
       lowerer.arrHofHelpers.set(cacheKey, helper);
       lowerer.liftedFns.push(
         buildBytesSortFn(helper, bytesT, arity, hasComparator, copyFirst, order, loc),
@@ -270,7 +271,7 @@ function bytesCallbackHelper(
   const key = `bytes.${method}:${bytesT.elem}:${typeKey(resultT)}:${typeKey(fnRet)}:${arity}:${hasInit ? "init" : ""}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%bytes.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%bytes.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   const reduce = method === "reduce" || method === "reduceRight";
   const backward = method === "reduceRight" || method === "findLast" || method === "findLastIndex";
@@ -642,7 +643,7 @@ export function lowerBytesNew(
   );
 }
 
-/** TypedArray.from without a mapping callback. Preserve its iterable /
+/** TypedArray.from and TypedArray.of. Preserve from's iterable /
  * array-like semantics separately from constructor length coercion. */
 export function lowerBytesStaticCall(
   lowerer: Lowerer,
@@ -662,10 +663,15 @@ export function lowerBytesStaticCall(
       loc: locOf(call),
     };
   }
-  if (access.name.text !== "from" || !ts.isIdentifier(access.expression)) return null;
+  if (
+    (access.name.text !== "from" && access.name.text !== "of") ||
+    !ts.isIdentifier(access.expression)
+  )
+    return null;
   const symbol = lowerer.resolveValueSymbol(access.expression);
   const elem = symbol ? own(BYTES_CTORS, ts.symbolName(symbol)) : undefined;
   if (!elem || !lowerer.isStdlibSymbol(symbol ?? undefined)) return null;
+  if (access.name.text === "of") return lowerBytesOf(lowerer, call, elem);
   if (
     call.arguments.nodes.length < 1 ||
     call.arguments.nodes.length > 3 ||
@@ -751,6 +757,59 @@ export function lowerBytesStaticCall(
     from: true,
     type: bytesOf(elem),
     loc: locOf(call),
+  };
+}
+
+/** TypedArray.of: a new array of the arguments, each converted with ToNumber
+ * in argument order after all of them are evaluated. Numbers copy directly;
+ * other values (and spread items) collect into an array that goes through
+ * TypedArray.from's conversion, which calls valueOf/toString the same way. */
+function lowerBytesOf(lowerer: Lowerer, call: ts.CallExpression, elem: IrBytesElem): IrExpr {
+  const loc = locOf(call);
+  const nodes = call.arguments.nodes;
+  const type = bytesOf(elem);
+  if (nodes.some(ts.isSpreadElement)) {
+    const numeric = nodes.every((node) => {
+      const mapped = lowerer.mapTypeOf(
+        lowerer.typeOf(ts.isSpreadElement(node) ? node.expression : node),
+      );
+      return ts.isSpreadElement(node)
+        ? mapped?.kind === "array" && mapped.elem.kind === "f64"
+        : mapped?.kind === "f64";
+    });
+    const elemType = numeric ? F64 : DYN;
+    const items = lowerArraySpreadItems(
+      lowerer,
+      nodes,
+      elemType,
+      { kind: "array", elem: elemType },
+      loc,
+    );
+    if (numeric) return { kind: "bytesNew", source: items, type, loc };
+    return {
+      kind: "bytesNew",
+      source: lowerer.coerceToExpected(items, DYN),
+      from: true,
+      type,
+      loc,
+    };
+  }
+  const values = nodes.map((node) => lowerer.lowerExpr(node));
+  if (values.every((value) => value.type.kind === "f64")) {
+    return {
+      kind: "bytesNew",
+      source: { kind: "arrayLit", elems: values, type: arrayOf(F64), loc },
+      type,
+      loc,
+    };
+  }
+  const elems = values.map((value, i) => lowerer.coerceInto(nodes[i]!, value, DYN));
+  return {
+    kind: "bytesNew",
+    source: lowerer.coerceToExpected({ kind: "arrayLit", elems, type: arrayOf(DYN), loc }, DYN),
+    from: true,
+    type,
+    loc,
   };
 }
 
@@ -1479,6 +1538,8 @@ function lowerBufferInstanceMethod(
       if (encName === "utf16le") align = 2;
     } else if (vT?.kind === "bytes" && vT.elem === "u8") {
       needle = lowerer.lowerExpr(args[0]!);
+      // A Buffer needle under utf16le also searches whole 2-byte units.
+      if (encName === "utf16le") align = 2;
     } else {
       lowerer.noLowering(
         `.${name} of '${lowerer.checker.typeToString(lowerer.typeOf(args[0]!))}' values`,
@@ -1912,7 +1973,8 @@ function lowerBufferStaticValue(
       const srcNode = args[0].expression;
       const srcIr = lowerer.mapTypeOf(lowerer.typeOf(srcNode));
       if (srcIr?.kind === "bytes") {
-        const receiver = lowerer.lowerExpr(srcNode);
+        // A JavaScript field can hold the typed array as a dynamic value.
+        const receiver = lowerer.lowerExprExpecting(srcNode, srcIr);
         const idxArgs = args.slice(1).map((a) => lowerer.lowerExprExpecting(a, F64));
         return {
           kind: "bytesIntrinsic",

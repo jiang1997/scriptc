@@ -426,7 +426,7 @@ function reflectedMethodValue(
       );
     }
     if (value.kind === "closure" && value.captures.length === 0) {
-      const body = lowerer.liftedFns.find((fn) => fn.name === value.fnName);
+      const body = lowerer.liftedFnNamed(value.fnName);
       if (body?.captures?.length === 0) delete body.captures;
     }
     const cache = staticMethod

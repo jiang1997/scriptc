@@ -35,6 +35,7 @@ import {
   mangleArgPack,
   mangleAsyncAdoptCall,
   mangleAsyncAwaitCall,
+  mangleAsyncDirectSpawn,
   mangleAsyncSpawn,
   mangleBorrowedFunction,
   mangleClassStruct,
@@ -153,6 +154,7 @@ export function emitFunction(emitter: LlEmitter, fn: IrFunction): string {
       : new Map();
   emitter.integerViews.clear();
   emitter.fieldPointerTags.clear();
+  emitter.compressedFieldPtrs.clear();
   emitter.integerArrayBindings.clear();
   emitter.loopArrayBorrows =
     emitter.debug === null
@@ -910,6 +912,20 @@ export function emitAsyncScaffolding(emitter: LlEmitter): string[] {
       for (const line of emitter.emitAsyncAwaitCall(fn, argPackLines, true)) out.push(line);
     }
     const stackless = emitter.stacklessAsync.has(fn.name);
+    if (stackless && emitter.directAwaitCallees.has(fn.name)) {
+      // A coroutine's direct await: the same prefix, with the promise kept
+      // inside the returned fiber record.
+      emitter.declare(`declare ptr @scr_async_spawn_direct(ptr, ptr)`);
+      out.push(
+        `define internal ptr @${mangleAsyncDirectSpawn(fn.name)}(${spawnParams.join(", ")}) ${FN_ATTRS} { ; direct spawn ${fn.name}`,
+        `entry:`,
+        ...argPackLines,
+        `  %f = call ptr @scr_async_spawn_direct(ptr @${mangleTrampoline(fn.name)}, ptr %ap)`,
+        `  ret ptr %f`,
+        `}`,
+        ``,
+      );
+    }
     const spawn = stackless ? "scr_async_spawn_stackless" : "scr_async_spawn";
     emitter.declare(`declare ptr @scr_fiber_promise(ptr)`);
     emitter.declare(`declare ptr @${spawn}(ptr, ptr)`);
@@ -1117,8 +1133,11 @@ export function emitAsyncAwaitCall(
       ``,
     ];
   }
-  emitter.declare(`declare void @scr_async_inline_enter(ptr)`);
-  emitter.declare(`declare void @scr_async_inline_exit(ptr)`);
+  const framed = emitter.fiberlessFrames;
+  if (framed) {
+    emitter.declare(`declare void @scr_async_inline_enter(ptr)`);
+    emitter.declare(`declare void @scr_async_inline_exit(ptr)`);
+  }
   emitter.declare(`declare void @scr_await_hop()`);
   emitter.declare(`declare ptr @scr_promise_new()`);
   emitter.declare(`declare void @scr_promise_reject_pending(ptr)`);
@@ -1127,11 +1146,12 @@ export function emitAsyncAwaitCall(
   const out = [
     head,
     `entry:`,
-    `  %frame = alloca { ptr, ptr }`,
-    `  call void @scr_async_inline_enter(ptr %frame)`,
+    ...(framed
+      ? [`  %frame = alloca { ptr, ptr }`, `  call void @scr_async_inline_enter(ptr %frame)`]
+      : []),
     retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`,
     ...emitter.pendingTestLines("%pend"),
-    `  call void @scr_async_inline_exit(ptr %frame)`,
+    ...(framed ? [`  call void @scr_async_inline_exit(ptr %frame)`] : []),
     // Adopting: the then job's turn comes before the settled promise's
     // own reaction, whichever way the body completed.
     ...(adopt ? [`  call void @scr_await_hop()`] : []),

@@ -21,9 +21,7 @@ export const SCR_ARR_FIELD = {
   cyc: 4,
   spare: 5,
   filled: 6,
-  ops: 7,
-  data: 8,
-  ext: 9,
+  data: 7,
 } as const;
 
 /** Loads the i32 `len` or `cap` of a %ScrArr at `ptr` into `dest` as a

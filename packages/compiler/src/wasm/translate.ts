@@ -211,7 +211,7 @@ export function signatureHash(sig: string): string {
 }
 
 /** UTF-8 bytes of a string. */
-function utf8Bytes(text: string): number[] {
+export function utf8Bytes(text: string): number[] {
   const out: number[] = [];
   for (let i = 0; i < text.length; i++) {
     const cp = text.codePointAt(i)!;
@@ -233,7 +233,7 @@ function utf8Bytes(text: string): number[] {
 }
 
 /** An LLVM c"..." string body for bytes. */
-function cBytes(bytes: Uint8Array, start: number, end: number): string {
+export function cBytes(bytes: Uint8Array, start: number, end: number): string {
   let s = "";
   for (let i = start; i < end; i++) {
     const b = bytes[i]!;

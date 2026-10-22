@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { dateJsonType, isDateJsonSource } from "../builtins/dates.js";
 import { dynUndefinedExpr, numLit, strLit, varRef } from "../../../ir/build.js";
 import { pathModuleValue } from "../lower-builtin-values.js";
@@ -406,7 +407,7 @@ export function lowerDynObjectLiteral(
       if (!(err instanceof PoisonError) || !pureMember) throw err;
       const fence = lowerer.deferToRuntimeFence(propDiagsBefore, prop, {
         kind: "closure",
-        name: () => `%fn${lowerer.lambdaCounter++}_dynfence`,
+        name: () => lowerer.closureName(loc, "_dynfence"),
         returnType: VOID,
         type: { kind: "func", params: [], ret: VOID },
       });
@@ -461,7 +462,7 @@ export function lowerDynObjectLiteral(
         if (!(err instanceof PoisonError)) throw err;
         const fence = lowerer.deferToRuntimeFence(convDiagsBefore, prop, {
           kind: "closure",
-          name: () => `%fn${lowerer.lambdaCounter++}_dynfence`,
+          name: () => lowerer.closureName(loc, "_dynfence"),
           returnType: VOID,
           type: { kind: "func", params: [], ret: VOID },
         });
@@ -2956,7 +2957,7 @@ function lowerDeclaredSpreadMerge(
     const key = `declmerge-source:${type.shapeId}:${source.shapeId}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%rec.declmerge.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%rec.declmerge", key);
       const sourceType = source.value.type;
       const destination = varRef("out.0", type, loc);
       const receiver = varRef("source.0", sourceType, loc);

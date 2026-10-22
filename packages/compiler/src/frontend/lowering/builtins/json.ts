@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { isDateJsonSource } from "./dates.js";
 import { dynUndefinedExpr, varRef } from "../../../ir/build.js";
 import { InternalCompilerError } from "../../../errors.js";
@@ -253,7 +254,7 @@ function lowerOptionalStringifyRoot(
   const key = `json.optionalString:${value.type.unionId}:${JSON.stringify(indent)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%json.optionalString.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%json.optionalString", key);
     lowerer.valueHelpers.set(key, helper);
     const input = varRef("value.0", value.type, loc);
     const serialized: IrExpr = {
