@@ -151,8 +151,11 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_tls.c", "tlsEffective"],
   ["scr_cipher.c", "cipher"],
   ["scr_ecdh.c", "ecdh"],
+  ["scr_pki.c", "pki"],
   ["scr_wasm.c", "wasm"],
   ["scr_webcrypto.c", "webcrypto"],
+  ["scr_webcrypto_pki.c", all("webcrypto", "pki")],
+  ["scr_ed25519.c", all("pki", "ed25519")],
   ["scr_x509.c", "x509"],
   // WebCrypto's AES ciphers run over the cipher feature's mbedTLS archive.
   ["scr_webcrypto_aes.c", all("cipher", "webcrypto")],
@@ -217,7 +220,7 @@ export function createRuntimePackMatrix({
     { id: "quickjs", predicate: false },
     { id: "libregexp", predicate: "regex" },
     { id: "zlib", predicate: "zlibEffective" },
-    { id: "mbedtls", predicate: any("tlsEffective", "cipher", "ecdh") },
+    { id: "mbedtls", predicate: any("tlsEffective", "cipher", "ecdh", "pki") },
   ];
   const matrix = withLibraryRuntimeFlavors(
     withWorkerRuntimeVariants({

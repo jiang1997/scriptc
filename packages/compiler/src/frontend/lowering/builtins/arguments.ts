@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import {
   BYTES_U8,
   BOOL,
@@ -72,7 +73,7 @@ export function lowerOptionalNumberPredicate(
   const key = `number.optionalPredicate:${fn}:${typeKey(widened)}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%number.optionalPredicate.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%number.optionalPredicate", key);
     lowerer.valueHelpers.set(key, helper);
     const input = varRef("value.0", widened, loc);
     lowerer.liftedFns.push({

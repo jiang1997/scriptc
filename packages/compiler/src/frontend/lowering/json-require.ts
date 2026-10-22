@@ -10,6 +10,7 @@
  * JSON module is ordinary storage holding that object — destructuring
  * copies its properties at the require, exactly like Node. ES-module JSON
  * imports keep their own record (Node's ESM loader caches separately). */
+import { keyedHelperName } from "./stable-names.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { PoisonError } from "./lowerer.js";
@@ -84,7 +85,7 @@ export function collectJsonRequires(lowerer: Lowerer, parts: FileParts[]): void 
             );
             throw new PoisonError();
           }
-          const id = `%g.jsonRequire.${lowerer.jsonRequireModules.size}`;
+          const id = keyedHelperName(lowerer, "%g.jsonRequire", jsonSf.fileName);
           const global: IrGlobal = { id, name: "%json", type: mapped, mutable: true };
           const loadedId = `${id}%loaded`;
           lowerer.globalsList.push(global, {

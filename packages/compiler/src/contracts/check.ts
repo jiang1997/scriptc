@@ -174,7 +174,8 @@ class ContractChecker {
       return `${owner}.${method[2]}`;
     }
     if (fn?.sourceName !== undefined && fn.sourceName !== "<anonymous>") return fn.sourceName;
-    if (fn !== undefined && /^%fn\d+$/.test(fnName)) return `the function at ${this.where(fn.loc)}`;
+    if (fn !== undefined && /^%fn\.[0-9a-f]{12}$/.test(fnName))
+      return `the function at ${this.where(fn.loc)}`;
     return fnName.replace(/^%/, "");
   }
 

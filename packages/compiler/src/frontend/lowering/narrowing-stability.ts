@@ -454,6 +454,10 @@ export class NarrowingStability {
     const found = new Map<string, ts.Identifier[]>();
     writes = found;
     this.identifierWrites.set(file, found);
+    // A declaration file holds no code that runs, so none of its writes
+    // happen. Its bindings (`console`, `JSON`) are read in most programs,
+    // and the walk would read every node of the file.
+    if (file.isDeclarationFile) return writes;
     const add = (target: ts.Node): void => {
       forEachWriteTarget(target, (t) => {
         if (!ts.isIdentifier(t)) return;

@@ -272,6 +272,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "dyn.nativeMapIs": { argTypes: [DYN], result: BOOL },
   "dyn.nativeUrlIs": { argTypes: [DYN], result: BOOL },
   "dyn.nativeDateIs": { argTypes: [DYN], result: BOOL },
+  "dyn.nativeDateHandleIs": { argTypes: [DYN], result: BOOL },
   /** A builtin constructor (`Object`, `Date`, `RegExp`, `Map`, `Set`,
    * `Promise`, `WeakMap`, `WeakSet`) read as a JavaScript value: one
    * interned function per name, the same one dynamic values answer for
@@ -291,6 +292,8 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   /** `new Date(value)` in JavaScript: a string argument parses with V8's
    * full date parser; every other value constructs as date.nativeNew. */
   "date.nativeNewValue": { argTypes: [DYN], result: DYN },
+  "date.argumentsTime": { argTypes: [DYN], result: DATE_T },
+  "date.classOperation": { argTypes: [DYN, DYN], result: VOID },
   "date.checkedValue": { argTypes: [DYN], result: DATE_T },
   "dyn.nativeRegexIs": { argTypes: [DYN], result: BOOL },
   /** toString() on a checked-dynamic receiver: runtime kind dispatch
@@ -2872,8 +2875,8 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   /** WebCrypto (scr_webcrypto.c): each method takes its argument vector as
    * one dyn array and answers a promise that argument and validation
    * failures reject. CryptoKey values are native handles. */
-  "webcrypto.importKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.generateKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
+  "webcrypto.importKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.exportKey": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.encrypt": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "webcrypto.decrypt": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
@@ -3681,6 +3684,10 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "dyn.arrayPrototype": { argTypes: [], result: DYN },
   "dyn.arrayConstructor": { argTypes: [], result: DYN },
   "dyn.objectPrototype": { argTypes: [], result: DYN },
+  "dyn.errorPrototype": { argTypes: [], result: DYN },
+  "dyn.inheritsErrorPrototype": { argTypes: [DYN], result: BOOL },
+  "dyn.errorCaptureStackTrace": { argTypes: [DYN], result: DYN },
+  "dyn.errorCaptureStackTraceFunction": { argTypes: [], result: DYN },
   "dyn.functionApply": { argTypes: [], result: DYN },
   "dyn.builtinMethod": { argTypes: [STRING, STRING], result: DYN },
   "dyn.classPrototype": { argTypes: [DYN, DYN], result: DYN },
@@ -4674,6 +4681,19 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * body passes its undefined result on into a Buffer slot. Owned (+1);
    * never throws. */
   "bytes.absent": { argTypes: [], result: BYTES_U8 },
+  /** node:crypto asymmetric keys and signatures (scr_pki.c): checked-
+   * dynamic arguments, borrowed; KeyObject, Sign and Verify handles,
+   * Buffers and booleans as checked-dynamic results (+1). Node's argument
+   * and decoder errors throw (may-throw); generateKeyPairCb's callback
+   * receives (null, publicKey, privateKey) in a later macrotask. */
+  "crypto.createPrivateKey": { argTypes: [DYN], result: DYN },
+  "crypto.createPublicKey": { argTypes: [DYN], result: DYN },
+  "crypto.generateKeyPairSync": { argTypes: [DYN, DYN], result: DYN },
+  "crypto.generateKeyPairCb": { argTypes: [DYN, DYN, DYN], result: VOID },
+  "crypto.signOneshot": { argTypes: [DYN, DYN, DYN], result: DYN },
+  "crypto.verifyOneshot": { argTypes: [DYN, DYN, DYN, DYN], result: DYN },
+  "crypto.createSign": { argTypes: [DYN], result: DYN },
+  "crypto.createVerify": { argTypes: [DYN], result: DYN },
   /** The Buffer brand of a Uint8Array source onto a fresh Uint8Array
    * result (map and filter of a Buffer return a Buffer). */
   "bytes.copyBrand": { argTypes: [BYTES_U8, BYTES_U8], result: VOID },

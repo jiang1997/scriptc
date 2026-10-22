@@ -1,4 +1,5 @@
 /* Binary operators: arithmetic, comparisons and equality, logical and nullish pairs, and string conversion for concatenation. */
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { cleanFuncAdaptable } from "../coercions/function-adapters.js";
 import { type Lowerer, jsFuncNameOf } from "../lowerer.js";
@@ -801,7 +802,7 @@ function nullProtoToString(lowerer: Lowerer, e: IrExpr, t: IrType & { kind: "rec
   const key = `nullProtoToString:${t.shapeId}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
-    helper = `%rec.tostr.${lowerer.valueHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%rec.tostr", key);
     lowerer.valueHelpers.set(key, helper);
     const r = varRef("r.0", t, loc);
     lowerer.liftedFns.push({
@@ -902,10 +903,15 @@ export function lowerCompoundValueToTarget(
   // operator on both values, then the checked conversion into the
   // target's declared type (a string result for a number target throws the
   // catchable TypeError, as the expanded assignment does).
+  // A union operand (`fraction += "0"` on a binding the program assigns
+  // both a number and a string) takes the same runtime operator.
   if (
-    (target.type.kind === "dyn" || rhs.type.kind === "dyn") &&
-    (isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
-      (lowerer.dynConvertible(read.type) && lowerer.dynConvertible(rhs.type)))
+    ((target.type.kind === "dyn" || rhs.type.kind === "dyn") &&
+      (isJsSourceFile(ts.getSourceFileOfNode(expr)) ||
+        (lowerer.dynConvertible(read.type) && lowerer.dynConvertible(rhs.type)))) ||
+    ((target.type.kind === "union" || rhs.type.kind === "union") &&
+      lowerer.dynConvertible(read.type) &&
+      lowerer.dynConvertible(rhs.type))
   ) {
     const left = lowerer.coerceInto(expr.left, read, DYN);
     const right = lowerer.coerceInto(expr.right, rhs, DYN);
@@ -1275,6 +1281,48 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
         type: parts.value.type,
         loc,
       };
+    }
+    // `a[k] = b[k] = v` in a JavaScript file: a member write in value
+    // position lowers as its statement form and yields the value. The
+    // receiver, the key and the value are evaluated in that order into
+    // temporaries first. A receiver held in a temporary must be a
+    // checked-dynamic value, which the temporary shares; any other receiver
+    // must be a variable or `this`.
+    if (
+      op === ts.SyntaxKind.EqualsToken &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
+      (ts.isPropertyAccessExpression(expr.left) || ts.isElementAccessExpression(expr.left)) &&
+      !expr.left.questionDotToken
+    ) {
+      const target = expr.left;
+      const receiverNode = target.expression;
+      const bareReceiver =
+        ts.isIdentifier(receiverNode) || receiverNode.kind === ts.SyntaxKind.ThisKeyword;
+      if (bareReceiver || tryLowerExpression(lowerer, receiverNode)?.type.kind === "dyn") {
+        const stmts: IrStmt[] = [];
+        const overrides: { node: ts.Expression; value: IrExpr }[] = [];
+        const hold = (node: ts.Expression, name: string): IrExpr => {
+          const value = lowerer.lowerExpr(node);
+          const local = lowerer.declareHiddenLocal(name, value.type);
+          stmts.push({ kind: "varDecl", localId: local.id, init: value, loc: value.loc });
+          const held = varRef(local.id, value.type, value.loc);
+          overrides.push({ node, value: held });
+          return held;
+        };
+        if (!bareReceiver) hold(receiverNode, "%assignReceiver");
+        if (
+          ts.isElementAccessExpression(target) &&
+          !ts.isIdentifier(target.argumentExpression) &&
+          !ts.isStringLiteral(target.argumentExpression) &&
+          !ts.isNumericLiteral(target.argumentExpression)
+        )
+          hold(target.argumentExpression, "%assignKey");
+        const result = hold(expr.right, "%assignValue");
+        stmts.push(
+          lowerer.withExpressionOverrides(overrides, () => lowerer.lowerExprStatement(expr)),
+        );
+        return { kind: "seqExpr", stmts, result, type: result.type, loc };
+      }
     }
     lowerer.unsupported(
       "SC1090",

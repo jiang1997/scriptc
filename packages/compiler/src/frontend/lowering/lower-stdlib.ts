@@ -2278,7 +2278,7 @@ function lowerStaticNamespaceImport(
 ): IrExpr {
   const loc = locOf(call);
   const resultT: IrType & { kind: "promise" } = { kind: "promise", inner: ns };
-  const fnName = `%fn${lowerer.lambdaCounter++}_staticImport`;
+  const fnName = lowerer.closureName(loc, "_staticImport");
   const fnType: IrType & { kind: "func" } = { kind: "func", params: [], ret: resultT };
   const fnCtx = newFnCtx(true, null, fnType, ns);
   fnCtx.isAsync = true;

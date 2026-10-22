@@ -270,7 +270,7 @@ export function lowerLambda(
   const nameIdent =
     !ts.isArrowFunction(node) && node.name && ts.isIdentifier(node.name) ? node.name : null;
   const baseName = nameIdent ? nameIdent.text : "";
-  const fnName = `%fn${lowerer.lambdaCounter++}${baseName ? `_${baseName}` : ""}`;
+  const fnName = lowerer.closureName(locOf(node), baseName ? `_${baseName}` : "");
   // Named function expressions/declarations can self-reference by name; an
   // object-literal method's name is a PROPERTY, not a binding — no self.
   const selfSymbol =

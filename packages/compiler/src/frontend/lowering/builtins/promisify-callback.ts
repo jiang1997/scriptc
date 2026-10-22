@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
 import { varRef } from "../../../ir/build.js";
@@ -170,7 +171,7 @@ function promisifyMaker(lowerer: Lowerer, shape: CallbackShape, loc: SrcLoc): st
   const key = `promisify:${typeKey(shape.fnT)}=>${typeKey(shape.resultT)}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const base = `%promisify.${lowerer.arrHofHelpers.size}`;
+  const base = keyedHelperName(lowerer, "%promisify", key);
   lowerer.arrHofHelpers.set(key, base);
   const { fnT, resultT, args, callbackT, callbackParamT, inner, error } = shape;
   const promiseT = resultT.ret;

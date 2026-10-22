@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { dateJsonType, isDateJsonSource } from "../builtins/dates.js";
 import { dynUndefinedExpr, numLit, strLit, varRef } from "../../../ir/build.js";
 import { pathModuleValue } from "../lower-builtin-values.js";
@@ -35,7 +36,6 @@ import { tryLowerExpression } from "./try-lower-expression.js";
 import { fenceSymbolFieldCopy } from "../symbol-fields.js";
 import { planUnionRetag } from "../union-retag.js";
 import { jsHoldsDynObject, runtimeOptionalStorageOperand } from "../lower-exprs.js";
-import { builtinGlobalValue } from "./property-access.js";
 
 /** `{ a: 1, b: "x" }` → recordLit. The record type comes from the
  * contextual type when tsc has one (annotated declarations, arguments,
@@ -394,11 +394,9 @@ export function lowerDynObjectLiteral(
       const lowerValue = (): IrExpr =>
         ts.isMethodDeclaration(prop)
           ? lowerer.lowerLambda(prop, true)
-          : ts.isShorthandPropertyAssignment(prop) && shorthandBuiltinValue(lowerer, prop)
-            ? shorthandBuiltinValue(lowerer, prop)!
-            : !boxValue && ts.isObjectLiteralExpression(valueExpr)
-              ? lowerer.lowerExprExpecting(valueExpr, DYN)
-              : lowerer.lowerExpr(valueExpr as ts.Expression);
+          : !boxValue && ts.isObjectLiteralExpression(valueExpr)
+            ? lowerer.lowerExprExpecting(valueExpr, DYN)
+            : lowerer.lowerExpr(valueExpr as ts.Expression);
       raw = fenceClosureProbe(lowerer, valueExpr, undefined, lowerValue) ?? lowerValue();
     } catch (err) {
       // A PURE member read a JS file cannot lower (a namespace object
@@ -409,7 +407,7 @@ export function lowerDynObjectLiteral(
       if (!(err instanceof PoisonError) || !pureMember) throw err;
       const fence = lowerer.deferToRuntimeFence(propDiagsBefore, prop, {
         kind: "closure",
-        name: () => `%fn${lowerer.lambdaCounter++}_dynfence`,
+        name: () => lowerer.closureName(loc, "_dynfence"),
         returnType: VOID,
         type: { kind: "func", params: [], ret: VOID },
       });
@@ -464,7 +462,7 @@ export function lowerDynObjectLiteral(
         if (!(err instanceof PoisonError)) throw err;
         const fence = lowerer.deferToRuntimeFence(convDiagsBefore, prop, {
           kind: "closure",
-          name: () => `%fn${lowerer.lambdaCounter++}_dynfence`,
+          name: () => lowerer.closureName(loc, "_dynfence"),
           returnType: VOID,
           type: { kind: "func", params: [], ret: VOID },
         });
@@ -800,6 +798,7 @@ export function lowerObjectLiteral(
 ): IrExpr {
   // Unannotated JavaScript accumulator fields have no element contract.
   // Preserve their checked arrays instead of assigning never[] a numeric ABI.
+  // An empty object field is a map the program adds keys to.
   if (
     !expected &&
     isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
@@ -808,6 +807,8 @@ export function lowerObjectLiteral(
         ts.isPropertyAssignment(prop) &&
         ((ts.isArrayLiteralExpression(prop.initializer) &&
           prop.initializer.elements.nodes.length === 0) ||
+          (ts.isObjectLiteralExpression(prop.initializer) &&
+            prop.initializer.properties.nodes.length === 0) ||
           neverTaintedJsType(lowerer, prop.initializer, lowerer.typeOf(prop.initializer))),
     )
   ) {
@@ -2959,7 +2960,7 @@ function lowerDeclaredSpreadMerge(
     const key = `declmerge-source:${type.shapeId}:${source.shapeId}`;
     let helper = lowerer.valueHelpers.get(key);
     if (!helper) {
-      helper = `%rec.declmerge.${lowerer.valueHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%rec.declmerge", key);
       const sourceType = source.value.type;
       const destination = varRef("out.0", type, loc);
       const receiver = varRef("source.0", sourceType, loc);
@@ -3156,20 +3157,6 @@ function lowerDeclaredSpreadMerge(
 /** The value of a shorthand property (`{ x }`): the binding `x` refers to.
  * The property name's own symbol is the PROPERTY, so resolution goes
  * through getShorthandAssignmentValueSymbol. */
-/** `{ TypeError }`: a stdlib global in shorthand position reads as the value
- * its name reads as elsewhere (the interned constructor or function value),
- * or null when the global has no such value. The shorthand's name carries
- * the property's symbol, so the identifier path cannot resolve it. */
-function shorthandBuiltinValue(
-  lowerer: Lowerer,
-  prop: ts.ShorthandPropertyAssignment,
-): IrExpr | null {
-  const symbol = lowerer.checker.getShorthandAssignmentValueSymbol(prop);
-  if (!symbol || !lowerer.isStdlibSymbol(symbol)) return null;
-  const js = isJsSourceFile(ts.getSourceFileOfNode(prop));
-  return builtinGlobalValue(ts.symbolName(symbol), locOf(prop.name), js);
-}
-
 export function lowerShorthandValue(
   lowerer: Lowerer,
   prop: ts.ShorthandPropertyAssignment,
@@ -3186,8 +3173,6 @@ export function lowerShorthandValue(
     const callable = lowerer.lowerBuiltinCallableValue(builtin, loc);
     if (callable) return callable;
   }
-  const builtinValue = shorthandBuiltinValue(lowerer, prop);
-  if (builtinValue) return builtinValue;
   if (symbol) {
     if (lowerer.ctx.selfSymbol === symbol) {
       return { kind: "selfRef", type: lowerer.ctx.selfType!, loc };

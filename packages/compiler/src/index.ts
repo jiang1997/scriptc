@@ -49,7 +49,8 @@ import { frontendProcessExecArgv } from "./frontend-process-args.js";
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -524,6 +525,9 @@ async function compileExecutableNative(
   onArtifactReady?: NonNullable<Parameters<typeof compileExternalC>[0]["onArtifactReady"]>,
   programPartitions: readonly string[] = [],
   profileGenerate = false,
+  /** The kept LLVM text's shared name, when `llvmPath` is the build's private copy of it
+   * (BuildSources): the spelling clang sees and native cache keys name. */
+  llvmVisiblePath?: string,
 ): Promise<void> {
   const programIsObject = /\.(?:o|obj)$/.test(llvmPath);
   const runtimePackTarget = programIsObject && !sanitize ? nativeCodegenTarget() : null;
@@ -563,7 +567,9 @@ async function compileExecutableNative(
   if (programIsObject)
     throw new InternalCompilerError("program objects must link against a precompiled runtime pack");
   await compileExternalC({
-    cPath: llvmPath,
+    ...(llvmVisiblePath === undefined || llvmVisiblePath === llvmPath
+      ? { cPath: llvmPath }
+      : { cPath: llvmVisiblePath, cSourcePath: llvmPath }),
     outPath,
     cacheIdentity: "scriptc-generated-v1",
     ...optimizationField(features.optimization),
@@ -624,6 +630,8 @@ async function compileExecutableNative(
     tlsCa: features.tlsCa,
     cipher: features.cipher,
     ecdh: features.ecdh,
+    pki: features.pki,
+    ed25519: features.ed25519,
     x509: features.x509,
     webcrypto: features.webcrypto,
     perfLoop: features.perfLoop,
@@ -730,8 +738,12 @@ function runtimePackDiagnostic(error: RuntimePackError, entryPath: string): ScrD
 
 interface PreparedExecutable {
   llvmSource: LlvmInput;
+  /** The kept LLVM text beside the executable, installed when the build ends. */
   llvmPath: string;
+  /** This build's private copy of the LLVM text (BuildSources). */
+  llvmSourcePath: string;
   irPath: string | undefined;
+  irSourcePath: string | undefined;
   nativeFeatures: EarlyExecutableNativeFeatures;
   programSplit: ReturnType<typeof splitLlvmProgram>;
   sourceTexts: Map<string, string>;
@@ -842,6 +854,8 @@ async function prepareExecutableInput(
 
   await mkdir(opts.outDir, { recursive: true });
   const llvmPath = defaultSourcePaths.llvm;
+  // The extension keeps clang reading the copy as LLVM IR rather than as a linker input.
+  const llvmSourcePath = `${privateSiblingPath(llvmPath, "llvm")}.ll`;
   const backend = "llvm" as const;
   const useRuntimePack =
     opts.nativeProgramObject === true || usesPrecompiledRuntimePack(opts, backend);
@@ -864,12 +878,14 @@ async function prepareExecutableInput(
     return { ok: false, diagnostics: [llvmRefusalDiag(err, entryPath)], sourceTexts };
   }
   timing("llvm-emit");
-  await writeLlvmSource(llvmPath, llvmSource);
+  await writeLlvmSource(llvmSourcePath, llvmSource);
   timing("llvm-write");
   let irPath: string | undefined;
+  let irSourcePath: string | undefined;
   if (opts.emitIr) {
     irPath = defaultSourcePaths.ir;
-    await writeTextParts(irPath, serializeModuleParts(mod));
+    irSourcePath = privateSiblingPath(irPath, "ir");
+    await writeTextParts(irSourcePath, serializeModuleParts(mod));
   }
 
   const nativeFeatures = executableNativeFeatures(mod, backend, opts.optimization ?? "release");
@@ -883,7 +899,87 @@ async function prepareExecutableInput(
       ? splitLlvmProgram(llvmSource)
       : null;
   timing("llvm-split");
-  return { llvmSource, llvmPath, irPath, nativeFeatures, programSplit, sourceTexts };
+  return {
+    llvmSource,
+    llvmPath,
+    llvmSourcePath,
+    irPath,
+    irSourcePath,
+    nativeFeatures,
+    programSplit,
+    sourceTexts,
+  };
+}
+
+/**
+ * The kept LLVM text (`<entry stem>.ll`) and IR (`<entry stem>.ir.json`) sit beside the executable,
+ * so programs whose entries share a name and are built into one output directory share them. Each
+ * build therefore writes, compiles and caches private copies (privateSiblingPath) and moves them to
+ * the shared names only when it is done (rename replaces a file in one step): a concurrent build of
+ * another program cannot replace the text a build compiles or the translation unit it caches.
+ * Builds that compile with the C driver install them before the native build instead
+ * (stageDriverBuildSources).
+ */
+interface BuildSources {
+  llvmPath: string;
+  llvmSourcePath: string;
+  irPath?: string | undefined;
+  irSourcePath?: string | undefined;
+  /** The shared name already holds the private copy's bytes (a cache hit's restored files): it is
+   * left as it is, with its time stamps. */
+  llvmPathCurrent?: boolean | undefined;
+  irPathCurrent?: boolean | undefined;
+}
+
+/** Moves a build's private copies to the shared names, or drops them when that fails. */
+async function installBuildSources(sources: BuildSources): Promise<void> {
+  const install = async (
+    source: string | undefined,
+    destination: string | undefined,
+    current: boolean | undefined,
+  ) => {
+    if (source === undefined || destination === undefined || source === destination) return;
+    if (current === true) await rm(source, { force: true });
+    else await rename(source, destination).catch(() => rm(source, { force: true }));
+  };
+  await Promise.all([
+    install(sources.llvmSourcePath, sources.llvmPath, sources.llvmPathCurrent),
+    install(sources.irSourcePath, sources.irPath, sources.irPathCurrent),
+  ]);
+}
+
+/**
+ * A build that compiles the LLVM text with the C driver (no precompiled runtime pack) records the
+ * output directory in its native cache proofs, so that directory has to be in its final state before
+ * the native build starts. The build therefore installs the shared names first and compiles and
+ * caches copies in a private directory outside the output directory. Returns that directory and the
+ * copies.
+ */
+async function stageDriverBuildSources(
+  sources: BuildSources,
+): Promise<{ dir: string; sources: BuildSources }> {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-program-"));
+  const llvmSourcePath = join(dir, basename(sources.llvmPath));
+  const irSourcePath =
+    sources.irPath === undefined || sources.irSourcePath === undefined
+      ? undefined
+      : join(dir, basename(sources.irPath));
+  try {
+    await Promise.all([
+      copyFile(sources.llvmSourcePath, llvmSourcePath),
+      irSourcePath === undefined || sources.irSourcePath === undefined
+        ? undefined
+        : copyFile(sources.irSourcePath, irSourcePath),
+    ]);
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true });
+    throw err;
+  }
+  await installBuildSources(sources);
+  return {
+    dir,
+    sources: { llvmPath: sources.llvmPath, llvmSourcePath, irPath: sources.irPath, irSourcePath },
+  };
 }
 
 /**
@@ -977,10 +1073,11 @@ type FrontendProcessResult =
   | {
       kind: "prepared";
       llvmPath: string;
-      /** A private copy of the LLVM text, which the native helper reads (`nativeInputPath`). */
+      /** The build's private copy of the LLVM text (BuildSources), which the native helper reads. */
       nativeInputPath: string;
       llvmBytes: number;
       irPath: string | undefined;
+      irSourcePath: string | undefined;
       nativeFeatures: EarlyExecutableNativeFeatures;
       sourceTexts: [string, string][];
       warnings: ScrDiagnostic[];
@@ -1048,7 +1145,9 @@ async function prepareExecutableInputInChild(
   return {
     llvmSource: { file: result.nativeInputPath, bytes: result.llvmBytes },
     llvmPath: result.llvmPath,
+    llvmSourcePath: result.nativeInputPath,
     irPath: result.irPath,
+    irSourcePath: result.irSourcePath,
     nativeFeatures: result.nativeFeatures,
     programSplit: null,
     sourceTexts,
@@ -1086,18 +1185,15 @@ export async function runFrontendProcess(requestPath: string, resultPath: string
     );
     const frontend = frontendInputs.snapshot();
     if (!("ok" in prepared)) {
-      // The public .ll file may be rewritten by a concurrent build of another entry with the
-      // same output stem before the native helper reads it (see emitNativeArtifact).
       if (isLlvmFile(prepared.llvmSource))
         throw new InternalCompilerError("in-process preparation returned LLVM text as a file");
-      const nativeInputPath = privateSiblingPath(prepared.llvmPath, "frontend-llvm");
-      await writeLlvmSource(nativeInputPath, prepared.llvmSource, 0o600);
       result = {
         kind: "prepared",
         llvmPath: prepared.llvmPath,
-        nativeInputPath,
+        nativeInputPath: prepared.llvmSourcePath,
         llvmBytes: llvmInputBytes(prepared.llvmSource),
         irPath: prepared.irPath,
+        irSourcePath: prepared.irSourcePath,
         nativeFeatures: prepared.nativeFeatures,
         sourceTexts: [...prepared.sourceTexts],
         warnings: warnings.warnings,
@@ -1451,37 +1547,54 @@ async function compileTracked(
         ...(earlyHit.irPath === undefined ? {} : { irPath: earlyHit.irPath }),
       };
     }
-    let nativeInputPath = earlyHit.llvmPath;
+    // The build's private copies of the cached LLVM text and IR (BuildSources).
+    const hitSources: BuildSources = {
+      llvmPath: earlyHit.llvmPath,
+      llvmSourcePath: earlyHit.llvmSourcePath ?? earlyHit.llvmPath,
+      irPath: earlyHit.irPath,
+      irSourcePath: earlyHit.irSourcePath,
+      llvmPathCurrent: earlyHit.llvmPathCurrent,
+      irPathCurrent: earlyHit.irPathCurrent,
+    };
+    // What the native build compiles and the cache publishes: hitSources, or their staged copies.
+    let nativeSources = hitSources;
+    let stagedDir: string | null = null;
+    let nativeInputPath = hitSources.llvmSourcePath;
     let nativeProgramObject: NativeProgramObject | null = null;
     const useRuntimePack =
       opts.nativeProgramObject === true ||
       usesPrecompiledRuntimePack(opts, earlyHit.native.backend);
-    if (useRuntimePack) {
-      if (earlyHit.native.backend !== "llvm") {
-        throw new InternalCompilerError(
-          "native program-object cache hit restored a non-LLVM translation unit",
-        );
-      }
-      try {
-        nativeProgramObject = await emitNativeProgramObject(
-          entryPath,
-          opts,
-          // A large program's LLVM exceeds the engine's string limit as one
-          // string; the emitter takes it in parts, as on a cold build.
-          await readTextParts(earlyHit.llvmPath),
-          profile,
-        );
-        nativeInputPath = nativeProgramObject.linkPath;
-      } catch (err) {
-        if (!(err instanceof NativeCodegenError)) throw err;
-        return {
-          ok: false,
-          diagnostics: [nativeCodegenDiag(err.diagnosticCode, err.message, entryPath)],
-          sourceTexts: new Map(),
-        };
-      }
-    }
     try {
+      if (useRuntimePack) {
+        if (earlyHit.native.backend !== "llvm") {
+          throw new InternalCompilerError(
+            "native program-object cache hit restored a non-LLVM translation unit",
+          );
+        }
+        try {
+          nativeProgramObject = await emitNativeProgramObject(
+            entryPath,
+            opts,
+            // A large program's LLVM exceeds the engine's string limit as one
+            // string; the emitter takes it in parts, as on a cold build.
+            await readTextParts(hitSources.llvmSourcePath),
+            profile,
+          );
+          nativeInputPath = nativeProgramObject.linkPath;
+        } catch (err) {
+          if (!(err instanceof NativeCodegenError)) throw err;
+          return {
+            ok: false,
+            diagnostics: [nativeCodegenDiag(err.diagnosticCode, err.message, entryPath)],
+            sourceTexts: new Map(),
+          };
+        }
+      } else {
+        const staged = await stageDriverBuildSources(hitSources);
+        stagedDir = staged.dir;
+        nativeSources = staged.sources;
+        nativeInputPath = nativeSources.llvmSourcePath;
+      }
       await compileExecutableNative(
         earlyHit.native,
         nativeInputPath,
@@ -1497,6 +1610,10 @@ async function compileTracked(
           : async ({ dependencies }) => {
               await publishEarlyExecutableCache(cacheRoot, executableCacheOptions, {
                 ...earlyHit,
+                llvmPath: nativeSources.llvmSourcePath,
+                ...(nativeSources.irSourcePath === undefined
+                  ? {}
+                  : { irPath: nativeSources.irSourcePath }),
                 executableRestored: true,
                 nativeDependencies: dependencies,
                 frontend: earlyHit.frontend,
@@ -1504,6 +1621,7 @@ async function compileTracked(
             },
         nativeProgramObject?.partitionPaths,
         profile?.generate !== undefined,
+        hitSources.llvmPath,
       );
       if (nativeProgramObject !== null && opts.nativeProgramObject === true) {
         await rename(nativeProgramObject.linkPath, nativeProgramObject.artifactPath);
@@ -1533,6 +1651,8 @@ async function compileTracked(
           nativeProgramObject.partitionPaths,
         );
       }
+      if (stagedDir === null) await installBuildSources(hitSources);
+      else await rm(stagedDir, { recursive: true, force: true });
     }
     await pruneBuildCache(cacheRoot);
     return {
@@ -1565,7 +1685,17 @@ async function compileTracked(
         )
       : await prepareExecutableInput(entryPath, opts, ffi, buildPlatform, timing, warningSink);
   if ("ok" in prepared) return prepared;
-  const { llvmSource, llvmPath, irPath, nativeFeatures, programSplit, sourceTexts } = prepared;
+  const buildSources: BuildSources = {
+    llvmPath: prepared.llvmPath,
+    llvmSourcePath: prepared.llvmSourcePath,
+    irPath: prepared.irPath,
+    irSourcePath: prepared.irSourcePath,
+  };
+  const { llvmSource, llvmPath, irPath } = prepared;
+  const { nativeFeatures, programSplit, sourceTexts } = prepared;
+  // What the native build compiles and the cache publishes: buildSources, or their staged copies.
+  let { llvmSourcePath, irSourcePath } = buildSources;
+  let stagedDir: string | null = null;
   const backend = "llvm" as const;
   await mkdir(dirname(opts.outPath), { recursive: true });
   if (earlyCacheOptions === null) {
@@ -1597,10 +1727,14 @@ async function compileTracked(
           sourceTexts,
         };
       }
+    } else {
+      const staged = await stageDriverBuildSources(buildSources);
+      stagedDir = staged.dir;
+      ({ llvmSourcePath, irSourcePath } = staged.sources);
     }
     await compileExecutableNative(
       nativeFeatures,
-      nativeProgramObject?.linkPath ?? llvmPath,
+      nativeProgramObject?.linkPath ?? llvmSourcePath,
       opts.outPath,
       opts.sanitize ?? false,
       ffi,
@@ -1612,22 +1746,33 @@ async function compileTracked(
         ? undefined
         : async ({ dependencies }) => {
             await publishEarlyExecutableCache(cacheRoot, executableCacheOptions, {
-              llvmPath,
+              llvmPath: llvmSourcePath,
               native: nativeFeatures,
               executableRestored: true,
               nativeDependencies: dependencies,
               frontend: frontendInputs.snapshot(),
-              ...(irPath === undefined ? {} : { irPath }),
+              ...(irSourcePath === undefined ? {} : { irPath: irSourcePath }),
               ...performanceWarnings(warningSink),
             });
             publishedExecutable = true;
           },
       nativeProgramObject?.partitionPaths,
       profile?.generate !== undefined,
+      llvmPath,
     );
     timing("native-link");
     if (nativeProgramObject !== null && opts.nativeProgramObject === true) {
       await rename(nativeProgramObject.linkPath, nativeProgramObject.artifactPath);
+    }
+    if (!publishedExecutable) {
+      await publishEarlyExecutableCache(cacheRoot, executableCacheOptions, {
+        llvmPath: llvmSourcePath,
+        native: nativeFeatures,
+        executableRestored: false,
+        frontend: frontendInputs.snapshot(),
+        ...(irSourcePath === undefined ? {} : { irPath: irSourcePath }),
+        ...performanceWarnings(warningSink),
+      }).catch(() => undefined);
     }
   } catch (err) {
     if (err instanceof RuntimePackError) {
@@ -1650,18 +1795,8 @@ async function compileTracked(
         nativeProgramObject.partitionPaths,
       );
     }
-    // The frontend process's private copy of the LLVM text.
-    if (isLlvmFile(llvmSource)) await rm(llvmSource.file, { force: true });
-  }
-  if (!publishedExecutable) {
-    await publishEarlyExecutableCache(cacheRoot, executableCacheOptions, {
-      llvmPath,
-      native: nativeFeatures,
-      executableRestored: false,
-      frontend: frontendInputs.snapshot(),
-      ...(irPath === undefined ? {} : { irPath }),
-      ...performanceWarnings(warningSink),
-    }).catch(() => undefined);
+    if (stagedDir === null) await installBuildSources(buildSources);
+    else await rm(stagedDir, { recursive: true, force: true });
   }
   await pruneBuildCache(cacheRoot);
   timing("complete");

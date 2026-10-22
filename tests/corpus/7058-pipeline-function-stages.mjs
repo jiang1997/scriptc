@@ -60,7 +60,7 @@ await new Promise((resolve) => {
     },
     (err, value) => {
       console.log("array source:", err ?? null, value);
-      resolve();
+      resolve(undefined);
     },
   );
 });
@@ -114,7 +114,7 @@ function ticker(log) {
   await new Promise((resolve) =>
     pipeline(["a", "b"], new PassThrough(), sink(log), () => {
       stop();
-      resolve();
+      resolve(undefined);
     }),
   );
   console.log("array ticks:", log.join(" "));
@@ -134,7 +134,7 @@ function ticker(log) {
       sink(log),
       () => {
         stop();
-        resolve();
+        resolve(undefined);
       },
     ),
   );

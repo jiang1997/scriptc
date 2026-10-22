@@ -696,6 +696,8 @@ export function lowerCryptoModuleCall(
       loc,
     };
   }
+  const pki = lowerPkiCall(lowerer, expr, bi.member, args, loc);
+  if (pki) return pki;
   if (bi.member === "createSecretKey") {
     if (args.length < 1 || args.length > 2 || args.some(ts.isSpreadElement))
       lowerer.noLowering(
@@ -1338,4 +1340,56 @@ export function isWebCryptoReceiver(lowerer: Lowerer, receiver: ts.Expression): 
     return member?.module === "crypto" && member.member === "webcrypto";
   }
   return false;
+}
+
+/** The asymmetric-key and signature members (scr_pki.c): checked-dynamic
+ * arguments, and the result converted to the call site's type
+ * (KeyObject, Sign and Verify are checked-dynamic handles; key pairs,
+ * signatures and verdicts convert to their records, Buffers and
+ * booleans). Null for other members. */
+function lowerPkiCall(
+  lowerer: Lowerer,
+  expr: ts.CallExpression,
+  member: string,
+  args: readonly ts.Expression[],
+  loc: SrcLoc,
+): IrExpr | null {
+  const forms: Readonly<Record<string, readonly [IrLibFn, number, number, string]>> = {
+    createPrivateKey: ["crypto.createPrivateKey", 1, 1, "createPrivateKey(key)"],
+    createPublicKey: ["crypto.createPublicKey", 1, 1, "createPublicKey(key)"],
+    generateKeyPairSync: ["crypto.generateKeyPairSync", 1, 2, "generateKeyPairSync(type, options)"],
+    generateKeyPair: [
+      "crypto.generateKeyPairCb",
+      2,
+      3,
+      "generateKeyPair(type, [options,] callback)",
+    ],
+    sign: ["crypto.signOneshot", 3, 3, "sign(algorithm, data, key)"],
+    verify: ["crypto.verifyOneshot", 4, 4, "verify(algorithm, data, key, signature)"],
+    createSign: ["crypto.createSign", 1, 1, "createSign(algorithm)"],
+    createVerify: ["crypto.createVerify", 1, 1, "createVerify(algorithm)"],
+  };
+  const form = forms[member];
+  if (!form) return null;
+  const [fn, min, max, supported] = form;
+  if (args.length < min || args.length > max)
+    lowerer.noLowering(
+      `crypto.${member} with ${args.length} arguments`,
+      expr,
+      `${supported} is supported`,
+    );
+  // generateKeyPair(type, callback): Node reads a function in the options
+  // position as the callback.
+  const shifted = fn === "crypto.generateKeyPairCb" && args.length === 2;
+  const values: IrExpr[] = [];
+  for (let i = 0; i < max; i++) {
+    const node = shifted ? (i === 1 ? undefined : i === 2 ? args[1] : args[i]) : args[i];
+    values.push(dynArg(lowerer, node, loc));
+  }
+  if (fn === "crypto.generateKeyPairCb")
+    return { kind: "libCall", fn, args: values, type: VOID, loc };
+  const call: IrExpr = { kind: "libCall", fn, args: values, type: DYN, loc };
+  const result = lowerer.mapTypeOf(lowerer.typeOf(expr));
+  if (result === null || result.kind === "dyn") return call;
+  return lowerer.coerceInto(expr, call, result);
 }

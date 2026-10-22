@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import {
   dynUndefinedExpr,
   boolLit,
@@ -45,6 +46,7 @@ import type { ClassInfo } from "./lower-classes.js";
 import { isSafeToDiscard, isSafeToRepeat } from "./expressions/evaluation-safety.js";
 import { symbolFieldDisplayName } from "./symbol-fields.js";
 import { eventTargetRootOf } from "./lower-event-target.js";
+import { dateRootOf } from "./builtins/date-classes.js";
 import { lowerSystemErrorMap } from "./lower-system-errors.js";
 import { isPerfEntryType, perfEntryJson } from "./builtins/performance.js";
 import { recordMayKeepSource, recordSourceTest } from "./record-sources.js";
@@ -268,7 +270,7 @@ function errorInspectHelper(
   const key = `insp.userError:${typeKey(t)}`;
   const existing = lowerer.inspectHelpers.get(key);
   if (existing) return existing;
-  const name = `%util.insp.${lowerer.inspectHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%util.insp", key);
   lowerer.inspectHelpers.set(key, name);
   const v = (): IrExpr => varRef("v.0", t, loc);
   const r = (): IrExpr => varRef("r.0", F64, loc);
@@ -804,8 +806,9 @@ function inspectSupport(
       const info = lowerer.classes.get(t.className);
       if (!info) return `class '${t.className}' has no inspect lowering`;
       // EventTarget and Event subclasses render through Node's inspectors
-      // for those classes (the runtime's capsule view).
-      if (eventTargetRootOf(info) !== null) return null;
+      // for those classes (the runtime's capsule view), and so do classes
+      // declared `extends Date`.
+      if (eventTargetRootOf(info) !== null || dateRootOf(info) !== null) return null;
       if (isErrorClass(lowerer, t.className)) {
         if (userErrorClasses(info).length > 0 && errorHeaderOverridden(lowerer, info))
           return "error subclasses whose name, message or stack is an accessor or a prototype property have no inspect lowering yet";
@@ -957,7 +960,10 @@ export function inspectExpr(
         loc,
       };
     case "object":
-      if (eventTargetRootOf(lowerer.classes.get(t.className)) !== null) {
+      if (
+        eventTargetRootOf(lowerer.classes.get(t.className)) !== null ||
+        dateRootOf(lowerer.classes.get(t.className)) !== null
+      ) {
         return {
           kind: "libCall",
           fn: "insp.dyn",
@@ -1145,7 +1151,7 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
   const key = `insp:${typeKey(t)}`;
   const existing = lowerer.inspectHelpers.get(key);
   if (existing) return existing;
-  const name = `%util.insp.${lowerer.inspectHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%util.insp", key);
   lowerer.inspectHelpers.set(key, name);
 
   const v = (): IrExpr => varRef("v.0", t, loc);
@@ -2074,7 +2080,7 @@ function formatUnionHelper(
   const existing = lowerer.inspectHelpers.get(key);
   if (existing) return existing;
   const loc = helperLoc(site);
-  const name = `%util.fmtv.${lowerer.inspectHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%util.fmtv", key);
   lowerer.inspectHelpers.set(key, name);
   const def = lowerer.unions.get(t.unionId);
   if (!def) throw new InternalCompilerError(`format value over unknown union ${t.unionId}`);

@@ -314,16 +314,19 @@ test("virtual calls admit every same-named method", () => {
   expect(new AmbientReceiverReaders(functions).ignores(caller)).toBe(false);
 });
 
-test("synthetic array HOF helpers are constant-callback consumers", () => {
-  const mod = fixture();
-  const consumer = mod.functions[1]!;
-  const entry = mod.functions[2]!;
-  delete consumer.ownsPrototype;
-  consumer.name = "%arr.some.0";
-  const call = entry.body[0]!;
-  if (call.kind === "exprStmt" && call.expr.kind === "call") call.expr.callee = "%arr.some.0";
-  expect(facts(mod).get("%arr.some.0")?.get("test")).toBe("predicate");
-});
+test.each(["%arr.some.0", "%bytes.some.0"])(
+  "synthetic array and typed-array HOF helpers are constant-callback consumers (%s)",
+  (name) => {
+    const mod = fixture();
+    const consumer = mod.functions[1]!;
+    const entry = mod.functions[2]!;
+    delete consumer.ownsPrototype;
+    consumer.name = name;
+    const call = entry.body[0]!;
+    if (call.kind === "exprStmt" && call.expr.kind === "call") call.expr.callee = name;
+    expect(facts(mod).get(name)?.get("test")).toBe("predicate");
+  },
+);
 
 function factory(name: string, returns: IrExpr[]): IrFunction {
   return {

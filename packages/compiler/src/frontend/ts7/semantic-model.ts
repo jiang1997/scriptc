@@ -8,7 +8,7 @@ import type { __String } from "./ast-types.js";
 import type * as enums from "./enums.generated.js";
 import { parseAstNodeHandle } from "./ast-wire.js";
 import type { SemanticChecker, SemanticJsDocTag } from "./semantic-checker.js";
-import { parseSemanticJson } from "./semantic-json.js";
+import { decodeSemanticObject, decodeSemanticObjects, parseSemanticJson } from "./semantic-json.js";
 import {
   SemanticObjectFlags as ObjectFlags,
   SemanticSignatureFlags as SignatureFlags,
@@ -17,6 +17,14 @@ import {
 
 /** JSON and binary operations stay at the transport boundary. The concrete
  * semantic objects below need neither the SDK nor a JavaScript engine. */
+/** The elements of a reply that has no nulls: a null element fails as it
+ * would when read as an object. */
+export function present<T>(items: (T | undefined)[], method: string): T[] {
+  for (const item of items)
+    if (item === undefined) throw new TypeError(`${method} returned a null element`);
+  return items as T[];
+}
+
 export interface SemanticTransport {
   text: (method: string, payload: string) => string;
   binary: (method: string, payload: string) => Uint8Array;
@@ -154,6 +162,54 @@ export class SemanticProject {
     return this.snapshot.transport.binary(method, JSON.stringify(query));
   }
 
+  /** A reply of one type, or undefined for null. */
+  requestType(method: string, query: SemanticQuery): SemanticType | undefined {
+    const bytes = this.requestBinary(method, query);
+    const cached = (id: number): SemanticType | undefined => this.types.get(id);
+    const build = (data: TypeResponse): SemanticType => this.type(data);
+    return decodeSemanticObject(bytes, cached, build) ?? undefined;
+  }
+
+  /** A reply of types and nulls (undefined here), or [] for null. */
+  requestTypes(method: string, query: SemanticQuery): (SemanticType | undefined)[] {
+    const bytes = this.requestBinary(method, query);
+    const cached = (id: number): SemanticType | undefined => this.types.get(id);
+    const build = (data: TypeResponse): SemanticType => this.type(data);
+    return (decodeSemanticObjects(bytes, cached, build) ?? []).map((item) => item ?? undefined);
+  }
+
+  /** A reply of one symbol, or undefined for null. */
+  requestSymbol(method: string, query: SemanticQuery): SemanticSymbol | undefined {
+    const bytes = this.requestBinary(method, query);
+    const cached = (id: number): SemanticSymbol | undefined => this.snapshot.cachedSymbol(id);
+    const build = (data: SymbolResponse): SemanticSymbol => this.symbol(data);
+    return decodeSemanticObject(bytes, cached, build) ?? undefined;
+  }
+
+  /** A reply of symbols and nulls (undefined here), or [] for null. */
+  requestSymbols(method: string, query: SemanticQuery): (SemanticSymbol | undefined)[] {
+    const bytes = this.requestBinary(method, query);
+    const cached = (id: number): SemanticSymbol | undefined => this.snapshot.cachedSymbol(id);
+    const build = (data: SymbolResponse): SemanticSymbol => this.symbol(data);
+    return (decodeSemanticObjects(bytes, cached, build) ?? []).map((item) => item ?? undefined);
+  }
+
+  /** A reply of one signature, or undefined for null. */
+  requestSignature(method: string, query: SemanticQuery): SemanticSignature | undefined {
+    const bytes = this.requestBinary(method, query);
+    const cached = (id: number): SemanticSignature | undefined => this.signatures.get(id);
+    const build = (data: SignatureResponse): SemanticSignature => this.signature(data);
+    return decodeSemanticObject(bytes, cached, build) ?? undefined;
+  }
+
+  /** A reply of signatures and nulls (undefined here), or [] for null. */
+  requestSignatures(method: string, query: SemanticQuery): (SemanticSignature | undefined)[] {
+    const bytes = this.requestBinary(method, query);
+    const cached = (id: number): SemanticSignature | undefined => this.signatures.get(id);
+    const build = (data: SignatureResponse): SemanticSignature => this.signature(data);
+    return (decodeSemanticObjects(bytes, cached, build) ?? []).map((item) => item ?? undefined);
+  }
+
   type(data: TypeResponse): SemanticType {
     this.ensureActive();
     let type = this.types.get(data.id);
@@ -190,9 +246,9 @@ export class SemanticProject {
       const cached = this.types.get(handle);
       if (cached !== undefined) return cached;
     }
-    const data = this.request<TypeResponse | null>(method, { objectId: source });
-    if (data === null) throw new Error(`${method} returned null type for ${source}`);
-    return this.type(data);
+    const type = this.requestType(method, { objectId: source });
+    if (type === undefined) throw new Error(`${method} returned null type for ${source}`);
+    return type;
   }
 
   fetchSymbol(
@@ -204,9 +260,9 @@ export class SemanticProject {
     if (handle === undefined || handle === 0) return undefined;
     const cached = this.snapshot.cachedSymbol(handle);
     if (cached !== undefined) return cached;
-    const data = this.request<SymbolResponse | null>(method, { objectId: source });
-    if (data === null) throw new Error(`${method} returned null symbol for ${source}`);
-    return this.symbol(data);
+    const symbol = this.requestSymbol(method, { objectId: source });
+    if (symbol === undefined) throw new Error(`${method} returned null symbol for ${source}`);
+    return symbol;
   }
 
   fetchSignature(
@@ -218,9 +274,9 @@ export class SemanticProject {
     if (handle === undefined || handle === 0) return undefined;
     const cached = this.signatures.get(handle);
     if (cached !== undefined) return cached;
-    const data = this.request<SignatureResponse | null>(method, { objectId: source });
-    if (data === null) throw new Error(`${method} returned null signature for ${source}`);
-    return this.signature(data);
+    const signature = this.requestSignature(method, { objectId: source });
+    if (signature === undefined) throw new Error(`${method} returned null signature for ${source}`);
+    return signature;
   }
 
   fetchTypes(source: number, method: string, handles?: readonly number[]): SemanticType[] {
@@ -234,8 +290,7 @@ export class SemanticProject {
       }
       if (cached.length === handles.length) return cached;
     }
-    const data = this.request<TypeResponse[] | null>(method, { objectId: source });
-    return (data ?? []).map((item) => this.type(item));
+    return present(this.requestTypes(method, { objectId: source }), method);
   }
 
   fetchSymbols(source: number, method: string, handles?: readonly number[]): SemanticSymbol[] {
@@ -249,8 +304,7 @@ export class SemanticProject {
       }
       if (cached.length === handles.length) return cached;
     }
-    const data = this.request<SymbolResponse[] | null>(method, { objectId: source });
-    return (data ?? []).map((item) => this.symbol(item));
+    return present(this.requestSymbols(method, { objectId: source }), method);
   }
 
   dispose(): void {
@@ -577,9 +631,8 @@ export class SemanticType {
    * changes nothing or its members are unreadable too. */
   private widenedConstituents(): SemanticType[] | undefined {
     try {
-      const data = this.project.request<TypeResponse | null>("getWidenedType", { type: this.id });
-      if (data === null || data.id === this.id) return undefined;
-      const widened = this.project.type(data);
+      const widened = this.project.requestType("getWidenedType", { type: this.id });
+      if (widened === undefined || widened.id === this.id) return undefined;
       if ((widened.flags & TypeFlags.Union) === 0) return [widened];
       return this.project.fetchTypes(widened.id, "getTypesOfType");
     } catch (e) {
@@ -594,8 +647,7 @@ export class SemanticType {
   getBaseTypes(): SemanticType[] | undefined {
     this.project.ensureActive();
     if (!this.isClassOrInterface()) return undefined;
-    const data = this.project.request<TypeResponse[] | null>("getBaseTypes", { type: this.id });
-    return (data ?? []).map((item) => this.project.type(item));
+    return present(this.project.requestTypes("getBaseTypes", { type: this.id }), "getBaseTypes");
   }
   getTrueType(): SemanticType {
     const result = this.project.fetchType(this.id, "getTrueTypeOfConditionalType", this.trueType);

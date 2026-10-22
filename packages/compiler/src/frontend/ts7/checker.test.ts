@@ -283,8 +283,9 @@ test("negative assignability answers remain independent in both directions", () 
       requests.push(query);
       return JSON.stringify(query.source === 1 && query.target === 2);
     },
-    binary: () => {
-      throw new Error("unexpected binary request");
+    // Object replies are read as bytes; they carry the same JSON.
+    binary(method, payload) {
+      return Buffer.from(this.text(method, payload), "utf8");
     },
   });
   const project = snapshot.addProject("project", () => undefined);
@@ -324,8 +325,9 @@ test("property lookup caches hits and misses by type and name within each projec
         checkFlags: 0,
       });
     },
-    binary: () => {
-      throw new Error("unexpected binary request");
+    // Object replies are read as bytes; they carry the same JSON.
+    binary(method, payload) {
+      return Buffer.from(this.text(method, payload), "utf8");
     },
   });
   const first = snapshot.addProject("first", () => undefined);
@@ -397,8 +399,9 @@ test("member type batches are bounded, reuse warm entries, and isolate absent or
       if (ids.includes(7)) throw new Error("checker panic");
       return JSON.stringify(ids.map((id) => (id === 11 ? null : { id, flags: TypeFlags.Number })));
     },
-    binary: () => {
-      throw new Error("unexpected binary query");
+    // Object replies are read as bytes; they carry the same JSON.
+    binary(method, payload) {
+      return Buffer.from(this.text(method, payload), "utf8");
     },
   });
   const project = snapshot.addProject("members", () => undefined);

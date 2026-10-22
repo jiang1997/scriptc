@@ -1,6 +1,8 @@
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer } from "../lowerer.js";
 import { locOf } from "../../program.js";
+import { tryLowerExpression } from "../expressions/try-lower-expression.js";
+import { dynUndefinedExpr } from "../../../ir/build.js";
 import {
   BOOL,
   CAUGHT,
@@ -8,6 +10,7 @@ import {
   DYN_CLASS_PROPERTIES,
   F64,
   type IrExpr,
+  type IrStmt,
   type IrType,
   STRING,
 } from "../../../ir/ir.js";
@@ -265,6 +268,114 @@ function isErrorClassType(lowerer: Lowerer, type: IrType): boolean {
     type.kind === "object" &&
     (type.className === "%Error" || lowerer.isSubclassOf(type.className, "%Error"))
   );
+}
+
+/** Error classes that construct when called without `new`. */
+const CALLABLE_ERROR_CLASSES: ReadonlySet<string> = new Set([
+  "%Error",
+  "%TypeError",
+  "%RangeError",
+  "%SyntaxError",
+  "%ReferenceError",
+  "%EvalError",
+  "%URIError",
+]);
+
+/** `Error(message?, options?)` and `Error.call(thisArg, message?, options?)`
+ * (an ES5 constructor function's `Error.call(this)`), and the same for the
+ * other standard error classes: called as a function, the constructor
+ * returns a new error and ignores the receiver. `thisArg` is evaluated
+ * first. Null for other callees. */
+export function lowerErrorFunctionCall(lowerer: Lowerer, call: ts.CallExpression): IrExpr | null {
+  if (call.questionDotToken) return null;
+  let callee = call.expression;
+  let args = call.arguments.nodes;
+  let thisArg: ts.Expression | undefined;
+  const viaCall =
+    ts.isPropertyAccessExpression(callee) &&
+    !callee.questionDotToken &&
+    callee.name.text === "call" &&
+    ts.isIdentifier(callee.expression);
+  if (viaCall) {
+    callee = (callee as ts.PropertyAccessExpression).expression;
+    thisArg = args[0];
+    args = args.slice(1);
+  }
+  if (!ts.isIdentifier(callee) || args.some(ts.isSpreadElement)) return null;
+  if (thisArg && ts.isSpreadElement(thisArg)) return null;
+  const info = lowerer.builtinErrorInfoOf(lowerer.checker.getSymbolAtLocation(callee));
+  if (!info || !CALLABLE_ERROR_CLASSES.has(info.def.name)) return null;
+  const loc = locOf(call);
+  const stmts: IrStmt[] = [];
+  if (thisArg) {
+    const receiver = lowerer.lowerExpr(thisArg);
+    if (receiver.kind !== "varRef" && receiver.kind !== "unitLit")
+      stmts.push({ kind: "exprStmt", expr: receiver, loc: receiver.loc });
+  }
+  const error: IrExpr = {
+    kind: "libCall",
+    fn: "error.newOptions",
+    args: lowerer.errorConstructorArgs(args, loc, call),
+    type: { kind: "object", className: info.def.name },
+    loc,
+  };
+  return stmts.length > 0
+    ? { kind: "seqExpr", stmts, result: error, type: error.type, loc }
+    : error;
+}
+
+/** `Error.captureStackTrace(target[, constructorOpt])` (also called as
+ * `Error.captureStackTrace?.(...)`, which always calls it). On a
+ * checked-dynamic target (`this` in a JavaScript constructor function) the
+ * runtime defines target's `stack`. An instance of a class that extends
+ * Error derives its stack from its name and message when the stack is
+ * read, so the call only evaluates its arguments. Both arguments are
+ * evaluated; the second only selects frames in Node. Null for other
+ * targets and callees. */
+export function lowerErrorCaptureStackTraceCall(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
+  if (access.questionDotToken) return null;
+  if (lowerer.stdlibGlobalMember(access, "Error") !== "captureStackTrace") return null;
+  const args = call.arguments.nodes;
+  if (args.length < 1 || args.length > 2 || args.some(ts.isSpreadElement)) return null;
+  const probed = tryLowerExpression(lowerer, args[0]!);
+  const loc = locOf(call);
+  if (
+    probed?.type.kind === "object" &&
+    (probed.type.className === "%Error" || lowerer.isSubclassOf(probed.type.className, "%Error"))
+  ) {
+    const stmts: IrStmt[] = [];
+    for (const arg of args) {
+      const value = lowerer.lowerExpr(arg);
+      if (value.kind !== "varRef") stmts.push({ kind: "exprStmt", expr: value, loc: value.loc });
+    }
+    const result = dynUndefinedExpr(loc);
+    return stmts.length > 0 ? { kind: "seqExpr", stmts, result, type: DYN, loc } : result;
+  }
+  if (probed?.type.kind !== "dyn") return null;
+  const target = lowerer.lowerExpr(args[0]!);
+  const result: IrExpr = {
+    kind: "libCall",
+    fn: "dyn.errorCaptureStackTrace",
+    args: [target],
+    type: DYN,
+    loc,
+  };
+  if (args.length === 1) return result;
+  const local = lowerer.declareHiddenLocal("%captureTarget", DYN);
+  return {
+    kind: "seqExpr",
+    stmts: [
+      { kind: "varDecl", localId: local.id, init: target, loc },
+      { kind: "exprStmt", expr: lowerer.lowerExprExpecting(args[1]!, DYN), loc },
+    ],
+    result: { ...result, args: [{ kind: "varRef", localId: local.id, type: DYN, loc }] },
+    type: DYN,
+    loc,
+  };
 }
 
 /** `Error.isError(value)`. A catch binding tests its payload against the

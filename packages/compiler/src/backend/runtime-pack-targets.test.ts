@@ -125,6 +125,8 @@ const features = {
   tlsCa: false,
   cipher: false,
   ecdh: false,
+  pki: false,
+  ed25519: false,
   x509: false,
   webcrypto: false,
   perfLoop: false,

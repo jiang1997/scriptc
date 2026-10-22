@@ -158,6 +158,11 @@ typedef enum {
   X(DIR, 44) /* fs.Dir (scr_lib.c) */ \
   X(DISPOSABLE_STACK, 49) /* DisposableStack (scr_symbol.c) */ \
   X(ECDH, 64) /* node:crypto ECDH (scr_ecdh.c) */ \
+  X(PRIVATE_KEY, 65) /* node:crypto PrivateKeyObject (scr_pki.c) */ \
+  X(PUBLIC_KEY, 66) /* node:crypto PublicKeyObject (scr_pki.c) */ \
+  X(SIGN, 67) /* node:crypto Sign (scr_pki.c) */ \
+  X(VERIFY, 68) /* node:crypto Verify (scr_pki.c) */ \
+  X(ASYMMETRIC_CRYPTO_KEY, 69) /* WebCrypto ECDSA and RSA CryptoKey (scr_webcrypto_pki.c) */ \
   X(EVENT, 14) /* ScrEvent — new Event() and AbortSignal's abort events */ \
   X(EVENT_TARGET, 39) /* ScrEventTarget — new EventTarget() */ \
   X(FETCH_HEADERS, 13) /* native static-fetch response Headers */ \
@@ -662,6 +667,40 @@ bool scr_dyn_native_url_is(const ScrDyn *value);
 ScrDyn *scr_dyn_native_search_params(ScrSearchParams *value);
 bool scr_dyn_native_search_params_is(const ScrDyn *value);
 bool scr_dyn_native_date_is(const ScrDyn *value);
+/* Instances of program classes declared `extends Date` (scr_lib.c). */
+void scr_date_class_operation_install(ScrDyn *time, ScrDyn *methods);
+/* Set by scr_date_class_operation_install; NULL in a program without such
+ * a class, where every wrapper below answers false or NULL. */
+typedef struct {
+  bool (*time)(const ScrDyn *value, double *time);
+  ScrDyn *(*to_json)(const ScrDyn *value, const ScrDyn *key);
+  ScrDyn *(*to_string)(const ScrDyn *value);
+  ScrDyn *(*value_of)(const ScrDyn *value);
+  ScrStr *(*name)(const ScrDyn *value);
+  ScrDyn *(*method)(const ScrDyn *value, const char *key, size_t key_len);
+} ScrDateClassHooks;
+extern const ScrDateClassHooks *scr_date_class_hooks;
+static inline bool scr_dyn_date_class_time(const ScrDyn *value, double *time) {
+  return scr_date_class_hooks && scr_date_class_hooks->time(value, time);
+}
+static inline ScrDyn *scr_dyn_date_class_to_json(const ScrDyn *value, const ScrDyn *key) {
+  return scr_date_class_hooks->to_json(value, key);
+}
+static inline ScrDyn *scr_dyn_date_class_to_string(const ScrDyn *value) {
+  return scr_date_class_hooks->to_string(value);
+}
+static inline ScrDyn *scr_dyn_date_class_value_of(const ScrDyn *value) {
+  return scr_date_class_hooks->value_of(value);
+}
+static inline ScrStr *scr_dyn_date_class_name(const ScrDyn *value) {
+  return scr_date_class_hooks ? scr_date_class_hooks->name(value) : NULL;
+}
+static inline ScrDyn *scr_dyn_date_class_method(const ScrDyn *value, const char *key, size_t key_len) {
+  return scr_date_class_hooks ? scr_date_class_hooks->method(value, key, key_len) : NULL;
+}
+bool scr_dyn_date_instance_is(const ScrDyn *value);
+ScrDyn *scr_dyn_date_class_member(const ScrDyn *d, const char *key, size_t key_len);
+double scr_dyn_date_arguments_time(const ScrDyn *arguments);
 ScrDyn *scr_dyn_native_date_new(const ScrDyn *arguments);
 ScrDyn *scr_dyn_native_date_new_fields(const ScrDyn *arguments);
 ScrDyn *scr_dyn_native_date_new_value(const ScrDyn *arguments);
@@ -725,9 +764,6 @@ ScrDyn *scr_dyn_array_constructor(void);
 /* The interned builtin constructor `name` (Object, Date, RegExp, Map, Set,
  * Promise, WeakMap, WeakSet) as a dynamic function value: +1. */
 ScrDyn *scr_dyn_global_constructor(const ScrStr *name);
-/* The interned function value of an error constructor ("TypeError"), or
- * NULL for other names. */
-ScrDyn *scr_dyn_error_constructor(const char *name);
 /* A builtin global function (setTimeout, setImmediate, process.nextTick, ...)
  * as an interned dynamic function value: +1. */
 ScrDyn *scr_dyn_builtin_function(const ScrStr *name);
@@ -1051,6 +1087,10 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc);
  * prototype chain has no toString (Node's answer). */
 ScrStr *scr_dyn_to_string_method(const ScrDyn *d, const ScrStr *enc, const ScrStr *what);
 ScrDyn *scr_dyn_object_prototype(void);
+ScrDyn *scr_dyn_error_prototype(void);
+bool scr_dyn_inherits_error_prototype(const ScrDyn *value);
+ScrDyn *scr_dyn_error_capture_stack_trace(ScrDyn *target);
+ScrDyn *scr_dyn_error_capture_stack_trace_function(void);
 ScrDyn *scr_dyn_function_apply(void);
 ScrDyn *scr_dyn_reflect_apply(ScrDyn *target, ScrDyn *receiver, ScrDyn *arguments_list);
 ScrDyn *scr_dyn_apply_array_like(const ScrDyn *target, const ScrDyn *receiver, const ScrDyn *arguments, const char *what);

@@ -173,6 +173,7 @@ async function build() {
               ...(unit.source === "scr_tls.c" ||
               unit.source === "scr_cipher.c" ||
               unit.source === "scr_ecdh.c" ||
+              unit.source === "scr_pki.c" ||
               unit.source === "scr_webcrypto_aes.c"
                 ? ["-I", join(mbedtls, "include")]
                 : []),

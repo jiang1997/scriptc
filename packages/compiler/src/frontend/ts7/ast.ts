@@ -47,8 +47,9 @@ import {
 } from "./ast-guards.generated.js";
 import type { Ts7DiagnosticData as Diagnostic } from "./session-schema.generated.js";
 import { ModifierFlags, SyntaxKind } from "./enums.js";
-import { AstKind } from "./ast-schema.generated.js";
+import { AstKind, KIND_NODE_LIST } from "./ast-schema.generated.js";
 import { PREORDER_LIST } from "./ast-wire.js";
+import { tokenStartOfNode } from "./node-functions.js";
 
 /* ---- everything 7 kept under the same name ---- */
 
@@ -194,6 +195,93 @@ function walkLinkedPreorder(
     }
     for (let i = first; i < stack.length; i++) depths.push(depth + 1);
   }
+}
+
+/** The semantic children of a wire node: list items stand in for their
+ * list, and attached JSDoc trees are left out (the walkPreorder view). */
+function semanticChildIndices(root: Node, index: number, out: number[]): void {
+  const wire = root.file.wire;
+  for (let child = wire.firstChild(index); child !== 0; child = wire.next(child)) {
+    const kind = wire.kind(child);
+    if (kind === KIND_NODE_LIST) {
+      for (let item = wire.firstChild(child); item !== 0; item = wire.next(item)) out.push(item);
+    } else if (kind !== AstKind.JSDoc) out.push(child);
+  }
+}
+
+/** The outermost node of `sourceFile` whose token span is exactly
+ * [start, end), or undefined. Only nodes ending at `end` are
+ * materialized. */
+export function nodeAtSpan(sourceFile: SourceFile, start: number, end: number): Node | undefined {
+  const wire = sourceFile.file.wire;
+  const children: number[] = [];
+  let index = sourceFile.index;
+  for (;;) {
+    children.length = 0;
+    semanticChildIndices(sourceFile, index, children);
+    let next = 0;
+    for (const child of children) {
+      if (wire.pos(child) > start || wire.end(child) < end) continue;
+      if (wire.end(child) === end) {
+        const node = sourceFile.file.node(child);
+        if (tokenStartOfNode(node) === start) return node;
+      }
+      next = child;
+      break;
+    }
+    if (next === 0) return undefined;
+    index = next;
+  }
+}
+
+/** The name of the declaration at wire `index` in `root`'s file when its
+ * kind is in `kinds`: its identifier, private identifier or string literal
+ * name, "constructor" for a constructor, or null. Reads the wire without
+ * materializing nodes. */
+export function declarationNameAt(
+  root: Node,
+  index: number,
+  kinds: ReadonlySet<number>,
+): string | null {
+  const wire = root.file.wire;
+  const kind = wire.kind(index);
+  if (!kinds.has(kind)) return null;
+  if (kind === SyntaxKind.Constructor) return "constructor";
+  const name = wire.namedChild(index, "name");
+  if (name === 0) return null;
+  const nameKind = wire.kind(name);
+  if (
+    nameKind !== SyntaxKind.Identifier &&
+    nameKind !== SyntaxKind.PrivateIdentifier &&
+    nameKind !== SyntaxKind.StringLiteral
+  )
+    return null;
+  return wire.text(name) ?? null;
+}
+
+/** The indices, in preorder, of the nodes below `root` that have `key` and
+ * are not inside a nested named declaration (declarationNameAt with
+ * `kinds`). A named declaration is keyed `<kind>:<name>` and its subtree is
+ * not visited; other nodes are keyed by their kind. No node is
+ * materialized. */
+export function anchoredNodes(root: Node, key: string, kinds: ReadonlySet<number>): number[] {
+  const wire = root.file.wire;
+  const out: number[] = [];
+  const children: number[] = [];
+  const stack: number[] = [];
+  semanticChildIndices(root, root.index, children);
+  for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]!);
+  while (stack.length > 0) {
+    const index = stack.pop()!;
+    const kind = wire.kind(index);
+    const name = declarationNameAt(root, index, kinds);
+    if ((name === null ? String(kind) : `${kind}:${name}`) === key) out.push(index);
+    if (name !== null) continue;
+    children.length = 0;
+    semanticChildIndices(root, index, children);
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]!);
+  }
+  return out;
 }
 
 export function getLineAndCharacterOfPosition(

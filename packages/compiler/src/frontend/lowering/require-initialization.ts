@@ -9,6 +9,7 @@
  * and every reference that can run earlier checks it first — the same
  * module.tdzCheck the import-cycle bindings use. A reference whose lowering
  * leaves no expression to check keeps the SC1013 fence. */
+import { positionTag } from "./structural-positions.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import {
@@ -119,7 +120,7 @@ export function markRequireEarlyBindings(lowerer: Lowerer): void {
     const tag = rawTag === "" ? "e." : rawTag.replace(/^%/, "");
     const bySymbol = new Map<ts.Symbol, { flag: RequireInitFlag; decl: ts.VariableDeclaration }>();
     for (const { decl } of declared) {
-      const flagId = `%g.${tag}%required.${ts.tokenStartOfNode(decl)}`;
+      const flagId = `%g.${tag}%required.${positionTag(lowerer, decl)}`;
       lowerer.globalsList.push({ id: flagId, name: "%initialized", type: BOOL, mutable: true });
       const flag: RequireInitFlag = { flagId, names: new Map() };
       for (const id of boundNames(decl.name)) {

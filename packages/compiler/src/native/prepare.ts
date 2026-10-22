@@ -161,6 +161,8 @@ function validFeatures(value: unknown): value is NativeLinkFeatures {
     "tlsCa",
     "cipher",
     "ecdh",
+    "pki",
+    "ed25519",
     "x509",
     "webcrypto",
     "perfLoop",

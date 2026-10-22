@@ -29,12 +29,16 @@ export function findConstantCallbacks(
     mod.functions
       .filter(
         (fn) =>
-          // Authored declarations, plus the frontend's synthetic array
-          // HOF loops (`%arr.<method>.<n>`): those are plain direct-call
-          // functions, and a literal callback gets a helper of its own.
+          // Authored declarations, plus the frontend's synthetic array and
+          // typed-array HOF loops (`%arr.<method>.<n>`, `%bytes.<method>.<n>`):
+          // those are plain direct-call functions, and a literal callback
+          // gets a helper of its own.
           // Generator declarations are entered through their spawn wrapper,
           // which moves the same arguments into the generator's frame.
-          (fn.ownsPrototype || fn.name.startsWith("%arr.") || fn.generator !== undefined) &&
+          (fn.ownsPrototype ||
+            fn.name.startsWith("%arr.") ||
+            fn.name.startsWith("%bytes.") ||
+            fn.generator !== undefined) &&
           (!fn.async || fn.generator !== undefined) &&
           !fn.captures &&
           !fn.classCaptures &&

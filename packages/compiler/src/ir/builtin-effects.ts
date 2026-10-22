@@ -538,6 +538,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "date.nativeNew",
   "date.nativeNewFields",
   "date.nativeNewValue",
+  "date.argumentsTime",
   "date.checkedValue",
   "util.parseArgs",
   "util.parseEnv",
@@ -605,6 +606,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.objCreateWithProperties",
   "dyn.getPrototype",
   "dyn.setPrototype",
+  // Error.captureStackTrace: Node's TypeError for a primitive target, and
+  // the error string conversion of name and message
+  "dyn.errorCaptureStackTrace",
   // a proxy in the prototype chain can throw
   "dyn.builtinInstanceOf",
   "dyn.functionInstanceOf",
@@ -981,6 +985,14 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.x509ValidFromStr",
   "crypto.x509ValidTo",
   "crypto.x509ValidToStr",
+  "crypto.createPrivateKey",
+  "crypto.createPublicKey",
+  "crypto.generateKeyPairSync",
+  "crypto.generateKeyPairCb",
+  "crypto.signOneshot",
+  "crypto.verifyOneshot",
+  "crypto.createSign",
+  "crypto.createVerify",
   "crypto.x509Raw",
   "crypto.x509RawStr",
 ]);

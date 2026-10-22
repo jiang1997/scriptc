@@ -45,8 +45,9 @@ function harness() {
       if (!answers.has(method)) throw new Error(`Unexpected request ${method}`);
       return JSON.stringify(answers.get(method));
     },
-    binary() {
-      throw new Error("Unexpected binary request");
+    // Object replies are read as bytes; they carry the same JSON.
+    binary(method, payload) {
+      return Buffer.from(this.text(method, payload), "utf8");
     },
   });
   const first = snapshot.addProject("/first.json", () => undefined);

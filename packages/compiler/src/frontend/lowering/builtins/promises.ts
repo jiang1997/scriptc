@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { checkedPromiseAll, thenReader } from "../checked-promise-all.js";
 import { InternalCompilerError } from "../../../errors.js";
 import * as ts from "../../ts7/adapter.js";
@@ -55,7 +56,7 @@ function lowerTuplePromiseAll(
   const key = `${elems.map((e) => typeKey(e.type)).join(",")}->${typeKey(resultT.inner)}`;
   let name = lowerer.arrHofHelpers.get(`promise.allTuple:${key}`);
   if (name === undefined) {
-    name = `%promise.allTuple.${lowerer.arrHofHelpers.size}`;
+    name = keyedHelperName(lowerer, "%promise.allTuple", `promise.allTuple:${key}`);
     lowerer.arrHofHelpers.set(`promise.allTuple:${key}`, name);
     const ctx = newFnCtx(false, null, null, resultT.inner);
     ctx.isAsync = true;
@@ -557,7 +558,7 @@ export function lowerPromiseStaticCall(
     const key = `promise.try:${typeKey(f.type)}:${args.map((a) => typeKey(a.type)).join(",")}`;
     let helper = lowerer.arrHofHelpers.get(key);
     if (!helper) {
-      helper = `%promise.try.${lowerer.arrHofHelpers.size}`;
+      helper = keyedHelperName(lowerer, "%promise.try", key);
       lowerer.arrHofHelpers.set(key, helper);
       const fRef: IrExpr = { kind: "varRef", localId: "f.0", type: f.type, loc };
       const argLocals = args.map((a, i) => ({ id: `a${i}.0`, name: `a${i}`, type: a.type }));

@@ -85,7 +85,7 @@ export function lowerTimersPromisesSetInterval(
   const genT = timersPromisesIntervalType(lowerer, expr);
   if (genT === null) lowerer.badType(expr, lowerer.typeOf(expr));
   const yielded = lowerer.coerceInto(valueNode, value, genT.yieldT);
-  const fnName = `%fn${lowerer.lambdaCounter++}_tpInterval`;
+  const fnName = lowerer.closureName(loc, "_tpInterval");
   const msParam: IrLocal = { id: "%tp.ms", name: "delay", type: F64, mutable: false };
   const valueParam: IrLocal = { id: "%tp.value", name: "value", type: genT.yieldT, mutable: false };
   const promiseVoid: IrType = { kind: "promise", inner: VOID };

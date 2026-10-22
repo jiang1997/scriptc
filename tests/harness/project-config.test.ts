@@ -1114,6 +1114,38 @@ test("node-types: ECDH matches Node under @types/node", async () => {
   expect(comparableStderr(native.stderr)).toBe(node.stderr);
 });
 
+test("node-types: asymmetric keys and signatures match Node under @types/node", async () => {
+  const outDir = outDirFor("node-keys");
+  const entry = join(nodeTypesDir, "keys.ts");
+  const result = await compile(entry, { outPath: join(outDir, "keys"), outDir, sanitize });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
+test("node-types: WebCrypto ECDSA, Ed25519 and RSA match Node under @types/node", async () => {
+  const outDir = outDirFor("node-webcrypto-ecdsa");
+  const entry = join(nodeTypesDir, "webcrypto-ecdsa.ts");
+  const result = await compile(entry, {
+    outPath: join(outDir, "webcrypto-ecdsa"),
+    outDir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const [native, node] = await Promise.all([
+    execFileAsync(result.binaryPath),
+    execFileAsync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", entry]),
+  ]);
+  expect(native.stdout).toBe(node.stdout);
+  expect(comparableStderr(native.stderr)).toBe(node.stderr);
+});
+
 test("node-types: WebCrypto HMAC matches Node under @types/node", async () => {
   const outDir = outDirFor("node-webcrypto-hmac");
   const entry = join(nodeTypesDir, "webcrypto-hmac.ts");

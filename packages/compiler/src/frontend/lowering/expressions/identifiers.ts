@@ -11,6 +11,7 @@ import {
   DYN,
   F64,
   type IrExpr,
+  type IrLocal,
   type IrType,
   STRING,
   type SrcLoc,
@@ -226,7 +227,10 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
       if (use?.kind === "element") {
         const key = runtimeOptionalElementKey(use.access.argumentExpression);
         if (key === null) {
-          return varRef(local.id, local.type, loc);
+          return (
+            runtimeOptionalKeyedRecord(lowerer, expr, local, loc) ??
+            varRef(local.id, local.type, loc)
+          );
         }
         return runtimeOptionalReceiverRead(lowerer, expr, local, key, loc);
       }
@@ -938,10 +942,43 @@ function moduleFileName(lowerer: Lowerer, sf: ts.SourceFile): string {
     : sf.fileName;
 }
 
-/** Object.keys/Object.entries require an object receiver, but their first
- * argument is not syntactically a member receiver. Recognize that one
- * standard-library position so a runtime-optional loop element can be
- * checked against the checker-narrowed record arm before builtin lowering. */
+/** A computed-key access (`value[key]` after `typeof value === "object"`)
+ * of a runtime-optional binding the checker narrowed to one record arm of a
+ * wider union. The binding re-tags to that record or undefined, so the keyed
+ * read or write evaluates its operands and then throws Node's TypeError for
+ * an undefined receiver. The other arms, which the checker excluded, fail
+ * the checked re-tag. Null when the binding stores only the record and
+ * undefined, or the narrowed record is not one of its arms. */
+function runtimeOptionalKeyedRecord(
+  lowerer: Lowerer,
+  expr: ts.Identifier,
+  local: IrLocal,
+  loc: SrcLoc,
+): IrExpr | null {
+  if (local.type.kind !== "union") return null;
+  const narrowed = lowerer.mapTypeOf(lowerer.typeOf(expr));
+  if (narrowed?.kind !== "record") return null;
+  const fromId = local.type.unionId;
+  const arms = lowerer.unions.get(fromId)?.arms;
+  const recordTag = lowerer.armTag(fromId, narrowed);
+  const undefTag = lowerer.armTag(fromId, UNDEFINED_T);
+  if (!arms || arms.length <= 2 || recordTag < 0 || undefTag < 0) return null;
+  const target = lowerer.withUndefinedArm(narrowed);
+  if (target.kind !== "union") return null;
+  const trappable = new Set<number>();
+  for (let tag = 0; tag < arms.length; tag++) {
+    if (tag !== recordTag && tag !== undefTag) trappable.add(tag);
+  }
+  const helper = lowerer.unionRetagHelper(fromId, target.unionId, loc, trappable);
+  if (!helper) return null;
+  return lowerer.checkedNarrowCall(helper, varRef(local.id, local.type, loc), target, loc);
+}
+
+/** Object.keys, Object.values and Object.entries require an object
+ * receiver, but their first argument is not syntactically a member
+ * receiver. Recognize that one standard-library position so a
+ * runtime-optional loop element can be checked against the checker-narrowed
+ * record arm before builtin lowering. */
 function runtimeOptionalObjectWalkerArg(lowerer: Lowerer, expr: ts.Expression): boolean {
   let arg = expr;
   while (
@@ -962,7 +999,9 @@ function runtimeOptionalObjectWalkerArg(lowerer: Lowerer, expr: ts.Expression): 
     return false;
   const access = call.expression;
   return (
-    (access.name.text === "keys" || access.name.text === "entries") &&
+    (access.name.text === "keys" ||
+      access.name.text === "values" ||
+      access.name.text === "entries") &&
     lowerer.isStdlibMember(access)
   );
 }

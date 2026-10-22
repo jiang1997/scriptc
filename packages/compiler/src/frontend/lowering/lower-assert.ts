@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { InternalCompilerError } from "../../errors.js";
 /* The node:assert lowering (a spoke module like lower-dgram.ts): the
  * callable module form (`assert(x)` through a default import or a CJS
@@ -667,7 +668,7 @@ function partialEqHelper(lowerer: Lowerer, ta: IrType, tb: IrType, loc: SrcLoc):
   const key = `assert.pdeq:${typeKey(ta)}|${typeKey(tb)}`;
   const existing = lowerer.assertHelpers.get(key);
   if (existing) return existing;
-  const name = `%assert.pdeq.${lowerer.assertHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%assert.pdeq", key);
   lowerer.assertHelpers.set(key, name);
   const a = (): IrExpr => varRef("a.0", ta, loc);
   const b = (): IrExpr => varRef("b.0", tb, loc);
@@ -1280,7 +1281,7 @@ function deepCheckCall(
   const key = `assert.dcheck:${variant}:${negated}:${typeKey(a.type)}:${typeKey(b.type)}`;
   let name = lowerer.assertHelpers.get(key);
   if (!name) {
-    name = `%assert.dcheck.${lowerer.assertHelpers.size}`;
+    name = keyedHelperName(lowerer, "%assert.dcheck", key);
     lowerer.assertHelpers.set(key, name);
     const pa = varRef("a.0", a.type, loc);
     const pb = varRef("b.0", b.type, loc);
@@ -1844,7 +1845,7 @@ function assertThrowsHelper(
   const key = `assert.${mode}:${recvIsPromise ? "p" : "f"}:${typeKey(recvType)}:${sig}`;
   const existing = lowerer.assertHelpers.get(key);
   if (existing) return existing;
-  const name = `%assert.${mode}.${lowerer.assertHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%assert.${mode}`, key);
   lowerer.assertHelpers.set(key, name);
 
   const caughtRef = (): IrExpr => varRef("e.0", CAUGHT, loc);
@@ -2293,7 +2294,7 @@ function ifErrorHelper(lowerer: Lowerer, t: IrType & { kind: "union" }, loc: Src
   const key = `assert.iferr:${typeKey(t)}`;
   const existing = lowerer.assertHelpers.get(key);
   if (existing) return existing;
-  const name = `%assert.iferr.${lowerer.assertHelpers.size}`;
+  const name = keyedHelperName(lowerer, "%assert.iferr", key);
   lowerer.assertHelpers.set(key, name);
   const def = lowerer.unions.get(t.unionId);
   if (!def) throw new InternalCompilerError(`assert.ifError over unknown union ${t.unionId}`);
@@ -2464,7 +2465,7 @@ function deepEqHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc, loose = false): 
   const key = `assert.${prefix}:${typeKey(t)}`;
   const existing = lowerer.assertHelpers.get(key);
   if (existing) return existing;
-  const name = `%assert.${prefix}.${lowerer.assertHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%assert.${prefix}`, key);
   lowerer.assertHelpers.set(key, name);
 
   const a = (): IrExpr => varRef("a.0", t, loc);

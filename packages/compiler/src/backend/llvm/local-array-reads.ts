@@ -12,7 +12,7 @@ import { everyStmtList } from "../../ir/traverse.js";
 import { analyzeCallLifetimes, type CallLifetimes } from "./call-lifetimes.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { ReferenceEffects } from "./reference-effects.js";
-import { SCR_ARR_FIELD, exactIndexLines, loadArrCount, scrArrStateAt } from "./common.js";
+import { SCR_ARR_FIELD, loadArrCount, scrArrStateAt } from "./common.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 import { READ_FALLBACK } from "./dense-array-access.js";
 
@@ -472,78 +472,81 @@ function emitDenseReferenceArrayRead(
   loadType: "ptr" | "i64" | "i8" = "ptr",
 ): void {
   const B = host.B;
-  const range = B.newLabel("local.array.range"),
-    dense = B.newLabel("local.array.dense");
-  // The dense path uses the existing ScrArr ABI. Sparse indices and
-  // noncanonical numeric properties retain the runtime lookup semantics.
-  const capPtr = B.tmp(),
-    cap = B.tmp();
-  B.line(
-    `${capPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.cap}`,
-  );
-  host.markMemoryPointer(capPtr, "array:header");
-  loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
-  let offset: string, inRange: string;
+  const header = (field: number): string => {
+    const ptr = B.tmp();
+    B.line(`${ptr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${field}`);
+    host.markMemoryPointer(ptr, "array:header");
+    return ptr;
+  };
+  const valueLabel = B.newLabel("local.array.value");
+  // `key` is the index compared with the array's counts and `offset` the
+  // index that addresses its slots. A double index that is not an exact
+  // integer, like a sparse or noncanonical one, keeps the runtime lookup
+  // semantics; an exact one compares as i64, which a 32-bit target does
+  // before truncating it.
+  let key: string, keyType: string, offset: string;
   if (integerIndex) {
-    offset = integerIndex;
-    inRange = B.tmp();
-    B.line(`${inRange} = icmp ult ${host.sizeType} ${integerIndex}, ${cap}`);
+    key = offset = integerIndex;
+    keyType = host.sizeType;
   } else {
-    // Capacity bounds the dense slots; the length check below still decides presence.
-    const exact = exactIndexLines(index.name, cap, host.sizeType, () => B.tmp());
-    for (const line of exact.lines) B.line(line);
-    inRange = exact.ok;
-    offset = exact.wide;
+    const raw = B.tmp(),
+      back = B.tmp(),
+      integral = B.tmp(),
+      exact = B.newLabel("local.array.exact");
+    key = B.tmp();
+    keyType = "i64";
+    B.line(`${raw} = fptosi double ${index.name} to i64`);
+    B.line(`${key} = freeze i64 ${raw}`);
+    B.line(`${back} = sitofp i64 ${key} to double`);
+    B.line(`${integral} = fcmp oeq double ${back}, ${index.name}`);
+    B.condBr(integral, exact, slow);
+    B.startBlock(exact);
+    offset = key;
     if (host.sizeType !== "i64") {
       offset = B.tmp();
-      B.line(`${offset} = trunc i64 ${exact.wide} to ${host.sizeType}`);
+      B.line(`${offset} = trunc i64 ${key} to ${host.sizeType}`);
     }
   }
-  B.condBr(inRange, range, slow);
-  B.startBlock(range);
-  B.br(dense);
-  B.startBlock(dense);
-  // The state and value paths below both index from `data`: one load here
-  // serves both.
-  const dataPtr = B.tmp(),
+  const widen = (count: string, type: string): string => {
+    if (type === keyType) return count;
+    const wide = B.tmp();
+    B.line(`${wide} = zext ${type} ${count} to ${keyType}`);
+    return wide;
+  };
+  // The state and value paths both index from `data`: one load serves both.
+  const dataPtr = header(SCR_ARR_FIELD.data),
     data = B.tmp();
-  B.line(
-    `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
-  );
-  host.markMemoryPointer(dataPtr, "array:header");
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
-  // Below the hole-free prefix bound every state is a present value.
-  const filledPtr = B.tmp(),
+  // Below the hole-free prefix every state is a present value, and the
+  // prefix is at most the length and the capacity, so an index below it needs
+  // no other test before the value load.
+  const filledPtr = header(SCR_ARR_FIELD.filled),
     filled = B.tmp(),
-    belowFilled = B.tmp(),
-    lenLabel = B.newLabel("local.array.len");
-  B.line(
-    `${filledPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.filled}`,
-  );
-  host.markMemoryPointer(filledPtr, "array:header");
+    prefix = B.tmp();
   B.line(`${filled} = load i32, ptr ${filledPtr}${host.fieldAliasAttachment(filledPtr)}`);
-  let filledSized = filled;
-  if (host.sizeType !== "i32") {
-    filledSized = B.tmp();
-    B.line(`${filledSized} = zext i32 ${filled} to ${host.sizeType}`);
-  }
-  B.line(`${belowFilled} = icmp ult ${host.sizeType} ${offset}, ${filledSized}`);
-  const valueLabel = B.newLabel("local.array.value");
+  B.line(`${prefix} = icmp ult ${keyType} ${key}, ${widen(filled, "i32")}`);
   if (induction) {
     // The state of slot i is at data + cap * (width + 1) - 1 - i, and an
     // inline state check makes LLVM keep -1 - i as a second induction
     // variable in the loop; above the prefix the runtime reads the slot.
-    B.condBr(belowFilled, valueLabel, slow);
+    B.condBr(prefix, valueLabel, slow);
   } else {
-    B.condBr(belowFilled, valueLabel, lenLabel);
-    B.startBlock(lenLabel);
-    const lenPtr = B.tmp(),
+    const range = B.newLabel("local.array.range"),
+      dense = B.newLabel("local.array.dense");
+    B.condBr(prefix, valueLabel, range);
+    B.startBlock(range);
+    const capPtr = header(SCR_ARR_FIELD.cap),
+      cap = B.tmp(),
+      inRange = B.tmp();
+    loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
+    B.line(`${inRange} = icmp ult ${keyType} ${key}, ${widen(cap, host.sizeType)}`);
+    B.condBr(inRange, dense, slow);
+    // Within the capacity and above the prefix, a slot below the length is
+    // present when its state is.
+    B.startBlock(dense);
+    const lenPtr = header(SCR_ARR_FIELD.len),
       len = B.tmp(),
       belowLen = B.tmp();
-    B.line(
-      `${lenPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.len}`,
-    );
-    host.markMemoryPointer(lenPtr, "array:header");
     loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
     B.line(`${belowLen} = icmp ult ${host.sizeType} ${offset}, ${len}`);
     const stateLabel = B.newLabel("local.array.state");

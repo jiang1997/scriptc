@@ -85,6 +85,10 @@ ScrDyn *scr_crypto_create_secret_key(ScrDyn *key, ScrDyn *encoding);
 ScrDyn *scr_crypto_generate_key_sync(ScrDyn *type, ScrDyn *options);
 ScrBytes *scr_crypto_key_object_input(ScrDyn *key);
 bool scr_crypto_is_key_object(const ScrDyn *value);
+/* Throws Node's ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE for a private or public
+ * KeyObject used as a secret key. scr_pki.c, which makes those keys,
+ * installs it with them, so its messages stay out of other programs. */
+extern void (*scr_crypto_reject_asymmetric_secret)(const ScrDyn *key);
 const unsigned char *scr_key_object_bytes(const ScrDyn *value, size_t *len);
 /* crypto.createCipheriv (decrypt false) and crypto.createDecipheriv
  * (decrypt true) over checked-dynamic arguments (scr_cipher.c, linked
@@ -261,6 +265,18 @@ ScrStr *scr_crypto_x509_valid_from(ScrBytes *data);
 ScrStr *scr_crypto_x509_valid_from_str(ScrStr *pem);
 ScrStr *scr_crypto_x509_valid_to(ScrBytes *data);
 ScrStr *scr_crypto_x509_valid_to_str(ScrStr *pem);
+/* Asymmetric keys and signatures (scr_pki.c, the pki unit). Arguments
+ * borrowed; results +1, or NULL with the error pending. */
+ScrDyn *scr_crypto_create_private_key(ScrDyn *key);
+ScrDyn *scr_crypto_create_public_key(ScrDyn *key);
+ScrDyn *scr_crypto_generate_key_pair_sync(ScrDyn *type, ScrDyn *options);
+void scr_crypto_generate_key_pair_async(ScrDyn *type, ScrDyn *options, ScrDyn *callback);
+ScrDyn *scr_crypto_sign_oneshot(ScrDyn *algorithm, ScrDyn *data, ScrDyn *key);
+ScrDyn *scr_crypto_verify_oneshot(ScrDyn *algorithm, ScrDyn *data, ScrDyn *key, ScrDyn *signature);
+ScrDyn *scr_crypto_create_sign(ScrDyn *algorithm);
+ScrDyn *scr_crypto_create_verify(ScrDyn *algorithm);
+bool scr_crypto_is_asymmetric_key(const ScrDyn *value);
+const char *scr_crypto_asymmetric_key_type(const ScrDyn *value);
 /* X509Certificate fields (scr_x509.c): raw decodes the constructor's input (+1 Buffer,
  * or NULL with Node's PEM error pending); the others read that DER
  * (borrowed) and never throw. subjectAltName, infoAccess and

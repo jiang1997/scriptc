@@ -1,3 +1,4 @@
+import { keyedHelperName } from "./stable-names.js";
 import { dynUndefinedExpr, numLit, varRef } from "../../ir/build.js";
 import * as ts from "../ts7/adapter.js";
 import { isJsSourceFile } from "../program.js";
@@ -55,7 +56,7 @@ export function adaptZeroArgTimerCallback(
     const toT: IrType = { kind: "func", params: [], ret: VOID };
     const key = `timer.dropret:${typeKey(fromT)}`;
     const existing = lowerer.arrHofHelpers.get(key);
-    const name = existing ?? `%timer.dropret.${lowerer.arrHofHelpers.size}`;
+    const name = existing ?? keyedHelperName(lowerer, "%timer.dropret", key);
     if (!existing) {
       lowerer.arrHofHelpers.set(key, name);
       lowerer.liftedFns.push(
@@ -117,7 +118,7 @@ export function adaptZeroArgTimerCallback(
   const toT: IrType = { kind: "func", params: [], ret: VOID };
   const key = `timer.droparg:${typeKey(fromT)}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%timer.droparg.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%timer.droparg", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     lowerer.liftedFns.push(
@@ -203,7 +204,7 @@ function makeTimerArgsThunk(
   const toT: IrType = { kind: "func", params: [], ret: VOID };
   const key = `timer.argsthunk:${n}`;
   const existing = lowerer.arrHofHelpers.get(key);
-  const name = existing ?? `%timer.argsthunk.${lowerer.arrHofHelpers.size}`;
+  const name = existing ?? keyedHelperName(lowerer, "%timer.argsthunk", key);
   if (!existing) {
     lowerer.arrHofHelpers.set(key, name);
     const impl = `${name}.impl`;

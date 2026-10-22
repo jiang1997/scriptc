@@ -3,7 +3,16 @@ import { dynUndefinedExpr, helperLoc, nodeThrowExpr, varRef } from "../../ir/bui
 import { constructedValue } from "./constructor-returns.js";
 import { eventTargetApiMembers, eventTargetInheritedMember } from "./lower-event-target.js";
 import {
+  DATE_PROTOTYPE_METHOD_NAMES,
+  DATE_TIME_FIELD,
+  dateInheritedMember,
+  dateRootOf,
+  programDeclaresDateClass,
+} from "./builtins/date-classes.js";
+import { dateValueMethod } from "./builtins/dates.js";
+import {
   BOOL,
+  DATE_T,
   DYN,
   F64,
   DYN_CLASS_PROPERTIES as PROPERTY_BAG,
@@ -296,6 +305,32 @@ export function classInstanceOf(
     );
     const body: IrStmt[] = prototype
       ? [
+          // In a program that declares a class extending Date, a Date can
+          // meet a class test (`date instanceof Moment`): its prototype
+          // chain holds no class prototype.
+          ...(programDeclaresDateClass(lowerer)
+            ? [
+                {
+                  kind: "if" as const,
+                  cond: {
+                    kind: "libCall" as const,
+                    fn: "dyn.nativeDateHandleIs" as const,
+                    args: [varRef("value", DYN, loc)],
+                    type: BOOL,
+                    loc,
+                  },
+                  then: [
+                    {
+                      kind: "return" as const,
+                      value: { kind: "boolLit" as const, value: false, type: BOOL, loc },
+                      loc,
+                    },
+                  ],
+                  else_: null,
+                  loc,
+                },
+              ]
+            : []),
           { kind: "varDecl", localId: "candidate", init: varRef("value", DYN, loc), loc },
           {
             kind: "while",
@@ -2871,6 +2906,7 @@ export class ClassDynamicDispatch {
           !isClassOwnEnumerableFieldName(dispatch.name) ||
           (!(info.builtinStream !== undefined && streamProperty(dispatch.name)) &&
             !eventTargetInheritedMember(info, dispatch.name) &&
+            !dateInheritedMember(lowerer, info, dispatch.name) &&
             !findMethodOn(lowerer, info, dispatch.name) &&
             !findGenericMethodOn(lowerer, info, dispatch.name) &&
             dispatch.name !== "constructor" &&
@@ -2987,7 +3023,8 @@ export class ClassDynamicDispatch {
             ];
           if (
             ((info.builtinStream !== undefined && streamProperty(name)) ||
-              eventTargetInheritedMember(info, name)) &&
+              eventTargetInheritedMember(info, name) ||
+              dateInheritedMember(lowerer, info, name)) &&
             dispatch.probe
           )
             return [
@@ -3200,6 +3237,9 @@ export class ClassDynamicDispatch {
           for (const name of [...STREAM_BOOL_PROPERTIES, ...STREAM_NUM_PROPERTIES]) names.add(name);
         const inherited = eventTargetApiMembers(info);
         if (inherited) for (const name of inherited) names.add(name);
+        if (dateRootOf(info))
+          for (const name of DATE_PROTOTYPE_METHOD_NAMES)
+            if (dateInheritedMember(lowerer, info, name)) names.add(name);
 
         for (let owner: ClassInfo | null = info; owner; owner = owner.base) {
           const methodNames = [...owner.methods.keys()];
@@ -3862,6 +3902,70 @@ export class ClassDynamicDispatch {
         },
       ];
       return { kind: "if", cond: condition, then: body, else_: null, loc };
+    }
+    // Date.prototype[Symbol.toPrimitive] takes "default" as "string", and a
+    // class declared `extends Date` inherits Date's toString and valueOf,
+    // which answer primitives from the time value.
+    const dateRoot = dateRootOf(info);
+    if (dateRoot) {
+      const dateOrder: ("valueOf" | "toString")[] =
+        hint === "number" ? ["valueOf", "toString"] : ["toString", "valueOf"];
+      const { receiver } = this.propertyReceiver(plan, loc);
+      const body: IrStmt[] = [];
+      for (const method of dateOrder) {
+        if (!conversionMethod(lowerer, info, method)) {
+          const time: IrExpr = {
+            kind: "fieldGet",
+            obj: upcastTo(lowerer, receiver, dateRoot.def.name),
+            className: dateRoot.def.name,
+            field: DATE_TIME_FIELD,
+            type: DATE_T,
+            loc,
+          };
+          body.push({
+            kind: "return",
+            value: lowerer.coerceToExpected(dateValueMethod(method, time, loc)!, DYN),
+            loc,
+          });
+          break;
+        }
+        const result = `%toPrimitive.${method}.${helper.locals.length}`;
+        helper.locals.push({ id: result, name: method, type: DYN, mutable: false });
+        body.push(
+          {
+            kind: "varDecl",
+            localId: result,
+            init: {
+              kind: "call",
+              callee: this.toPrimitiveCall(lowerer, plan, method, 0, loc),
+              args: [varRef("p.0", DYN, loc)],
+              type: DYN,
+              loc,
+            },
+            loc,
+          },
+          {
+            kind: "if",
+            cond: isPrimitive(varRef(result, DYN, loc), loc),
+            then: [{ kind: "return", value: varRef(result, DYN, loc), loc }],
+            else_: null,
+            loc,
+          },
+        );
+      }
+      if (body.at(-1)?.kind !== "return")
+        body.push({
+          kind: "return",
+          value: nodeThrowExpr(1, "", "Cannot convert object to primitive value", DYN, loc),
+          loc,
+        });
+      return {
+        kind: "if",
+        cond: this.propertyReceiver(plan, loc).condition,
+        then: body,
+        else_: null,
+        loc,
+      };
     }
     const order: ("valueOf" | "toString")[] =
       hint === "string" ? ["toString", "valueOf"] : ["valueOf", "toString"];
@@ -4731,9 +4835,11 @@ export class ClassDynamicDispatch {
   ): IrStmt[] {
     const { name, write } = dispatch;
     const loc = dispatch.fn.loc;
-    // The inherited EventTarget/Event members of a subclass instance: the
-    // runtime's capsule view answers the accessors and method values.
-    if (eventTargetInheritedMember(info, name)) {
+    // The inherited EventTarget/Event members of a subclass instance, and
+    // the inherited Date methods of an instance of a class declared
+    // `extends Date`: the runtime's capsule view answers the accessors and
+    // method values.
+    if (eventTargetInheritedMember(info, name) || dateInheritedMember(lowerer, info, name)) {
       const key: IrExpr = { kind: "strLit", value: name, type: STRING, loc };
       if (!write)
         return [

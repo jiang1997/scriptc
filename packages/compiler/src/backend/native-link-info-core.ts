@@ -91,6 +91,12 @@ export interface NativeLinkFeatures {
   /** crypto.createECDH and ECDH.convertKey: scr_ecdh.c plus the mbedTLS
    * archive. */
   ecdh: boolean;
+  /** Asymmetric KeyObjects, crypto.sign/verify and Sign/Verify: scr_pki.c
+   * plus the mbedTLS archive. */
+  pki: boolean;
+  /** Ed25519 keys and signatures with pki: scr_ed25519.c (the vendored
+   * libsodium Ed25519). */
+  ed25519: boolean;
   /** X509Certificate fields beyond the validity window and fingerprint:
    * scr_x509.c. */
   x509: boolean;

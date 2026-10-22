@@ -1634,14 +1634,15 @@ console.log(typeof promisePrototype, typeof promisePrototype.then, promiseProtot
   });
 });
 
-// WebCrypto's native slice is crypto.subtle's secret-key methods.
-// Algorithms Node recognizes outside that slice reject with a coded SC2020
+// WebCrypto's native slice is crypto.subtle's secret-key methods and its
+// ECDSA, Ed25519 and RSA algorithms. Algorithms Node recognizes outside
+// that slice reject with a coded SC2020
 // Error instead of a Node-shaped success, and a JavaScript call of a
 // method outside it meets its named fence when it runs.
 // Node's own rejections (unknown names, bad usages) are corpus-pinned
 // (6292, 6294); these refusals have no Node twin, so they live here.
 describe("WebCrypto refusals (JS lane)", () => {
-  test("recognized algorithms outside the secret-key slice reject with SC2020", async () => {
+  test("recognized algorithms outside the lowered ones reject with SC2020", async () => {
     const r = await compileAndRun(
       "webcrypto-unsupported-algorithms",
       `const bytes = new TextEncoder().encode("secret");
@@ -1653,16 +1654,13 @@ async function attempt(label, run) {
     console.log(label, e.name, e.code, e.message);
   }
 }
-await attempt("rsa", () =>
-  crypto.subtle.importKey("raw", bytes, { name: "RSA-PSS", hash: "SHA-256" }, false, ["verify"]),
-);
 const key = await crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-await attempt("ecdsa", () => crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, bytes));
+await attempt("ed448", () => crypto.subtle.sign({ name: "Ed448" }, key, bytes));
+await attempt("ecdsa with an hmac key", () => crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, bytes));
 await attempt("sha3", () => crypto.subtle.digest("SHA3-256", bytes));
 await attempt("sha3 hmac", () =>
   crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA3-256" }, false, ["sign"]),
 );
-await attempt("ed25519 key", () => crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign"]));
 const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 128 }, false, ["encrypt"]);
 await attempt("aes-ocb", () => crypto.subtle.encrypt({ name: "AES-OCB", iv: new Uint8Array(12) }, aes, bytes));
 await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key, 256));
@@ -1672,11 +1670,10 @@ await attempt("ecdh bits", () => crypto.subtle.deriveBits({ name: "ECDH" }, key,
     expect(r.exitCode).toBe(0);
     expect(r.stderr).toBe("");
     expect(r.stdout).toBe(
-      "rsa Error SC2020 crypto.subtle.importKey with the RSA-PSS algorithm is not supported yet\n" +
-        "ecdsa Error SC2020 crypto.subtle.sign with the ECDSA algorithm is not supported yet\n" +
+      "ed448 Error SC2020 crypto.subtle.sign with the Ed448 algorithm is not supported yet\n" +
+        "ecdsa with an hmac key InvalidAccessError 15 Key algorithm mismatch\n" +
         "sha3 Error SC2020 crypto.subtle.digest with the SHA3-256 algorithm is not supported yet\n" +
         "sha3 hmac Error SC2020 crypto.subtle.importKey with the SHA3-256 algorithm is not supported yet\n" +
-        "ed25519 key Error SC2020 crypto.subtle.generateKey with the Ed25519 algorithm is not supported yet\n" +
         "aes-ocb Error SC2020 crypto.subtle.encrypt with the AES-OCB algorithm is not supported yet\n" +
         "ecdh bits Error SC2020 crypto.subtle.deriveBits with the ECDH algorithm is not supported yet\n",
     );
@@ -1695,6 +1692,57 @@ await crypto.subtle.wrapKey("raw", key, key, "AES-KW");
     expect(r.stdout).toBe("before\n");
     expect(r.stderr).toMatch(
       /^Uncaught Error: 'crypto\.subtle\.wrapKey' is part of the standard library types but has no scriptc lowering yet.*\n$/,
+    );
+  });
+});
+
+// The Ed25519 arithmetic (scr_ed25519.c) links only into programs whose
+// string literals name Ed25519. Without it, an Ed25519 public key still
+// imports and exports, while private-key parsing, signing and verification
+// reject with a coded SC2020 Error where Node answers; there is no Node
+// twin, so this lives here. The corpus (7080, 7081) pins the linked path.
+describe("Ed25519 without the Ed25519 unit (JS lane)", () => {
+  test("a program that never names Ed25519 refuses its arithmetic with SC2020", async () => {
+    const r = await compileAndRun(
+      "ed25519-unit-not-linked",
+      `import * as c from "node:crypto";
+const spki = Buffer.from("302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "hex");
+const pkcs8 = Buffer.from("302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex");
+const pub = c.createPublicKey({ key: spki, format: "der", type: "spki" });
+console.log(pub.asymmetricKeyType, pub.export({ format: "jwk" }).x);
+async function attempt(label, run) {
+  try {
+    await run();
+    console.log(label, "resolved");
+  } catch (e) {
+    console.log(label, e.name, e.code, e.message);
+  }
+}
+await attempt("pkcs8", () => c.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" }));
+await attempt("verify", () => c.verify(null, Buffer.from("x"), pub, Buffer.alloc(64)));
+// ECDSA links the WebCrypto key unit; the Ed25519 name is built at run time.
+const ecdsa = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+console.log(ecdsa.privateKey.type);
+const name = ["Ed", "25519"].join("");
+await attempt("generateKey", () => crypto.subtle.generateKey(name, false, ["sign", "verify"]));
+await attempt("importKey", () => crypto.subtle.importKey("pkcs8", pkcs8, name, false, ["sign"]));
+const raw = await crypto.subtle.importKey("raw", spki.subarray(12), name, false, ["verify"]);
+await attempt("subtle verify", () => crypto.subtle.verify(name, raw, new Uint8Array(64), new Uint8Array(1)));
+`,
+      "mjs",
+    );
+    const refusal =
+      "Error SC2020 Ed25519 keys are supported when a string literal in the program names 'ed25519'";
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(
+      "ed25519 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\n" +
+        `pkcs8 ${refusal}\n` +
+        `verify ${refusal}\n` +
+        "private\n" +
+        `generateKey ${refusal}\n` +
+        `importKey ${refusal}\n` +
+        `subtle verify ${refusal}\n`,
     );
   });
 });

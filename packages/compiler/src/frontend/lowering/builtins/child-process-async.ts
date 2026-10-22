@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { recordToEnvPairs } from "./environment.js";
 import { lowerChildArgsArg } from "./child-process.js";
 import { boolLit, numLit, varRef } from "../../../ir/build.js";
@@ -218,7 +219,7 @@ function execFileAsyncHelper(
   const key = shell ? "execAsync" : "execFileAsync";
   const existing = lowerer.valueHelpers.get(key);
   if (existing) return { name: existing, shapeId, envShapeId };
-  const name = `%${key}.${lowerer.valueHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%${key}`, key);
   lowerer.valueHelpers.set(key, name);
   const recT: IrType = { kind: "record", shapeId };
   const envRecT: IrType = { kind: "record", shapeId: envShapeId };

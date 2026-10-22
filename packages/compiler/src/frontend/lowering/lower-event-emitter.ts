@@ -42,6 +42,7 @@
  * emit-overrides block at the bottom of this file (per-event
  * monomorphization of the override body, dispatch on the dynamic class,
  * super.emit as the prototype chain). */
+import { keyedHelperName } from "./stable-names.js";
 import { checkKeypressListener } from "./builtins/readline.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
@@ -631,7 +632,7 @@ function lowerFlexListenerCall(
   const key = `emitter.${registering ? "onFlex" : "offDyn"}:${typeKey(recvT)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%emitter.${registering ? "onFlex" : "offFlex"}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%emitter.${registering ? "onFlex" : "offFlex"}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const params: IrParam[] = [
       { localId: "r.0", name: "r", type: recvT },
@@ -850,7 +851,7 @@ function lowerDynListenerCall(
   const existing = lowerer.arrHofHelpers.get(key);
   let helper = existing;
   if (!helper) {
-    helper = `%emitter.${registering ? "onDyn" : "offDyn"}.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, `%emitter.${registering ? "onDyn" : "offDyn"}`, key);
     lowerer.arrHofHelpers.set(key, helper);
     const check: IrStmt = {
       kind: "exprStmt",
@@ -1000,7 +1001,7 @@ export function lowerDynamicEmitterEmit(
   const key = `emitter.dynEmit:${typeKey(recvT)}:${k}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%emitter.dynEmit.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%emitter.dynEmit", key);
     lowerer.arrHofHelpers.set(key, helper);
     const params: IrParam[] = [
       { localId: "r.0", name: "r", type: recvT },
@@ -1092,7 +1093,7 @@ export function lowerDynamicEmitterOn(
   const key = `emitter.dynOn:${typeKey(recvT)}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%emitter.dynOn.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%emitter.dynOn", key);
     lowerer.arrHofHelpers.set(key, helper);
     const params: IrParam[] = [
       { localId: "r.0", name: "r", type: recvT },
@@ -2359,7 +2360,7 @@ function emitDispatchExpr(
   const key = `emitter.emitDispatch:${typeKey(recvT)}:${name}`;
   let helper = lowerer.arrHofHelpers.get(key);
   if (!helper) {
-    helper = `%emitter.emitDispatch.${lowerer.arrHofHelpers.size}`;
+    helper = keyedHelperName(lowerer, "%emitter.emitDispatch", key);
     lowerer.arrHofHelpers.set(key, helper);
     const params: IrParam[] = [
       { localId: "r.0", name: "r", type: recvT },
@@ -2424,7 +2425,7 @@ function eventsOnceBoxer(
   const key = `eventsOnce:${typeKey(fnType)}`;
   let name = lowerer.valueHelpers.get(key);
   if (name === undefined) {
-    name = `%events.onceArgs.${lowerer.valueHelpers.size}`;
+    name = keyedHelperName(lowerer, "%events.onceArgs", key);
     lowerer.valueHelpers.set(key, name);
     const params: IrParam[] = tuple.map((type, i) => ({
       localId: `%once.a${i}`,

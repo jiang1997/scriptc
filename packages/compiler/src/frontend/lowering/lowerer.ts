@@ -1,4 +1,6 @@
 import { relieveHeapPressure } from "../../heap-pressure.js";
+import { keyedHelperName } from "./stable-names.js";
+import { positionTag, StructuralPositions } from "./structural-positions.js";
 import { onlyForwarded, stripTypeWrappers } from "./typed-arguments.js";
 import {
   needsGeneralNodeStreams,
@@ -497,7 +499,8 @@ import {
   lowerTracingChannelProperty,
 } from "./builtins/async-context.js";
 import { lowerDisposableStackNew } from "./builtins/disposable-stack.js";
-import { lowerErrorCodeProperty } from "./builtins/errors.js";
+import { lowerErrorCodeProperty, lowerErrorFunctionCall } from "./builtins/errors.js";
+import { noteDateClassMethods } from "./builtins/date-classes.js";
 import {
   lowerProcessProperty,
   lowerProcessMethodCall,
@@ -1004,6 +1007,11 @@ function lowerShuffle(): ((wave: string[]) => void) | null {
  * the bodies reachable emit did NOT mark (plus deferred collection
  * diagnostics nothing flushed), reported separately: whole-program analysis without
  * letting unreached code fail builds. */
+/** The closure root of an emit-override specialization body. */
+function emitSpecRoot(spec: EmitSpecRequest): string {
+  return `%emit.${spec.info.def.name}.${spec.event}.${spec.ordinal}`;
+}
+
 export function lowerToIr(
   program: ts.Program,
   entry: ts.SourceFile,
@@ -2807,6 +2815,8 @@ export class Lowerer {
   /** Generated value helpers, keyed by operation and type. Callers own
    * their key prefixes; this includes more than structural conversions. */
   readonly valueHelpers = new Map<string, string>();
+  /** Each name keyedHelperName made, with a second hash of its key. */
+  readonly keyedNameKeys = new Map<string, number>();
   /** structuralNarrowing's assignable classes, keyed by static and
    * narrowed class name. */
   readonly structuralClassPeers = new Map<string, readonly string[]>();
@@ -2943,13 +2953,16 @@ export class Lowerer {
       ctx: FnCtx;
     }
   >();
-  chainCounter = 0;
   /** Keyed by program-wide qualified class name (what IR object types carry). */
   readonly classes = new Map<string, ClassInfo>();
   readonly classBySymbol = new Map<ts.Symbol, ClassInfo>();
   /** Named method slots observed before class collection need a callable
    * ABI and shared prototype descriptors instead of call-site specialization. */
   readonly prototypeMethodAccesses = new Map<string, ts.Node>();
+  /** Whether the program reads `Error.prototype`, the checked-dynamic
+   * object an ES5 constructor function can inherit from: only then can a
+   * value that is not an Error instance be `instanceof Error`. */
+  errorPrototypeValues = false;
   /** Well-known symbol methods (`sym:iterator`) the program may replace
    * through a symbol-keyed write: an instance or prototype property, or a
    * reflection call. */
@@ -3173,7 +3186,53 @@ export class Lowerer {
    * dispatch revision needs no weak-key identity or process-global state. */
   errorMethodDispatchRevision: string | null = null;
   errorPropertyDispatchRevision: string | null = null;
-  lambdaCounter = 0;
+  /** Structural source positions (structural-positions.ts) for names that
+   * stay the same when unrelated code moves. */
+  /** Default library files are named by their base name: two checkers
+   * install them in different directories. */
+  readonly positions = new StructuralPositions((sf) =>
+    this.program.isSourceFileDefaultLibrary(sf)
+      ? `lib:${sf.fileName.slice(sf.fileName.lastIndexOf("/") + 1)}`
+      : sf.fileName,
+  );
+
+  /** The outermost node whose token span is exactly `loc`, or null. */
+  nodeAtLoc(loc: SrcLoc): ts.Node | null {
+    const sf = this.program.getSourceFile(loc.file);
+    return sf === undefined ? null : (ts.nodeAtSpan(sf, loc.start, loc.end) ?? null);
+  }
+
+  /** The lowering unit whose name scopes the closures it lifts. */
+  private closureRoot = "%pre";
+  private readonly closureNameCounts = new Map<string, number>();
+
+  /** Runs `fn` with the closures it lifts named under `root`. */
+  withClosureRoot<T>(root: string, fn: () => T): T {
+    const previous = this.closureRoot;
+    this.closureRoot = root;
+    try {
+      return fn();
+    } finally {
+      this.closureRoot = previous;
+    }
+  }
+
+  /** The name of a closure (or wrapper) lifted for the source at `loc`:
+   * `<prefix>.<hash>` of the current lowering unit, the location and
+   * `suffix`, then `suffix`. A unit that lifts several functions for the same
+   * location and suffix numbers them in the order it lifts them, so a
+   * closure's name depends only on its unit, not on which units lowered
+   * before it. */
+  closureName(loc: SrcLoc, suffix = "", prefix = "%fn"): string {
+    const node = this.nodeAtLoc(loc);
+    const where = node === null ? `${loc.file}:${loc.start}:${loc.end}` : this.positions.of(node);
+    const key = `${prefix}|${this.closureRoot}|${where}|${suffix}`;
+    const first = keyedHelperName(this, prefix, key);
+    const seen = this.closureNameCounts.get(first) ?? 0;
+    this.closureNameCounts.set(first, seen + 1);
+    return (seen === 0 ? first : keyedHelperName(this, prefix, `${key}|${seen}`)) + suffix;
+  }
+
   readonly preparedClassFactories = new Map<ts.ArrowFunction | ts.FunctionExpression, IrExpr>();
   readonly preparingClassFactories = new Set<ts.ArrowFunction | ts.FunctionExpression>();
 
@@ -3526,6 +3585,7 @@ export class Lowerer {
     this.checker = program.getTypeChecker();
     this.typeCtx = {
       checker: this.checker,
+      positionOf: (node) => this.positions.of(node),
       shapes: this.shapes,
       unions: this.unions,
       classNamer: this.classNamer,
@@ -3536,7 +3596,7 @@ export class Lowerer {
         this.genericClassInstanceType(decl, ref, mapArgument),
       runtimeClassValue: (type) => runtimeClassValueOfType(this, type),
       localClassValue: (type) =>
-        this.instanceResultClass?.declared === type.id
+        this.instanceResultClass !== null && this.instanceResultClass.declared === type.id
           ? this.instanceResultClass.value
           : (this.localClassValueTypes.get(type.id) ?? null),
       mixinClassInstance: (decl) =>
@@ -3818,11 +3878,11 @@ export class Lowerer {
       })()
         ? this.qualify(
             ts.getSourceFileOfNode(decl),
-            `%cx${ts.tokenStartOfNode(decl)}.${decl.name?.text ?? ""}`,
+            `%cx${positionTag(this, decl)}.${decl.name?.text ?? ""}`,
           )
         : this.qualify(
             ts.getSourceFileOfNode(decl),
-            nsPathPrefix(decl) + (decl.name ? decl.name.text : "%anon"),
+            nsPathPrefix(this, decl) + (decl.name ? decl.name.text : "%anon"),
           );
     for (let index = this.localClassInstantiations.length - 1; index >= 0; index--) {
       const entry = this.localClassInstantiations[index]!;
@@ -7381,7 +7441,10 @@ export class Lowerer {
       }
       for (const decl of fp.classDecls) {
         const info = this.classes.get(this.classNamer(decl));
-        if (info) functions.push(...this.lowerClassMembers(info));
+        if (info)
+          functions.push(
+            ...this.withClosureRoot(info.def.name, () => this.lowerClassMembers(info)),
+          );
         else if (this.countsSkips()) this.countSkippedBody(decl);
       }
     }
@@ -7394,7 +7457,10 @@ export class Lowerer {
     // are reachable by definition, already counted by reachable emit.
     if (!this.remainder) {
       for (const fp of parts) {
-        functions.push(this.lowerFileInit(fp.sf, fp.topStmts, this.initNameOf.get(fp.sf)!));
+        const initName = this.initNameOf.get(fp.sf)!;
+        functions.push(
+          this.withClosureRoot(initName, () => this.lowerFileInit(fp.sf, fp.topStmts, initName)),
+        );
       }
       functions.push(this.buildMain());
     }
@@ -7436,7 +7502,9 @@ export class Lowerer {
           // default): the diagnostic is recorded — the instance skips
           // like a signature-blocked function (lowerFunction's rule).
           try {
-            functions.push(this.lowerGenericInstance(info, inst));
+            functions.push(
+              this.withClosureRoot(inst.name, () => this.lowerGenericInstance(info, inst)),
+            );
           } catch (e) {
             if (!(e instanceof PoisonError)) throw e;
           }
@@ -7446,7 +7514,10 @@ export class Lowerer {
         // instances of its own; the joint fixpoint covers both).
         while (es < this.emitSpecQueue.length) {
           try {
-            const fn = lowerEmitOverrideSpec(this, this.emitSpecQueue[es++]!);
+            const spec = this.emitSpecQueue[es++]!;
+            const fn = this.withClosureRoot(emitSpecRoot(spec), () =>
+              lowerEmitOverrideSpec(this, spec),
+            );
             if (fn) functions.push(fn);
           } catch (e) {
             if (!(e instanceof PoisonError)) throw e;
@@ -8000,7 +8071,9 @@ export class Lowerer {
             this.genericClassDemandPriority.set(info, ref);
             instanceFunctions.push(
               ...this.withGenericDemandOwner(owner, () =>
-                this.shapes.withDeclaredOrderPriority(ref, () => this.lowerClassMembers(info)),
+                this.shapes.withDeclaredOrderPriority(ref, () =>
+                  this.withClosureRoot(info.def.name, () => this.lowerClassMembers(info)),
+                ),
               ),
             );
             relieveHeapPressure();
@@ -8027,7 +8100,7 @@ export class Lowerer {
               instanceFunctions.push(
                 this.withGenericDemandOwner(owner, () =>
                   this.shapes.withDeclaredOrderPriority(ref, () =>
-                    this.lowerGenericInstance(info, inst),
+                    this.withClosureRoot(inst.name, () => this.lowerGenericInstance(info, inst)),
                   ),
                 ),
               );
@@ -8060,9 +8133,12 @@ export class Lowerer {
           );
           while (specLowered < waveEnd) {
             try {
-              const fn = this.shapes.withDeclaredOrderPriority([4, instanceMetadataOrder++], () =>
-                lowerEmitOverrideSpec(this, this.emitSpecQueue[specLowered++]!),
-              );
+              const fn = this.shapes.withDeclaredOrderPriority([4, instanceMetadataOrder++], () => {
+                const spec = this.emitSpecQueue[specLowered++]!;
+                return this.withClosureRoot(emitSpecRoot(spec), () =>
+                  lowerEmitOverrideSpec(this, spec),
+                );
+              });
               if (fn) instanceFunctions.push(fn);
             } catch (e) {
               if (!(e instanceof PoisonError)) throw e;
@@ -8090,7 +8166,9 @@ export class Lowerer {
       initFunctions.push(
         this.withGenericDemandOwner(owner, () =>
           this.shapes.withDeclaredOrderPriority(priority, () =>
-            this.lowerFileInit(fp.sf, fp.topStmts, this.initNameOf.get(fp.sf)!),
+            this.withClosureRoot(this.initNameOf.get(fp.sf)!, () =>
+              this.lowerFileInit(fp.sf, fp.topStmts, this.initNameOf.get(fp.sf)!),
+            ),
           ),
         ),
       );
@@ -8116,7 +8194,9 @@ export class Lowerer {
             const priority = metadataPriority.get(name) ?? [3, expressionMetadataOrder++];
             const owner = demandOwner(priority);
             const fn = this.withGenericDemandOwner(owner, () =>
-              this.shapes.withDeclaredOrderPriority(priority, unit.lower),
+              this.shapes.withDeclaredOrderPriority(priority, () =>
+                this.withClosureRoot(name, unit.lower),
+              ),
             );
             if (fn) loweredUnits.set(name, fn);
             relieveHeapPressure();
@@ -8133,6 +8213,7 @@ export class Lowerer {
     // turn queue more instances. Continue to the joint fixpoint; the initial
     // queue above is the only portion whose discovery order differed from
     // historical emit order.
+    noteDateClassMethods(this);
     const classDispatch = new ClassDynamicDispatch(extraRoots !== undefined);
     // Units in declaration order, so the passes below meet functions, and the
     // classes they collect, in an order that does not depend on lowering order.
@@ -12769,6 +12850,25 @@ export class Lowerer {
     );
   }
 
+  /** withExpressionOverride for several nodes at once. */
+  withExpressionOverrides<T>(
+    overrides: readonly { node: ts.Expression; value: IrExpr }[],
+    lower: () => T,
+  ): T {
+    const previous = overrides.map((override) => this.chainRecvByNode.get(override.node));
+    for (const override of overrides) this.chainRecvByNode.set(override.node, override.value);
+    try {
+      return lower();
+    } finally {
+      for (let i = overrides.length - 1; i >= 0; i--) {
+        const node = overrides[i]!.node;
+        const value = previous[i];
+        if (value) this.chainRecvByNode.set(node, value);
+        else this.chainRecvByNode.delete(node);
+      }
+    }
+  }
+
   withExpressionOverride<T>(node: ts.Expression, value: IrExpr, lower: () => T): T {
     const previous = this.chainRecvByNode.get(node);
     this.chainRecvByNode.set(node, value);
@@ -12788,6 +12888,7 @@ export class Lowerer {
     if (webAssembly !== null) return webAssembly;
     refuseWebAssemblyUse(this, expr.expression);
     return (
+      lowerErrorFunctionCall(this, expr) ??
       lowerLifetimeRegionCall(this, expr) ??
       lowerInternTableCall(this, expr) ??
       lowerThreadSlotsCall(this, expr) ??
@@ -13504,7 +13605,7 @@ export class Lowerer {
     const key = `${fn.valueFn ?? fn.fn}:${typeKey(funcType)}:${adapterShape}`;
     let fnName = this.builtinCallableValueFns.get(key);
     if (!fnName) {
-      fnName = `%builtin.value.${fn.valueFn ?? fn.fn}.${this.builtinCallableValueFns.size}`;
+      fnName = keyedHelperName(this, `%builtin.value.${fn.valueFn ?? fn.fn}`, key);
       this.builtinCallableValueFns.set(key, fnName);
       this.builtinCallableValueNames.set(fnName, display.slice(display.lastIndexOf(".") + 1));
       const params = funcType.params.map((type, index) => ({

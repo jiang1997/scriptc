@@ -1,3 +1,4 @@
+import { keyedHelperName } from "../stable-names.js";
 import { boolLit, dynUndefinedExpr, numLit, varRef } from "../../../ir/build.js";
 import { BUF_NUM_METHODS } from "./buffer-numeric-methods.js";
 import * as ts from "../../ts7/adapter.js";
@@ -42,7 +43,7 @@ import { lowerArraySpreadItems, lowerCheckedArrayFrom } from "./array-constructi
 import { lowerToNumberArgument } from "../lower-exprs.js";
 import { lowerBytesIteratorValue } from "../iterator-adapters.js";
 import { lowerArrayCallback } from "./callback-arguments.js";
-import { findPredicateOk, predicateToBoolean } from "./array-callbacks.js";
+import { callbackSite, findPredicateOk, predicateToBoolean } from "./array-callbacks.js";
 import { typeKey } from "../../type-mapper.js";
 
 /** TypedArray.prototype.sort and toSorted. The receiver and comparator
@@ -77,7 +78,7 @@ function lowerBytesSortCall(
     const cacheKey = `bytes.${method}:${bytesT.elem}:${key}`;
     let helper = lowerer.arrHofHelpers.get(cacheKey);
     if (!helper) {
-      helper = `%bytes.${method}.${lowerer.arrHofHelpers.size}`;
+      helper = keyedHelperName(lowerer, `%bytes.${method}`, cacheKey);
       lowerer.arrHofHelpers.set(cacheKey, helper);
       lowerer.liftedFns.push(
         buildBytesSortFn(helper, bytesT, arity, hasComparator, copyFirst, order, loc),
@@ -250,13 +251,28 @@ function lowerBytesCallbackCall(
           : method === "findIndex" || method === "findLastIndex"
             ? F64
             : lowerer.irTypeOf(call));
-  const helper = bytesCallbackHelper(lowerer, method, bytesT, resultT, fnRet, arity, hasInit, loc);
+  const helper = bytesCallbackHelper(
+    lowerer,
+    method,
+    bytesT,
+    resultT,
+    fnRet,
+    arity,
+    hasInit,
+    loc,
+    callbackSite(fnArg),
+  );
   const args: IrExpr[] = [receiver, fnArg];
   if (hasInit) args.push(lowerer.lowerExprExpecting(call.arguments.nodes[1]!, resultT));
   return { kind: "call", callee: helper, args, type: resultT, loc };
 }
 
-/** The interned helper of one typed-array callback method shape. */
+/** The interned helper of one typed-array callback method shape. A literal
+ * callback gets a helper of its own (`site`), which the backend then calls
+ * directly, as for the array methods. The visit is a loop on its own
+ * counter (`for (let i = 0; i < a.length; i++)`, or down from the last
+ * index), so the counter is an integer and the element reads need no
+ * index test. */
 function bytesCallbackHelper(
   lowerer: Lowerer,
   method: BytesCallbackMethod,
@@ -266,11 +282,12 @@ function bytesCallbackHelper(
   arity: number,
   hasInit: boolean,
   loc: SrcLoc,
+  site: string,
 ): string {
-  const key = `bytes.${method}:${bytesT.elem}:${typeKey(resultT)}:${typeKey(fnRet)}:${arity}:${hasInit ? "init" : ""}`;
+  const key = `bytes.${method}:${bytesT.elem}:${typeKey(resultT)}:${typeKey(fnRet)}:${arity}:${hasInit ? "init" : ""}${site}`;
   const existing = lowerer.arrHofHelpers.get(key);
   if (existing) return existing;
-  const name = `%bytes.${method}.${lowerer.arrHofHelpers.size}`;
+  const name = keyedHelperName(lowerer, `%bytes.${method}`, key);
   lowerer.arrHofHelpers.set(key, name);
   const reduce = method === "reduce" || method === "reduceRight";
   const backward = method === "reduceRight" || method === "findLast" || method === "findLastIndex";
@@ -299,10 +316,20 @@ function bytesCallbackHelper(
     type: fnRet,
     loc,
   });
+  // The forward bound is the receiver's length itself (fixed for a typed
+  // array, and equal to `n`), which the emitter's typed-array loops use.
+  const length = (): IrExpr => ({
+    kind: "bytesIntrinsic",
+    method: "length",
+    receiver: a(),
+    args: [],
+    type: F64,
+    loc,
+  });
   const inRange = (): IrExpr =>
     backward
       ? { kind: "bin", op: ">=", left: i(), right: numLit(0, loc), type: BOOL, loc }
-      : { kind: "bin", op: "<", left: i(), right: n(), type: BOOL, loc };
+      : { kind: "bin", op: "<", left: i(), right: length(), type: BOOL, loc };
   const advance = (): IrStmt => ({
     kind: "assign",
     localId: "i.0",
@@ -343,6 +370,7 @@ function bytesCallbackHelper(
     ...(hasInit ? [{ localId: "z.0", name: "z", type: resultT }] : []),
   ];
   const visit: IrStmt[] = [{ kind: "assign", localId: "v.0", value: at(i()), loc }];
+  let seeded = false;
   const prologue: IrStmt[] = [];
   let epilogue: IrStmt[];
   switch (method) {
@@ -458,10 +486,12 @@ function bytesCallbackHelper(
           loc,
         });
       } else {
+        // The seed is the first visited element; the loop starts past it.
+        seeded = true;
         prologue.push(
           {
             kind: "if",
-            cond: { kind: "unary", op: "!", operand: inRange(), type: BOOL, loc },
+            cond: { kind: "bin", op: "===", left: n(), right: numLit(0, loc), type: BOOL, loc },
             then: [
               {
                 kind: "throw",
@@ -485,8 +515,16 @@ function bytesCallbackHelper(
             else_: null,
             loc,
           },
-          { kind: "varDecl", localId: "acc.0", init: at(i()), loc },
-          advance(),
+          {
+            kind: "varDecl",
+            localId: "acc.0",
+            init: at(
+              backward
+                ? { kind: "bin", op: "-", left: n(), right: numLit(1, loc), type: F64, loc }
+                : numLit(0, loc),
+            ),
+            loc,
+          },
         );
       }
       visit.push({
@@ -505,17 +543,30 @@ function bytesCallbackHelper(
       init: { kind: "bytesIntrinsic", method: "length", receiver: a(), args: [], type: F64, loc },
       loc,
     },
-    {
-      kind: "varDecl",
-      localId: "i.0",
-      init: backward
-        ? { kind: "bin", op: "-", left: n(), right: numLit(1, loc), type: F64, loc }
-        : numLit(0, loc),
-      loc,
-    },
     { kind: "varDecl", localId: "v.0", init: numLit(0, loc), loc },
     ...prologue,
-    { kind: "for", init: null, cond: inRange(), update: advance(), body: visit, loc },
+    {
+      kind: "for",
+      init: {
+        kind: "varDecl",
+        localId: "i.0",
+        init: backward
+          ? {
+              kind: "bin",
+              op: "-",
+              left: n(),
+              right: numLit(seeded ? 2 : 1, loc),
+              type: F64,
+              loc,
+            }
+          : numLit(seeded ? 1 : 0, loc),
+        loc,
+      },
+      cond: inRange(),
+      update: advance(),
+      body: visit,
+      loc,
+    },
     ...epilogue,
   ];
   lowerer.liftedFns.push({ name, params, returnType: resultT, locals, body, loc });
