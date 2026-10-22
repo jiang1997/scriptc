@@ -35,6 +35,38 @@ export const eventLoopCases: EventLoopCase[] = [
     script: { writes: [], end: false },
   },
   {
+    title: "stdio values: 'readable' drains with read(), then fires once more at EOF",
+    fixture: "stdio-readable.mjs",
+    script: {
+      writes: [
+        { delayMs: 0, data: "alpha " },
+        { delayMs: 60, data: "beta\n" },
+      ],
+      end: true,
+    },
+  },
+  {
+    title: "stdio values: 'readable' with read(size) holds a partial tail until EOF",
+    fixture: "stdio-readable-size.mjs",
+    script: { writes: [{ delayMs: 0, data: "abcdefghij" }], end: true },
+  },
+  {
+    title: "stdio values: 'readable' on an immediately ended pipe",
+    fixture: "stdio-readable.mjs",
+    script: { writes: [], end: true },
+  },
+  {
+    title: "for-await: process.stdin yields Buffers",
+    fixture: "stdin-for-await-buffers.mjs",
+    script: {
+      writes: [
+        { delayMs: 0, data: ">ONE\nACGT\n" },
+        { delayMs: 40, data: ">TWO\nTTGA\n" },
+      ],
+      end: true,
+    },
+  },
+  {
     title: "read-all: one instant write, then EOF",
     fixture: "stdin-read-all.ts",
     script: { writes: [{ delayMs: 0, data: "hello stdin\nsecond line\n" }], end: true },

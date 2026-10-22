@@ -907,9 +907,10 @@ function lowerDataViewNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
  * (shared view), toReversed, copyWithin, set(src,
  * offset?), and the u8-only Buffer surface: toString(enc?) plus the
  * whole numeric read/write family (fixed widths BE/LE and the
- * variable-width read/writeUIntLE quartet — BUF_NUM_METHODS). Everything
- * else the lib declares (fill, indexOf, reverse, ...) falls through to
- * the SC2020 member fence. Null when this isn't a bytes method call. */
+ * variable-width read/writeUIntLE quartet — BUF_NUM_METHODS), and
+ * TypedArray fill, indexOf, lastIndexOf and includes. Everything else the
+ * lib declares (reverse, sort, ...) falls through to the SC2020 member
+ * fence. Null when this isn't a bytes method call. */
 export function lowerBytesMethodCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -1101,6 +1102,43 @@ export function lowerBytesMethodCall(
       loc,
     };
   }
+  if (
+    (name === "indexOf" || name === "lastIndexOf" || name === "includes") &&
+    !(() => {
+      const symbol = lowerer.checker.getSymbolAtLocation(access.name);
+      return (
+        symbol !== undefined &&
+        symbol.declarations.some(
+          (declaration) =>
+            ts.isInterfaceDeclaration(declaration.parent) &&
+            declaration.parent.name.text === "Buffer",
+        )
+      );
+    })()
+  ) {
+    // TypedArray search: strict equality (includes: SameValueZero) with a
+    // relative fromIndex. Buffer's same-named methods keep their byte,
+    // string and Buffer needles.
+    if (nArgs < 1 || nArgs > 2 || call.arguments.nodes.some(ts.isSpreadElement)) {
+      lowerer.noLowering(`.${name} with ${nArgs} arguments on typed arrays`, call);
+    }
+    const receiver = lowerer.lowerExprExpecting(access.expression, receiverIr);
+    const args = call.arguments.nodes.map((a) => lowerer.lowerExprExpecting(a, F64));
+    const method =
+      name === "indexOf"
+        ? "indexOfElem"
+        : name === "lastIndexOf"
+          ? "lastIndexOfElem"
+          : "includesElem";
+    return {
+      kind: "bytesIntrinsic",
+      method,
+      receiver,
+      args,
+      type: name === "includes" ? BOOL : F64,
+      loc,
+    };
+  }
   if (name === "set") {
     if (nArgs < 1 || nArgs > 2) {
       lowerer.noLowering(`.set with ${nArgs} arguments on typed arrays`, call);
@@ -1210,9 +1248,8 @@ export function lowerBytesMethodCall(
   // The Buffer-declared comparison/search/mutation surface. All of
   // these resolve against the Buffer interface (the checker keeps most
   // off plain typed arrays; where the lib DOES declare a same-named
-  // TypedArray member — indexOf, includes, fill — the semantics differ,
-  // so only Buffer-declared resolutions lower and u8 receivers gate the
-  // rest).
+  // TypedArray member — indexOf, includes, fill — the semantics differ:
+  // those resolutions lowered above, and u8 receivers gate the rest).
   const declOnBuffer = (() => {
     const nameSym = lowerer.checker.getSymbolAtLocation(access.name);
     return (

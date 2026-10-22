@@ -3292,6 +3292,47 @@ double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd)
   return scr_bytes_index_of(b, &needle, off, 1, fwd);
 }
 
+/* TypedArray.prototype.indexOf and lastIndexOf (strict equality, so NaN
+ * never matches) and includes (`same_value_zero`: NaN matches NaN). `from`
+ * is the fromIndex argument when `has_from` (ToIntegerOrInfinity, negative
+ * counts from the end), else the default: 0, or len - 1 searching
+ * backwards. Returns the element index, or -1. Never throws. */
+double scr_bytes_ta_index_of(const ScrBytes *b, double v, double from, bool has_from, bool forward,
+                             bool same_value_zero) {
+  size_t len = b->len;
+  if (len == 0) return -1;
+  double k = has_from ? (from != from ? 0 : trunc(from)) : forward ? 0 : (double)len - 1;
+  bool nan = v != v;
+  if (nan && !same_value_zero) return -1;
+  bool bytes = (b->elem == SCR_BYTES_U8 || b->elem == SCR_BYTES_U8C) && !b->shared;
+  if (forward) {
+    if (k >= (double)len) return -1;
+    if (k < 0) k = k + (double)len < 0 ? 0 : k + (double)len;
+    size_t start = (size_t)k;
+    if (bytes) {
+      if (!(v >= 0 && v <= 255 && v == trunc(v))) return -1;
+      const uint8_t *hit = memchr(b->data + start, (int)v, len - start);
+      return hit ? (double)(hit - b->data) : -1;
+    }
+    for (size_t i = start; i < len; i++) {
+      double e = scr_bytes_load(b, i);
+      if (e == v || (nan && e != e)) return (double)i;
+    }
+    return -1;
+  }
+  if (k < 0) {
+    k += (double)len;
+    if (k < 0) return -1;
+  } else if (k > (double)len - 1) {
+    k = (double)len - 1;
+  }
+  for (size_t i = (size_t)k + 1; i-- > 0;) {
+    double e = scr_bytes_load(b, i);
+    if (e == v || (nan && e != e)) return (double)i;
+  }
+  return -1;
+}
+
 /* fill's shared core over a normalized byte pattern. nargs counts the
  * present offset/end args. An EMPTY pattern zero-fills when zero_ok
  * (Node's '' string) and is the constant TypeError otherwise (an empty

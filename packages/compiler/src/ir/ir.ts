@@ -2419,6 +2419,13 @@ export type IrBytesIntrinsicMethod =
    * (same observable number-fill result; Buffer's throwing offset
    * validation). */
   | "fillElem"
+  /** TypedArray.prototype.indexOf / lastIndexOf / includes on any
+   * receiver: [f64 searchElement, f64 fromIndex?] → f64 index (-1 when
+   * absent) or bool; strict equality (includes: SameValueZero), a present
+   * fromIndex counts from the end when negative, never throws. */
+  | "indexOfElem"
+  | "lastIndexOfElem"
+  | "includesElem"
   | "copy"
   | "swap16"
   | "swap32"

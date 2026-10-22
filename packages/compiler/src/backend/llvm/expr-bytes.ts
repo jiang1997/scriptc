@@ -918,6 +918,22 @@ export function emitBytesIntrinsic(
       B.line(`${t} = fcmp one double ${idx.name}, ${f64Lit(-1)}`);
       return { name: t, type: e.type };
     }
+    case "indexOfElem":
+    case "lastIndexOfElem":
+    case "includesElem": {
+      const includes = method === "includesElem";
+      const idx = call(
+        "scr_bytes_ta_index_of",
+        "double (ptr, double, double, i1 zeroext, i1 zeroext, i1 zeroext)",
+        `ptr ${r.name}, double ${args[0]!.name}, double ${args[1]?.name ?? f64Lit(0)}, i1 ${args.length > 1}, i1 ${method !== "lastIndexOfElem"}, i1 ${includes}`,
+        false,
+        false,
+      );
+      if (!includes) return idx;
+      const t = B.tmp();
+      B.line(`${t} = fcmp one double ${idx.name}, ${f64Lit(-1)}`);
+      return { name: t, type: e.type };
+    }
     case "fillElem":
       // Per-element TypedArray fill (non-u8): slice-style index
       // defaults, never throws; the receiver comes back +1.

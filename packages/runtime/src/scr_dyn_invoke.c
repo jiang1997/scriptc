@@ -1667,6 +1667,21 @@ static ScrDyn *scr_dyn_invoke_impl(
       scr_str_release(joined);
       return out;
     }
+    if (!recv->buffer && (dyn_name_is(method, "indexOf") || dyn_name_is(method, "lastIndexOf") ||
+                          dyn_name_is(method, "includes"))) {
+      /* TypedArray search: strict equality (includes: SameValueZero), so a
+       * needle that is not a number matches nothing; fromIndex counts as
+       * given whenever it is passed, undefined included. */
+      double from = 0;
+      if (argc > 1) {
+        if (!scr_dyn_number_coerce_js(args[1], &from)) return NULL;
+      }
+      bool includes = dyn_name_is(method, "includes");
+      double found = argc > 0 && args[0]->kind == SCR_DYN_NUM
+        ? scr_bytes_ta_index_of(bytes, args[0]->v.num, from, argc > 1, !dyn_name_is(method, "lastIndexOf"), includes)
+        : -1;
+      return includes ? scr_dyn_new_bool(found >= 0) : scr_dyn_new_num(found);
+    }
     if (dyn_bytes_proto_real(method)) {
       dyn_throw_unsupported(scr_bytes_elem_name(bytes->elem), method);
       return NULL;

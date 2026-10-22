@@ -499,6 +499,8 @@ ScrEmitter *scr_emitter_set_max_chk(ScrEmitter *em, const ScrDyn *n);
 void scr_emitter_set_default_max_chk(const ScrDyn *n, const ScrStr *name);
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd);
 double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd);
+double scr_bytes_ta_index_of(const ScrBytes *b, double v, double from, bool has_from, bool forward,
+                             bool same_value_zero);
 ScrBytes *scr_bytes_fill(ScrBytes *b, const ScrBytes *pattern, double nargs, double offset, double end);
 ScrBytes *scr_bytes_fill_num(ScrBytes *b, double v, double nargs, double offset, double end);
 ScrBytes *scr_bytes_fill_str(ScrBytes *b, const ScrStr *s, const ScrStr *enc,

@@ -2361,7 +2361,6 @@ export function collectGlobals(
           // References from separately-declared functions cascade to
           // their own per-site runtime fences.
           const factoryType =
-            !isLet &&
             isJsSourceFile(sf) &&
             !decl.type &&
             !hasJsTypeAnnotation(decl) &&
