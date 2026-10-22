@@ -1910,7 +1910,9 @@ export function lowerIslandRequireAtStatement(
   const module = path === null ? undefined : lowerer.islandModules.get(path);
   if (path === null || module === undefined) return null;
   const loc = locOf(decl);
-  const load = runsAtModuleEvaluation(decl) ? deferIslandModule(path, loc) : loadIslandModule(path, loc);
+  const load = runsAtModuleEvaluation(decl)
+    ? deferIslandModule(path, loc)
+    : loadIslandModule(path, loc);
   return { kind: "assign", localId: module.global.id, value: load, loc };
 }
 
