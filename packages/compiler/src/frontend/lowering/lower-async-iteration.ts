@@ -359,13 +359,15 @@ function boolRef(localId: string, loc: ReturnType<typeof locOf>): IrExpr {
 
 /** The loop's stream: a JavaScript value typed as a stream can arrive as a
  * checked-dynamic value (returned through an untyped function), which
- * checks back into the stream class. */
+ * checks back into the stream class, or as a union with it (an element
+ * read), which narrows to it. */
 function streamSource(
   lowerer: Lowerer,
   plan: NodeReadablePlan,
   loc: ReturnType<typeof locOf>,
 ): IrExpr {
   const v = lowerer.lowerExpr(plan.source);
+  if (v.type.kind === "union") return lowerer.coerceToExpected(v, plan.type);
   if (v.type.kind !== "dyn") return v;
   return { kind: "dynCheck", value: v, type: plan.type, loc };
 }

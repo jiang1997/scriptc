@@ -42,6 +42,24 @@ export function* textSlices(text: string, length = TEXT_WRITE_LENGTH): Generator
   }
 }
 
+/** `parts` with consecutive parts joined into strings of about
+ * TEXT_WRITE_LENGTH UTF-16 units (a longer part passes through whole), so
+ * writing or escaping many small parts takes few calls. */
+export function* joinedParts(parts: readonly string[]): Generator<string> {
+  let batch: string[] = [];
+  let length = 0;
+  for (const part of parts) {
+    batch.push(part);
+    length += part.length;
+    if (length >= TEXT_WRITE_LENGTH) {
+      yield batch.length === 1 ? batch[0]! : batch.join("");
+      batch = [];
+      length = 0;
+    }
+  }
+  if (batch.length > 0) yield batch.join("");
+}
+
 /** Encodes and writes `part` to `fd` in slices (`textSlices`), so a large
  * part is never encoded whole. `written` sees each slice after it is
  * written. */
@@ -55,8 +73,8 @@ function writeTextPart(fd: number, part: string, written?: (slice: string) => vo
   }
 }
 
-/** Write text parts to `path` in order without joining them first; pass
- * batched parts (`batchTextParts`) for many small ones. */
+/** Write text parts to `path` in order without joining them whole: small
+ * parts are written in batches (`joinedParts`). */
 export function writeTextPartsSync(
   path: string,
   parts: readonly string[],
@@ -64,7 +82,7 @@ export function writeTextPartsSync(
 ): void {
   const fd = openSync(path, "w");
   try {
-    for (const part of parts) writeTextPart(fd, part, written);
+    for (const part of joinedParts(parts)) writeTextPart(fd, part, written);
   } finally {
     closeSync(fd);
   }

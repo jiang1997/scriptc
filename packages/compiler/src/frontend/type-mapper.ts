@@ -43,7 +43,7 @@ import {
   UNDEFINED_T,
   VOID,
 } from "../ir/ir.js";
-import { BIGINT_T, KEY_ORDER_FIELD } from "../ir/ir.js";
+import { BIGINT_T } from "../ir/ir.js";
 import { literalValues } from "./literal-values.js";
 import { remapUnionDiscriminant } from "./union-discriminants.js";
 
@@ -553,21 +553,6 @@ export class ShapeRegistry {
     if (!extra) return order;
     const missing = extra.filter((name) => !order.includes(name));
     return missing.length === 0 ? order : [...order, ...missing];
-  }
-
-  /** Gives a shape with orderVariants its KEY_ORDER_FIELD, in place,
-   * after the bodies lowered (key-order-witness.ts adds the field to each
-   * of the shape's literals). Allocation zeroes it, which every other
-   * construction keeps. */
-  addKeyOrderField(shapeId: string): void {
-    const shape = this.byId.get(shapeId);
-    if (!shape || shape.fields.some((f) => f.name === KEY_ORDER_FIELD)) return;
-    shape.fields = [...shape.fields, { name: KEY_ORDER_FIELD, type: F64 }].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-    );
-    this.revision++;
-    const key = this.keyOf(shape.fields, false, shape.indexValue);
-    if (!this.byKey.has(key)) this.byKey.set(key, shapeId);
   }
 
   /** Adds optional fields to an interned shape in place: members a type
@@ -1860,10 +1845,16 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // TypeScript's intrinsic globalThis symbol has no declaration. A stored
   // reference needs native object identity, including var's undefined state.
   const intrinsic = type.getSymbol();
+  const isIntrinsicGlobal = (symbol: ts.Symbol | undefined): boolean =>
+    symbol !== undefined &&
+    ts.symbolName(symbol) === "globalThis" &&
+    symbol.declarations.length === 0;
+  if (isIntrinsicGlobal(intrinsic)) return DYN;
+  // `typeof globalThis & { key?: T }` (the global-singleton spelling) is the
+  // same global object with declared extra members.
   if (
-    intrinsic !== undefined &&
-    ts.symbolName(intrinsic) === "globalThis" &&
-    intrinsic.declarations.length === 0
+    type.isIntersectionType() &&
+    ts.constituentTypes(type).some((part) => isIntrinsicGlobal(part.getSymbol()))
   )
     return DYN;
   if (ctx.jsDynamicDeclaration !== undefined && intrinsic !== undefined) {
@@ -3192,6 +3183,8 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // Native WeakMap keeps reference identities in checked-dynamic storage.
   // The runtime rejects reference kinds without a weak lifetime contract.
   if (isStdlibInterface("WeakMap") || isStdlibInterface("WeakSet")) return DYN;
+  // FinalizationRegistry is a native handle with register and unregister.
+  if (isStdlibInterface("FinalizationRegistry")) return DYN;
   // Set<T>: Map's sibling — same provenance rule and key domain.
   // Anything else stays unmapped;
   // the `new Set` lowering names the offending element type specifically.
@@ -7733,6 +7726,22 @@ function wideningAddedProperties(
   return added;
 }
 
+/** Whether `type` is an interface one of whose `extends` clauses names a
+ * type the checker answers `any` (or an error type) for. */
+function interfaceExtendsAny(type: ts.Type, checker: ts.TypeChecker): boolean {
+  const symbol = type.getSymbol();
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Interface) === 0) return false;
+  for (const decl of symbol.declarations) {
+    if (!ts.isInterfaceDeclaration(decl)) continue;
+    for (const clause of decl.heritageClauses?.nodes ?? []) {
+      for (const base of clause.types.nodes) {
+        if ((checker.getTypeAtLocation(base).flags & ts.TypeFlags.Any) !== 0) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function mapRecordTypeInner(
   widened: ts.Type,
   ctx: TypeMapperCtx,
@@ -7748,6 +7757,13 @@ function mapRecordTypeInner(
   // names the construct.
   const widenedSym = widened.getSymbol();
   if (widenedSym !== undefined && (widenedSym.flags & ts.SymbolFlags.Enum) !== 0) return null;
+  // An interface extending a type the checker answers `any` for (in the
+  // compiled world, a package type computed from members only its .d.ts
+  // declares, such as `interface P extends z.infer<typeof S>`) has members
+  // the checker cannot list: its own declared fields are not the whole
+  // object. The value is checked-dynamic, never a record of the declared
+  // fields alone.
+  if (interfaceExtendsAny(widened, checker)) return DYN;
   // An index signature maps to a hybrid shape: declared fields keep
   // struct slots, undeclared keys ride the shape's overflow map, valued
   // uniformly by the signature's value type (`unknown` → dyn — a model-pricing table's

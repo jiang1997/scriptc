@@ -168,6 +168,43 @@ test("ProgramLifetime hierarchies are never freed and take no reference counts",
   expect(body(mangleClassRelease("Owner"))).toContain("load i32, ptr %bufp");
 });
 
+test("arrays of ProgramLifetime instances tell the runtime their teardown releases nothing", () => {
+  const kids = { kind: "array" as const, elem: { kind: "object" as const, className: "Node" } };
+  const owners = { kind: "array" as const, elem: { kind: "object" as const, className: "Owner" } };
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [
+      {
+        name: "main",
+        params: [],
+        returnType: VOID,
+        locals: [],
+        body: [
+          { kind: "exprStmt", expr: { kind: "arrayLit", elems: [], type: kids, loc }, loc },
+          { kind: "exprStmt", expr: { kind: "arrayLit", elems: [], type: owners, loc }, loc },
+        ],
+        loc,
+      },
+    ],
+    classes: [
+      { name: "Node", fields: [], methods: [], loc },
+      { name: "Owner", fields: [{ name: "nodes", type: kids }], methods: [], loc },
+    ],
+    contracts: { programLifetime: ["Node"] },
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  const ops = (cls: string): string =>
+    new RegExp(`^@sc_arrops\\.[^\\n]*${mangleClassRelease(cls)}[^\\n]*$`, "m").exec(llvm)?.[0] ??
+    "";
+  // SCR_ARR_OPS_RELEASE_NOTHING for Node; Owner's elements are released.
+  expect(ops("Node")).toMatch(
+    /= internal global \{ ptr, ptr, ptr, i32, i32 \} .*, i32 0, i32 2 \}$/,
+  );
+  expect(ops("Owner")).toMatch(/= internal global %ScrArrOps .*, i32 0 \}$/);
+});
+
 test("classes whose trace visits nothing start acyclic in a traced hierarchy", () => {
   const mapper = { kind: "object" as const, className: "Mapper" };
   const mod: IrModule = {

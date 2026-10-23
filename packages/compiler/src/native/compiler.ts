@@ -362,7 +362,7 @@ export class NativeCompiler {
       mkdirSync(inputDirectory);
       const llvmInput = outputKind === "llvm" ? stagedOutput : join(inputDirectory, "program.ll");
       // In slices: the module text is never encoded whole.
-      writeTextPartsSync(llvmInput, [llvm]);
+      writeTextPartsSync(llvmInput, llvm);
       timing("llvm-write");
       if (outputKind === "llvm") {
         renameSync(stagedOutput, output);
@@ -496,7 +496,7 @@ export class NativeCompiler {
         renameSync(stagedOutput + ".dSYM", output + ".dSYM");
       }
       mkdirSync(options.outDir, { recursive: true });
-      writeTextPartsSync(llvmPath, [llvm]);
+      writeTextPartsSync(llvmPath, llvm);
       let irPath: string | undefined;
       if (options.emitIr) {
         irPath = join(options.outDir, `${stem}.ir.json`);
@@ -585,7 +585,7 @@ export class NativeCompiler {
       const llvm = prepared.llvm;
       const llvmInput = join(stage, "program.ll");
       // In slices: the module text is never encoded whole.
-      writeTextPartsSync(llvmInput, [llvm]);
+      writeTextPartsSync(llvmInput, llvm);
       timing("llvm-write");
       const features = prepared.features;
       const pack = selectNativeRuntimePack(
@@ -648,7 +648,7 @@ export class NativeCompiler {
         });
       }
       timing("native-archive");
-      writeTextPartsSync(llvmPath, [llvm]);
+      writeTextPartsSync(llvmPath, llvm);
       let irPath: string | undefined;
       if (options.emitIr) {
         irPath = join(options.outDir, `${stem}.lib.ir.json`);

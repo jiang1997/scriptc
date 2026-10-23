@@ -1118,7 +1118,9 @@ export function emitInlineAtomicsOp(
   if (op !== 0 && op !== 1 && op !== 3 && ATOMIC_RMW[op] === undefined) return null;
   const elem = array.type.elem;
   const B = host.B;
-  const receiver = host.emitExpr(array).name;
+  // The instruction and scr_atomics_op borrow the array: an unchanged local
+  // owns it across the later operands and the operation.
+  const receiver = emitBorrowedInput(host, array).name;
   const idxValue = host.emitExpr(index);
   const operand = host.emitExpr(value);
   const swap = host.emitExpr(replacement);

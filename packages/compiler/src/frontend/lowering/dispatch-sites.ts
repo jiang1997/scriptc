@@ -80,6 +80,7 @@ const DISPATCH_LIB_CALLS = new Set<string>([
   "dyn.propertyIsEnumerableComputed",
   "dyn.defineProperty",
   "dyn.getPrototype",
+  "dyn.inheritsErrorPrototype",
   "dyn.reflectGet",
   "dyn.reflectSet",
 ]);

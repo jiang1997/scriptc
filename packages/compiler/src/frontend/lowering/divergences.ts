@@ -464,8 +464,11 @@ function identityUse(root: ts.Node, name: string, from = -1): IdentityUse | null
       cur = cur.expression;
     return cur;
   };
+  // The text appears only in warnings. A build that reported warnings is
+  // not reused after a source edit, so the read is not recorded as a source
+  // text dependency (ts.getTextOfNode would record it).
   const textOf = (node: ts.Node): string => {
-    const text = ts.getTextOfNode(node);
+    const text = ts.getSourceFileOfNode(node).text.slice(ts.tokenStartOfNode(node), node.end);
     return text.length > 60 ? `${text.slice(0, 57)}...` : text;
   };
   const visit = (node: ts.Node): "skip" | "stop" | undefined => {
@@ -724,11 +727,6 @@ function keyOrderFinding(
   written: readonly string[],
   assignedNames: ReadonlySet<string>,
 ): { native: string; node: string; detail: "reordered" | "added-later" } | null {
-  // Values of a shape with orderVariants enumerate in the order their
-  // literal wrote (key-order-witness.ts).
-  const mapped = safely(() => lowerer.mapTypeOf(contextual));
-  if (mapped?.kind === "record" && lowerer.shapes.get(mapped.shapeId)?.orderVariants !== undefined)
-    return null;
   // A shape whose table the witness pass re-chose (key-order-witness.ts)
   // enumerates that table, not the checker's declaration order.
   const table = witnessTable(lowerer, contextual);

@@ -536,6 +536,22 @@ test("charCodeAt reads of a string binding version with the typed-array reads", 
   expect(sliced.bounds.has(read)).toBe(false);
 });
 
+test("charAt reads of a string binding version as one-unit reads", () => {
+  const read: IrExpr = {
+    kind: "strIntrinsic",
+    method: "charAt",
+    receiver: ref("text", STR),
+    args: [bin("-", ref("i"), num(1))],
+    type: STR,
+    loc,
+  };
+  const loop = counted([{ kind: "exprStmt", expr: read, loc }]);
+  const version = match(textKernel([loop]), loop)!;
+  expect(version.bounds.has(read)).toBe(true);
+  expect(version.receivers.map((r) => r.string)).toEqual([true]);
+  expect(version.affine.map((c) => [c.receiver, c.minOffset, c.maxEnd])).toEqual([[0, -1, -1]]);
+});
+
 test("the guard tests a string's ASCII bit and the fast copy reads bytes", () => {
   const loop = counted([set(ref("out", f64s), ref("i"), charCode(ref("text", STR), ref("i")))]);
   const kernel = textKernel([loop]);

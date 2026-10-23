@@ -32,11 +32,18 @@ import { allocateLocalUnion, storeLocalUnion } from "./local-union-storage.js";
 import { boxAccess, boxNewCall, elemAccess } from "./shapes.js";
 import { dynHoleRead } from "./loop-array-borrows.js";
 import { endsWithJump, matchStringSelfConcat } from "../../ir/analysis.js";
-import { emitDiscardedSplice } from "./expr-containers.js";
+import { charAtUnitRead, emitDiscardedSplice } from "./expr-containers.js";
 import { InternalCompilerError } from "../../errors.js";
-import { emitDenseArrayGet, emitDenseArrayPop, emitDenseArraySet } from "./dense-array-access.js";
+import {
+  emitDenseArrayGet,
+  emitDenseArrayPop,
+  emitDenseArraySet,
+  SCR_ELEM_I32,
+} from "./dense-array-access.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
-import { f64Lit, llvmCommentText, loadArrCount, sizeToDouble } from "./common.js";
+import { f64Lit, llvmCommentText, loadArrCount, SCR_ARR_FIELD, sizeToDouble } from "./common.js";
+import { planInt32KindLoop, type Int32KindLoopPlan } from "./int32-kind-loops.js";
+import { withinInt32 } from "../../ir/integer-ranges.js";
 import { resultSlotStore } from "../result-slots.js";
 import {
   matchIntegerArrayForLoop,
@@ -411,7 +418,21 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
       const v = emitter.emitExpr(s.value);
       if (s.arr.type.kind !== "array")
         throw new InternalCompilerError("llvm emitter bug: arraySet on non-array");
-      const acc = elemAccess(s.arr.type.elem);
+      if (emitter.checkedInt32Array(s.arr)) {
+        // An int32 array with checked stores: the int32 arm stores an int32
+        // value, and widens the array for any other first.
+        emitter.emitPublishedArrayGuard(arr.name, s.arr.type, 0, idx.name);
+        const elem = s.arr.type.elem;
+        const proven = emitter.provenDenseIndex(s.arr, s.index);
+        emitter.emitByElementKind(arr.name, null, (acc, widened) => {
+          if (acc === "i32") emitter.emitCheckedInt32Store(arr.name, v.name, s.value, widened);
+          emitDenseArraySet(emitter, arr.name, idx, s.index, acc, elem, v.name, proven);
+          return null;
+        });
+        break;
+      }
+      const acc = emitter.arrayAccess(s.arr, s.arr.type.elem);
+      const int32 = emitter.emitInt32KindStoreCheck(s.arr, v, s.value);
       emitter.emitPublishedArrayGuard(arr.name, s.arr.type, 0, idx.name);
       if (acc === "ref") emitter.toHeap(v);
       emitDenseArraySet(
@@ -423,6 +444,7 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         s.arr.type.elem,
         v.name,
         emitter.provenDenseIndex(s.arr, s.index),
+        int32,
       );
       break;
     }
@@ -478,12 +500,19 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
         B.condBr(dropsLast, pop, call);
         B.startBlock(pop);
         const elem = s.arr.type.elem;
-        const acc = elemAccess(elem);
-        const raw = emitDenseArrayPop(emitter, arr.name, acc, elem, call, call);
-        if (acc === "ref" && isRefCounted(elem)) {
-          const old = B.tmp();
-          B.line(`${old} = inttoptr i64 ${raw} to ptr`);
-          emitter.releaseHeap(old, elem);
+        if (emitter.checkedInt32Array(s.arr)) {
+          emitter.emitByElementKind(arr.name, null, (acc) => {
+            emitDenseArrayPop(emitter, arr.name, acc, elem, call, call);
+            return null;
+          });
+        } else {
+          const acc = emitter.arrayAccess(s.arr, elem);
+          const raw = emitDenseArrayPop(emitter, arr.name, acc, elem, call, call);
+          if (acc === "ref" && isRefCounted(elem)) {
+            const old = B.tmp();
+            B.line(`${old} = inttoptr i64 ${raw} to ptr`);
+            emitter.releaseHeap(old, elem);
+          }
         }
         B.br(done);
         B.startBlock(call);
@@ -1826,7 +1855,7 @@ export function emitTryCatch(emitter: LlEmitter, s: IrStmt & { kind: "tryCatch" 
  * case, refcounted/boxed case-body locals are NULL-reset up front and
  * the scope-exit releases rely on NULL tolerance. */
 export function emitSwitch(emitter: LlEmitter, s: IrStmt & { kind: "switch" }): void {
-  const unitSwitch = charAtUnitSwitch(s);
+  const unitSwitch = charAtUnitSwitch(emitter, s);
   if (unitSwitch !== null) return emitSwitch(emitter, unitSwitch);
   const B = emitter.B;
   const discKind = s.disc.type.kind;
@@ -2098,9 +2127,26 @@ export function emitLoopCopies(
         )
       : null;
   if (!plan) {
-    const proven = allowed ? planProvenLoop(emitter, loop) : null;
-    if (proven) emitProvenLoop(emitter, proven, exit, emitCopy);
-    else emitCopy(exit);
+    const ordinary = (exit: string): void => {
+      const proven = allowed ? planProvenLoop(emitter, loop) : null;
+      if (proven) emitProvenLoop(emitter, proven, exit, emitCopy);
+      else emitCopy(exit);
+    };
+    const kinds =
+      allowed &&
+      emitter.speculativeLoopsEnabled &&
+      emitter.int32Slots.checkedInt32Arrays.size > 0 &&
+      emitter.int32Kinds === null &&
+      emitter.speculation === null &&
+      emitter.speculationResume === null
+        ? planInt32KindLoop(
+            loop,
+            (id) => emitter.checkedInt32Local(id),
+            (e) => withinInt32(emitter.integerRanges.get(e)),
+          )
+        : null;
+    if (kinds) emitInt32KindLoop(emitter, kinds, exit, kinds.writes.size > 0 ? emitCopy : ordinary);
+    else ordinary(exit);
     return;
   }
   const B = emitter.B;
@@ -2240,6 +2286,124 @@ export function emitLoopCopies(
   } finally {
     emitter.speculation = null;
     for (const id of plan.locals.keys()) emitter.integerLoopBindings.delete(id);
+  }
+}
+
+/** An int32 kind loop (int32-kind-loops.ts). The entry test reads the kind
+ * of each of the plan's arrays: when every one holds int32 slots the fast
+ * copy runs, when every one holds doubles the wide copy, which reads and
+ * writes them as double arrays, and otherwise (a plan with several arrays)
+ * the mixed copy, which tests their kinds at each access. A failed store of
+ * the fast copy re-executes in the third copy, which finishes its
+ * iteration with kind tests and then enters the mixed copy, or the wide
+ * copy when the plan has one array (it just widened). Each copy is emitted
+ * by `ordinary`: the loop's plain copy when a store may fail, since a
+ * proven integer loop keeps locals in shadows of its own copy that another
+ * copy cannot resume from. */
+function emitInt32KindLoop(
+  emitter: LlEmitter,
+  plan: Int32KindLoopPlan,
+  exit: string,
+  ordinary: (exit: string) => void,
+): void {
+  const B = emitter.B;
+  const fn = emitter.currentFunctionName;
+  const keys = new Set([...plan.arrays.keys()].map((id) => `${fn}\0${id}`));
+  const several = keys.size > 1;
+  let allInt32 = "true",
+    allWide = "true";
+  const and = (all: string, next: string): string => {
+    if (all === "true") return next;
+    const both = B.tmp();
+    B.line(`${both} = and i1 ${all}, ${next}`);
+    return both;
+  };
+  for (const ref of plan.arrays.values()) {
+    const arr = emitter.emitStableReceiver(ref, []);
+    const kindPtr = B.tmp(),
+      kind = B.tmp(),
+      isInt32 = B.tmp();
+    B.line(
+      `${kindPtr} = getelementptr inbounds %ScrArr, ptr ${arr.name}, i32 0, i32 ${SCR_ARR_FIELD.elem}`,
+    );
+    emitter.markMemoryPointer(kindPtr, "array:header");
+    B.line(`${kind} = load i8, ptr ${kindPtr}${emitter.fieldAliasAttachment(kindPtr)}`);
+    B.line(`${isInt32} = icmp eq i8 ${kind}, ${SCR_ELEM_I32}`);
+    allInt32 = and(allInt32, isInt32);
+    if (several) {
+      const isWide = B.tmp();
+      B.line(`${isWide} = xor i1 ${isInt32}, true`);
+      allWide = and(allWide, isWide);
+    }
+  }
+  const fast = B.newLabel("kind.fast"),
+    wide = B.newLabel("kind.wide"),
+    mixed = several ? B.newLabel("kind.mixed") : null;
+  if (mixed === null) B.condBr(allInt32, fast, wide);
+  else {
+    const other = B.newLabel("kind.other");
+    B.condBr(allInt32, fast, other);
+    B.startBlock(other);
+    B.condBr(allWide, wide, mixed);
+  }
+  const resume = new Map<IrStmt, { label: string; placed: boolean }>();
+  for (const s of plan.writes) resume.set(s, { label: B.newLabel("kind.resume"), placed: false });
+  // The header the third copy enters: the mixed copy's, or the wide copy's.
+  let header: string | null = null;
+  const capture = (label: string): void => {
+    header = label;
+  };
+  B.startBlock(wide);
+  if (resume.size > 0 && mixed === null) emitter.speculationHeader = capture;
+  emitter.int32Kinds = { int32: new Set(), wide: keys, resume: new Map() };
+  try {
+    ordinary(exit);
+  } finally {
+    emitter.speculationHeader = null;
+    emitter.int32Kinds = null;
+  }
+  if (mixed !== null) {
+    B.startBlock(mixed);
+    if (resume.size > 0) emitter.speculationHeader = capture;
+    try {
+      ordinary(exit);
+    } finally {
+      emitter.speculationHeader = null;
+    }
+  }
+  if (resume.size > 0) {
+    if (header === null)
+      throw new InternalCompilerError("llvm emitter bug: int32 kind loop copy without a header");
+    // A failed store finishes its iteration here, as in a speculative
+    // integer loop's third copy.
+    B.startBlock(B.newLabel("kind.tail"));
+    emitter.speculationResume = resume;
+    emitter.speculationHeader = () => {
+      B.br(header!);
+      B.startBlock(B.newLabel("kind.unused"));
+    };
+    try {
+      ordinary(exit);
+    } finally {
+      emitter.speculationResume = null;
+      emitter.speculationHeader = null;
+    }
+  }
+  B.startBlock(fast);
+  if (![...resume.values()].every((r) => r.placed)) {
+    // A write the third copy never reached: this copy tests the kinds.
+    ordinary(exit);
+    return;
+  }
+  emitter.int32Kinds = {
+    int32: keys,
+    wide: new Set(),
+    resume: new Map([...resume].map(([s, r]) => [s, r.label])),
+  };
+  try {
+    ordinary(exit);
+  } finally {
+    emitter.int32Kinds = null;
   }
 }
 
@@ -2518,7 +2682,10 @@ function nullableStringSwitch(
  * one-unit string literals, as a switch on `s.charCodeAt(i)` with the units
  * as cases: no character string is built. An index out of range answers
  * NaN, which matches no case, as "" matches no one-unit literal. */
-function charAtUnitSwitch(s: IrStmt & { kind: "switch" }): (IrStmt & { kind: "switch" }) | null {
+function charAtUnitSwitch(
+  emitter: LlEmitter,
+  s: IrStmt & { kind: "switch" },
+): (IrStmt & { kind: "switch" }) | null {
   const disc = s.disc;
   if (disc.kind !== "strIntrinsic" || disc.method !== "charAt" || disc.args.length !== 1)
     return null;
@@ -2531,7 +2698,7 @@ function charAtUnitSwitch(s: IrStmt & { kind: "switch" }): (IrStmt & { kind: "sw
     return null;
   return {
     ...s,
-    disc: { ...disc, method: "charCodeAt", type: F64 },
+    disc: charAtUnitRead(emitter, disc),
     cases: s.cases.map((c) =>
       c.test?.kind === "strLit"
         ? {

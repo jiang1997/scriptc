@@ -96,9 +96,15 @@ function webAssemblySurface(lowerer: Lowerer, expr: ts.Expression): string | nul
     isGlobalThis(lowerer, expr.expression)
   ) {
     const target = lowerer.checker.getTypeAtLocation(expr.type);
-    return lowerer.checker.getPropertyOfType(target, "WebAssembly") !== undefined
-      ? "globalThis.WebAssembly"
-      : null;
+    const member = lowerer.checker.getPropertyOfType(target, "WebAssembly");
+    // A target built from `typeof globalThis` (`typeof globalThis & { key?: T }`)
+    // inherits the global's own WebAssembly declaration: that cast names the
+    // whole global object, whose other properties stay readable and writable.
+    const globalMember = lowerer.checker.getPropertyOfType(
+      lowerer.typeOf(bare(expr.expression)),
+      "WebAssembly",
+    );
+    return member !== undefined && member !== globalMember ? "globalThis.WebAssembly" : null;
   }
   const node = bare(expr);
   if (ts.isIdentifier(node)) {

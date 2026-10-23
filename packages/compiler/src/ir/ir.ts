@@ -1073,6 +1073,12 @@ export interface IrModule {
    * write in the program (ir/contract-check.ts). Backends may rely on them
    * unconditionally. Absent when the program writes no contract. */
   contracts?: IrContracts;
+  /** Local number arrays (`function\0local`) the backend may store as
+   * int32 slots, proposed by ir/int32-arrays.ts after their element-reader
+   * calls were inlined; the int32 slot analysis keeps the ones whose every
+   * stored element it proves an int32, and those whose stores are exact
+   * integers with checked stores. Absent when there is none. */
+  int32ArrayCandidates?: string[];
   /** The WebAssembly modules translated into this program (wasm/
    * translate.ts), present exactly when the program uses the WebAssembly
    * API (possibly empty). The backend appends each module's translation
@@ -1691,24 +1697,6 @@ export interface IrRecordShape {
    * an accessor property named once (see accessorSlotProp). The
    * checked-dynamic copy lists its keys in this order. */
   accessorOrder?: string[];
-  /** Every order the shape's values enumerate their keys in, when its
-   * object literals write the keys in more than one order (see
-   * key-order-witness.ts); declaredOrder is the first. Each value holds the
-   * index of its order in the hidden number field KEY_ORDER_FIELD: the
-   * literal that wrote it stores its order's index, a copy its source's,
-   * and every other construction leaves 0. Each key-order surface
-   * dispatches on that field. */
-  orderVariants?: string[][];
-}
-
-/** The hidden field of a shape with orderVariants: the index of the value's
- * key order. */
-export const KEY_ORDER_FIELD = "%order";
-
-/** The orders a record shape's values enumerate their keys in: each order
- * of a shape with orderVariants, or its one table. */
-export function shapeKeyOrders(shape: IrRecordShape): readonly (readonly string[])[] {
-  return shape.orderVariants ?? [shape.declaredOrder ?? shape.fields.map((f) => f.name)];
 }
 
 /** fs.Dirent rows: the hidden %dtype entry kind (libuv's UV_DIRENT
@@ -2112,8 +2100,9 @@ export type IrStmt =
    * and whose `code` carries the SC diagnostic code; unwinds exactly like
    * `throw`.
    * TypeScript sources produce it only as the tsc-unreachable fallthrough
-   * trap (appendImplicitUndefinedReturn's SC9002) — their construct fences
-   * stay compile errors. */
+   * trap (appendImplicitUndefinedReturn's SC9002) and for a typed-array
+   * store through an element index that is undefined at run time
+   * (undefined-index.ts); their construct fences stay compile errors. */
   | { kind: "runtimeFence"; code: string; message: string; loc: SrcLoc }
   /** Rethrow of a catch binding (`throw e` where e is the binding):
    * re-raises the SAVED exception exactly — kind and payload preserved,

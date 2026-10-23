@@ -48,6 +48,12 @@ typedef enum {
    * address over 8, 0 for NULL. Compact instances are never counted or
    * traced, so these arrays retain, release and trace nothing. */
   SCR_ELEM_CREF,
+  /* Numbers that the compiler proves are always int32 (never -0), in
+   * 4-byte slots: arrays that only compiled element accesses ever reach
+   * (backend/llvm int32 arrays). Every runtime slot is the value's double
+   * bits, as for SCR_ELEM_F64: scr_arr_dense_get and scr_arr_dense_put
+   * convert, so the paths compiled code calls need no case of their own. */
+  SCR_ELEM_I32,
 } ScrElemKind;
 
 typedef enum {
@@ -89,6 +95,22 @@ static inline bool scr_arr_ops_compact(const ScrArrOps *ops) {
 #endif
 }
 
+/* `release` does nothing: the element type's instances live until the
+ * process exits (llvm/shapes.ts arrOps). Destroying such an array frees only
+ * its storage. */
+#define SCR_ARR_OPS_RELEASE_NOTHING 2u
+
+/* Whether `ops` has SCR_ARR_OPS_RELEASE_NOTHING. 32-bit descriptors end
+ * before the flags word, so they never have it. */
+static inline bool scr_arr_ops_release_nothing_flag(const ScrArrOps *ops) {
+#if UINTPTR_MAX > 0xffffffffu
+  return (ops->flags & SCR_ARR_OPS_RELEASE_NOTHING) != 0;
+#else
+  (void)ops;
+  return false;
+#endif
+}
+
 typedef struct ScrArr {
   size_t rc; /* SIZE_MAX = immortal (unused for arrays; kept per convention) */
   /* Length and dense capacity are at most SCR_ARR_MAX_LENGTH (2^32 - 1);
@@ -118,11 +140,12 @@ typedef struct ScrArr {
    * 0 is always valid. */
   uint32_t filled;
   /* Dense values: `cap` 8-byte slots, `cap` bytes for SCR_ELEM_BOOL or
-   * `cap` 4-byte slots for SCR_ELEM_CREF (scr_arr_slot_width), followed in
-   * the same allocation, when the array has states (SCR_ARR_STATES), by one
-   * state byte per slot in reverse slot order (scr_arr_states_end). Sparse
-   * entries and properties keep 8-byte slots for every kind; a bool slot is
-   * 0 or 1 wherever it lives, and a CREF slot's 8-byte form is the pointer
+   * `cap` 4-byte slots for SCR_ELEM_CREF and SCR_ELEM_I32
+   * (scr_arr_slot_width), followed in the same allocation, when the array
+   * has states (SCR_ARR_STATES), by one state byte per slot in reverse slot
+   * order (scr_arr_states_end). Sparse entries and properties keep 8-byte
+   * slots for every kind; a bool slot is 0 or 1 wherever it lives, a CREF
+   * slot's 8-byte form is the pointer and an I32 slot's the double's bits
    * (scr_arr_dense_get). Rarely
    * used storage (sparse indices, noncanonical numeric properties,
    * match-result metadata) lives out of line, and an array that has it
@@ -216,6 +239,9 @@ static inline struct ScrArrExt *scr_arr_ext_of(const ScrArr *a) {
 #define SCR_ARR_OPS_SHIFT 5
 #define SCR_ARR_OPS_OVERFLOW (UINT16_MAX >> SCR_ARR_OPS_SHIFT)
 extern const ScrArrOps *scr_arr_ops_table[SCR_ARR_OPS_OVERFLOW];
+/* By registry id: 1 when the descriptor has SCR_ARR_OPS_RELEASE_NOTHING.
+ * Written before the id is published; the overflow id stays 0. */
+extern uint8_t scr_arr_ops_release_nothing[SCR_ARR_OPS_OVERFLOW + 1];
 /* Assigns the id on a descriptor's first array; out of line, so the id
  * load in scr_arr_ops_id stays the only cost on later arrays. */
 __attribute__((cold, noinline)) uint32_t scr_arr_ops_register(ScrArrOps *ops);
@@ -241,7 +267,7 @@ static inline const ScrArrOps *scr_arr_ops(const ScrArr *a) {
 /* Bytes per dense value slot of element kind `elem`. */
 static inline size_t scr_elem_slot_width(uint8_t elem) {
   if (elem == SCR_ELEM_BOOL) return 1;
-  if (__builtin_expect(elem == SCR_ELEM_CREF, 0)) return sizeof(uint32_t);
+  if (__builtin_expect(elem == SCR_ELEM_CREF || elem == SCR_ELEM_I32, 0)) return sizeof(uint32_t);
   return sizeof(uint64_t);
 }
 
@@ -306,11 +332,38 @@ static inline void scr_arr_need_states(ScrArr *a) {
 static inline uint64_t scr_cref_decode(uint32_t ref) { return (uint64_t)ref << 3; }
 static inline uint32_t scr_cref_encode(uint64_t slot) { return (uint32_t)(slot >> 3); }
 
+/* The bits of `d` as a slot, and back. */
+static inline uint64_t scr_arr_f64_slot(double d) {
+  uint64_t slot;
+  memcpy(&slot, &d, sizeof slot);
+  return slot;
+}
+
+static inline double scr_arr_slot_f64(uint64_t slot) {
+  double d;
+  memcpy(&d, &slot, sizeof d);
+  return d;
+}
+
+/* An int32 array's slot for a double: its stores are proven int32s that
+ * are not -0 (and a cleared slot is +0), so anything else is a compiler
+ * bug. */
+static inline int32_t scr_arr_i32_of(uint64_t slot) {
+  double d = scr_arr_slot_f64(slot);
+  if (__builtin_expect(!(d >= -2147483648.0 && d <= 2147483647.0 && d == (double)(int32_t)d) ||
+                           slot == UINT64_C(0x8000000000000000),
+                       0))
+    __builtin_trap();
+  return (int32_t)d;
+}
+
 /* The dense value at `index` (< cap) as an 8-byte slot, and its store. */
 static inline uint64_t scr_arr_dense_get(const ScrArr *a, size_t index) {
   if (a->elem == SCR_ELEM_BOOL) return ((const uint8_t *)a->data)[index];
   if (__builtin_expect(a->elem == SCR_ELEM_CREF, 0))
     return scr_cref_decode(((const uint32_t *)a->data)[index]);
+  if (__builtin_expect(a->elem == SCR_ELEM_I32, 0))
+    return scr_arr_f64_slot((double)((const int32_t *)a->data)[index]);
   return a->data[index];
 }
 
@@ -318,6 +371,8 @@ static inline void scr_arr_dense_put(ScrArr *a, size_t index, uint64_t slot) {
   if (a->elem == SCR_ELEM_BOOL) ((uint8_t *)a->data)[index] = (uint8_t)slot;
   else if (__builtin_expect(a->elem == SCR_ELEM_CREF, 0))
     ((uint32_t *)a->data)[index] = scr_cref_encode(slot);
+  else if (__builtin_expect(a->elem == SCR_ELEM_I32, 0))
+    ((int32_t *)a->data)[index] = scr_arr_i32_of(slot);
   else a->data[index] = slot;
 }
 
@@ -378,6 +433,9 @@ ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap);
  * array plus five 8-byte slots). Otherwise exactly scr_arr_new(elem, 0) and
  * scr_arr_new_ops(ops, 0). Returns +1. */
 ScrArr *scr_arr_new_small(ScrElemKind elem);
+/* An int32 array's storage as doubles, in place (SCR_ELEM_I32 to
+ * SCR_ELEM_F64); no-op for any other kind. */
+void scr_arr_widen_i32(ScrArr *a);
 ScrArr *scr_arr_new_ops_small(const ScrArrOps *ops);
 /* scr_arr_new(elem, cap) for a known final length: the `cap` slots share
  * the array's own block (one allocation). With `states`, the array starts
@@ -402,9 +460,15 @@ void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
  * properties of `target`, so neither is lost when the storage is swapped. */
 void scr_arr_adopt_view_properties(ScrArr *a, struct ScrDyn *view, ScrArr *target);
 /* True when `key` is the string spelling of a number that is not an array
- * index ("-1", "1.5", "NaN", "Infinity"), with the number in *out. Arrays
- * keep such properties in their noncanonical property table. */
+ * index ("-1", "1.5", "NaN", "Infinity"), or "undefined", with the number in
+ * *out (scr_arr_undefined_key for "undefined"). Arrays keep such properties
+ * in their noncanonical property table. */
 bool scr_arr_numeric_key(const char *key, size_t len, double *out);
+/* The number compiled code passes as the key of an element access whose
+ * index is undefined at run time: a NaN with its own payload, which the
+ * property table spells "undefined" (JavaScript names that property, not
+ * "NaN"). */
+double scr_arr_undefined_key(void);
 /* Whether the array still has the named or noncanonical numeric property
  * `key`: `for...in` skips a key deleted before its turn. Borrows both. */
 bool scr_arr_has_named_key(ScrArr *a, ScrStr *key);
@@ -412,6 +476,10 @@ bool scr_arr_has_named_key(ScrArr *a, ScrStr *key);
  * noncanonical numeric properties, then the named properties in insertion
  * order. +1. */
 ScrArr *scr_arr_named_keys(ScrArr *a);
+/* Whether the array has properties besides its elements (noncanonical
+ * numeric keys, match metadata, named properties): util.inspect lists
+ * them after the elements. */
+bool scr_arr_has_properties(const ScrArr *a);
 /* Installed by scr_regex.c when it records a pending match source; this
  * unit links without the regex runtime. Writes the pending metadata of
  * `a` into its dynamic copy or materializes it, answering whether it

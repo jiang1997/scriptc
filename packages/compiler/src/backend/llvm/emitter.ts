@@ -79,8 +79,18 @@ import {
 } from "./emit-journal.js";
 import { specializeNumericCalls } from "../../ir/numeric-call-specialization.js";
 import { versionLoopBoundParameters } from "../../ir/parameter-versions.js";
+import {
+  allocatedLiteral,
+  fillAllocationLength,
+  selectInt32Arrays,
+} from "../../ir/int32-arrays.js";
 import { everyExpr, everyExprChild, everyStmtChild, everyStmtList } from "../../ir/traverse.js";
-import { INT32_RANGE, type IntegerRange, type IntegerRanges } from "../../ir/integer-ranges.js";
+import {
+  INT32_RANGE,
+  withinInt32,
+  type IntegerRange,
+  type IntegerRanges,
+} from "../../ir/integer-ranges.js";
 import { unshareNodes } from "../../ir/unshare.js";
 import { copyStableCaptures } from "../../ir/capture-values.js";
 import { resolveSelfCaptures } from "../../ir/self-captures.js";
@@ -90,6 +100,7 @@ import { foldConstantGlobals } from "../../ir/constant-globals.js";
 import { dropUnwrittenPropertyBags } from "../../ir/property-bags.js";
 import { freezeInitOnlyGlobals } from "../../ir/init-only-globals.js";
 import { hoistFinalFieldReads } from "../../ir/field-values.js";
+import { holdCharLocalsAsUnits } from "../../ir/char-unit-locals.js";
 import {
   findInt32Abis,
   INT32_ABI_SUFFIX,
@@ -99,7 +110,7 @@ import {
 } from "./int32-abi.js";
 import { type Int32Local } from "./int32-locals.js";
 import { findIntegerClones, NO_INTEGER_CLONES, type IntegerClones } from "./integer-clones.js";
-import { exactInteger, narrowInteger } from "./integer-values.js";
+import { exactInteger, narrowInteger, widenInteger } from "./integer-values.js";
 import { findInitializerBindings } from "../../ir/initializer-bindings.js";
 import { findConstantNumericTables, type ConstantNumericTable } from "../../ir/constant-tables.js";
 import {
@@ -146,7 +157,12 @@ import {
 } from "./inline-unions.js";
 import { OptionalArrayReads, type LocalArrayRead } from "./local-array-reads.js";
 import { CheckedNarrows } from "./checked-narrows.js";
-import { emitDenseArraySet, emitDenseSlotUnlink } from "./dense-array-access.js";
+import {
+  emitDenseArraySet,
+  emitDenseSlotUnlink,
+  SCR_ELEM_I32,
+  type ArrayAccess,
+} from "./dense-array-access.js";
 import { matchMapRead, type MapReadLifetimes } from "./map-read-lifetimes.js";
 import { type MapEntryFusion } from "./map-entry-fusion.js";
 import { emitBorrowedFieldSequence, guardedValue } from "./borrowed-receivers.js";
@@ -167,7 +183,7 @@ import {
 } from "./string-slices.js";
 import { LazyCaptures } from "./lazy-captures.js";
 import { StackCaptures } from "./stack-captures.js";
-import { emitFieldAbsentTest, f64Lit } from "./common.js";
+import { emitFieldAbsentTest, f64Lit, SCR_ARR_FIELD } from "./common.js";
 import { ffiExtendsNarrowIntegers } from "../targets.js";
 import {
   emitLiteralExpr,
@@ -482,35 +498,65 @@ function versionParameters(mod: IrModule): IrModule {
   return versionLoopBoundParameters(mod, mangleFunction);
 }
 
-export function emitLlvmModule(input: IrModule, options: LlvmTargetOptions = {}): string {
+/** The int32 arrays the int32 slot analysis keeps in `mod` (proven and
+ * checked), under the inputs LlEmitter gives it (selectInt32Arrays). */
+function provenInt32Arrays(mod: IrModule): ReadonlySet<string> {
+  const slots = analyzeInt32Slots(mod, {
+    dynamicStores: dynamicFieldStores(mod),
+    initializerBindings: findInitializerBindings(mod),
+  });
+  return new Set([...slots.int32Arrays, ...slots.checkedInt32Arrays]);
+}
+
+/** The emitter for `input` after the module passes every emission runs. */
+function moduleEmitter(input: IrModule, options: LlvmTargetOptions): LlEmitter {
   // Facts are keyed by node identity: emit the same module whether it was
   // lowered in memory or read back from its serialized form.
   const mod = unshareNodes(input);
   // Keep source storage intact for debugger inspection in dev builds.
   return new LlEmitter(
     options.debugSources === undefined
-      ? versionParameters(
-          addRecordResultEntries(
-            scalarizeNumericRecords(
-              specializeCallbackCalls(
-                specializeNumericCalls(
-                  foldConstantGlobals(
-                    copyStableCaptures(
-                      resolveSelfCaptures(
-                        hoistFinalFieldReads(freezeInitOnlyGlobals(dropUnwrittenPropertyBags(mod))),
+      ? selectInt32Arrays(
+          versionParameters(
+            addRecordResultEntries(
+              scalarizeNumericRecords(
+                specializeCallbackCalls(
+                  specializeNumericCalls(
+                    foldConstantGlobals(
+                      copyStableCaptures(
+                        resolveSelfCaptures(
+                          hoistFinalFieldReads(
+                            freezeInitOnlyGlobals(
+                              holdCharLocalsAsUnits(dropUnwrittenPropertyBags(mod)),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
+                    mangleFunction,
                   ),
                   mangleFunction,
                 ),
-                mangleFunction,
               ),
             ),
           ),
+          provenInt32Arrays,
         )
       : mod,
     options,
-  ).emit();
+  );
+}
+
+export function emitLlvmModule(input: IrModule, options: LlvmTargetOptions = {}): string {
+  return moduleEmitter(input, options).emit();
+}
+
+/** emitLlvmModule's text as parts that concatenate to it, without the copy
+ * that joining them makes: a large program's text is 150 MB. */
+export function emitLlvmModuleParts(input: IrModule, options: LlvmTargetOptions = {}): string[] {
+  return moduleEmitter(input, options)
+    .emitParts()
+    .flatMap((part, index) => (index === 0 ? [part] : ["\n", part]));
 }
 
 /** Keep large translation units below the host's single-string limit. */
@@ -520,31 +566,7 @@ export function emitLlvmModuleSource(
 ): string | readonly string[] {
   // IR validation, contracts and the frontend's disposal run after lowering without checks.
   relieveHeapPressure(true);
-  const mod = unshareNodes(input);
-  const parts = new LlEmitter(
-    options.debugSources === undefined
-      ? versionParameters(
-          addRecordResultEntries(
-            scalarizeNumericRecords(
-              specializeCallbackCalls(
-                specializeNumericCalls(
-                  foldConstantGlobals(
-                    copyStableCaptures(
-                      resolveSelfCaptures(
-                        hoistFinalFieldReads(freezeInitOnlyGlobals(dropUnwrittenPropertyBags(mod))),
-                      ),
-                    ),
-                  ),
-                  mangleFunction,
-                ),
-                mangleFunction,
-              ),
-            ),
-          ),
-        )
-      : mod,
-    options,
-  ).emitParts();
+  const parts = moduleEmitter(input, options).emitParts();
   const length = parts.reduce((total, part) => total + part.length, Math.max(0, parts.length - 1));
   if (length <= 256 * 1024 * 1024) return parts.join("\n");
   return parts.flatMap((part, index) => (index === 0 ? [part] : ["\n", part]));
@@ -723,6 +745,228 @@ export class LlEmitter {
     }
     this.journal?.entry("tag", category, tag);
     return `, !tbaa !${tag}`;
+  }
+
+  /** The current function's int32 array allocations: the array literals
+   * its int32 arrays are written with. They construct SCR_ELEM_I32 arrays. */
+  int32Allocations = new Set<IrExpr>();
+  /** The fill temporaries (`new Array(n).fill(v)`) of those allocations:
+   * the same arrays, so int32 too. */
+  int32ArrayTemps = new Set<string>();
+  /** The same for the current function's int32 arrays with checked stores,
+   * which are only allocated by fills (ir/int32-arrays.ts
+   * checkableInt32Allocations): their temporaries' literals, with the fill's
+   * length (a literal constructs SCR_ELEM_I32 storage when that length is at
+   * least CHECKED_INT32_MIN_LENGTH, SCR_ELEM_F64 otherwise), and their
+   * temporaries. */
+  checkedAllocations = new Map<IrExpr, IrExpr>();
+  checkedArrayTemps = new Set<string>();
+  /** The fill calls (`.fill(v)`) of those allocations: a value that is not
+   * an int32 widens the new array first. */
+  checkedFills = new Set<IrExpr>();
+
+  /** Collect the int32 allocations of `fn`, about to be emitted. */
+  findInt32Allocations(fn: IrFunction): void {
+    this.int32Allocations.clear();
+    this.int32ArrayTemps.clear();
+    this.checkedAllocations.clear();
+    this.checkedArrayTemps.clear();
+    this.checkedFills.clear();
+    const { int32Arrays, checkedInt32Arrays } = this.int32Slots;
+    if (int32Arrays.size === 0 && checkedInt32Arrays.size === 0) return;
+    everyStmtList(fn.body, {
+      stmt: (s) => {
+        if (s.kind !== "varDecl" && s.kind !== "assign") return true;
+        const key = `${fn.name}\0${s.localId}`;
+        const checked = checkedInt32Arrays.has(key);
+        if (!checked && !int32Arrays.has(key)) return true;
+        const value = s.kind === "varDecl" ? s.init : s.value;
+        const allocation = value && allocatedLiteral(value);
+        if (!allocation) return true;
+        const length = checked ? fillAllocationLength(value) : null;
+        if (length !== null) this.checkedAllocations.set(allocation.literal, length);
+        else if (!checked) this.int32Allocations.add(allocation.literal);
+        if (allocation.temporary !== null)
+          (checked ? this.checkedArrayTemps : this.int32ArrayTemps).add(allocation.temporary);
+        if (checked && value !== allocation.literal) this.checkedFills.add(value!);
+        return true;
+      },
+      expr: () => true,
+    });
+  }
+
+  /** Whether `arr` is one of the current function's int32 arrays
+   * (ir/int32-arrays.ts, kept by the int32 slot analysis). */
+  int32Array(arr: IrExpr): boolean {
+    if (arr.kind !== "varRef") return false;
+    if (this.int32KindArray(arr)) return true;
+    if (this.int32Slots.int32Arrays.size === 0) return false;
+    return (
+      this.int32ArrayTemps.has(arr.localId) ||
+      this.int32Slots.int32Arrays.has(`${this.currentFunctionName}\0${arr.localId}`)
+    );
+  }
+
+  /** Whether `arr` is one of the current function's int32 arrays with
+   * checked stores: int32 slots until a store widens it to doubles. Every
+   * access tests its kind (emitByElementKind), except in the fast copy of
+   * an int32 kind loop, which reads and writes it as an int32 array. */
+  checkedInt32Array(arr: IrExpr): boolean {
+    if (arr.kind !== "varRef" || this.int32KindArray(arr)) return false;
+    if (this.int32Kinds?.wide.has(`${this.currentFunctionName}\0${arr.localId}`)) return false;
+    return this.checkedInt32Local(arr.localId);
+  }
+
+  /** Whether the local `localId` holds one of the current function's int32
+   * arrays with checked stores. */
+  checkedInt32Local(localId: string): boolean {
+    if (this.int32Slots.checkedInt32Arrays.size === 0) return false;
+    return (
+      this.checkedArrayTemps.has(localId) ||
+      this.int32Slots.checkedInt32Arrays.has(`${this.currentFunctionName}\0${localId}`)
+    );
+  }
+
+  /** Whether `arr` is an int32 array with checked stores that the fast copy
+   * of the int32 kind loop being emitted holds as an int32 array. */
+  int32KindArray(arr: IrExpr): boolean {
+    return (
+      this.int32Kinds !== null &&
+      arr.kind === "varRef" &&
+      this.int32Kinds.int32.has(`${this.currentFunctionName}\0${arr.localId}`)
+    );
+  }
+
+  /** Before a store of `value` (of `expr`) into `arr`, in the fast copy of
+   * an int32 kind loop: continue when it is an int32 that is not -0, and
+   * otherwise leave for the statement's resume point, where it re-executes
+   * with kind tests. Returns the value as an i32 when it is at hand as an
+   * integer, or null when the store converts the double itself. */
+  emitInt32KindStoreCheck(arr: IrExpr, value: LlValue, expr: IrExpr): string | null {
+    if (!this.int32KindArray(arr) || withinInt32(this.integerRanges.get(expr))) return null;
+    const integer = exactInteger(this, value, expr);
+    if (integer !== null && withinInt32(integer.range)) return narrowInteger(this, integer);
+    const resume = this.int32KindResume;
+    if (resume === null)
+      throw new InternalCompilerError("llvm emitter bug: an int32 kind store without a resume");
+    const B = this.B;
+    const ok = B.tmp(),
+      int = B.tmp();
+    if (integer !== null) {
+      // An exact integer: a range test on its 64-bit form.
+      const wide = widenInteger(this, integer),
+        low = B.tmp(),
+        high = B.tmp();
+      B.line(`${low} = icmp sge i64 ${wide}, -2147483648`);
+      B.line(`${high} = icmp sle i64 ${wide}, 2147483647`);
+      B.line(`${ok} = and i1 ${low}, ${high}`);
+      const store = B.newLabel("arr.store.i32");
+      B.condBr(ok, store, resume);
+      B.startBlock(store);
+      B.line(`${int} = trunc i64 ${wide} to i32`);
+      return int;
+    }
+    this.declare("declare i32 @llvm.fptosi.sat.i32.f64(double)");
+    const back = B.tmp(),
+      exact = B.tmp(),
+      bits = B.tmp(),
+      notNegativeZero = B.tmp();
+    B.line(`${int} = call i32 @llvm.fptosi.sat.i32.f64(double ${value.name})`);
+    B.line(`${back} = sitofp i32 ${int} to double`);
+    B.line(`${exact} = fcmp oeq double ${back}, ${value.name}`);
+    B.line(`${bits} = bitcast double ${value.name} to i64`);
+    B.line(`${notNegativeZero} = icmp ne i64 ${bits}, -9223372036854775808`);
+    B.line(`${ok} = and i1 ${exact}, ${notNegativeZero}`);
+    const store = B.newLabel("arr.store.i32");
+    B.condBr(ok, store, resume);
+    B.startBlock(store);
+    return int;
+  }
+
+  /** Emit an access to the checked int32 array `array` once per element
+   * kind: `arm("i32", widened)` while it holds int32 slots and
+   * `arm("f64", widened)` after it widened, joined after both. `widened` is
+   * the label of the double arm, where an int32 arm's store of a value that
+   * is not an int32 continues after widening the array. Returns the phi of
+   * the arms' results (of LLVM type `ty`), or null when `ty` is null. */
+  emitByElementKind(
+    array: string,
+    ty: string | null,
+    arm: (acc: "i32" | "f64", widened: string) => string | null,
+  ): string | null {
+    const B = this.B;
+    const narrow = B.newLabel("arr.kind.i32"),
+      wide = B.newLabel("arr.kind.f64"),
+      join = B.newLabel("arr.kind.join");
+    const kindPtr = B.tmp(),
+      kind = B.tmp(),
+      isInt32 = B.tmp();
+    B.line(
+      `${kindPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.elem}`,
+    );
+    this.markMemoryPointer(kindPtr, "array:header");
+    B.line(`${kind} = load i8, ptr ${kindPtr}${this.fieldAliasAttachment(kindPtr)}`);
+    B.line(`${isInt32} = icmp eq i8 ${kind}, ${SCR_ELEM_I32}`);
+    B.condBr(isInt32, narrow, wide);
+    B.startBlock(narrow);
+    const narrowValue = arm("i32", wide);
+    const narrowEnd = B.isTerminated() ? null : B.currentLabel();
+    if (narrowEnd !== null) B.br(join);
+    B.startBlock(wide);
+    const wideValue = arm("f64", wide);
+    const wideEnd = B.isTerminated() ? null : B.currentLabel();
+    if (wideEnd !== null) B.br(join);
+    B.startBlock(join);
+    // Arms that end in their own branches (a read's shared join) leave this
+    // join without predecessors.
+    if (narrowEnd === null && wideEnd === null) B.terminate("unreachable");
+    if (ty === null) return null;
+    const arms: string[] = [];
+    if (narrowEnd !== null) arms.push(`[ ${narrowValue}, %${narrowEnd} ]`);
+    if (wideEnd !== null) arms.push(`[ ${wideValue}, %${wideEnd} ]`);
+    const result = B.tmp();
+    B.line(`${result} = phi ${ty} ${arms.join(", ")}`);
+    return result;
+  }
+
+  /** Before storing the double `value` (of `expr`) into an int32 arm
+   * (emitByElementKind) of the checked int32 array `array`: continue in this
+   * arm when it is an int32 that is not -0, or widen the array and continue
+   * at `widened`. A value proven an int32 needs no test. */
+  emitCheckedInt32Store(array: string, value: string, expr: IrExpr, widened: string): void {
+    if (withinInt32(this.integerRanges.get(expr))) return;
+    const B = this.B;
+    this.declare("declare i32 @llvm.fptosi.sat.i32.f64(double)");
+    this.declare("declare void @scr_arr_widen_i32(ptr)");
+    const int = B.tmp(),
+      back = B.tmp(),
+      exact = B.tmp(),
+      bits = B.tmp(),
+      notNegativeZero = B.tmp(),
+      ok = B.tmp();
+    B.line(`${int} = call i32 @llvm.fptosi.sat.i32.f64(double ${value})`);
+    B.line(`${back} = sitofp i32 ${int} to double`);
+    B.line(`${exact} = fcmp oeq double ${back}, ${value}`);
+    B.line(`${bits} = bitcast double ${value} to i64`);
+    B.line(`${notNegativeZero} = icmp ne i64 ${bits}, -9223372036854775808`);
+    B.line(`${ok} = and i1 ${exact}, ${notNegativeZero}`);
+    const store = B.newLabel("arr.store.i32"),
+      widen = B.newLabel("arr.widen");
+    B.condBr(ok, store, widen);
+    B.startBlock(widen);
+    B.line(`call void @scr_arr_widen_i32(ptr ${array})`);
+    B.br(widened);
+    B.startBlock(store);
+  }
+
+  /** The access an element operation on `arr` (of element type `elem`)
+   * takes: int32 arrays read and write their 4-byte slots. */
+  arrayAccess(arr: IrExpr, elem: IrType): ArrayAccess {
+    if (this.checkedInt32Array(arr))
+      throw new InternalCompilerError(
+        "llvm emitter bug: a checked int32 array without its kind test",
+      );
+    return this.int32Array(arr) ? "i32" : elemAccess(elem);
   }
 
   /** Whether an element access at `index` of `arr` lies in the hole-free
@@ -1025,6 +1269,11 @@ export class LlEmitter {
   get usesDynBuiltinStream(): boolean {
     return this.runtimeFeatures.dynBuiltinStream;
   }
+  /** A checked-dynamic for-await may hold a native stream: the program
+   * links the stream unit (and the dyn-async one the loop needs). */
+  get dynForAwaitStreams(): boolean {
+    return this.runtimeFeatures.stream && this.runtimeFeatures.dynAsync;
+  }
   /** Runtime-arm dispatchers for live union values. */
   readonly liveDynUnionRefAdapters = new Map<string, string>();
   readonly dynPromiseAdapters = new Map<string, string>();
@@ -1166,6 +1415,14 @@ export class LlEmitter {
    * (`enterLoopHeader`): records the ordinary copy's header, or sends the
    * third copy's header there. */
   speculationHeader: ((header: string) => void) | null = null;
+  /** A copy of an int32 kind loop (int32-kind-loops.ts) being emitted: the
+   * int32 arrays with checked stores it reads and writes as int32 arrays
+   * (the fast copy) or as double arrays (an ordinary copy entered only
+   * after they widened), as `function\0local` keys, and where each of the
+   * fast copy's writes resumes in the third copy. */
+  int32Kinds: { int32: Set<string>; wide: Set<string>; resume: Map<IrStmt, string> } | null = null;
+  /** The resume label of the fast-copy write being emitted. */
+  int32KindResume: string | null = null;
   /** The function being emitted, for speculative globals. */
   speculativeFunction = "";
   /** Every function that writes each number global (computed on demand). */
@@ -1187,6 +1444,10 @@ export class LlEmitter {
    * (findIntegerOrNaNLocals in wrapping-sums.ts). */
   integerOrNaNLocals: ReadonlyMap<string, IntegerRange> = new Map();
   bytesBounds: ReadonlySet<IrExpr | IrStmt> = new Set();
+  /** The charCodeAt reads standing for charAt reads the emitter rewrote
+   * (one-unit tests and switches, charAtUnitRead), with the charAt each
+   * stands for: a loop version's proof for the charAt covers its read. */
+  readonly charAtUnitReads = new Map<IrExpr, IrExpr>();
   /** Worker programs: typed-array accesses whose views an enclosing version
    * guard proved thread-owned. */
   bytesOwned: ReadonlySet<IrExpr | IrStmt> = new Set();
@@ -1586,6 +1847,11 @@ export class LlEmitter {
       dynPromiseAdapter: (type) => this.dynPromiseAdapter(type),
       isErrorClass: (name) => this.classMeta.get(name)?.root.def.name === "%Error",
       classRootOf: (name) => this.classMeta.get(name)?.root.def.name,
+      releasesNothing: (t) => {
+        if (t.kind !== "object" || (this.shapeHost.regions ?? null) !== null) return false;
+        const meta = this.classMeta.get(t.className);
+        return meta !== undefined && programLifetimeClass(this.shapeHost, meta);
+      },
       classSubtypes: (name) => {
         const target = this.classMetaOf(name);
         const intervals = classMembershipIntervals(this.classMeta, target.def.name);
@@ -5249,10 +5515,14 @@ export class LlEmitter {
     const loop =
       s.kind === "while" || s.kind === "doWhile" || s.kind === "for" || s.kind === "forOf";
     if (loop) this.loopDepth++;
+    // An int32 kind loop's fast-copy write leaves for its resume point.
+    const kindResume = this.int32KindResume;
+    this.int32KindResume = this.int32Kinds?.resume.get(s) ?? null;
     try {
       this.emitStmtBody(s);
     } finally {
       this.B.debugLocation = previous;
+      this.int32KindResume = kindResume;
       if (loop) this.loopDepth--;
     }
   }
@@ -6460,7 +6730,10 @@ export class LlEmitter {
     return streamDataAdapter(this, cbT);
   }
 
-  streamDoneFnFor(kind: "w" | "f" | "d" | "t" | "l", doneT: IrType & { kind: "func" }): string {
+  streamDoneFnFor(
+    kind: "w" | "f" | "d" | "t" | "l" | "c",
+    doneT: IrType & { kind: "func" },
+  ): string {
     return streamDoneFnFor(this, kind, doneT);
   }
 
@@ -6484,7 +6757,7 @@ export class LlEmitter {
     return zlibBytesThunkFor(this, cbT);
   }
 
-  streamCbThunkFor(kind: "r" | "w" | "f" | "d" | "t" | "l" | "e", cbT: IrType): string {
+  streamCbThunkFor(kind: "r" | "w" | "f" | "d" | "t" | "l" | "e" | "c" | "v", cbT: IrType): string {
     return streamCbThunkFor(this, kind, cbT);
   }
 
@@ -6496,7 +6769,7 @@ export class LlEmitter {
     return tagInSet(this, uName, unionId, tags);
   }
 
-  arrPush(arr: string, acc: "f64" | "bool" | "ref", value: string, element: IrType | null): string {
+  arrPush(arr: string, acc: ArrayAccess, value: string, element: IrType | null): string {
     return arrPush(this, arr, acc, value, element);
   }
 

@@ -44,7 +44,9 @@ typedef struct SfChunk {
 } SfChunk;
 
 struct SfReadRequest {
-  ScrPromise *promise;
+  ScrPromise *promise;            /* or NULL for a sink request */
+  const ScrFetchReadSink *sink;   /* readableStreamDefaultReaderRead's read request */
+  void *sink_ctx;
   SfReadRequest *next;
 };
 
@@ -776,6 +778,11 @@ static SfReadRequest *sf_reader_take_request(SfReader *r) {
 static void sf_reader_reject_message_all(SfReader *r, const char *message) {
   SfReadRequest *request;
   while ((request = sf_reader_take_request(r)) != NULL) {
+    if (request->sink) {
+      request->sink->error(request->sink_ctx, NULL);
+      free(request);
+      continue;
+    }
     sf_type_error(message);
     scr_promise_reject_pending(request->promise);
     scr_promise_release(request->promise);
@@ -958,6 +965,12 @@ static void sf_reader_fulfill_one(SfReader *r, bool done, ScrDyn *value) {
   if (!r) return;
   SfReadRequest *request = sf_reader_take_request(r);
   if (!request) return;
+  if (request->sink) {
+    if (done) request->sink->close(request->sink_ctx);
+    else request->sink->chunk(request->sink_ctx, value);
+    free(request);
+    return;
+  }
   scr_promise_fulfill_ref(request->promise, sf_read_result(done, value),
                           &scr_dyn_retain_v, &scr_dyn_release_v, NULL);
   scr_promise_release(request->promise);
@@ -968,6 +981,11 @@ static void sf_reader_reject_all(SfReader *r, ScrDyn *reason) {
   if (!r) return;
   SfReadRequest *request;
   while ((request = sf_reader_take_request(r)) != NULL) {
+    if (request->sink) {
+      request->sink->error(request->sink_ctx, reason);
+      free(request);
+      continue;
+    }
     sf_reject_promise_reason(request->promise, reason);
     scr_promise_release(request->promise);
     free(request);
@@ -1654,18 +1672,21 @@ static SfReader *sf_stream_get_reader(SfStream *s) {
   return r;
 }
 
-static ScrPromise *sf_reader_read(SfReader *r) {
-  ScrPromise *p = scr_promise_new();
+/* readableStreamDefaultReaderRead: queue the request, then serve it from
+ * the queue or a pull. false (TypeError pending) for a released reader. */
+static bool sf_reader_read_request(SfReader *r, ScrPromise *p, const ScrFetchReadSink *sink,
+                                   void *sink_ctx) {
   SfStream *s = r->stream;
   if (!s || s->reader != r) {
     sf_type_error("This reader has been released");
-    scr_promise_reject_pending(p);
-    return p;
+    return false;
   }
   s->disturbed = true;
   SfReadRequest *request = calloc(1, sizeof *request);
   if (!request) sf_oom();
-  request->promise = scr_promise_retain(p);
+  request->promise = p ? scr_promise_retain(p) : NULL;
+  request->sink = sink;
+  request->sink_ctx = sink_ctx;
   if (r->pending_tail) r->pending_tail->next = request;
   else r->pending_head = request;
   r->pending_tail = request;
@@ -1674,6 +1695,12 @@ static ScrPromise *sf_reader_read(SfReader *r) {
     sf_stream_pull(s);
     sf_stream_drain(s);
   }
+  return true;
+}
+
+static ScrPromise *sf_reader_read(SfReader *r) {
+  ScrPromise *p = scr_promise_new();
+  if (!sf_reader_read_request(r, p, NULL, NULL)) scr_promise_reject_pending(p);
   return p;
 }
 
@@ -1958,6 +1985,15 @@ ScrDyn *scr_fetch_stream_from_string(ScrStr *iterable) {
   ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
   sf_stream_release(s);
   return out;
+}
+
+bool scr_fetch_reader_read_into(ScrDyn *reader, const ScrFetchReadSink *sink, void *ctx) {
+  if (!reader || reader->kind != SCR_DYN_HANDLE ||
+      reader->v.handle.tag != SCR_DYNH_WEB_READER) {
+    sf_type_error("Expected a ReadableStreamDefaultReader");
+    return false;
+  }
+  return sf_reader_read_request((SfReader *)reader->v.handle.ptr, NULL, sink, ctx);
 }
 
 ScrPromise *scr_fetch_reader_read(ScrDyn *reader) {

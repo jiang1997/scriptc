@@ -17,6 +17,16 @@ import {
 import type { SourceFile } from "./ast-types.js";
 import { SyntaxKind, NodeFlags } from "./enums.js";
 
+/** Receives the file name of a source file whose raw text or line
+ * positions a reader takes: the text of a node other than a token
+ * (getText), a node's text with its trivia (getFullText), or line starts. */
+let sourceTextObserver: ((fileName: string) => void) | undefined;
+
+/** Installs the observer of raw source text reads (sourceTextObserver). */
+export function observeSourceText(observer: ((fileName: string) => void) | undefined): void {
+  sourceTextObserver = observer;
+}
+
 /** A list of child nodes with the list's own position, the shape of tsc-ts's
  * NodeList. The file keeps the nodes array, not this object: each read of a
  * list field returns a new AstNodeList over the same array, so `nodes` keeps
@@ -210,6 +220,12 @@ export class AstFile {
     return result;
   }
 
+  /** Reports a read of this file's raw text or line positions. */
+  noteSourceText(): void {
+    if (sourceTextObserver !== undefined && this.root.kind === SyntaxKind.SourceFile)
+      sourceTextObserver(this.root.fileName);
+  }
+
   /** The file name of the source file node at `index`; the root's is
    * read once. */
   sourceFileName(index: number): string {
@@ -220,6 +236,7 @@ export class AstFile {
   }
 
   lineStarts(): number[] {
+    this.noteSourceText();
     if (this.lines === undefined) this.lines = astLineStarts(this.root.text ?? "");
     return this.lines;
   }
@@ -495,10 +512,14 @@ export class AstNode {
     return this.getStart(sourceFile) - this.pos;
   }
   getFullText(sourceFile?: AstNode): string {
-    return ((sourceFile ?? this.file.root).text ?? "").substring(this.pos, this.end);
+    const source = sourceFile ?? this.file.root;
+    source.file.noteSourceText();
+    return (source.text ?? "").substring(this.pos, this.end);
   }
   getText(sourceFile?: AstNode): string {
     const source = sourceFile ?? this.file.root;
+    // A token's text is the same in every token-equivalent version.
+    if (this.kind > SyntaxKind.LastToken) source.file.noteSourceText();
     return (source.text ?? "").substring(this.getStart(source), this.end);
   }
 

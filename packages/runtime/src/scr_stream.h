@@ -65,6 +65,8 @@ typedef void (*ScrStreamReadInv)(ScrClosure *cb, ScrStream *s, double size);
 typedef void (*ScrStreamChunkInv)(ScrClosure *cb, ScrStream *s, ScrBytes *chunk);
 typedef void (*ScrStreamPlainInv)(ScrClosure *cb, ScrStream *s);
 typedef void (*ScrStreamErrInv)(ScrClosure *cb, ScrStream *s, ScrError *err);
+/* writev(chunks, callback): chunks is the batch's dyn array (borrowed). */
+typedef void (*ScrStreamWritevInv)(ScrClosure *cb, ScrStream *s, struct ScrDyn *chunks);
 
 /* Constructors (+1 result; option callbacks MOVE; NULL = absent). hwm < 0
  * means the byte default (65536 — Node 24's getDefaultHighWaterMark). */
@@ -223,6 +225,9 @@ ScrStream *scr_stream_pipeline_stages(double n, ScrStream **streams, double coun
                                       double mask, ScrClosure **helpers, ScrClosure *box,
                                       struct ScrDyn *signal, ScrClosure *abort, ScrClosure *cb,
                                       ScrStreamErrInv inv);
+ScrStream *scr_stream_compose_stages(double n, ScrStream **streams, double count, ScrClosure **stages,
+                                     double positions, double flags, double mask, ScrClosure **helpers,
+                                     ScrClosure *box, ScrDyn *signal, ScrClosure *abort);
 ScrStream *scr_stream_pipeline_stages_dyn(double n, ScrStream **streams, double count,
                                           ScrClosure **stages, double positions, double flags,
                                           double mask, ScrClosure **helpers, ScrClosure *box,
@@ -261,6 +266,9 @@ ScrDyn *scr_stream_done_dyn_l(ScrClosure *clo, ScrDyn *const *args, size_t argc)
 /* The readable surface. push/unshift borrow their chunk (strings convert
  * utf8, Node's decodeStrings default); push answers the below-hwm bool. */
 bool scr_stream_push(ScrStream *s, ScrBytes *chunk);
+/* readable.push(chunk) from a program: a non-Buffer view becomes a Buffer
+ * over the same bytes in byte mode. */
+bool scr_stream_push_view(ScrStream *s, ScrBytes *chunk);
 bool scr_stream_push_str(ScrStream *s, ScrStr *str);
 /* push(chunk, enc): the per-call literal encoding (canonical); overrides
  * the stream's defaultEncoding. Borrows both. */
@@ -296,6 +304,14 @@ bool scr_stream_write_dyn(ScrStream *s, const ScrDyn *d, ScrClosure *cb); /* cb 
 bool scr_stream_write_enc(ScrStream *s, const ScrDyn *chunk, ScrDyn *enc, ScrClosure *cb);
 ScrPromise *scr_stream_next_chunk(ScrStream *s);
 ScrPromise *scr_stream_next_chunk_dyn(ScrStream *s);
+/* The same step resolving with an iterator result ({ value, done }). */
+ScrPromise *scr_stream_next_result_dyn(ScrStream *s);
+/* The native readable stream behind a checked-dynamic value (+1), or NULL. */
+ScrStream *scr_stream_native_readable_of_dyn(const struct ScrDyn *value);
+/* for await over a checked-dynamic value in a program with streams
+ * (scr_stream_ops.c): a native readable stream iterates as a typed loop
+ * does; any other value takes scr_dyn_async_iterator_open. */
+struct ScrDyn *scr_stream_dyn_async_iterator_open(struct ScrDyn *value, ScrStr *spell);
 /* node:stream/promises — the promise forms over the finished/pipeline
  * machinery above: a pending void promise the terminal watcher settles
  * (fulfilled on a clean finish, rejected with the finish status
@@ -329,6 +345,7 @@ enum {
   SCR_FROM_BYTE_MODE = 4,
   SCR_FROM_HAS_HWM = 8,
   SCR_FROM_DEFAULT_HWM = 16, /* a nullish highWaterMark: the mode's default */
+  SCR_FROM_DUPLEX = 32,      /* Duplex.from: a Duplexify with its writable side off */
 };
 ScrStream *scr_stream_from_arr(ScrArr *arr, double flags, double hwm);
 /* Readable.from(iterable, options) over a checked-dynamic source: a
@@ -414,18 +431,41 @@ int scr_stream_push_object(ScrStream *s, const ScrDyn *v);
  * dyn array, find and reduce a dyn value — reduce's `kind` picks the
  * payload instead: 0 dyn, 1 number, 2 boolean, 3 string — some and every
  * a boolean, forEach nothing. */
-ScrStream *scr_stream_op_map(ScrStream *s, ScrDyn *fn, ScrDyn *options);
-ScrStream *scr_stream_op_filter(ScrStream *s, ScrDyn *fn, ScrDyn *options);
-ScrStream *scr_stream_op_flat_map(ScrStream *s, ScrDyn *fn, ScrDyn *options);
+ScrStream *scr_stream_op_map(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
+ScrStream *scr_stream_op_filter(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
+ScrStream *scr_stream_op_flat_map(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
+/* flatMap whose callback returns a compiled generator: the helpers over its
+ * type (async: next, read, return, throw; sync: next, return, throw;
+ * borrowed). */
+ScrStream *scr_stream_op_flat_map_async_gen(ScrStream *s, ScrDyn *fn, ScrDyn *options,
+                                            ScrDyn *cb_opts, ScrClosure *next, ScrClosure *read,
+                                            ScrClosure *ret, ScrClosure *thr);
+ScrStream *scr_stream_op_flat_map_sync_gen(ScrStream *s, ScrDyn *fn, ScrDyn *options,
+                                           ScrDyn *cb_opts, ScrClosure *next, ScrClosure *ret,
+                                           ScrClosure *thr);
 ScrStream *scr_stream_op_drop(ScrStream *s, ScrDyn *number, ScrDyn *options);
 ScrStream *scr_stream_op_take(ScrStream *s, ScrDyn *number, ScrDyn *options);
 ScrPromise *scr_stream_op_to_array(ScrStream *s, ScrDyn *options);
-ScrPromise *scr_stream_op_for_each(ScrStream *s, ScrDyn *fn, ScrDyn *options);
-ScrPromise *scr_stream_op_some(ScrStream *s, ScrDyn *fn, ScrDyn *options);
-ScrPromise *scr_stream_op_every(ScrStream *s, ScrDyn *fn, ScrDyn *options);
-ScrPromise *scr_stream_op_find(ScrStream *s, ScrDyn *fn, ScrDyn *options);
+ScrPromise *scr_stream_op_for_each(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
+ScrPromise *scr_stream_op_some(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
+ScrPromise *scr_stream_op_every(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
+ScrPromise *scr_stream_op_find(ScrStream *s, ScrDyn *fn, ScrDyn *options, ScrDyn *cb_opts);
 ScrPromise *scr_stream_op_reduce(ScrStream *s, ScrDyn *fn, ScrDyn *init, bool has_init,
                                  ScrDyn *options, double kind);
+/* reduce whose reducer reads its { signal } (cb_opts): abort is ac.abort()
+ * (borrowed), run when the reduction ends. */
+ScrPromise *scr_stream_op_reduce_signal(ScrStream *s, ScrDyn *fn, ScrDyn *init, bool has_init,
+                                        ScrDyn *options, double kind, ScrClosure *abort,
+                                        ScrDyn *cb_opts);
+/* `options?.signal` (+1, undefined when absent) and `{ once: true }` (+1),
+ * for the listener that makes options.signal abort reduce's controller. */
+ScrDyn *scr_stream_op_signal_of(ScrDyn *options);
+ScrDyn *scr_stream_op_once_options(void);
+/* The operator callbacks' { signal } (the options argument): the signals
+ * AbortSignal.any combines (`[options?.signal].filter(Boolean)`) and the
+ * object around the combined signal. +1 each. */
+ScrDyn *scr_stream_op_signal_list(ScrDyn *options);
+ScrDyn *scr_stream_op_signal_opts(ScrDyn *signal);
 /* finished(s, options[, cb]) — Node's eos with its listeners and state
  * predicates: readable/writable are -1 (the default), 0 or 1; on_error is
  * options.error !== false; signal is NULL or borrowed (ERR_INVALID_ARG_TYPE
@@ -445,6 +485,12 @@ ScrPromise *scr_sp_finished_opts(ScrStream *s, double readable, double writable,
  * ERR_INVALID_ARG_TYPE. Streams borrowed. */
 ScrPromise *scr_sp_pipeline_opts(double n, ScrStream **streams, bool end, ScrDyn *signal,
                                  ScrAbortAddFn add);
+/* scr_sp_pipeline_stages with the options' end and signal (outer). */
+ScrPromise *scr_sp_pipeline_stages_opts(double n, ScrStream **streams, double count,
+                                        ScrClosure **stages, double positions, double flags,
+                                        double mask, ScrClosure **helpers, ScrClosure *box,
+                                        ScrDyn *signal, ScrClosure *abort, bool end,
+                                        ScrDyn *outer, ScrAbortAddFn add);
 double scr_stream_prop(ScrStream *s, const char *name);
 ScrError *scr_stream_errored(ScrStream *s); /* +1 or NULL */
 
@@ -512,6 +558,57 @@ void scr_stream_flush_done_value(ScrStream *s, ScrError *err, struct ScrDyn *v);
 void scr_stream_construct(ScrStream *s, ScrClosure *cb, ScrStreamPlainInv inv);
 void scr_stream_construct_done(ScrStream *s, ScrError *err);
 void scr_stream_set_writev_concat(ScrStream *s);
+/* The user construct option / _construct method (scheduled now; cb
+ * moves), and the writev option / _writev method (cb moves). */
+void scr_stream_set_construct(ScrStream *s, ScrClosure *cb, ScrStreamPlainInv inv);
+void scr_stream_set_writev(ScrStream *s, ScrClosure *cb, ScrStreamWritevInv inv);
+void scr_stream_set_writev_default(ScrStream *s, ScrClosure *cb, ScrStreamWritevInv inv);
+/* Duplex.from (duplexify.js): over an async generator function (the
+ * compiled stage takes the source generator that the compiled source
+ * makes from next() and ack(); all borrowed, helpers too), and over a
+ * checked-dynamic body (borrowed). +1 each. The typed iterable bodies take
+ * the Readable.from builders with SCR_FROM_DUPLEX. */
+ScrStream *scr_stream_duplex_from_gen(ScrClosure *stage, ScrClosure *source, ScrClosure *next,
+                                      ScrClosure *read, ScrClosure *ret, ScrClosure *thr);
+ScrStream *scr_stream_duplex_from_dyn(struct ScrDyn *body);
+/* Readable.fromWeb(readableStream, { objectMode, highWaterMark, encoding })
+ * (scr_stream_from_web.c): hwm < 0 is the mode's default, encoding NULL or
+ * a known name; web and encoding borrowed. +1, or NULL with the error. */
+ScrStream *scr_stream_readable_from_web(struct ScrDyn *web, bool object_mode, double hwm, ScrStr *encoding);
+/* Duplex.from over an async function (the compiled stage takes the source
+ * generator and answers its promise; source and the promise's box helper
+ * borrowed): a writable Duplexify whose final waits for the promise. +1. */
+ScrStream *scr_stream_duplex_from_async_fn(ScrClosure *stage, ScrClosure *source, ScrClosure *box);
+/* The same for a body that declares the options argument: it takes
+ * { signal } (signal borrowed), and destroy calls abort(err) (borrowed),
+ * the AbortController's abort, before it settles (fromAsyncGen's
+ * ac.abort(err)). */
+ScrStream *scr_stream_duplex_from_gen_signal(ScrClosure *stage, ScrClosure *source, ScrClosure *next,
+                                             ScrClosure *read, ScrClosure *ret, ScrClosure *thr,
+                                             ScrClosure *abort, struct ScrDyn *signal);
+ScrStream *scr_stream_duplex_from_async_fn_signal(ScrClosure *stage, ScrClosure *source,
+                                                  ScrClosure *box, ScrClosure *abort,
+                                                  struct ScrDyn *signal);
+/* Duplex.from over a Readable, a Writable, or a { readable, writable }
+ * pair (duplexify.js's _duplexify): a Duplexify that reads r and writes w
+ * (either NULL in scr_stream_duplexify; streams borrowed). +1. */
+ScrStream *scr_stream_duplexify(ScrStream *r, ScrStream *w);
+ScrStream *scr_stream_duplexify_readable(ScrStream *r);
+ScrStream *scr_stream_duplexify_writable(ScrStream *w);
+ScrStream *scr_stream_duplexify_pair(ScrStream *r, ScrStream *w);
+/* Duplex.from(promise): a readable Duplexify of the promise's value. p and
+ * box (the compiler's promise → dyn promise helper) borrowed. +1. */
+ScrStream *scr_stream_duplex_from_promise(struct ScrPromise *p, ScrClosure *box);
+/* decodeStrings (false keeps string writes as strings), the writable
+ * defaultEncoding option (a known encoding, borrowed), and
+ * setDefaultEncoding (validated; answers the stream +1). The chaining
+ * forms answer the stream (+1). */
+void scr_stream_set_decode_strings(ScrStream *s, bool decode);
+ScrStream *scr_stream_decode_strings(ScrStream *s, bool decode);
+void scr_stream_set_write_encoding(ScrStream *s, ScrStr *enc);
+ScrStream *scr_stream_write_encoding(ScrStream *s, ScrStr *enc);
+ScrStream *scr_stream_set_default_encoding(ScrStream *s, struct ScrDyn *enc);
+ScrDyn *scr_stream_done_dyn_c(ScrClosure *clo, ScrDyn *const *args, size_t argc);
 /* The native state's extra operations: view adds its members to the
  * stream's untyped view and close is the view's close() (both NULL when
  * absent); aggregate builds aggregateTwoErrors' +1 AggregateError from the

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { textSlices, writeTextPartsSync } from "./text-file.js";
+import { joinedParts, textSlices, writeTextPartsSync } from "./text-file.js";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -39,4 +39,14 @@ test("a part larger than one slice is written as its UTF-8 bytes", () => {
   expect(readFileSync(path).equals(expected)).toBe(true);
   expect(seen.join("")).toBe("head," + large + "tail");
   expect(Math.max(...seen.map((slice) => slice.length))).toBeLessThanOrEqual(1024 * 1024);
+});
+
+test("small parts join into batches and a long part passes through whole", () => {
+  const small = Array.from({ length: 3000 }, (_, index) => `line ${index}\n`);
+  const long = "x".repeat(2 * 1024 * 1024);
+  const parts = [...small, long, "tail"];
+  const joined = [...joinedParts(parts)];
+  expect(joined.join("")).toBe(parts.join(""));
+  expect(joined.length).toBeLessThan(5);
+  expect(joined).toContain("tail");
 });

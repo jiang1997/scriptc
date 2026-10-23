@@ -122,7 +122,8 @@ const COPIES = new Set([
 const COPY_IN = new Set(["pushSpread", "unshiftSpread", "spliceInsert"]);
 
 /** Library calls that only read array arguments. */
-const READ_ONLY_LIB = /^(console\.|inspect\.|json\.stringify|math\.|insp\.)/;
+const READ_ONLY_LIB =
+  /^(console\.|inspect\.|json\.stringify|math\.|insp\.|array\.(hasProperties|namedKeys|hasNamedKey)$)/;
 
 /** Library calls that always throw (the value they stand for never exists). */
 const THROWING_LIB = /^error\.\w*Throw$/;
@@ -872,6 +873,9 @@ export class Int32ElementContracts {
     };
     const isNumberArray = (t: IrType): boolean => t.kind === "array" && t.elem.kind === "f64";
 
+    // Live views handed straight to a read-only library call (util.inspect
+    // of an array with properties) are only read through.
+    const readOnlyViews = new Set<IrExpr>();
     const expr = (e: IrExpr): void => {
       switch (e.kind) {
         case "assignExpr":
@@ -1000,6 +1004,7 @@ export class Int32ElementContracts {
         case "libCall":
           if (!READ_ONLY_LIB.test(e.fn))
             for (const a of e.args) escape(a, a.loc, `the library call ${e.fn}`);
+          else for (const a of e.args) if (a.kind === "dynFrom") readOnlyViews.add(a);
           break;
         case "callValue":
           for (const a of e.args) escape(a, a.loc, "a call through a function value");
@@ -1008,7 +1013,10 @@ export class Int32ElementContracts {
         case "dynFrom":
           // Plain arrays and records cross into dynamic code as deep copies;
           // class instances and live references stay connected.
-          if (e.liveRef === true || this.containsObject(e.value.type, new Set()))
+          if (
+            !readOnlyViews.has(e) &&
+            (e.liveRef === true || this.containsObject(e.value.type, new Set()))
+          )
             escape(e.value, e.loc, "dynamic (any or unknown) code");
           break;
         default:

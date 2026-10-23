@@ -351,6 +351,7 @@ bump: 1 2
 note: 1 2
 indexed: 72100
 recall: a,b
+globals: undefined fenced
 `;
 
   test("K4: three init sessions are byte-identical", async () => {

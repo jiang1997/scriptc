@@ -553,6 +553,19 @@ export function lowerPropertyAccessExpr(
       expr.name.text,
     )
   ) {
+    // A name the program stores on the global object
+    // (`(_a = globalThis).__config ?? (_a.__config = {})`) reads back from
+    // the global object's own properties.
+    const globalType = lowerer.typeOf(staticallySelected(lowerer, expr.expression));
+    if (globalThisWrittenNames(lowerer, globalType).has(expr.name.text)) {
+      return {
+        kind: "dynKeyGet",
+        value: lowerer.coerceToExpected(lowerer.lowerExpr(expr.expression), DYN),
+        key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+        type: DYN,
+        loc,
+      };
+    }
     return dynUndefinedExpr(loc);
   }
   // `Uint8Array.prototype.toBase64` and its siblings, the base64/hex
@@ -4126,6 +4139,7 @@ const GLOBAL_CONSTRUCTOR_VALUES: ReadonlySet<string> = new Set([
   "Promise",
   "WeakMap",
   "WeakSet",
+  "FinalizationRegistry",
   ...ERROR_CONSTRUCTOR_VALUES,
 ]);
 
@@ -4489,4 +4503,30 @@ function contextualArgumentCount(lowerer: Lowerer, fn: ts.Node): number | null {
     count++;
   }
   return count;
+}
+
+/** The property names the program assigns on the global object, through
+ * `globalThis` or a binding of its type (`(_a = globalThis).x = v`). */
+function globalThisWrittenNames(lowerer: Lowerer, globalType: ts.Type): Set<string> {
+  const known = lowerer.globalThisWrittenNames;
+  if (known) return known;
+  const names = new Set<string>();
+  lowerer.globalThisWrittenNames = names;
+  for (const sf of lowerer.program.getImplementationSourceFiles()) {
+    if (sf.isDeclarationFile || !sf.text.includes("globalThis")) continue;
+    ts.walkPreorder(sf, (node) => {
+      if (
+        ts.isBinaryExpression(node) &&
+        (node.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
+          node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+          node.operatorToken.kind === ts.SyntaxKind.BarBarEqualsToken ||
+          node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken) &&
+        ts.isPropertyAccessExpression(node.left) &&
+        lowerer.typeOf(node.left.expression) === globalType
+      )
+        names.add(node.left.name.text);
+      return undefined;
+    });
+  }
+  return names;
 }

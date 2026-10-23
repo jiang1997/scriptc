@@ -1856,9 +1856,10 @@ static const char dyn_s31[] SCR_DYN_COMPAT_STR = "Set";
 static const char dyn_s32[] SCR_DYN_COMPAT_STR = "";
 static const char dyn_s33[] SCR_DYN_COMPAT_STR = "constructing %s%s through a stored value is not supported yet";
 static const char dyn_s34[] SCR_DYN_COMPAT_STR = " from a primitive";
+static const char dyn_s35[] SCR_DYN_COMPAT_STR = "FinalizationRegistry";
 
 static const char *const dyn_global_ctor_names[] = {
-  dyn_s26, dyn_s29, dyn_s25, dyn_s30, dyn_s31, dyn_s21, dyn_s22, dyn_s24,
+  dyn_s26, dyn_s29, dyn_s25, dyn_s30, dyn_s31, dyn_s21, dyn_s22, dyn_s24, dyn_s35,
 };
 #define DYN_GLOBAL_CTORS (sizeof dyn_global_ctor_names / sizeof dyn_global_ctor_names[0])
 static SCR_TL ScrDyn *dyn_global_ctors[DYN_GLOBAL_CTORS];
@@ -1928,8 +1929,8 @@ static ScrDyn *dyn_global_ctor(const char *name) {
     }
     if (!dyn_global_ctors[i]) {
       /* Each constructor's own length: Object 1, Date 7, RegExp 2, Promise 1,
-       * the collections 0. */
-      uint32_t length = i == 0 || i == 5 ? 1 : i == 1 ? 7 : i == 2 ? 2 : 0;
+       * the collections 0, FinalizationRegistry 1. */
+      uint32_t length = i == 0 || i == 5 || i == 8 ? 1 : i == 1 ? 7 : i == 2 ? 2 : 0;
       dyn_global_ctors[i] = scr_dyn_new_func(scr_closure_new((void *)dyn_global_ctor_names[i], 0),
                                              dyn_global_ctor_call, length, dyn_s6,
                                              dyn_global_ctor_names[i]);

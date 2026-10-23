@@ -75,6 +75,29 @@ export function emitAsciiCharCode(host: LlvmEmitterContext, s: string, index: st
   return code;
 }
 
+/** The one-character string of unit `index` (an i64) of a proven-ASCII
+ * string `s` whose length covers it: the immortal `@sc_ascii_chars` entry
+ * for its byte, as the inline charAt helpers answer. */
+export function emitAsciiChar(host: LlvmEmitterContext, s: string, index: string): string {
+  // The table is defined with sc_str_char_at.
+  host.declare(STRING_CHAR_AT_DECL);
+  const B = host.B;
+  const sz = host.sizeType;
+  const data = B.tmp(),
+    pointer = B.tmp(),
+    byte = B.tmp(),
+    code = B.tmp(),
+    entry = B.tmp();
+  B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${s}, i32 1`);
+  B.line(`${pointer} = getelementptr inbounds i8, ptr ${data}, i64 ${index}`);
+  B.line(`${byte} = load i8, ptr ${pointer}`);
+  B.line(`${code} = zext i8 ${byte} to i64`);
+  B.line(
+    `${entry} = getelementptr inbounds [128 x { ${sz}, ${sz}, ${sz}, [2 x i8] }], ptr @sc_ascii_chars, i64 0, i64 ${code}`,
+  );
+  return entry;
+}
+
 /** Load the proven-ASCII flag of `%s` into `%ascii`. */
 function asciiTest(): string[] {
   return [

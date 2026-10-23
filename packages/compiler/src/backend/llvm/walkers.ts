@@ -1,4 +1,3 @@
-import { emitPerKeyOrder } from "./key-orders.js";
 import { f64Lit } from "./common.js";
 import { InternalCompilerError } from "../../errors.js";
 /* Structure-walking helper EMITTERS for the LLVM backend — the .ll mirror
@@ -329,80 +328,78 @@ export class LlWalkers {
       if (cyclic) this.jbLeave(B);
       return;
     }
-    // Fields serialize in DECLARED order (JS insertion order), or in the
-    // value's own order for a shape with orderVariants; internal
+    // Fields serialize in DECLARED order (JS insertion order); internal
     // '%'-fields stay hidden — jsonWriteHelper's contract, ported comment
     // and all.
-    emitPerKeyOrder(B, shape, fieldBase, "%v", (order) => {
-      const inOrder = new Set(order);
-      if (shape.fields.some((f) => !inOrder.has(f.name) && !f.name.startsWith("%"))) {
-        throw new InternalCompilerError(
-          `llvm emitter bug: declaredOrder of shape ${shapeId} omits a non-internal field`,
+    const order = shape.declaredOrder ?? shape.fields.map((f) => f.name);
+    const inOrder = new Set(order);
+    if (shape.fields.some((f) => !inOrder.has(f.name) && !f.name.startsWith("%"))) {
+      throw new InternalCompilerError(
+        `llvm emitter bug: declaredOrder of shape ${shapeId} omits a non-internal field`,
+      );
+    }
+    const byName = new Map(shape.fields.map((f) => [f.name, f]));
+    // Function-valued properties are omitted, as JSON.stringify omits them.
+    const emitFields = order
+      .map((n) => byName.get(n))
+      .filter((f) => f !== undefined)
+      .filter((f) => f.type.kind !== "func");
+    const droppable =
+      emitFields.some((f) => undefinedArmTag(f.type, this.host.unionsById) >= 0) ||
+      !!shape.indexValue;
+    this.putc(B, "%b", "123"); // '{'
+    if (!droppable) {
+      emitFields.forEach((f, i) => {
+        this.puts(B, "%b", `${i > 0 ? "," : ""}${jsonObjectKeyLabel(f.name)}`);
+        if (edgeable(f.type)) this.jbEdgeProp(B, f.name);
+        const v = this.loadField(B, "%v", shapeId, fieldIndex.get(f.name)!, f.type);
+        B.line(
+          `call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; ${llvmCommentText(f.name)}`,
         );
-      }
-      const byName = new Map(shape.fields.map((f) => [f.name, f]));
-      // Function-valued properties are omitted, as JSON.stringify omits them.
-      const emitFields = order
-        .map((n) => byName.get(n))
-        .filter((f) => f !== undefined)
-        .filter((f) => f.type.kind !== "func");
-      const droppable =
-        emitFields.some((f) => undefinedArmTag(f.type, this.host.unionsById) >= 0) ||
-        !!shape.indexValue;
-      this.putc(B, "%b", "123"); // '{'
-      if (!droppable) {
-        emitFields.forEach((f, i) => {
-          this.puts(B, "%b", `${i > 0 ? "," : ""}${jsonObjectKeyLabel(f.name)}`);
-          if (edgeable(f.type)) this.jbEdgeProp(B, f.name);
-          const v = this.loadField(B, "%v", shapeId, fieldIndex.get(f.name)!, f.type);
-          B.line(
-            `call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; ${llvmCommentText(f.name)}`,
-          );
-        });
-      } else {
-        const first = B.slot();
-        B.entryAllocas.push(`${first} = alloca i1`);
-        B.line(`store i1 true, ptr ${first}`);
-        const comma = (): void => {
-          const isf = B.tmp();
-          const lc = B.newLabel("jwc.c");
-          const lj = B.newLabel("jwc.j");
-          B.line(`${isf} = load i1, ptr ${first}`);
-          B.condBr(isf, lj, lc);
-          B.startBlock(lc);
-          this.putc(B, "%b", "44"); // ','
-          B.br(lj);
-          B.startBlock(lj);
-          B.line(`store i1 false, ptr ${first}`);
-        };
-        for (const f of emitFields) {
-          const utag = undefinedArmTag(f.type, this.host.unionsById);
-          const v = this.loadField(B, "%v", shapeId, fieldIndex.get(f.name)!, f.type);
-          let skip: string | null = null;
-          if (utag >= 0 && f.type.kind === "union") {
-            // Undefined-valued field: dropped, like Node.
-            const tag = this.unionTag(B, v, f.type.unionId);
-            const isu = B.tmp();
-            B.line(`${isu} = icmp eq i32 ${tag}, ${utag}`);
-            const lw = B.newLabel("jwf.w");
-            skip = B.newLabel("jwf.s");
-            B.condBr(isu, skip, lw);
-            B.startBlock(lw);
-          }
-          comma();
-          this.puts(B, "%b", jsonObjectKeyLabel(f.name));
-          if (edgeable(f.type)) this.jbEdgeProp(B, f.name);
-          B.line(
-            `call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; ${llvmCommentText(f.name)}`,
-          );
-          if (skip !== null) {
-            B.br(skip);
-            B.startBlock(skip);
-          }
+      });
+    } else {
+      const first = B.slot();
+      B.entryAllocas.push(`${first} = alloca i1`);
+      B.line(`store i1 true, ptr ${first}`);
+      const comma = (): void => {
+        const isf = B.tmp();
+        const lc = B.newLabel("jwc.c");
+        const lj = B.newLabel("jwc.j");
+        B.line(`${isf} = load i1, ptr ${first}`);
+        B.condBr(isf, lj, lc);
+        B.startBlock(lc);
+        this.putc(B, "%b", "44"); // ','
+        B.br(lj);
+        B.startBlock(lj);
+        B.line(`store i1 false, ptr ${first}`);
+      };
+      for (const f of emitFields) {
+        const utag = undefinedArmTag(f.type, this.host.unionsById);
+        const v = this.loadField(B, "%v", shapeId, fieldIndex.get(f.name)!, f.type);
+        let skip: string | null = null;
+        if (utag >= 0 && f.type.kind === "union") {
+          // Undefined-valued field: dropped, like Node.
+          const tag = this.unionTag(B, v, f.type.unionId);
+          const isu = B.tmp();
+          B.line(`${isu} = icmp eq i32 ${tag}, ${utag}`);
+          const lw = B.newLabel("jwf.w");
+          skip = B.newLabel("jwf.s");
+          B.condBr(isu, skip, lw);
+          B.startBlock(lw);
         }
-        if (shape.indexValue) this.emitOverflowEntries(B, shape, first, edgeable(shape.indexValue));
+        comma();
+        this.puts(B, "%b", jsonObjectKeyLabel(f.name));
+        if (edgeable(f.type)) this.jbEdgeProp(B, f.name);
+        B.line(
+          `call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; ${llvmCommentText(f.name)}`,
+        );
+        if (skip !== null) {
+          B.br(skip);
+          B.startBlock(skip);
+        }
       }
-    });
+      if (shape.indexValue) this.emitOverflowEntries(B, shape, first, edgeable(shape.indexValue));
+    }
     this.putc(B, "%b", "125"); // '}'
     if (cyclic) this.jbLeave(B);
   }

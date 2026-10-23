@@ -773,17 +773,22 @@ jobs:
         run: >-
           pnpm exec vitest run tests/harness/worktree-files.test.ts
           --testNamePattern "workspace reset keeps Linux Sandbox paths POSIX"
+      # The Node host checks with tsc-ts, the default, over the named pipe it
+      # serves on Windows, and with tsgo.
       - name: Windows scriptc run smoke
         shell: pwsh
         run: |
           zig version
-          $output = & node packages/cli/dist/main.js run tests/corpus/001-hello.ts --backend llvm
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          $actual = ($output -join "`n").Trim()
-          if ($actual -ne "hello world") {
-            throw "unexpected scriptc output: $actual"
+          foreach ($checker in @("tsc-ts", "tsgo")) {
+            $env:SCRIPTC_CHECKER = $checker
+            $output = & node packages/cli/dist/main.js run tests/corpus/001-hello.ts --backend llvm
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            $actual = ($output -join "`n").Trim()
+            if ($actual -ne "hello world") {
+              throw "unexpected scriptc output with ${checker}: $actual"
+            }
           }
       - name: Windows PE subsystem selection
         env:

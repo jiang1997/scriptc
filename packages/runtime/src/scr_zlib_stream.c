@@ -549,7 +549,12 @@ void scr_zlib_stream_flush(ScrStream *s, ScrDyn *kind, ScrClosure *cb) {
     return;
   }
   int ki = (int)k;
-  if (zs->flush_bufs[ki] == NULL) zs->flush_bufs[ki] = scr_bytes_new(SCR_BYTES_U8, 0);
+  if (zs->flush_bufs[ki] == NULL) {
+    /* a Buffer, as Node's kFlushBuffers are: write() passes a Buffer
+     * through unchanged, so _transform recognizes the sentinel */
+    zs->flush_bufs[ki] = scr_bytes_new(SCR_BYTES_U8, 0);
+    zs->flush_bufs[ki]->is_buffer = true;
+  }
   scr_stream_write(s, zs->flush_bufs[ki], cb);
 }
 

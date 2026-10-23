@@ -61,6 +61,7 @@ export function emitFunction(emitter: LlEmitter, fn: IrFunction): string {
   const B = new BlockBuilder();
   emitter.B = B;
   emitter.currentFunctionName = fn.name;
+  emitter.findInt32Allocations(fn);
   emitter.currentTier = fn.tier;
   // Fiber switches restore the active exception cell before control
   // returns to a synchronous frame (emitPendingCheck).
@@ -138,6 +139,8 @@ export function emitFunction(emitter: LlEmitter, fn: IrFunction): string {
   emitter.speculativeFunction = fn.name;
   emitter.speculation = null;
   emitter.speculationResume = null;
+  emitter.int32Kinds = null;
+  emitter.int32KindResume = null;
   emitter.finalFieldBorrows =
     !fn.async &&
     !fn.generator &&

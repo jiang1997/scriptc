@@ -65,7 +65,7 @@ export interface BytesLoopVersion {
    * thread-owned (no shared storage). */
   owned: ReadonlySet<Node>;
   /** Root receiver bindings, read once before the loop; `string` marks a
-   * string whose `charCodeAt` reads the version covers. */
+   * string whose `charCodeAt` and `charAt` reads the version covers. */
   receivers: { ref: VarRef; global: boolean; string: boolean }[];
   /** Receivers the guard requires to have no shared storage. */
   ownedReceivers: number[];
@@ -132,11 +132,13 @@ const INVARIANT_OPS = new Set(["+", "-", "*", "&", "|", "^", "<<", ">>", ">>>"])
  *   such as `base` for `const base = r * cols`, must also be an exact
  *   integer between -2^32 and 2^32, which the guard tests.
  *
- * `s.charCodeAt(index)` of a string binding qualifies the same way. A
- * string is immutable: its bytes, its length and the capacity-word bit that
- * proves it ASCII (string-reads.ts) are fixed when it is built. The guard
- * also requires that bit, so each UTF-16 unit is one byte and the length
- * is the byte length, and the fast copy reads each unit with one byte load.
+ * `s.charCodeAt(index)` and `s.charAt(index)` (so `s[index]`) of a string
+ * binding qualify the same way. A string is immutable: its bytes, its
+ * length and the capacity-word bit that proves it ASCII (string-reads.ts)
+ * are fixed when it is built. The guard also requires that bit, so each
+ * UTF-16 unit is one byte and the length is the byte length. The fast copy
+ * reads each unit with one byte load, and each character as the immortal
+ * one-character string for its byte.
  *
  * In worker programs, every access of a view that may be shared tests its
  * shared storage. A view's storage is also fixed at construction, so the
@@ -507,7 +509,11 @@ export function matchBytesLoopVersion(
       const numeric = byteNumberAccess(e);
       if (numeric) access(e, e.receiver, e.args[numeric.offsetArg]!, numeric.width);
       else if (e.method === "get" && e.args[0]) access(e, e.receiver, e.args[0], 1);
-    } else if (e.kind === "strIntrinsic" && e.method === "charCodeAt" && e.args[0])
+    } else if (
+      e.kind === "strIntrinsic" &&
+      (e.method === "charCodeAt" || e.method === "charAt") &&
+      e.args[0]
+    )
       access(e, e.receiver, e.args[0], 1);
     return everyExprChild(e, visitExpr, visitStmt);
   };

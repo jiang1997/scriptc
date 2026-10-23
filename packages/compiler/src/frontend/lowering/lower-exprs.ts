@@ -1,4 +1,10 @@
 import { keyedHelperName } from "./stable-names.js";
+import {
+  isNewTarget,
+  lowerNewTarget,
+  lowerNewTargetComparison,
+  lowerNewTargetName,
+} from "./new-target.js";
 import { lowerWebAssemblyValue, refuseWebAssemblyUse } from "./builtins/webassembly.js";
 import { lowerAwaitedUniformPromiseAll } from "./builtins/promises.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, strLit, varRef } from "../../ir/build.js";
@@ -713,7 +719,8 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   if (ts.isPrefixUnaryExpression(expr)) return lowerer.lowerPrefixUnary(expr);
   // `x++` / `x--` in expression position: yields the OLD value.
   if (ts.isPostfixUnaryExpression(expr)) return lowerIncDec(lowerer, expr, false);
-  if (ts.isBinaryExpression(expr)) return lowerer.lowerBinary(expr);
+  if (ts.isBinaryExpression(expr))
+    return lowerNewTargetComparison(lowerer, expr) ?? lowerer.lowerBinary(expr);
   if (ts.isCallExpression(expr)) {
     // `h.return?.()` on a helper object: the method exists, so the
     // optional call is the call.
@@ -729,13 +736,15 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   if (ts.isElementAccessExpression(expr)) return lowerer.lowerElementAccess(expr);
   if (ts.isConditionalExpression(expr)) return lowerTernary(lowerer, expr);
 
-  if (ts.isPropertyAccessExpression(expr)) return lowerPropertyAccessExpr(lowerer, expr, loc);
+  if (ts.isPropertyAccessExpression(expr))
+    return lowerNewTargetName(lowerer, expr) ?? lowerPropertyAccessExpr(lowerer, expr, loc);
 
   // Meta-properties, named: `new.target` reflects HOW a function was
   // invoked (compiled functions are never constructors of themselves —
   // no runtime invocation record exists), and `import.meta`/
   // `import.defer` are module-loader surface a native binary does not
   // carry.
+  if (isNewTarget(expr)) return lowerNewTarget(lowerer, expr);
   if (ts.isMetaProperty(expr)) {
     const name =
       expr.keywordToken === ts.SyntaxKind.NewKeyword ? "new.target" : `import.${expr.name.text}`;

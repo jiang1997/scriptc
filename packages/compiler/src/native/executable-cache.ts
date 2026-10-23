@@ -11,7 +11,7 @@ import {
 import { runNativeTool } from "../backend/native-tools.js";
 import type { NativeRuntimeSelection } from "../backend/runtime-pack-native.js";
 import type { NativeToolchain } from "./toolchain.js";
-import { contentDigest, NativeCache } from "./cache.js";
+import { contentDigest, NativeCache, partsDigest } from "./cache.js";
 
 interface InputIdentity {
   path: string;
@@ -254,7 +254,7 @@ export class NativeExecutableCache {
 export function openNativeExecutableCache(
   cache: NativeCache | null,
   toolchain: NativeToolchain,
-  llvm: string,
+  llvm: readonly string[],
   options: CompileRequestOptions,
   ffi: FfiProfile | null,
   pack: NativeRuntimeSelection,
@@ -299,7 +299,7 @@ export function openNativeExecutableCache(
     const key = contentDigest(
       JSON.stringify({
         schema: 1,
-        llvm: contentDigest(llvm),
+        llvm: partsDigest(llvm),
         options,
         toolchain,
         runtimeIdentity: pack.packageText,

@@ -28,7 +28,8 @@ The `captureRejections` option and `events.errorMonitor` listeners are not suppo
 The stream calls the object's `_read`, `_write`, `_final`, `_transform`, `_flush`, and `_destroy` with the object as `this`, and the stream prototypes' methods and accessors work on it.
 Its listeners live in the native stream rather than in `_events`, and `_readableState` and `_writableState` are read-only views that answer the commonly read fields.
 Typed code that receives such an object as a stream class uses its native stream, and piping a native stream into it works.
-The options the native streams refuse (`decodeStrings: false`, `signal`, and others) are refused here too, as are `_writev`, `_construct`, symbol event names, `listeners()`, `rawListeners()`, `wrap()`, strings written to a byte-mode stream in encodings other than UTF-8, and pipes into a destination that overrides `write()` or `end()`.
+The options the native streams refuse (`signal` and others) are refused here too, as are `_writev` on a Transform, `_final` on a Transform, symbol event names, `listeners()`, `rawListeners()`, `wrap()`, and pipes into a destination that overrides `write()` or `end()`.
+`_construct` and `_writev` are read when `Readable.call(this, options)` or `Writable.call(this, options)` runs, as Node's constructors read them.
 Other class constructors passed to `util.inherits` or `util.deprecate` are refused.
 Deprecation warnings are emitted on the next tick and follow assignments to `process.noDeprecation` and `process.throwDeprecation`; compiled binaries take no Node command-line flags such as `--no-deprecation` or `--trace-deprecation`, and `process.traceDeprecation` is unsupported.
 A stored `util.deprecate` reports a `length` of 4, where Node reports 3.

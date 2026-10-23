@@ -10,6 +10,7 @@ import {
 } from "./integer-ranges.js";
 import { exprFunctionReference, moduleFunctionReferences } from "./function-references.js";
 import { findInitializerBindings, withInitializerBindings } from "./initializer-bindings.js";
+import { checkableInt32Allocations, int32ArrayStores } from "./int32-arrays.js";
 import { everyExprChild, everyStmtChild, everyStmtList, everyTypeChild } from "./traverse.js";
 
 /** The storage slot an array-valued expression reads, as an
@@ -169,7 +170,10 @@ export class Int32Slots {
         this.int32Locals.has(`${fnName}\0${localId}`) || this.int32Locals.has(`\0${localId}`)
           ? INT32_RANGE
           : null;
-    if (this.int32Elements.size > 0) result.elements = (arr) => this.hasInt32Elements(fnName, arr);
+    if (this.int32Elements.size > 0) {
+      result.elements = (arr) => this.hasInt32Elements(fnName, arr);
+      if (this.narrowedReads) result.narrowedReads = true;
+    }
     const params = this.paramFacts.get(fnName);
     if (params)
       result.params =
@@ -234,6 +238,28 @@ export class Int32Slots {
   addInt32Elements(key: string): void {
     this.int32Elements.add(key);
   }
+  dropInt32Elements(key: string): boolean {
+    return this.int32Elements.delete(key);
+  }
+  hasInt32ElementSlot(key: string): boolean {
+    return this.int32Elements.has(key);
+  }
+  /** Whether the module has int32 array candidates (the narrowedReads
+   * range fact). */
+  narrowedReads = false;
+  /** Local number arrays (`function\0local`) stored as int32 slots: the
+   * module's int32 array candidates whose every stored element the
+   * fixpoint proved an int32. */
+  readonly int32Arrays = new Set<string>();
+  /** Local number arrays that may hold int32 slots with checked stores: the
+   * candidates whose element stores the fixpoint proved exact integers but
+   * not int32s, allocated only by fills that may be long. A fill of at least
+   * CHECKED_INT32_MIN_LENGTH elements creates one with int32 slots and a
+   * shorter one with doubles. Their elements give no int32 facts; compiled
+   * accesses test the array's kind (once per innermost loop where they can,
+   * backend/llvm/int32-kind-loops.ts), and a store that is not an int32
+   * widens it first (scr_arr_widen_i32). */
+  readonly checkedInt32Arrays = new Set<string>();
   /** Whether every present element of the number array `arr` evaluates to
    * (read inside `fnName`) is an int32. */
   hasInt32Elements(fnName: string, arr: IrExpr): boolean {
@@ -752,6 +778,18 @@ export function analyzeInt32Slots(mod: IrModule, inputs: Int32SlotInputs = {}): 
   }
   for (const key of contracts?.int32Locals ?? []) slots.addInt32Local(key);
   for (const key of contracts?.int32Elements ?? []) slots.addInt32Elements(key);
+  // Int32 array candidates (ir/int32-arrays.ts): assumed to hold int32
+  // elements until a store the fixpoint cannot prove drops one.
+  const arrayCandidates = new Map<string, Set<string>>();
+  slots.narrowedReads = (mod.int32ArrayCandidates?.length ?? 0) > 0;
+  for (const key of mod.int32ArrayCandidates ?? []) {
+    const cut = key.indexOf("\0");
+    const fnName = key.slice(0, cut);
+    const set = arrayCandidates.get(fnName) ?? new Set<string>();
+    set.add(key.slice(cut + 1));
+    arrayCandidates.set(fnName, set);
+    slots.addInt32Elements(`l:${key}`);
+  }
 
   /* ── candidate fields ── */
   const children = new Map<string, string[]>();
@@ -1031,6 +1069,7 @@ export function analyzeInt32Slots(mod: IrModule, inputs: Int32SlotInputs = {}): 
     return false;
   };
   const hasCandidateWrite = (fn: IrFunction): boolean => {
+    if (arrayCandidates.has(fn.name)) return true;
     const box = (localId: string): boolean => slots.hasBox(slots.boxGroup(fn.name, localId));
     const returns = slots.hasReturn(fn.name);
     return !everyStmtList(fn.body, {
@@ -1076,6 +1115,36 @@ export function analyzeInt32Slots(mod: IrModule, inputs: Int32SlotInputs = {}): 
       continue;
     }
     const int32 = (e: IrExpr): boolean => withinInt32(ranges.get(e));
+    // Every element stored into an int32 array candidate must be an int32
+    // under the facts that assume the candidates' own elements are; a
+    // failing store drops its array's element facts, and the function is
+    // analyzed again without them. When every failing store is still an
+    // exact integer under those facts (a counter, `a[i]! + 1`) and the array
+    // is only ever allocated by a fill that may be long
+    // (checkableInt32Allocations), it keeps int32 slots with checked stores
+    // (checkedInt32Arrays), which widen it to doubles in place at the first
+    // store that is not an int32.
+    const arrays = arrayCandidates.get(fn.name);
+    if (arrays) {
+      let dropped = false;
+      for (const [id, values] of int32ArrayStores(fn, arrays)) {
+        const key = `l:${fn.name}\0${id}`;
+        if (!slots.hasInt32ElementSlot(key) || values.every(int32)) continue;
+        slots.dropInt32Elements(key);
+        const checkable = (value: IrExpr): boolean => {
+          const range = ranges.get(value);
+          return int32(value) || range != null;
+        };
+        if (values.every(checkable) && checkableInt32Allocations(fn, id))
+          slots.checkedInt32Arrays.add(`${fn.name}\0${id}`);
+        else reason(`array:${fn.name}\0${id}`, "an element store is not int32");
+        dropped = true;
+      }
+      if (dropped && !queued.has(fn.name)) {
+        queued.add(fn.name);
+        queue.push(fn.name);
+      }
+    }
     // An int32 written into a slot still assumed non-negative: widen the
     // assumption when the value may be negative, and reanalyze its readers.
     const settle = (slot: string, e: IrExpr): void => {
@@ -1144,6 +1213,10 @@ export function analyzeInt32Slots(mod: IrModule, inputs: Int32SlotInputs = {}): 
   }
   for (const proven of provenByFunction.values())
     for (const value of proven) slots.provenWrites.add(value);
+  for (const [fnName, ids] of arrayCandidates)
+    for (const id of ids)
+      if (slots.hasInt32ElementSlot(`l:${fnName}\0${id}`))
+        slots.int32Arrays.add(`${fnName}\0${id}`);
   const ranged = rangedParameters(slots, functions, retry, numeric, (callee) =>
     readers.get(`ret:${callee}`),
   );

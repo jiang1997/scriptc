@@ -109,6 +109,20 @@ function invalidNodeIndex(index: number): never {
  * byte order. */
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
+/** `count` little-endian words of `bytes` from `offset`, which the caller has
+ * bounds-checked: a view of the response when the words are aligned on a
+ * little-endian host, a copy of their bytes when they are not, and a decoded
+ * copy on a big-endian host. Where a section starts depends on the lengths of
+ * the strings before it (file paths among them), so most files are unaligned. */
+function astWords(bytes: Uint8Array, offset: number, count: number): Uint32Array {
+  const start = bytes.byteOffset + offset;
+  if (LITTLE_ENDIAN && start % 4 === 0) return new Uint32Array(bytes.buffer, start, count);
+  const words = new Uint32Array(count);
+  if (LITTLE_ENDIAN) new Uint8Array(words.buffer).set(bytes.subarray(offset, offset + count * 4));
+  else for (let i = 0; i < count; i++) words[i] = astU32(bytes, offset + i * 4);
+  return words;
+}
+
 function hexWord(value: number): string {
   const digits = "0123456789abcdef";
   let result = "";
@@ -125,14 +139,15 @@ export class AstWireFile {
   readonly stringCount: number;
   readonly contentHash: string;
   readonly parseOptionsKey: string;
-  private readonly stringOffsets: number;
   private readonly strings: number;
   private readonly extended: number;
   private readonly structured: number;
   private readonly nodes: number;
-  /** The node table as 32-bit words: a view of the response when it is
-   * word-aligned on a little-endian host, otherwise a decoded copy. */
+  /** The node table as 32-bit words (astWords). */
   private readonly words: Uint32Array;
+  /** The string table's start and end offsets, two words per string
+   * (astWords). */
+  private readonly stringWords: Uint32Array;
   /** Decoded strings by string word index / 2. */
   private readonly stringCache: (string | undefined)[];
   private preorderTree: AstPreorder | null | undefined;
@@ -142,34 +157,28 @@ export class AstWireFile {
     const metadata = astU32(bytes, HEADER_OFFSET_METADATA);
     if (metadata >>> 24 !== PROTOCOL_VERSION)
       throw new AstDecodeError(`unsupported protocol version ${metadata >>> 24}`);
-    this.stringOffsets = astU32(bytes, HEADER_OFFSET_STRING_TABLE_OFFSETS);
+    const stringOffsets = astU32(bytes, HEADER_OFFSET_STRING_TABLE_OFFSETS);
     this.strings = astU32(bytes, HEADER_OFFSET_STRING_TABLE);
     this.extended = astU32(bytes, HEADER_OFFSET_EXTENDED_DATA);
     this.structured = astU32(bytes, HEADER_OFFSET_STRUCTURED_DATA);
     this.nodes = astU32(bytes, HEADER_OFFSET_NODES);
     if (
-      this.stringOffsets < HEADER_SIZE ||
-      this.strings < this.stringOffsets ||
+      stringOffsets < HEADER_SIZE ||
+      this.strings < stringOffsets ||
       this.extended < this.strings ||
       this.structured < this.extended ||
       this.nodes < this.structured ||
       this.nodes > bytes.length ||
-      (this.strings - this.stringOffsets) % 8 !== 0 ||
+      (this.strings - stringOffsets) % 8 !== 0 ||
       (this.structured - this.extended) % 4 !== 0 ||
       (bytes.length - this.nodes) % NODE_LEN !== 0
     ) {
       throw new AstDecodeError("invalid section layout");
     }
     this.nodeCount = (bytes.length - this.nodes) / NODE_LEN;
-    this.stringCount = (this.strings - this.stringOffsets) / 8;
-    const wordCount = this.nodeCount * NODE_WORDS;
-    const start = bytes.byteOffset + this.nodes;
-    if (LITTLE_ENDIAN && start % 4 === 0) {
-      this.words = new Uint32Array(bytes.buffer, start, wordCount);
-    } else {
-      this.words = new Uint32Array(wordCount);
-      for (let i = 0; i < wordCount; i++) this.words[i] = astU32(bytes, this.nodes + i * 4);
-    }
+    this.stringCount = (this.strings - stringOffsets) / 8;
+    this.words = astWords(bytes, this.nodes, this.nodeCount * NODE_WORDS);
+    this.stringWords = astWords(bytes, stringOffsets, this.stringCount * 2);
     this.stringCache = new Array<string | undefined>(this.stringCount).fill(undefined);
     if (this.nodeCount < 2) throw new AstDecodeError("missing root");
     if (this.kind(1) === KIND_NODE_LIST || this.parent(1) > 1)
@@ -184,8 +193,8 @@ export class AstWireFile {
     // source text, so pairs overlap and are not globally monotone. Handles
     // address words (0, 2, 4...), not pair ordinals.
     for (let i = 0; i < this.stringCount; i++) {
-      const start = astU32(bytes, this.stringOffsets + i * 8);
-      const end = astU32(bytes, this.stringOffsets + i * 8 + 4);
+      const start = this.stringWords[i * 2]!;
+      const end = this.stringWords[i * 2 + 1]!;
       if (end < start || end > this.extended - this.strings)
         throw new AstDecodeError("invalid string table offset");
     }
@@ -242,8 +251,8 @@ export class AstWireFile {
       throw new AstDecodeError(`invalid string index ${index}`);
     const cached = this.stringCache[index >>> 1];
     if (cached !== undefined) return cached;
-    const start = astU32(this.bytes, this.stringOffsets + index * 4);
-    const end = astU32(this.bytes, this.stringOffsets + (index + 1) * 4);
+    const start = this.stringWords[index]!;
+    const end = this.stringWords[index + 1]!;
     const text = decodeAstString(this.bytes, this.strings + start, end - start);
     this.stringCache[index >>> 1] = text;
     return text;

@@ -110,8 +110,8 @@ importers:
         specifier: workspace:*
         version: link:../runtime
       tsc-ts:
-        specifier: 0.0.7
-        version: 0.0.7
+        specifier: 0.0.8
+        version: 0.0.8
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -1360,8 +1360,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@scriptc/threads@0.4.1':
-    resolution: {integrity: sha512-wKgEBiVc07ZIGNFGwJpV5JbTXJN1N42qG6/g7ipnwt3klsU0nuWH2ToKV9vYH+RQstF7+twq6zMCf2qhUloTHQ==}
+  '@scriptc/threads@0.4.2':
+    resolution: {integrity: sha512-nR9FUxpOpgtTmJu6dejttElBL+JJTAZzJ2DZM+eNoujmLx9VpdlAVdgj3cu/MDsTUg/1sIUBq1ME1csC/Aa6yg==}
     engines: {node: '>=24.0.0'}
 
   '@sinclair/typebox@0.25.24':
@@ -1377,42 +1377,42 @@ packages:
   '@ts-morph/common@0.11.1':
     resolution: {integrity: sha512-7hWZS0NRpEsNV8vWJzg7FEz6V8MaLNeJOmwmghqUXTpzk16V1LLZhdo+4QvE/+zv4cVci0OviuJFnqhEfoV3+g==}
 
-  '@tsc-ts/darwin-arm64@0.0.7':
-    resolution: {integrity: sha512-nIaTJKBpG6n60xxRYfBlh02G6aSO2punIvj4qPy8/CXZu0Kw4ra/J3PYJtrtYMIh/eIGo4+f1Q01v5dFPPwZbw==}
+  '@tsc-ts/darwin-arm64@0.0.8':
+    resolution: {integrity: sha512-+hB9yWk58lwZHGrVEzqEC4D7MQW7Vd2z7blV3TULIKZPTMwdf8aT7XFAmfP48PoGff0H9yuQKyRXJl9I+sQv9w==}
     cpu: [arm64]
     os: [darwin]
 
-  '@tsc-ts/darwin-x64@0.0.7':
-    resolution: {integrity: sha512-8ITDyF3FG4SYeS1cV4+oRpbbk0jVsfd23Ww138wbQymbOLYjWPafzj4bymxnIE5kEWjZPVqTFDbaYqgWwNStag==}
+  '@tsc-ts/darwin-x64@0.0.8':
+    resolution: {integrity: sha512-yz4UddicqMXe+T7nV7ftpf155lkiK6gIPNwSB8rH9dlwiV6a17CO/vpSk627QLMqnfGNicB6YwLMk/SJ9moPdw==}
     cpu: [x64]
     os: [darwin]
 
-  '@tsc-ts/linux-arm64-gnu@0.0.7':
-    resolution: {integrity: sha512-nXGjtbM3YrARWOb+nkDaFdhKGSzPf3ofl/gV4x8JnVQ8SgK4IWJ5J0u93sk3mTYgdLj/Gcobp/D3lZ6WIzjKvA==}
+  '@tsc-ts/linux-arm64-gnu@0.0.8':
+    resolution: {integrity: sha512-LHqfT9mQ4tusPdWmnanCvC8/YBOF5bHM5h5863a3t2HTgFVdps1Qwb0yzrW5DDbojIhQ0Z+GupxtXVUQcV0Q/Q==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@tsc-ts/linux-arm64-musl@0.0.7':
-    resolution: {integrity: sha512-hSjpQsOhrLaDsbvEO5EH9nC3Vy0WAt3aB+GejytEh9fl4F3kT0BasbBP4wJqu6S5SG9upLW7ZClXiNVnGYDGlQ==}
+  '@tsc-ts/linux-arm64-musl@0.0.8':
+    resolution: {integrity: sha512-I0CC3xZMwoQM6OiVsubRHb0VI/RrJpneb33kDQhadYHq3taPos71KwP+CbCXNu88rNsDsyn7D1oCVfJb73g4Mw==}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@tsc-ts/linux-x64-gnu@0.0.7':
-    resolution: {integrity: sha512-MCU2MFefQGG/++nepg09BtYnsN2mVzeYfIS6GW30ChxUt2nJUMkEvzbDim9czDevW4LRqHgfnwEt+hs2ud1SDQ==}
+  '@tsc-ts/linux-x64-gnu@0.0.8':
+    resolution: {integrity: sha512-PLERuwUuxT92x0BZAMQubiQP5jhlqoLmswaZWqcvfKAZyBp0TbWiVOmuNnDbJozvBaNUrfdGPb9suiQ+Me7M6A==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@tsc-ts/linux-x64-musl@0.0.7':
-    resolution: {integrity: sha512-abTZZkn74772MPABStuXWJ1GHI07nbEf4a3Nwl7NYI5mLFYxeLSbq6+cGh0BUJeBeMhFNsjtQ5/j5sGmsrJ2tg==}
+  '@tsc-ts/linux-x64-musl@0.0.8':
+    resolution: {integrity: sha512-zDl36l1uyWc0mQniOAMZmkVD9TrlFExHlDT0fL8JGD4XLgx+bRe+To38yP0KSBehXBzjDNn8xrEoJ+3RP6mYwQ==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@tsc-ts/win32-x64-msvc@0.0.7':
-    resolution: {integrity: sha512-EOhLTkuWYytJYklR5BI1jRtTpEIPh1FQJKD8R37qqlcnPrELlRO6Nc2ncDpdCoYbpN+KrewIVPB3xD4o3VGUaw==}
+  '@tsc-ts/win32-x64-msvc@0.0.8':
+    resolution: {integrity: sha512-9gO+pFoLiIxITlAE2P6JL8ihZwns7z/2Raw5+38RqLzHmnSsRN47+H4p/4EqQsLW5/TTsAo9uSeSkf3EuRg+XA==}
     cpu: [x64]
     os: [win32]
 
@@ -2577,8 +2577,8 @@ packages:
   ts-toolbelt@6.15.5:
     resolution: {integrity: sha512-FZIXf1ksVyLcfr7M317jbB67XFJhOO1YqdTcuGaq9q5jLUoTikukZ+98TPjKiP2jC5CgmYdWWYs0s2nLSU0/1A==}
 
-  tsc-ts@0.0.7:
-    resolution: {integrity: sha512-KRWTXRUvwMXi4At6xOWPDa/0BreY3MR2tPHooEMNWLZUA2eLphNe7PJiHclPLLn9RCnHY4ffDTTeF5hqgyBvtA==}
+  tsc-ts@0.0.8:
+    resolution: {integrity: sha512-EiyDziYOryBg/YEvev/mKCn+hD4M6VFjH7VP9nv2WadDKYaPrdb+a3hP+wYr/UsDWNE7AdL7YGnjZppeXlXy6g==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3439,7 +3439,7 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.2':
     optional: true
 
-  '@scriptc/threads@0.4.1': {}
+  '@scriptc/threads@0.4.2': {}
 
   '@sinclair/typebox@0.25.24': {}
 
@@ -3454,25 +3454,25 @@ snapshots:
       mkdirp: 1.0.4
       path-browserify: 1.0.1
 
-  '@tsc-ts/darwin-arm64@0.0.7':
+  '@tsc-ts/darwin-arm64@0.0.8':
     optional: true
 
-  '@tsc-ts/darwin-x64@0.0.7':
+  '@tsc-ts/darwin-x64@0.0.8':
     optional: true
 
-  '@tsc-ts/linux-arm64-gnu@0.0.7':
+  '@tsc-ts/linux-arm64-gnu@0.0.8':
     optional: true
 
-  '@tsc-ts/linux-arm64-musl@0.0.7':
+  '@tsc-ts/linux-arm64-musl@0.0.8':
     optional: true
 
-  '@tsc-ts/linux-x64-gnu@0.0.7':
+  '@tsc-ts/linux-x64-gnu@0.0.8':
     optional: true
 
-  '@tsc-ts/linux-x64-musl@0.0.7':
+  '@tsc-ts/linux-x64-musl@0.0.8':
     optional: true
 
-  '@tsc-ts/win32-x64-msvc@0.0.7':
+  '@tsc-ts/win32-x64-msvc@0.0.8':
     optional: true
 
   '@tybys/wasm-util@0.10.3':
@@ -4813,17 +4813,17 @@ snapshots:
 
   ts-toolbelt@6.15.5: {}
 
-  tsc-ts@0.0.7:
+  tsc-ts@0.0.8:
     dependencies:
-      '@scriptc/threads': 0.4.1
+      '@scriptc/threads': 0.4.2
     optionalDependencies:
-      '@tsc-ts/darwin-arm64': 0.0.7
-      '@tsc-ts/darwin-x64': 0.0.7
-      '@tsc-ts/linux-arm64-gnu': 0.0.7
-      '@tsc-ts/linux-arm64-musl': 0.0.7
-      '@tsc-ts/linux-x64-gnu': 0.0.7
-      '@tsc-ts/linux-x64-musl': 0.0.7
-      '@tsc-ts/win32-x64-msvc': 0.0.7
+      '@tsc-ts/darwin-arm64': 0.0.8
+      '@tsc-ts/darwin-x64': 0.0.8
+      '@tsc-ts/linux-arm64-gnu': 0.0.8
+      '@tsc-ts/linux-arm64-musl': 0.0.8
+      '@tsc-ts/linux-x64-gnu': 0.0.8
+      '@tsc-ts/linux-x64-musl': 0.0.8
+      '@tsc-ts/win32-x64-msvc': 0.0.8
 
   tslib@2.8.1:
     optional: true

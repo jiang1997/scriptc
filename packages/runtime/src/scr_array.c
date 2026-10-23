@@ -108,6 +108,7 @@ ScrArrExt *scr_arr_ext(ScrArr *a) {
 
 /* Registry of element ops by id (scr_arr_ops); slot 0 is no ops. */
 const ScrArrOps *scr_arr_ops_table[SCR_ARR_OPS_OVERFLOW] = {0};
+uint8_t scr_arr_ops_release_nothing[SCR_ARR_OPS_OVERFLOW + 1] = {0};
 static uint32_t scr_arr_ops_count = 1;
 
 /* Assign `ops` its id on its first array; any thread may get there first,
@@ -119,6 +120,9 @@ uint32_t scr_arr_ops_register(ScrArrOps *ops) {
   if (id) return id;
   uint32_t fresh = __atomic_fetch_add(&scr_arr_ops_count, 1, __ATOMIC_RELAXED);
   if (fresh < SCR_ARR_OPS_OVERFLOW) {
+    /* Before the id is published: an array that carries the id can be
+     * released on any thread. */
+    scr_arr_ops_release_nothing[fresh] = scr_arr_ops_release_nothing_flag(ops);
     __atomic_store_n(&scr_arr_ops_table[fresh], ops, __ATOMIC_RELEASE);
   } else {
     fresh = SCR_ARR_OPS_OVERFLOW;
@@ -172,7 +176,22 @@ static size_t scr_arr_prop_index(const ScrArr *a, const char *key,
   return SIZE_MAX;
 }
 
+#define SCR_ARR_UNDEFINED_KEY_BITS UINT64_C(0x7ff8000000756e64)
+
+double scr_arr_undefined_key(void) {
+  uint64_t bits = SCR_ARR_UNDEFINED_KEY_BITS;
+  double key;
+  memcpy(&key, &bits, sizeof key);
+  return key;
+}
+
 static size_t scr_arr_prop_key(double i, char *buf) {
+  uint64_t bits;
+  memcpy(&bits, &i, sizeof bits);
+  if (bits == SCR_ARR_UNDEFINED_KEY_BITS) {
+    memcpy(buf, "undefined", sizeof "undefined");
+    return sizeof "undefined" - 1;
+  }
   return scr_f64_to_str(i, buf);
 }
 
@@ -273,6 +292,7 @@ typedef struct {
 static uint64_t scr_arr_storage_get(const ScrArrStorage *s, size_t index) {
   if (s->elem == SCR_ELEM_BOOL) return ((const uint8_t *)s->data)[index];
   if (s->elem == SCR_ELEM_CREF) return scr_cref_decode(((const uint32_t *)s->data)[index]);
+  if (s->elem == SCR_ELEM_I32) return scr_arr_f64_slot((double)((const int32_t *)s->data)[index]);
   return s->data[index];
 }
 
@@ -574,6 +594,36 @@ static void scr_arr_move_inline(ScrArr *a, size_t cap) {
   a->spare &= (uint16_t)~SCR_ARR_INLINE_SLOTS;
 }
 
+/* Widen an int32 array (SCR_ELEM_I32) to doubles in place, one way: its
+ * dense values move to 8-byte slots, with their states when it has them, and
+ * its kind becomes SCR_ELEM_F64. Compiled code calls it before storing a
+ * value that is not an int32 into an int32 array with checked stores; `data`
+ * may move. Sparse entries already hold doubles. */
+void scr_arr_widen_i32(ScrArr *a) {
+  if (a->elem != SCR_ELEM_I32) return;
+  size_t cap = a->cap;
+  if (cap > 0) {
+    /* Int32 arrays never shift, so they have no head room; inline slots
+     * have no ext prefix. */
+    bool inline_slots = scr_arr_inline(a);
+    bool states = scr_arr_has_states(a);
+    size_t unit = sizeof(uint64_t) + (states ? 1 : 0);
+    size_t prefix = inline_slots ? 0 : scr_arr_prefix(a);
+    if (cap > (SIZE_MAX - prefix) / unit) scr_arr_oom();
+    char *start = scr_mem_alloc(prefix + cap * unit);
+    if (!start) scr_arr_oom();
+    if (prefix) memcpy(start, scr_arr_alloc_start(a), prefix);
+    uint64_t *data = (uint64_t *)(start + prefix);
+    const int32_t *old = (const int32_t *)a->data;
+    for (size_t i = 0; i < cap; i++) data[i] = scr_arr_f64_slot((double)old[i]);
+    if (states) memcpy((uint8_t *)data + cap * sizeof(uint64_t), scr_arr_states_end(a) - cap, cap);
+    if (!inline_slots && a->rc != SIZE_MAX) scr_mem_free(scr_arr_alloc_start(a));
+    a->data = data;
+    a->spare &= (uint16_t)~SCR_ARR_INLINE_SLOTS;
+  }
+  a->elem = SCR_ELEM_F64;
+}
+
 /* How a dense allocation is sized. */
 typedef enum {
   SCR_ARR_GROW_APPEND, /* geometric headroom for further appends */
@@ -617,7 +667,7 @@ static void scr_arr_grow_dense_slow(ScrArr *a, size_t need, ScrArrGrow mode);
  * paths pick the same capacity. */
 static inline void scr_arr_grow_dense_to(ScrArr *a, size_t need, ScrArrGrow mode) {
   if (need <= a->cap) return;
-  if (a->elem == SCR_ELEM_BOOL || a->elem == SCR_ELEM_CREF ||
+  if (a->elem == SCR_ELEM_BOOL || a->elem == SCR_ELEM_CREF || a->elem == SCR_ELEM_I32 ||
       (a->spare & (SCR_ARR_INLINE_SLOTS | SCR_ARR_HEAD_ROOM | SCR_ARR_HAS_EXT)) || need > SCR_ARR_DENSE_LIMIT) {
     scr_arr_grow_dense_slow(a, need, mode);
     return;
@@ -1530,6 +1580,16 @@ ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap) {
 
 ScrArr *scr_arr_new_ops_small(const ScrArrOps *ops) { return scr_arr_make_ops(ops, 0, true); }
 
+/* Frees an acyclic array whose elements are already released. */
+static inline __attribute__((always_inline)) void scr_arr_free(ScrArr *a) {
+  scr_arr_free_parts(a);
+#ifdef SCR_RC_AUDIT
+  scr_live_arrays--;
+#endif
+  scr_weak_dispose_inline(a);
+  scr_mem_free(a);
+}
+
 static void scr_arr_destroy(void *object) {
   ScrArr *a = object;
   if (scr_arr_ext_of(a)) {
@@ -1597,21 +1657,29 @@ static void scr_arr_destroy(void *object) {
       }
     }
   }
-  if (a->cyc) {
-    scr_arr_gc_free(a);
-  } else {
-    scr_arr_free_parts(a);
-#ifdef SCR_RC_AUDIT
-    scr_live_arrays--;
-#endif
-    scr_weak_dispose_inline(a);
-    scr_mem_free(a);
-  }
+  if (a->cyc) scr_arr_gc_free(a);
+  else scr_arr_free(a);
+}
+
+/* Whether destroying `a`, an acyclic array, releases nothing: it has no ext
+ * and its elements are numbers, booleans or compact references, or
+ * references whose release does nothing (SCR_ARR_OPS_RELEASE_NOTHING). */
+static inline bool scr_arr_releases_nothing(const ScrArr *a) {
+  if (a->spare & SCR_ARR_HAS_EXT) return false;
+  if (!scr_elem_is_ref(a->elem)) return true;
+  return a->elem == SCR_ELEM_REF &&
+         scr_arr_ops_release_nothing[(uint32_t)a->spare >> SCR_ARR_OPS_SHIFT];
 }
 
 void scr_arr_release(ScrArr *a) {
   if (!a || a->rc == SIZE_MAX) return; /* NULL: an uninitialized `let` local */
   if (--a->rc == 0) {
+    /* Nothing to tear down: free the storage without scr_rc_destroy's
+     * queue (no release can recurse) or the element loop. */
+    if (!a->cyc && scr_arr_releases_nothing(a)) {
+      scr_arr_free(a);
+      return;
+    }
     if (a->cyc) scr_cyc_dead(a);
     scr_rc_destroy(a, scr_arr_destroy);
   } else if (a->cyc) {
@@ -1882,6 +1950,10 @@ static ScrArr *scr_arr_fill_slot(ScrArr *a, uint64_t slot, uint8_t state,
     if (state != SCR_ARR_VALUE) scr_arr_cut(a, from);
     if (a->elem == SCR_ELEM_BOOL) memset(scr_arr_dense_at(a, from), (int)slot, until - from);
     else if (a->elem == SCR_ELEM_CREF) for (size_t i = from; i < until; i++) scr_arr_dense_put(a, i, slot);
+    else if (a->elem == SCR_ELEM_I32) {
+      int32_t v = scr_arr_i32_of(slot);
+      for (size_t i = from; i < until; i++) ((int32_t *)a->data)[i] = v;
+    }
     else for (size_t i = from; i < until; i++) a->data[i] = slot;
     if (scr_arr_has_states(a)) memset(scr_arr_state_run(a, from, until - from), state, until - from);
   } else {
@@ -1985,7 +2057,7 @@ static uint64_t scr_arr_require_slot(ScrArr *a, double i) {
   if (scr_arr_prop_get_state(a, i, &prop, &state)) {
     if (state == SCR_ARR_UNDEFINED) {
       char buf[32];
-      scr_f64_to_str(i, buf);
+      scr_arr_prop_key(i, buf);
       scr_trap_fmt("scriptc: RangeError: numeric property %s is undefined\n", buf);
     }
     return prop;
@@ -5094,7 +5166,15 @@ ScrStr *scr_str_raw(ScrArr *raw, ScrArr *subs) {
 
 bool scr_arr_numeric_key(const char *key, size_t len, double *out) {
   char text[64];
+  if (len == sizeof "undefined" - 1 && memcmp(key, "undefined", len) == 0) {
+    *out = scr_arr_undefined_key();
+    return true;
+  }
   if (len == 0 || len >= sizeof text) return false;
+  /* A number's spelling starts with a digit, '-', "NaN" or "Infinity":
+   * other names answer without parsing. */
+  char first = key[0];
+  if (!(first >= '0' && first <= '9') && first != '-' && first != 'N' && first != 'I') return false;
   memcpy(text, key, len);
   text[len] = '\0';
   char *end;
@@ -5108,6 +5188,11 @@ bool scr_arr_numeric_key(const char *key, size_t len, double *out) {
   return true;
 }
 
+bool scr_arr_has_properties(const ScrArr *a) {
+  const ScrArrExt *x = scr_arr_ext_of(a);
+  return x && (x->prop_len || x->metadata);
+}
+
 void scr_arr_copy_metadata(ScrArr *a, ScrDyn *target) {
   const ScrDyn *metadata = SCR_AX(a)->metadata;
   if (metadata && metadata->kind == SCR_DYN_HANDLE && metadata->v.handle.tag == SCR_DYNH_MATCH_SOURCE &&
@@ -5115,21 +5200,7 @@ void scr_arr_copy_metadata(ScrArr *a, ScrDyn *target) {
     return;
   metadata = SCR_AX(a)->metadata;
   if (!metadata) return;
-  for (size_t i = 0; i < metadata->v.obj.len; i++) {
-    const ScrDynEntry *entry = &metadata->v.obj.entries[i];
-    ScrStr *key = scr_str_new(entry->key, entry->key_len);
-    if (!entry->accessor && entry->writable && entry->enumerable && entry->configurable) {
-      scr_dyn_key_set(target, key, entry->value);
-    } else {
-      /* Properties defined through a view keep their attributes. */
-      ScrDyn *name = scr_dyn_new_str(key);
-      ScrDyn *descriptor = scr_dyn_own_descriptor(metadata, key);
-      if (descriptor) scr_dyn_release(scr_dyn_define_property(target, name, descriptor));
-      scr_dyn_release(descriptor);
-      scr_dyn_release(name);
-    }
-    scr_str_release(key);
-  }
+  for (size_t i = 0; i < metadata->v.obj.len; i++) scr_dyn_copy_entry(target, metadata, &metadata->v.obj.entries[i]);
 }
 
 ScrArr *scr_arr_named_keys(ScrArr *a) {
@@ -5187,8 +5258,27 @@ void scr_arr_adopt_view_properties(ScrArr *a, ScrDyn *view, ScrArr *target) {
   }
   ScrDyn *named = view && view->kind == SCR_DYN_ARR ? view->v.arr.properties : NULL;
   if (!named || named->v.obj.len == 0) return;
+  /* The view's numeric properties are copies of the native ones (every
+   * write to them goes to the native array), so only the others move. */
+  bool numeric = false;
+  for (size_t i = 0; i < named->v.obj.len && !numeric; i++) {
+    double number;
+    numeric = scr_arr_numeric_key(named->v.obj.entries[i].key, named->v.obj.entries[i].key_len, &number);
+  }
+  if (numeric) {
+    ScrDyn *rest = scr_dyn_new_obj();
+    for (size_t i = 0; i < named->v.obj.len; i++) {
+      const ScrDynEntry *entry = &named->v.obj.entries[i];
+      double number;
+      if (!scr_arr_numeric_key(entry->key, entry->key_len, &number)) scr_dyn_copy_entry(rest, named, entry);
+    }
+    named = rest;
+  } else {
+    scr_dyn_retain(named);
+  }
   ScrArrExt *x = scr_arr_ext(a);
   ScrDyn *old = x->metadata;
-  x->metadata = scr_dyn_retain(named);
+  x->metadata = named->v.obj.len ? named : NULL;
+  if (!x->metadata) scr_dyn_release(named);
   scr_dyn_release(old);
 }

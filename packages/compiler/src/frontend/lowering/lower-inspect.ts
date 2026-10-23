@@ -1,5 +1,4 @@
 import { keyedHelperName } from "./stable-names.js";
-import { perKeyOrder } from "./key-order-witness.js";
 import {
   dynUndefinedExpr,
   boolLit,
@@ -41,7 +40,6 @@ import {
   isDynTypedRefType,
   recordTextCodecClass,
   shapeHasAccessorSlots,
-  shapeKeyOrders,
   typeKey,
 } from "../../ir/ir.js";
 import type { ClassInfo } from "./lower-classes.js";
@@ -1649,12 +1647,7 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
           });
         }
         body.push(depthGate("[Object]"), ...begin());
-        // One walk per key order (see perKeyOrder).
-        const orders = shapeKeyOrders(current);
-        const walks = orders.map((): IrStmt[] => []);
-        for (const [k, fname] of orders.flatMap((order, k) =>
-          order.map((name) => [k, name] as const),
-        )) {
+        for (const fname of order) {
           const ft = byName.get(fname);
           if (!ft) continue;
           const show = entry(
@@ -1662,13 +1655,12 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
             boolLit(false, loc),
           );
           const present = lowerer.recordFieldPresent(v(), t.shapeId, fname, loc);
-          walks[k]!.push(
+          body.push(
             present.kind === "recordHas"
               ? { kind: "if", cond: present, then: [show], else_: null, loc }
               : show,
           );
         }
-        body.push(...perKeyOrder(current, v(), walks, loc));
         body.push(
           ret(end(strLit("", loc), strLit("{", loc), strLit("}", loc), false, boolLit(false, loc))),
         );
@@ -1926,13 +1918,21 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
 
   // A closed record that kept the undeclared properties of its checked
   // source renders through its live checked view, which holds them in the
-  // source's own-key order beside the current field values.
+  // source's own-key order beside the current field values. An array with
+  // properties besides its elements does too: the view lists them after
+  // the elements.
   let prependSourceGate: (() => void) | null = null;
-  if (t.kind === "record" && recordMayKeepSource(lowerer, t)) {
+  const sourceTest: IrExpr | null =
+    t.kind === "record" && recordMayKeepSource(lowerer, t)
+      ? recordSourceTest(v(), loc)
+      : t.kind === "array" && lowerer.dynConvertible(t)
+        ? { kind: "libCall", fn: "array.hasProperties", args: [v()], type: BOOL, loc }
+        : null;
+  if (sourceTest !== null) {
     prependSourceGate = (): void => {
       body.unshift({
         kind: "if",
-        cond: recordSourceTest(v(), loc),
+        cond: sourceTest,
         then: [
           ret({
             kind: "libCall",

@@ -13,6 +13,7 @@ import {
   type IrType,
 } from "../../ir/ir.js";
 import { emitLlvmModule, emitLlvmModuleSource, LlEmitter } from "./emitter.js";
+import { INLINE_STR_RELEASES_PER_FUNCTION } from "./shapes.js";
 
 /** A pending-exception check: the inline active-cell test or a runtime call. */
 const PENDING_CHECK = /@scr_exc_(?:active|pending)\b/;
@@ -201,17 +202,24 @@ test("detached exit defines the runtime opt-in symbol only when requested", () =
   expect(detached.replace("@scr_detached_exit = constant i8 1\n", "")).toBe(plain);
 });
 
-test("inline RC inlines every fast path at speed and keeps string and box releases as calls in release", () => {
+test("inline RC inlines every fast path at speed and keeps box releases as calls in release", () => {
   for (const boxed of [false, true]) {
     const module = moduleFor(Array.from({ length: 4 }, call), { boxed });
     const release = emitLlvmModule(module);
     expect(release).not.toContain("@sc_rc_");
     expect(release).not.toContain("%ScrMapRc");
-    // The release subset inlines string retains and dyn retains and releases
-    // only; these string and box releases stay runtime calls.
+    // The release subset inlines string and dyn retains and releases and Map
+    // retains only: box releases stay runtime calls, and so do the string
+    // releases of a function with more than INLINE_STR_RELEASES_PER_FUNCTION.
     const subset = emitLlvmModule(module, { inlineRc: "release" });
-    expect(subset).not.toContain("@sc_rc_release_str");
-    expect(subset).not.toContain("@sc_rc_release_box");
+    expect(subset).not.toContain("call void @sc_rc_release_box(");
+    const sites = (ir: string, fn: string): number => ir.split(`call void @${fn}(ptr`).length - 1;
+    if (!boxed) {
+      expect(sites(subset, "sc_rc_release_str")).toBe(0);
+      // Every site calls the runtime, and so does the unused helper's slow path.
+      expect(sites(subset, "scr_str_release")).toBe(sites(release, "scr_str_release") + 1);
+      expect(sites(release, "scr_str_release")).toBeGreaterThan(INLINE_STR_RELEASES_PER_FUNCTION);
+    }
     const speed = emitLlvmModule(module, { inlineRc: "speed" });
     const helper = boxed ? "sc_rc_release_box" : "sc_rc_release_str";
     const runtime = boxed ? "scr_box_release" : "scr_str_release";

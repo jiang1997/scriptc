@@ -170,6 +170,9 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "fetch.streamFrom": { argTypes: [null], result: DYN },
   // The chunk/result record depends on ReadableStream<T>; validated by validate.ts.
   "fetch.readerRead": { argTypes: [DYN], result: VOID },
+  /** Readable.fromWeb (scr_stream_from_web.c): the stream, objectMode,
+   * highWaterMark (< 0: the mode's default) and encoding ("": none). */
+  "fetch.readableFromWeb": { argTypes: [DYN, BOOL, F64, STRING], result: VOID },
   "json.parse": { argTypes: [STRING], result: DYN },
   "json.parseReviver": { argTypes: [STRING, DYN], result: DYN },
   "json.stringifyReplacer": { argTypes: [DYN, DYN, STRING], result: DYN },
@@ -3614,6 +3617,8 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "weakSet.is": { argTypes: [DYN], result: BOOL },
   "weakMap.new": { argTypes: [DYN], result: DYN },
   "weakSet.new": { argTypes: [DYN], result: DYN },
+  "finalizationRegistry.new": { argTypes: [DYN], result: DYN },
+  "finalizationRegistry.is": { argTypes: [DYN], result: BOOL },
   "dyn.fromEntries": { argTypes: [DYN], result: DYN },
   "bytes.constructor": { argTypes: [STRING], result: DYN },
   "bytes.instanceOf": { argTypes: [DYN, DYN, STRING], result: BOOL },
@@ -3808,6 +3813,13 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   // Whether the array (args[0]) still has the key (args[1]) from its
   // namedKeys list. Borrowed; never throws.
   "array.hasNamedKey": { argTypes: [null, STRING], result: BOOL },
+  // Whether an array (args[0], any element type) has properties besides its
+  // elements: noncanonical numeric keys, match metadata or named
+  // properties. Borrowed; never throws.
+  "array.hasProperties": { argTypes: [null], result: BOOL },
+  // The key of an element access whose index is undefined (the property
+  // named "undefined"; frontend/lowering/undefined-index.ts).
+  "array.undefinedKey": { argTypes: [], result: F64 },
   // node:events EventEmitter: receivers are emitter-hierarchy objects and
   // the chaining forms (on/off/removeAll/setMax) return the receiver's
   // own class — program-dependent object types, checked in the libCall
@@ -3953,6 +3965,9 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "stream.setDestroy": { argTypes: [null, null], result: VOID },
   "stream.setTransform": { argTypes: [null, null], result: VOID },
   "stream.setFlush": { argTypes: [null, null], result: VOID },
+  "stream.setConstruct": { argTypes: [null, null], result: VOID },
+  "stream.setWritev": { argTypes: [null, null], result: VOID },
+  "stream.setWritevDefault": { argTypes: [null, null], result: VOID },
   /** The dyn-options twins (a checked-dynamic options record — the JS
    * lane's `super(options)` forwarding and `new Readable(dynVar)`): the
    * option walk runs at RUNTIME with Node's reading rules. newDyn:
@@ -3979,6 +3994,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "stream.pipeline": { argTypes: [F64], result: VOID },
   "stream.pipelineDyn": { argTypes: [F64], result: VOID },
   "stream.pipelineStages": { argTypes: [F64, F64, F64, F64, F64], result: VOID },
+  "stream.composeStages": { argTypes: [F64, F64, F64, F64, F64], result: VOID },
   "stream.pipelineStagesDyn": { argTypes: [F64, F64, F64, F64, F64], result: VOID },
   /** stream.compose(count, s1..sn): the Duplex over a pipeline of the
    * streams (+1). MAY THROW (ERR_INVALID_ARG_VALUE for a stream that is
@@ -4020,6 +4036,12 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * signal group (scr_stream_pipeline_stages). A promise destination's
    * promise type is sp.pipelineStages' result. */
   "sp.pipelineStages": {
+    argTypes: [F64, F64, F64, F64, F64],
+    result: { kind: "promise", inner: VOID },
+  },
+  /** sp.pipelineStages with the options argument: the same head, then
+   * end (a bool) and, with flags bit 6, the options' signal (dyn). */
+  "sp.pipelineStagesOpts": {
     argTypes: [F64, F64, F64, F64, F64],
     result: { kind: "promise", inner: VOID },
   },
@@ -4079,6 +4101,28 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   /** The objectMode option's sides (readable, writable), applied right
    * after construction; answers the receiver (+1, the chaining shape). */
   "stream.objectMode": { argTypes: [null, BOOL, BOOL], result: VOID },
+  "stream.decodeStrings": { argTypes: [null, BOOL], result: VOID },
+  "stream.duplexFromGen": { argTypes: [null, null, null, null, null, null], result: VOID },
+  "stream.duplexFromDyn": { argTypes: [DYN], result: VOID },
+  /** Duplex.from over a lone Readable or Writable, or a { readable,
+   * writable } pair of streams (duplexify.js's _duplexify). */
+  "stream.duplexifyReadable": { argTypes: [null], result: VOID },
+  "stream.duplexifyWritable": { argTypes: [null], result: VOID },
+  "stream.duplexifyPair": { argTypes: [null, null], result: VOID },
+  /** Duplex.from(promise): the promise and its box helper. */
+  "stream.duplexFromPromise": { argTypes: [null, null], result: VOID },
+  /** Duplex.from(asyncFunction): the stage, its source helper and the
+   * promise's box helper. */
+  "stream.duplexFromAsyncFn": { argTypes: [null, null, null], result: VOID },
+  /** The same for a body that declares the options argument: then the
+   * AbortController's abort() and its signal. */
+  "stream.duplexFromGenSignal": {
+    argTypes: [null, null, null, null, null, null, null, DYN],
+    result: VOID,
+  },
+  "stream.duplexFromAsyncFnSignal": { argTypes: [null, null, null, null, DYN], result: VOID },
+  "writable.writeEncoding": { argTypes: [null, STRING], result: VOID },
+  "writable.setDefaultEncoding": { argTypes: [null, DYN], result: VOID },
   /** Whether a readable.nextChunkDyn step answered the end (the done
    * marker; an object-mode stream can yield undefined). */
   "stream.chunkDone": { argTypes: [DYN], result: BOOL },
@@ -4114,17 +4158,39 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * forEach nothing; reduce: [stream, fn, init, hasInit, options, kind]
    * with the payload kind (0 dyn, 1 number, 2 boolean, 3 string). The
    * promise-returning ones reject instead of throwing. */
-  "readable.opMap": { argTypes: [null, DYN, DYN], result: VOID },
-  "readable.opFilter": { argTypes: [null, DYN, DYN], result: VOID },
-  "readable.opFlatMap": { argTypes: [null, DYN, DYN], result: VOID },
+  "readable.opMap": { argTypes: [null, DYN, DYN, DYN], result: VOID },
+  "readable.opFilter": { argTypes: [null, DYN, DYN, DYN], result: VOID },
+  "readable.opFlatMap": { argTypes: [null, DYN, DYN, DYN], result: VOID },
+  /** flatMap whose callback returns a compiled generator: the helpers
+   * over its type follow (async: next, read, return, throw; sync: next,
+   * return, throw). */
+  "readable.opFlatMapAsyncGen": {
+    argTypes: [null, DYN, DYN, DYN, null, null, null, null],
+    result: VOID,
+  },
+  "readable.opFlatMapSyncGen": { argTypes: [null, DYN, DYN, DYN, null, null, null], result: VOID },
   "readable.opDrop": { argTypes: [null, DYN, DYN], result: VOID },
   "readable.opTake": { argTypes: [null, DYN, DYN], result: VOID },
   "readable.opToArray": { argTypes: [null, DYN], result: { kind: "promise", inner: DYN } },
-  "readable.opForEach": { argTypes: [null, DYN, DYN], result: { kind: "promise", inner: VOID } },
-  "readable.opSome": { argTypes: [null, DYN, DYN], result: { kind: "promise", inner: BOOL } },
-  "readable.opEvery": { argTypes: [null, DYN, DYN], result: { kind: "promise", inner: BOOL } },
-  "readable.opFind": { argTypes: [null, DYN, DYN], result: { kind: "promise", inner: DYN } },
+  "readable.opForEach": {
+    argTypes: [null, DYN, DYN, DYN],
+    result: { kind: "promise", inner: VOID },
+  },
+  "readable.opSome": { argTypes: [null, DYN, DYN, DYN], result: { kind: "promise", inner: BOOL } },
+  "readable.opEvery": { argTypes: [null, DYN, DYN, DYN], result: { kind: "promise", inner: BOOL } },
+  "readable.opFind": { argTypes: [null, DYN, DYN, DYN], result: { kind: "promise", inner: DYN } },
+  /** The map family's last argument is the callback's { signal } (or
+   * undefined). reduceSignal adds ac.abort() (a closure) and
+   * { signal: ac.signal } for a reducer that reads them. */
   "readable.opReduce": { argTypes: [null, DYN, DYN, BOOL, DYN, F64], result: VOID },
+  "readable.opReduceSignal": {
+    argTypes: [null, DYN, DYN, BOOL, DYN, F64, null, DYN],
+    result: VOID,
+  },
+  "readable.opSignalList": { argTypes: [DYN], result: DYN },
+  "readable.opSignalOpts": { argTypes: [DYN], result: DYN },
+  "readable.opSignalOf": { argTypes: [DYN], result: DYN },
+  "readable.opOnceOptions": { argTypes: [], result: DYN },
   "readable.resume": { argTypes: [null], result: VOID },
   "readable.isPaused": { argTypes: [null], result: BOOL },
   "readable.pipe": { argTypes: [null, null, BOOL], result: VOID },
@@ -4832,10 +4898,12 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
 export type IrLibFn = keyof typeof LIB_FN_SIGS;
 
 /** The function-stage runs of a pipeline of `total` stages that a stream
- * follows (positions bit j: stage j is a function): each pumps its last
- * generator into that stream through one (next, read, return) triple. */
-export function pipelinePumpedRuns(total: number, positions: number): number {
-  let runs = 0;
+ * follows (positions bit j: stage j is a function), and an async
+ * generator destination's run (flags bits 1-2 = 1, pumped into the
+ * PassThrough pipeline() answers): each pumps its last generator through
+ * one (next, read, return) triple. */
+export function pipelinePumpedRuns(total: number, positions: number, flags: number): number {
+  let runs = ((flags >> 1) & 3) === 1 ? 1 : 0;
   for (let j = 0; j + 1 < total; j++) {
     if (Math.floor(positions / 2 ** j) % 2 === 1 && Math.floor(positions / 2 ** (j + 1)) % 2 === 0)
       runs++;

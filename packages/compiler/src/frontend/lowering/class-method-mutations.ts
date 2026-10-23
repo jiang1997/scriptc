@@ -380,6 +380,13 @@ export function collectClassMethodMutations(
         markTarget(node.initializer, node);
       if (ts.isPropertyAccessExpression(node) && isErrorPrototypeValue(lowerer, node))
         lowerer.errorPrototypeValues = true;
+      // A heritage evaluated at run time may be Error, which links the
+      // class's instances to Error.prototype.
+      if (
+        (ts.isClassDeclaration(node) || ts.isClassExpression(node)) &&
+        runtimeHeritage(lowerer, node)
+      )
+        lowerer.errorPrototypeValues = true;
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
         const base = unwrap(node.expression);
         const prototype =
@@ -620,4 +627,23 @@ export function collectClassMethodMutations(
     for (const field of arrowFields) {
       if (!receiverFields.has(field)) lowerer.receiverFreeCallbackFields.add(field);
     }
+}
+
+/** Whether a class's `extends` expression is a value computed at run time:
+ * anything other than a name of a class declaration or of a builtin
+ * constructor (`extends Parent` over `const Parent = params.Parent ?? Object`,
+ * `extends make()`). */
+function runtimeHeritage(
+  lowerer: Lowerer,
+  node: ts.ClassDeclaration | ts.ClassExpression,
+): boolean {
+  const heritage = node.heritageClauses?.nodes.find(
+    (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+  )?.types?.nodes[0]?.expression;
+  if (heritage === undefined) return false;
+  if (!ts.isIdentifier(heritage) && !ts.isPropertyAccessExpression(heritage)) return true;
+  let symbol = lowerer.checker.getSymbolAtLocation(heritage);
+  if (symbol === undefined) return true;
+  if (symbol.flags & ts.SymbolFlags.Alias) symbol = lowerer.checker.getAliasedSymbol(symbol);
+  return !(symbol.flags & ts.SymbolFlags.Class) && !lowerer.isStdlibSymbol(symbol);
 }

@@ -215,7 +215,7 @@ export function streamDataAdapter(
 
 export function streamDoneFnFor(
   host: LlvmEmitterContext,
-  kind: "w" | "f" | "d" | "t" | "l",
+  kind: "w" | "f" | "d" | "t" | "l" | "c",
   doneT: IrType & { kind: "func" },
 ): string {
   const key = `sd:${kind}:${typeKey(doneT)}`;
@@ -260,19 +260,21 @@ export function streamDoneFnFor(
     }
   }
   const entry =
-    kind === "w"
-      ? "scr_stream_write_done"
-      : kind === "f"
-        ? "scr_stream_final_done"
-        : kind === "d"
-          ? "scr_stream_destroy_done"
-          : kind === "t"
-            ? valueData
-              ? "scr_stream_transform_done_value"
-              : "scr_stream_transform_done"
-            : valueData
-              ? "scr_stream_flush_done_value"
-              : "scr_stream_flush_done";
+    kind === "c"
+      ? "scr_stream_construct_done"
+      : kind === "w"
+        ? "scr_stream_write_done"
+        : kind === "f"
+          ? "scr_stream_final_done"
+          : kind === "d"
+            ? "scr_stream_destroy_done"
+            : kind === "t"
+              ? valueData
+                ? "scr_stream_transform_done_value"
+                : "scr_stream_transform_done"
+              : valueData
+                ? "scr_stream_flush_done_value"
+                : "scr_stream_flush_done";
   const twoSlot = (kind === "t" || kind === "l") && !valueData;
   host.declare(
     `declare void @${entry}(ptr, ptr${twoSlot ? ", ptr, ptr" : valueData ? ", ptr" : ""})`,
@@ -634,7 +636,7 @@ export function zlibBytesThunkFor(
 
 export function streamCbThunkFor(
   host: LlvmEmitterContext,
-  kind: "r" | "w" | "f" | "d" | "t" | "l" | "e",
+  kind: "r" | "w" | "f" | "d" | "t" | "l" | "e" | "c" | "v",
   cbT: IrType,
 ): string {
   if (cbT.kind !== "func")
@@ -650,9 +652,11 @@ export function streamCbThunkFor(
       ? ["ptr %s", "double %size"]
       : kind === "w" || kind === "t"
         ? ["ptr %s", "ptr %chunk"]
-        : kind === "d" || kind === "e"
-          ? ["ptr %s", "ptr %err"]
-          : ["ptr %s"];
+        : kind === "v"
+          ? ["ptr %s", "ptr %chunks"]
+          : kind === "d" || kind === "e"
+            ? ["ptr %s", "ptr %err"]
+            : ["ptr %s"];
   const declared = cbT.params;
   const hasThis = declared[0] !== undefined && declared[0].kind === "object";
   if (declared.length === 0) {
@@ -661,7 +665,9 @@ export function streamCbThunkFor(
     );
   }
   const off = hasThis ? 1 : 0;
-  const full = (kind === "r" ? 1 : kind === "w" || kind === "t" ? 3 : kind === "d" ? 2 : 1) + off;
+  const full =
+    (kind === "r" ? 1 : kind === "w" || kind === "t" ? 3 : kind === "d" || kind === "v" ? 2 : 1) +
+    off;
   if (declared.length > full) {
     throw new InternalCompilerError(
       `llvm emitter bug: stream '${kind}' callback declares ${declared.length} params (frontend must fence)`,
@@ -709,6 +715,31 @@ export function streamCbThunkFor(
       }
       continue;
     }
+    if (kind === "v" && pos === 0) {
+      // writev's chunks: the batch array (borrowed from the runtime), as
+      // a dyn value or converted to the declared type
+      if (p.kind === "dyn") {
+        host.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
+        d.push(`  %vc${i} = call ptr @scr_dyn_retain_v(ptr %chunks)`);
+        passed.push(`ptr %vc${i}`);
+      } else {
+        const helper = host.dyn.dynCheckHelper(p, false);
+        const ty = host.llType(p);
+        host.declare(`declare zeroext i1 @scr_exc_pending()`);
+        if (hasThis) host.declare(`declare void @scr_stream_release_v(ptr)`);
+        d.push(
+          `  %vt${i} = call ${ty === "i1" ? "zeroext i1" : ty} @${helper}(ptr %chunks, ptr null)`,
+          `  %vtbad${i} = call zeroext i1 @scr_exc_pending()`,
+          `  br i1 %vtbad${i}, label %vtfail${i}, label %vtok${i}`,
+          `vtfail${i}:`,
+          ...(hasThis ? [`  call void @scr_stream_release_v(ptr %sr)`] : []),
+          `  ret void`,
+          `vtok${i}:`,
+        );
+        passed.push(`${ty} %vt${i}`);
+      }
+      continue;
+    }
     const isChunkPos = (kind === "w" || kind === "t") && pos === 0;
     const isEncPos = (kind === "w" || kind === "t") && pos === 1;
     const isErrPos = (kind === "d" || kind === "e") && pos === 0;
@@ -717,7 +748,7 @@ export function streamCbThunkFor(
         ? false
         : kind === "w" || kind === "t"
           ? pos === 2
-          : kind === "f" || kind === "l"
+          : kind === "f" || kind === "l" || kind === "c"
             ? pos === 0
             : pos === 1;
     if (p.kind === "dyn") {
@@ -763,7 +794,7 @@ export function streamCbThunkFor(
         d.push(`  br label %ego${i}`, `ego${i}:`, `  %edv${i} = load ptr, ptr %edslot${i}`);
         passed.push(`ptr %edv${i}`);
       } else if (isDonePos) {
-        const glue = `scr_stream_done_dyn_${kind}`;
+        const glue = `scr_stream_done_dyn_${kind === "v" ? "w" : kind}`;
         host.declare(`declare ptr @${glue}(ptr, ptr, ${host.sizeType})`);
         host.declare(`declare ptr @scr_dyn_new_func(ptr, ptr, i32, ptr, ptr)`);
         const clo = doneClosure(`@${glue}`, `dd${i}`);
@@ -884,7 +915,8 @@ export function streamCbThunkFor(
       );
       passed.push(`ptr %euv${i}`);
     } else if (isDonePos) {
-      const doneKind = kind as "w" | "f" | "d" | "t" | "l"; // "e" has no done position
+      // "e" has no done position; writev completes as a write
+      const doneKind = (kind === "v" ? "w" : kind) as "w" | "f" | "d" | "t" | "l" | "c";
       if (p.kind !== "func")
         throw new InternalCompilerError("llvm emitter bug: stream done callback not a func");
       const doneFn = host.streamDoneFnFor(doneKind, p);

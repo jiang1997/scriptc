@@ -28,7 +28,7 @@ import {
 } from "../../ir/ir.js";
 import {
   FN_ATTRS,
-  limitInlineDynReleases,
+  limitInlineReleases,
   releaseSym,
   typedRefConstructor,
   vAdapters,
@@ -2469,7 +2469,7 @@ export function emitFfiCallbackDefs(emitter: LlEmitter): { globals: string[]; de
 
 export function emitParts(emitter: LlEmitter): string[] {
   const parts = [
-    ...limitInlineDynReleases(emitter.emitModuleParts()),
+    ...limitInlineReleases(emitter.emitModuleParts(), emitter.shapeHost.rcMode),
     ...emitter.disposeObserverGates(),
   ];
   if (!emitter.executableTls) return parts;
