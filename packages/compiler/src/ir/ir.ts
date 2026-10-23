@@ -1044,6 +1044,10 @@ export interface IrModule {
   entry: string;
   /** Executable roots run in isolated native worker contexts. */
   workers?: boolean;
+  /** The program has declaration-typed boundary casts (decl-projection.ts):
+   * closures boxed for package code return records and arrays as live
+   * capsules, so a value that comes back keeps its identity. */
+  declBoundary?: true;
   /** The program constructs LifetimeRegion (@scriptc/experimental): every
    * ProgramLifetime instance lives in a counted region (the region.*
    * intrinsics; backend/llvm/regions.ts). */
@@ -1697,6 +1701,24 @@ export interface IrRecordShape {
    * an accessor property named once (see accessorSlotProp). The
    * checked-dynamic copy lists its keys in this order. */
   accessorOrder?: string[];
+  /** Every order the shape's values enumerate their keys in, when its
+   * object literals write the keys in more than one order (see
+   * key-order-witness.ts); declaredOrder is the first. Each value holds the
+   * index of its order in the hidden number field KEY_ORDER_FIELD: the
+   * literal that wrote it stores its order's index, a copy its source's,
+   * and every other construction leaves 0. Each key-order surface
+   * dispatches on that field. */
+  orderVariants?: string[][];
+}
+
+/** The hidden field of a shape with orderVariants: the index of the value's
+ * key order. */
+export const KEY_ORDER_FIELD = "%order";
+
+/** The orders a record shape's values enumerate their keys in: each order
+ * of a shape with orderVariants, or its one table. */
+export function shapeKeyOrders(shape: IrRecordShape): readonly (readonly string[])[] {
+  return shape.orderVariants ?? [shape.declaredOrder ?? shape.fields.map((f) => f.name)];
 }
 
 /** fs.Dirent rows: the hidden %dtype entry kind (libuv's UV_DIRENT
@@ -3423,7 +3445,11 @@ export type IrExpr =
         | "array"
         | "truthy"
         | "error"
-        | "function";
+        | "function"
+        /** The value is a capsule of a compiled class instance. */
+        | "classCapsule"
+        /** The value is a boxed function or class value (exact kind test). */
+        | "funcKind";
       bytesElem?: IrBytesElem;
       negated?: true;
       value: IrExpr;
@@ -3886,10 +3912,19 @@ export type IrExpr =
   /** `exact`: the value is known to be a capsule this program boxed from
    * exactly the class `type` names (a `dyn.typedRefKeyIs` test guards the
    * expression), so the check is one load of the capsule's instance. */
+  /** `adopt`: the declaration-typed boundary's cast (decl-projection.ts).
+   * The conversion preserves identity: a source object or array that
+   * something else still references (reference count above one) is
+   * turned, after the whole check succeeded, into a live capsule of the
+   * value built from it, so every holder sees the same native value; an
+   * unshared source is simply consumed. Values must be plain data
+   * (ordinary objects and arrays without accessors, prototypes, symbols
+   * or frozen state), otherwise the cast throws the path TypeError. */
   | {
       kind: "dynCheck";
       value: IrExpr;
       preserveRefs?: true;
+      adopt?: true;
       exact?: true;
       type: IrType;
       loc: SrcLoc;

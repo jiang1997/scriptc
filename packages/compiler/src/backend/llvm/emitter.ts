@@ -92,6 +92,7 @@ import {
   type IntegerRanges,
 } from "../../ir/integer-ranges.js";
 import { unshareNodes } from "../../ir/unshare.js";
+import { runPairedWhileLoopsAsFor } from "../../ir/paired-while-loops.js";
 import { copyStableCaptures } from "../../ir/capture-values.js";
 import { resolveSelfCaptures } from "../../ir/self-captures.js";
 import { analyzeInt32Slots, dynamicFieldStores, type Int32Slots } from "../../ir/int32-slots.js";
@@ -527,7 +528,9 @@ function moduleEmitter(input: IrModule, options: LlvmTargetOptions): LlEmitter {
                         resolveSelfCaptures(
                           hoistFinalFieldReads(
                             freezeInitOnlyGlobals(
-                              holdCharLocalsAsUnits(dropUnwrittenPropertyBags(mod)),
+                              holdCharLocalsAsUnits(
+                                dropUnwrittenPropertyBags(runPairedWhileLoopsAsFor(mod)),
+                              ),
                             ),
                           ),
                         ),
@@ -1076,6 +1079,10 @@ export class LlEmitter {
   readonly cstrs = new Map<string, { sym: string; len: number }>();
   /** Interned ScrMapOps descriptors (scr_map.h): initializer → symbol. */
   readonly mapOpsConsts = new Map<string, string>();
+  /** Method-id slots of checked-dynamic method calls
+   * (scr_dyn_invoke_prepared_id): method name → symbol of an i32 the
+   * runtime fills with the name's id on the first call. */
+  readonly methodIdSlots = new Map<string, string>();
   /** Type-directed walker functions (JSON serializers, the indent
    * rewriter, union ToString/join) — interned per typeKey/unionId, defs
    * flushed with the shape helpers. */
@@ -1844,6 +1851,7 @@ export class LlEmitter {
       liveDynRefAdapter: (type) => this.liveDynRefAdapter(type),
       usesDynBuiltinStream: () => this.usesDynBuiltinStream,
       liveDynUnionRefAdapter: (type) => this.liveDynUnionRefAdapter(type),
+      declBoundary: () => this.mod.declBoundary === true,
       dynPromiseAdapter: (type) => this.dynPromiseAdapter(type),
       isErrorClass: (name) => this.classMeta.get(name)?.root.def.name === "%Error",
       classRootOf: (name) => this.classMeta.get(name)?.root.def.name,
@@ -2734,6 +2742,17 @@ export class LlEmitter {
     }
     this.journal?.entry("cstr", text, c);
     return `@${c.sym}`;
+  }
+
+  /** The method-id slot for a constant method name (methodIdSlots). */
+  methodIdSlot(name: string): string {
+    let sym = this.methodIdSlots.get(name);
+    if (!sym) {
+      sym = this.contentSymbol("sc_mid_", name);
+      this.methodIdSlots.set(name, sym);
+    }
+    this.journal?.entry("methodIdSlot", name, sym);
+    return `@${sym}`;
   }
 
   needBadTag(): void {
@@ -4849,6 +4868,15 @@ export class LlEmitter {
         if (own === undefined) {
           own = this.contentSymbol("sc_map_ops_", key);
           this.mapOpsConsts.set(key, own);
+        }
+        if (own !== value) names.set(value as string, own);
+        return;
+      }
+      case "methodIdSlot": {
+        let own = this.methodIdSlots.get(key);
+        if (own === undefined) {
+          own = this.contentSymbol("sc_mid_", key);
+          this.methodIdSlots.set(key, own);
         }
         if (own !== value) names.set(value as string, own);
         return;

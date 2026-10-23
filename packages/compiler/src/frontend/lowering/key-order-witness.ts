@@ -41,11 +41,56 @@
  * value: that shape, and every shape copied from it, keeps today's table
  * (and today's SC6002 warnings). Shapes that no order surface observes
  * keep today's table too. */
-import type { IrExpr, IrFunction, IrRecordShape, IrStmt, IrType } from "../../ir/ir.js";
-import { shapeHasAccessorSlots, typeEquals, UNDEFINED_T } from "../../ir/ir.js";
-import { everyExprChild, everyStmtChild, everyTypeChild } from "../../ir/traverse.js";
+import type { IrExpr, IrFunction, IrRecordShape, IrStmt, IrType, SrcLoc } from "../../ir/ir.js";
+import {
+  BOOL,
+  F64,
+  KEY_ORDER_FIELD,
+  shapeHasAccessorSlots,
+  typeEquals,
+  UNDEFINED_T,
+} from "../../ir/ir.js";
+import {
+  everyExprChild,
+  everyStmtChild,
+  everyTypeChild,
+  transformStmtList,
+} from "../../ir/traverse.js";
 import type { Lowerer } from "./lowerer.js";
 import { ALWAYS_THROW_LIB_FNS } from "../../ir/builtin-effects.js";
+
+/** The statements a key-order helper runs for record `ref`: `walks[0]`,
+ * its walk over the shape's table, or, for a shape with orderVariants, a
+ * branch per order (walks[i] for order i) on the value's KEY_ORDER_FIELD.
+ * `walks` follows shapeKeyOrders. */
+export function perKeyOrder(
+  shape: IrRecordShape,
+  ref: IrExpr,
+  walks: readonly IrStmt[][],
+  loc: SrcLoc,
+): IrStmt[] {
+  let tail = walks[0]!;
+  for (let i = walks.length - 1; i >= 1; i--) {
+    const index: IrExpr = {
+      kind: "recordGet",
+      obj: ref,
+      shapeId: shape.id,
+      field: KEY_ORDER_FIELD,
+      type: F64,
+      loc,
+    };
+    const cond: IrExpr = {
+      kind: "bin",
+      op: "===",
+      left: index,
+      right: { kind: "numLit", value: i, type: F64, loc },
+      type: BOOL,
+      loc,
+    };
+    tail = [{ kind: "if", cond, then: walks[i]!, else_: tail, loc }];
+  }
+  return tail;
+}
 
 /** One property of an object literal, in source order. */
 export type KeyOrderSegment =
@@ -53,8 +98,9 @@ export type KeyOrderSegment =
    * exists only when its condition holds. */
   | { kind: "key"; name: string; definite: boolean }
   /** `...source` of a record shape; `maybeAbsent` when the whole source
-   * can be undefined (`...options` of `T | undefined`). */
-  | { kind: "spread"; shapeId: string; maybeAbsent: boolean }
+   * can be undefined (`...options` of `T | undefined`). `value` is the
+   * binding the literal evaluated the source into, when it has one. */
+  | { kind: "spread"; shapeId: string; maybeAbsent: boolean; value?: IrExpr & { kind: "varRef" } }
   /** A spread whose keys are only known at run time. */
   | { kind: "opaque" };
 
@@ -227,6 +273,11 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
   const opaqueSeen = new Set<string>();
   const runtimeShapes = new Set<string>();
   const runtimeSeen = new Set<string>();
+  /** Shapes the declaration-typed boundary converts into (adopting casts):
+   * their values come from package code that builds them in the
+   * declaration's order, the order their table holds. */
+  const declaredShapes = new Set<string>();
+  const declaredSeen = new Set<string>();
   const producedBy = (type: IrType, opaque: boolean): void => {
     if (opaque) shapesIn(type, opaqueShapes, opaqueSeen);
     else shapesIn(type, runtimeShapes, runtimeSeen);
@@ -329,10 +380,15 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
       case "strIntrinsic":
       case "regexIntrinsic":
       case "bytesIntrinsic":
+      // Generator results ({ done, value }) and Promise.withResolvers
+      // records are built by the backend in a fixed layout.
+      case "genResume":
+      case "promiseWithResolvers":
         producedBy(e.type, true);
         return;
       case "dynCheck":
-        if (!orderPreservingClone(e)) producedBy(e.type, false);
+        if (e.adopt === true) shapesIn(e.type, declaredShapes, declaredSeen);
+        else if (!orderPreservingClone(e)) producedBy(e.type, false);
         return;
       case "dynDestrCheck":
       case "caughtCheck":
@@ -392,6 +448,7 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
     f.opaque = true;
   }
   for (const id of runtimeShapes) factsOf(id).runtime = true;
+  for (const id of declaredShapes) if (!runtimeShapes.has(id)) factsOf(id).pinned = true;
 
   // ── scope ───────────────────────────────────────────────────────────
   // Only plain declared-field shapes with a table take part.
@@ -712,5 +769,542 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
     if (resolved.order.join("\0") === table.join("\0")) continue;
     shape.declaredOrder = [...shape.declaredOrder!.filter(isArrayIndex), ...resolved.order];
     notes.changed.add(id);
+  }
+
+  // ── per-instance orders ─────────────────────────────────────────────
+  // A shape whose literals write its keys in more than one order has no
+  // one table. Each value then records which of the orders it was written
+  // in (KEY_ORDER_FIELD), when every construction's order is known
+  // statically or copied from a value that records its own:
+  //  - a literal of explicit keys writes its order;
+  //  - a copy from a shape with one resolved order writes that order;
+  //  - a copy from a value of a shape with orders writes the source's
+  //    order, filtered to the copy's keys (rest bindings, width copies);
+  //  - clones copy the field, and every other construction (synthesized
+  //    literals, checked conversions, runtime producers) leaves 0, today's
+  //    table, as before.
+  // A write of an optional key a value lacks moves the key to the end of
+  // the value's order, as in Node: the orders include every order such
+  // writes reach, and each write site updates the index after it evaluates
+  // the value and before it writes the key.
+  const MAX_ORDERS = 16;
+  const unresolved = (id: string): boolean => result.get(id) === "unknown";
+  /** `order` over every key of `table`: keys the order lacks follow it. */
+  const complete = (order: readonly string[], table: readonly string[]): string[] => {
+    const keys = new Set(table);
+    const out = order.filter((k) => keys.has(k));
+    const seen = new Set(out);
+    return [...out, ...table.filter((k) => !seen.has(k))];
+  };
+  const literalOrder = (segments: readonly KeyOrderSegment[]): string[] | null => {
+    const out: string[] = [];
+    for (const segment of segments) {
+      if (segment.kind !== "key" || !segment.definite) return null;
+      if (!isArrayIndex(segment.name)) out.push(segment.name);
+    }
+    return out;
+  };
+  /** `{ ...value }` of a value of the literal's own shape: a copy of the
+   * value's order. */
+  const selfSpread = (segments: readonly KeyOrderSegment[], id: string): boolean =>
+    segments.length === 1 &&
+    segments[0]!.kind === "spread" &&
+    segments[0]!.shapeId === id &&
+    !segments[0]!.maybeAbsent;
+  const sameOrder = (a: readonly string[], b: readonly string[]): boolean =>
+    a.join("\0") === b.join("\0");
+  const indexOfOrder = (orders: readonly string[][], order: readonly string[]): number =>
+    orders.findIndex((o) => sameOrder(o, order));
+  /** The keys writes can add to a value of the shape, or null when a
+   * clone override can (the clone's order is its source's). */
+  const movingKeys = (id: string, f: ShapeFacts, table: readonly string[]): string[] | null => {
+    const keys = new Set(table);
+    const moving = new Set<string>();
+    for (const w of f.writes) {
+      if (w.kind === "delete" || !keys.has(w.field) || !maybeAbsent(id, w.field)) continue;
+      if (w.kind === "clone") return null;
+      moving.add(w.field);
+    }
+    return [...moving];
+  };
+  /** `values[i]` for the order index `current` holds, as a chain of
+   * tests. */
+  const indexChain = (current: IrExpr, values: readonly number[], loc: SrcLoc): IrExpr => {
+    let out: IrExpr = { kind: "numLit", value: values[values.length - 1]!, type: F64, loc };
+    for (let i = values.length - 2; i >= 0; i--) {
+      if (out.kind === "numLit" && out.value === values[i]) continue;
+      out = {
+        kind: "ternary",
+        cond: {
+          kind: "bin",
+          op: "===",
+          left: current,
+          right: { kind: "numLit", value: i, type: F64, loc },
+          type: BOOL,
+          loc,
+        },
+        then: { kind: "numLit", value: values[i]!, type: F64, loc },
+        else_: out,
+        type: F64,
+        loc,
+      };
+    }
+    return out;
+  };
+  const moves = new Map<string, Map<string, number[]>>();
+  /** Adds to `orders` every order writes of `moving` keys reach from them
+   * and records each key's transitions; false past MAX_ORDERS. */
+  const closeUnderMoves = (id: string, orders: string[][], moving: readonly string[]): boolean => {
+    const transitions = new Map<string, number[]>(moving.map((k) => [k, []]));
+    for (let i = 0; i < orders.length; i++) {
+      for (const key of moving) {
+        const moved = [...orders[i]!.filter((k) => k !== key), key];
+        let index = indexOfOrder(orders, moved);
+        if (index < 0) {
+          if (orders.length === MAX_ORDERS) return false;
+          index = orders.push(moved) - 1;
+        }
+        transitions.get(key)![i] = index;
+      }
+    }
+    if (moving.length > 0) moves.set(id, transitions);
+    return true;
+  };
+  // Observed shapes, and the shapes their values copy their orders from.
+  const wanted = new Set(observed);
+  const pending = [...observed];
+  while (pending.length > 0) {
+    const f = facts.get(pending.pop()!);
+    if (f === undefined) continue;
+    const sources = [
+      ...f.copies.map((c) => c.source),
+      ...f.literals.flatMap((segments) =>
+        segments.flatMap((s) => (s.kind === "spread" ? [s.shapeId] : [])),
+      ),
+    ];
+    for (const source of sources) {
+      if (wanted.has(source)) continue;
+      wanted.add(source);
+      pending.push(source);
+    }
+  }
+  const orderable = (
+    id: string,
+    f: ShapeFacts,
+  ): { shape: IrRecordShape; moving: string[] } | null => {
+    const shape = shapes.get(id);
+    if (!wanted.has(id) || !unresolved(id) || !inScope(shape)) return null;
+    const moving = movingKeys(id, f, tableOf(shape));
+    return moving === null ? null : { shape, moving };
+  };
+  const variants = new Map<string, string[][]>();
+  for (const [id, f] of facts) {
+    const candidate = orderable(id, f);
+    // A runtime producer builds the shape's values in its fixed layout,
+    // which has no KEY_ORDER_FIELD.
+    if (candidate === null || f.literals.length === 0 || f.opaque) continue;
+    const table = tableOf(candidate.shape);
+    const orders: string[][] = [table];
+    let ok = true;
+    const add = (order: readonly string[]): void => {
+      const full = complete(order, table);
+      if (indexOfOrder(orders, full) < 0) orders.push(full);
+    };
+    for (const segments of f.literals) {
+      if (selfSpread(segments, id)) continue;
+      const order = literalOrder(segments);
+      if (order === null) ok = false;
+      else add(order);
+    }
+    for (const c of f.copies) {
+      if (c.source === id) continue;
+      const source = result.get(c.source);
+      if (source === undefined || source === "unknown") ok = false;
+      else add(source.order.filter((k) => c.keys.has(k)));
+    }
+    if (!ok || orders.length > MAX_ORDERS || !closeUnderMoves(id, orders, candidate.moving))
+      continue;
+    if (orders.length > 1) variants.set(id, orders);
+    else moves.delete(id);
+  }
+  // Shapes built only from values of one shape with orders, all in one
+  // way: copies (rest bindings, width copies), or literals spreading the
+  // value between the same explicit keys. Order i is the source's order i
+  // over the shape's keys, after the keys before the spread and before
+  // the keys after it. A key after the spread that the source value may
+  // lack goes where the source has it, or after the source's keys when it
+  // has not: such a literal's orders are one per source order and set of
+  // those keys the source has, and `select.index[present][i]` is the order
+  // for source order i with the keys of bit set `present`.
+  type Template = {
+    source: string;
+    prefix: string[];
+    suffix: string[];
+    select?: { keys: string[]; index: number[][] };
+  };
+  const templateOf = (segments: readonly KeyOrderSegment[], id: string): Template | null => {
+    const prefix: string[] = [];
+    const suffix: string[] = [];
+    let source: string | null = null;
+    for (const segment of segments) {
+      if (segment.kind === "opaque") return null;
+      if (segment.kind === "spread") {
+        if (source !== null || segment.maybeAbsent || segment.shapeId === id) return null;
+        source = segment.shapeId;
+        continue;
+      }
+      if (!segment.definite) return null;
+      (source === null ? prefix : suffix).push(segment.name);
+    }
+    return source === null ? null : { source, prefix, suffix };
+  };
+  const templateKey = (t: Template): string => JSON.stringify([t.source, t.prefix, t.suffix]);
+  const copyTemplate = (source: string): Template => ({ source, prefix: [], suffix: [] });
+  const mirrors = new Map<string, Template>();
+  for (const [id, f] of facts) {
+    if (variants.has(id) || f.pinned || f.runtime || f.opaque) continue;
+    const candidate = orderable(id, f);
+    if (candidate === null || f.literals.length + f.copies.length === 0) continue;
+    const templates: (Template | null)[] = f.literals.map((segments) => templateOf(segments, id));
+    for (const c of f.copies) templates.push(copyTemplate(c.source));
+    const first = templates[0];
+    if (
+      first === null ||
+      first === undefined ||
+      templates.some((t) => t === null || templateKey(t) !== templateKey(first))
+    )
+      continue;
+    const orders = variants.get(first.source);
+    if (orders === undefined || mirrors.has(first.source)) continue;
+    const table = tableOf(candidate.shape);
+    const tested = first.suffix.filter((k) => maybeAbsent(first.source, k));
+    if (tested.length > 4) continue;
+    const mirrorOf = (o: readonly string[], lacks: ReadonlySet<string>): string[] => {
+      const order = [...first.prefix];
+      for (const k of o) if (!lacks.has(k) && !order.includes(k)) order.push(k);
+      for (const k of first.suffix) if (!order.includes(k)) order.push(k);
+      return complete(order, table);
+    };
+    let mirrored: string[][];
+    let template: Template = first;
+    if (tested.length === 0) mirrored = orders.map((o) => mirrorOf(o, new Set()));
+    else {
+      mirrored = [];
+      const index: number[][] = [];
+      for (let present = 0; present < 1 << tested.length; present++) {
+        const lacks = new Set(tested.filter((_, j) => (present & (1 << j)) === 0));
+        const row: number[] = [];
+        for (const o of orders) {
+          const order = mirrorOf(o, lacks);
+          let i = indexOfOrder(mirrored, order);
+          if (i < 0) i = mirrored.push(order) - 1;
+          row.push(i);
+        }
+        index.push(row);
+      }
+      if (mirrored.length > MAX_ORDERS) continue;
+      template = {
+        source: first.source,
+        prefix: first.prefix,
+        suffix: first.suffix,
+        select: { keys: tested, index },
+      };
+    }
+    if (!closeUnderMoves(id, mirrored, candidate.moving)) continue;
+    if (mirrored.every((o) => sameOrder(o, mirrored[0]!))) {
+      // Every order of the source agrees over these keys: one table.
+      moves.delete(id);
+      const shape = candidate.shape;
+      const only: string[] = mirrored[0] ?? table;
+      if (!sameOrder(only, table))
+        shape.declaredOrder = [...shape.declaredOrder!.filter(isArrayIndex), ...only];
+      continue;
+    }
+    variants.set(id, mirrored);
+    mirrors.set(id, template);
+  }
+  if (variants.size === 0) return;
+
+  // Every construction of those shapes, to give each its order index. A
+  // copy reads its source's index, so its source must be a plain binding.
+  const sites = new Map<string, (IrExpr & { kind: "recordLit" })[]>();
+  /** The statements a spread literal's sequence evaluates first: the
+   * spread value's binding, then its fields. */
+  const prologues = new Map<IrExpr, readonly IrStmt[]>();
+  const siteOf = (e: IrExpr): boolean => {
+    if (e.kind === "seqExpr" && e.result.kind === "recordLit") prologues.set(e.result, e.stmts);
+    if (e.kind === "recordLit" && e.type.kind === "record" && variants.has(e.type.shapeId)) {
+      const list = sites.get(e.type.shapeId) ?? [];
+      list.push(e);
+      sites.set(e.type.shapeId, list);
+    }
+    return everyExprChild(e, siteOf, siteStmt);
+  };
+  const siteStmt = (st: IrStmt): boolean => everyStmtChild(st, siteOf, siteStmt);
+  /** The function each literal with a prologue is built in. */
+  const owners = new Map<IrExpr, IrFunction>();
+  for (const fn of fns) {
+    const before = new Set(prologues.keys());
+    for (const st of fn.body) siteStmt(st);
+    for (const lit of prologues.keys()) if (!before.has(lit)) owners.set(lit, fn);
+  }
+  /** Where a literal evaluated its spread of `source`: the declaration the
+   * spread segment names, in the literal's own prologue. */
+  const spreadBinding = (
+    lit: IrExpr & { kind: "recordLit" },
+    source: string,
+  ): { stmts: IrStmt[]; at: number; value: IrExpr } | null => {
+    const stmts = prologues.get(lit) as IrStmt[] | undefined;
+    if (stmts === undefined) return null;
+    for (const segment of notes.literalOf(lit) ?? []) {
+      if (segment.kind !== "spread" || segment.shapeId !== source || !segment.value) continue;
+      const localId = segment.value.localId;
+      const at = stmts.findIndex((st) => st.kind === "varDecl" && st.localId === localId);
+      const decl = stmts[at];
+      if (decl?.kind !== "varDecl" || decl.init === null) return null;
+      return { stmts, at, value: { kind: "varRef", localId, type: decl.init.type, loc: lit.loc } };
+    }
+    return null;
+  };
+  /** The binding a copy or spread reads its fields from. A literal's spread
+   * names it; every field of a copy reads it. */
+  const copySource = (lit: IrExpr & { kind: "recordLit" }, source: string): IrExpr | null => {
+    if (notes.literalOf(lit) !== undefined) return spreadBinding(lit, source)?.value ?? null;
+    for (const field of lit.fields) {
+      const value = field.value;
+      if (value.kind === "recordGet" && value.shapeId === source && value.obj.kind === "varRef")
+        return value.obj;
+    }
+    for (const st of prologues.get(lit) ?? []) {
+      if (st.kind !== "varDecl" || st.init === null) continue;
+      const t = st.init.type;
+      if (t.kind === "record" && t.shapeId === source)
+        return { kind: "varRef", localId: st.localId, type: t, loc: lit.loc };
+    }
+    return null;
+  };
+  const orderIndex = (id: string, lit: IrExpr & { kind: "recordLit" }): IrExpr | number | null => {
+    const orders = variants.get(id)!;
+    const segments = notes.literalOf(lit);
+    if (segments !== undefined && selfSpread(segments, id)) {
+      const obj = copySource(lit, id);
+      if (obj === null) return null;
+      return {
+        kind: "recordGet",
+        obj,
+        shapeId: id,
+        field: KEY_ORDER_FIELD,
+        type: F64,
+        loc: lit.loc,
+      };
+    }
+    const mirror = mirrors.get(id);
+    if (segments !== undefined && mirror !== undefined) {
+      const obj = copySource(lit, mirror.source);
+      if (obj === null) return null;
+      const sourceIndex: IrExpr = {
+        kind: "recordGet",
+        obj,
+        shapeId: mirror.source,
+        field: KEY_ORDER_FIELD,
+        type: F64,
+        loc: lit.loc,
+      };
+      const select = mirror.select;
+      if (select === undefined) return sourceIndex;
+      // Tests the source for each key in turn, then picks by its index.
+      const pick = (j: number, present: number): IrExpr => {
+        if (j === select.keys.length)
+          return indexChain(sourceIndex, select.index[present]!, lit.loc);
+        return {
+          kind: "ternary",
+          cond: lowerer.recordFieldPresent(obj, mirror.source, select.keys[j]!, lit.loc),
+          then: pick(j + 1, present | (1 << j)),
+          else_: pick(j + 1, present),
+          type: F64,
+          loc: lit.loc,
+        };
+      };
+      return pick(0, 0);
+    }
+    if (segments !== undefined) {
+      const order = literalOrder(segments);
+      return order === null ? null : indexOfOrder(orders, complete(order, orders[0]!));
+    }
+    const source = notes.copyOf(lit);
+    if (source === undefined) return 0;
+    if (variants.has(source) && (source === id || mirrors.get(id)?.source === source)) {
+      const obj = copySource(lit, source);
+      if (obj === null) return null;
+      return {
+        kind: "recordGet",
+        obj,
+        shapeId: source,
+        field: KEY_ORDER_FIELD,
+        type: F64,
+        loc: lit.loc,
+      };
+    }
+    const resolved = result.get(source);
+    if (resolved === undefined || resolved === "unknown") return null;
+    const keys = new Set(
+      lit.fields.filter((x) => x.value.kind !== "fieldAbsent").map((x) => x.name),
+    );
+    return indexOfOrder(
+      orders,
+      complete(
+        resolved.order.filter((k) => keys.has(k)),
+        orders[0]!,
+      ),
+    );
+  };
+  const plan = new Map<IrExpr & { kind: "recordLit" }, IrExpr | number>();
+  const dropped = new Set<string>();
+  for (const [id, list] of sites) {
+    for (const lit of list) {
+      const index = orderIndex(id, lit);
+      if (index === null || (typeof index === "number" && index < 0)) dropped.add(id);
+      else plan.set(lit, index);
+    }
+  }
+  // Write sites of keys that move: each reads and updates the value's
+  // index before the write.
+  const writeSites: { st: IrStmt & { kind: "recordSet" }; fn: IrFunction }[] = [];
+  let writeFn: IrFunction | null = null;
+  const writeExpr = (e: IrExpr): boolean => everyExprChild(e, writeExpr, writeOf);
+  const writeOf = (st: IrStmt): boolean => {
+    if (
+      st.kind === "recordSet" &&
+      st.value.kind !== "fieldAbsent" &&
+      moves.get(st.shapeId)?.has(st.field)
+    )
+      writeSites.push({ st, fn: writeFn! });
+    return everyStmtChild(st, writeExpr, writeOf);
+  };
+  for (const fn of fns) {
+    writeFn = fn;
+    for (const st of fn.body) writeOf(st);
+  }
+  // A shape whose copies cannot read their source keeps today's table, and
+  // so do the shapes that mirror it.
+  for (const [id, mirror] of mirrors) if (dropped.has(mirror.source)) dropped.add(id);
+  let temporaries = 0;
+  for (const [lit, index] of plan) {
+    const id = (lit.type as IrType & { kind: "record" }).shapeId;
+    if (dropped.has(id)) continue;
+    let value: IrExpr =
+      typeof index === "number" ? { kind: "numLit", value: index, type: F64, loc: lit.loc } : index;
+    // A spread's order is the source's order at the spread: a later
+    // property may move the source's keys. Read it right after the literal
+    // evaluates the source.
+    const source = mirrors.get(id)?.source;
+    const binding = typeof index === "number" || !source ? null : spreadBinding(lit, source);
+    const fn = owners.get(lit);
+    if (binding && fn) {
+      const localId = `%keyOrderSource.${temporaries++}`;
+      fn.locals.push({ id: localId, name: "%keyOrderSource", type: F64, mutable: false });
+      binding.stmts.splice(binding.at + 1, 0, {
+        kind: "varDecl",
+        localId,
+        init: value,
+        loc: lit.loc,
+      });
+      value = { kind: "varRef", localId, type: F64, loc: lit.loc };
+    }
+    lit.fields.push({ name: KEY_ORDER_FIELD, value });
+  }
+  const replacements = new Map<IrFunction, Map<IrStmt, IrStmt>>();
+  for (const { st, fn } of writeSites) {
+    if (dropped.has(st.shapeId)) continue;
+    const transitions = moves.get(st.shapeId)!.get(st.field)!;
+    const loc = st.loc;
+    // A receiver other than a binding evaluates once, into a local. So does
+    // a binding when the value evaluates first (below): the value may
+    // assign the binding, and the write still goes to the object the
+    // binding held before.
+    const pure =
+      st.value.kind === "numLit" ||
+      st.value.kind === "strLit" ||
+      st.value.kind === "boolLit" ||
+      st.value.kind === "varRef";
+    let plain = st.obj;
+    while (plain.kind === "unionNarrow" || plain.kind === "downcast") plain = plain.value;
+    const prologue: IrStmt[] = [];
+    let obj = st.obj;
+    if (plain.kind !== "varRef" || !pure) {
+      const localId = `%keyOrderReceiver.${temporaries++}`;
+      fn.locals.push({ id: localId, name: "%keyOrderReceiver", type: st.obj.type, mutable: false });
+      prologue.push({ kind: "varDecl", localId, init: st.obj, loc });
+      obj = { kind: "varRef", localId, type: st.obj.type, loc };
+    }
+    const current: IrExpr = {
+      kind: "recordGet",
+      obj,
+      shapeId: st.shapeId,
+      field: KEY_ORDER_FIELD,
+      type: F64,
+      loc,
+    };
+    const next = indexChain(current, transitions, loc);
+    // The value evaluates before the key is tested and moved: it may add
+    // other keys to the same value, which then come first.
+    let value = st.value;
+    if (!pure) {
+      const localId = `%keyOrderValue.${temporaries++}`;
+      fn.locals.push({ id: localId, name: "%keyOrderValue", type: value.type, mutable: false });
+      prologue.push({ kind: "varDecl", localId, init: value, loc });
+      value = { kind: "varRef", localId, type: value.type, loc };
+    }
+    const absent: IrExpr = {
+      kind: "unary",
+      op: "!",
+      operand: lowerer.recordFieldPresent(obj, st.shapeId, st.field, loc),
+      type: BOOL,
+      loc,
+    };
+    const update: IrStmt = {
+      kind: "recordSet",
+      obj,
+      shapeId: st.shapeId,
+      field: KEY_ORDER_FIELD,
+      value: next,
+      loc,
+    };
+    // The write becomes a block that moves the key first.
+    const write: IrStmt = {
+      kind: "recordSet",
+      obj,
+      shapeId: st.shapeId,
+      field: st.field,
+      value,
+      loc,
+    };
+    const guard: IrStmt = { kind: "if", cond: absent, then: [update], else_: null, loc };
+    const block: IrStmt = { kind: "block", body: [...prologue, guard, write], loc };
+    let replaced = replacements.get(fn);
+    if (replaced === undefined) {
+      replaced = new Map();
+      replacements.set(fn, replaced);
+    }
+    replaced.set(st, block);
+  }
+  for (const [fn, replaced] of replacements) {
+    fn.body = transformStmtList(fn.body, {
+      expr: (e) => e,
+      stmt: (st) => replaced.get(st) ?? st,
+    });
+  }
+  for (const [id, orders] of variants) {
+    if (dropped.has(id)) continue;
+    const shape = shapes.get(id)!;
+    const indexKeys: string[] = (shape.declaredOrder ?? []).filter(isArrayIndex);
+    shapes.addKeyOrderField(id);
+    const tables: string[][] = [];
+    for (const order of orders) {
+      const table: string[] = [...indexKeys];
+      for (const key of order) table.push(key);
+      tables.push(table);
+    }
+    shape.orderVariants = tables;
   }
 }

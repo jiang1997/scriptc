@@ -74,7 +74,7 @@ http2.connect("https://localhost");
  * secure heap the generic hint, and setFips the FIPS truth (getFips() lowers to 0). */
 import { createCipheriv, publicEncrypt, secureHeapUsed, setFips } from "node:crypto";
 publicEncrypt("key", Buffer.alloc(1));
-createCipheriv("aes-128-ccm", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
+createCipheriv("aes-128-ocb", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
 secureHeapUsed();
 setFips(false);
 fetch("https://example.invalid/", {

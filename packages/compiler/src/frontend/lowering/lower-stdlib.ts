@@ -2496,6 +2496,25 @@ export function lowerStdlibMethodCall(
     // method, drains into the number[] the fold reads.
     src = classGeneratorIterable(lowerer, src) ?? src;
     if (src.type.kind === "generator") src = generatorDrain(lowerer, src, F64, loc) ?? src;
+    // An untyped iterable (`Math.min(...caps.map(f))` in JavaScript): the
+    // runtime packs its values and folds their ToNumber like Node. V8 names
+    // a null or undefined source by its text, calls as `f(...)`.
+    if (src.type.kind === "dyn") {
+      const what = ts.isCallExpression(spread.expression)
+        ? `${ts.getTextOfNode(spread.expression.expression)}(...)`
+        : ts.getTextOfNode(spread.expression);
+      return {
+        kind: "libCall",
+        fn: "dyn.mathFold",
+        args: [
+          src,
+          { kind: "boolLit", value: name === "max", type: BOOL, loc },
+          { kind: "strLit", value: what, type: STRING, loc },
+        ],
+        type: F64,
+        loc,
+      };
+    }
     if (src.type.kind !== "array" || src.type.elem.kind !== "f64") {
       lowerer.unsupported(
         "SC1090",

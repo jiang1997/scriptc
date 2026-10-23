@@ -1,6 +1,10 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* flock and LOCK_EX/LOCK_UN, which Darwin hides under _POSIX_C_SOURCE. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <stdint.h>
 #include <limits.h>
 #include <stddef.h>

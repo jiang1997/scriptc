@@ -46,4 +46,7 @@ export interface LlStreamTypedRefAdapter {
   recordOps?: string;
   /** `@sym` of the ScrDynTypedClassOps table for class instance capsules. */
   classOps?: string;
+  /** `@sym` of the ScrDynTypedBagClassOps table for capsules of bag-tracked
+   * class instances whose views inherit from prototype data. */
+  bagClassOps?: string;
 }

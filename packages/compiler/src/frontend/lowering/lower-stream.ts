@@ -5683,7 +5683,10 @@ export function lowerStreamMethodCall(
     // argument reaches an object-mode side's _write as passed, null when
     // the callback took its place (a byte-mode side encodes a string
     // chunk with it).
-    const writeEnc = (encArg: ts.Expression | undefined, cbArg: ts.Expression | undefined) => {
+    const writeEnc = (
+      encArg: ts.Expression | undefined,
+      cbArg: ts.Expression | undefined,
+    ): IrExpr => {
       const receiver = streamReceiverExpr(lowerer, access.expression);
       const chunk = lowerer.lowerExprExpecting(args[0]!, DYN);
       const tail: IrExpr[] = [];
@@ -5696,7 +5699,7 @@ export function lowerStreamMethodCall(
         args: [receiver, numLit(flags, loc), chunk, ...tail],
         type: BOOL,
         loc,
-      } satisfies IrExpr;
+      };
     };
     if (kind === "dyn") {
       if (args.length === 3) return writeEnc(args[1], args[2]);

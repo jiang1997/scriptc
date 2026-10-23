@@ -49,6 +49,7 @@ export interface NativeLinkFeatures {
   /** Own properties JavaScript adds to children: scr_dyn_handle_props.c.
    * Absent (false) for programs without them. */
   handleProps?: boolean;
+  declAdopt?: boolean;
   /** for await over checked-dynamic values: scr_dyn_for_await.c. Absent
    * (false) for programs without it. */
   dynForAwait?: boolean;

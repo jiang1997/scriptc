@@ -3171,13 +3171,17 @@ declare module "crypto" {
     callback: (error: Error | null, buffer: Buffer) => void,
   ): void;
   export type BinaryLike = string | ArrayBuffer | ArrayBufferView;
-  /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, gcm, ecb, cfb, cfb8,
-   * cfb1, and ofb modes, des-ede3 and des-ede, chacha20, and
-   * chacha20-poly1305. Both are Transforms: written chunks go through
-   * update(), and the end pushes final(). */
+  /* Cipheriv/Decipheriv: aes-128/192/256 in cbc, ctr, gcm, ccm, ecb, cfb,
+   * cfb8, cfb1, and ofb modes and their key wraps, des-ede3 and des-ede,
+   * chacha20, and chacha20-poly1305. Both are Transforms: written chunks go
+   * through update(), and the end pushes final(). */
+  export type CipherCCMTypes = "aes-128-ccm" | "aes-192-ccm" | "aes-256-ccm";
   export type CipherGCMTypes = "aes-128-gcm" | "aes-192-gcm" | "aes-256-gcm";
   export type CipherChaCha20Poly1305Types = "chacha20-poly1305";
   export type CipherKey = BinaryLike | KeyObject;
+  export interface CipherCCMOptions {
+    authTagLength: number;
+  }
   export interface CipherGCMOptions {
     authTagLength?: number;
   }
@@ -3196,6 +3200,10 @@ declare module "crypto" {
     final(): Buffer;
     final(outputEncoding: BufferEncoding): string;
     setAutoPadding(autoPadding?: boolean): this;
+  }
+  export interface CipherCCM extends Cipheriv {
+    setAAD(buffer: ArrayBufferView, options: { plaintextLength: number }): this;
+    getAuthTag(): Buffer;
   }
   export interface CipherGCM extends Cipheriv {
     setAAD(buffer: ArrayBufferView, options?: { plaintextLength: number }): this;
@@ -3218,6 +3226,10 @@ declare module "crypto" {
     final(outputEncoding: BufferEncoding): string;
     setAutoPadding(autoPadding?: boolean): this;
   }
+  export interface DecipherCCM extends Decipheriv {
+    setAuthTag(buffer: ArrayBufferView): this;
+    setAAD(buffer: ArrayBufferView, options: { plaintextLength: number }): this;
+  }
   export interface DecipherGCM extends Decipheriv {
     setAuthTag(buffer: ArrayBufferView): this;
     setAAD(buffer: ArrayBufferView, options?: { plaintextLength: number }): this;
@@ -3226,6 +3238,12 @@ declare module "crypto" {
     setAuthTag(buffer: ArrayBufferView): this;
     setAAD(buffer: ArrayBufferView, options?: { plaintextLength: number }): this;
   }
+  export function createCipheriv(
+    algorithm: CipherCCMTypes,
+    key: CipherKey,
+    iv: BinaryLike,
+    options: CipherCCMOptions,
+  ): CipherCCM;
   export function createCipheriv(
     algorithm: CipherGCMTypes,
     key: CipherKey,
@@ -3244,6 +3262,12 @@ declare module "crypto" {
     iv: BinaryLike | null,
     options?: { authTagLength?: number },
   ): Cipheriv;
+  export function createDecipheriv(
+    algorithm: CipherCCMTypes,
+    key: CipherKey,
+    iv: BinaryLike,
+    options: CipherCCMOptions,
+  ): DecipherCCM;
   export function createDecipheriv(
     algorithm: CipherGCMTypes,
     key: CipherKey,
@@ -3496,6 +3520,34 @@ declare module "crypto" {
    * per member like http2.constants. */
   export function getFips(): 1 | 0;
   export function getCiphers(): string[];
+  export type CipherMode =
+    | "cbc"
+    | "ccm"
+    | "cfb"
+    | "ctr"
+    | "ecb"
+    | "gcm"
+    | "ocb"
+    | "ofb"
+    | "stream"
+    | "wrap"
+    | "xts";
+  export interface CipherInfoOptions {
+    keyLength?: number | undefined;
+    ivLength?: number | undefined;
+  }
+  export interface CipherInfo {
+    name: string;
+    nid: number;
+    blockSize?: number | undefined;
+    ivLength?: number | undefined;
+    keyLength: number;
+    mode: CipherMode;
+  }
+  export function getCipherInfo(
+    nameOrNid: string | number,
+    options?: CipherInfoOptions,
+  ): CipherInfo | undefined;
   export function getHashes(): string[];
   export function getCurves(): string[];
   /* Node v24 crypto.constants, literal-typed (the Http2Constants
@@ -5604,6 +5656,7 @@ declare module "http" {
     readonly trailersDistinct: { [name: string]: string[] | undefined };
     readonly rawTrailers: string[];
     resume(): void;
+    pause(): void;
     destroy(): void;
     setTimeout(msecs: number, callback?: () => void): this;
     /* setEncoding('utf8'): 'data' delivers strings (other real encodings

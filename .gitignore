@@ -33,6 +33,7 @@ output/
 /packages/runtime-*/runtime-pack.json
 /packages/runtime-*/.runtime-pack-*
 !tests/fixtures/npm/node_modules/*/dist/
+!tests/fixtures/npm/node_modules/@*/*/dist/
 !tests/fixtures/npm/workspace/*/dist/
 !tests/fixtures/npm/cases/workspace-copied/members/*/dist/
 !tests/fixtures/npm/cases/workspace-copied/node_modules/*/dist/

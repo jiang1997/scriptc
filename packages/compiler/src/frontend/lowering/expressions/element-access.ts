@@ -566,8 +566,8 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
     }
   }
   if (receiverIr?.kind !== "array") {
+    const receiver = tryLowerExpression(lowerer, expr.expression);
     {
-      const receiver = tryLowerExpression(lowerer, expr.expression);
       if (
         receiver?.type.kind === "dyn" ||
         (receiver &&
@@ -618,7 +618,13 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
         }
       }
     }
-    if (receiverIr?.kind === "string") {
+    // A checker-`any` receiver that lowers to a string (an implicit-any
+    // package parameter specialized for a string argument) indexes the
+    // string the same way.
+    if (
+      receiverIr?.kind === "string" ||
+      (receiverIr === null && receiver?.type.kind === "string")
+    ) {
       // An indexed string property is absent for non-integer and missing
       // indexes. charAt has different coercion and out-of-range semantics.
       const recv = lowerer.lowerExpr(expr.expression);

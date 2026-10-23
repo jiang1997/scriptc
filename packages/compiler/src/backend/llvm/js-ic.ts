@@ -732,7 +732,7 @@ function emitKeyed(host: Host, e: ExprOf<"call">, callee: IrFunction): LlValue {
 
 /** dynInvoke's method read on an ordinary object through the site's
  * cache, else scr_dyn_prepare_method. Returns the owned method (or NULL,
- * which scr_dyn_invoke_prepared answers with the full dispatch). */
+ * which scr_dyn_invoke_prepared_id answers with the full dispatch). */
 export function emitJsIcMethod(host: Host, e: ExprOf<"dynInvoke">, receiver: string): string {
   const B = host.B;
   const method = e.method;

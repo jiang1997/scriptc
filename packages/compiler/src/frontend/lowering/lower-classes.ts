@@ -480,6 +480,10 @@ export interface ClassInfo {
   prototypeMethodValues?: Map<string, IrExpr>;
   prototypeReflectionReady?: true;
   prototypeObservedMethodsReady?: true;
+  /** The globals holding each observed method's original prototype value
+   * (set when the prototype data is built), by method name. A typed call
+   * whose slot still holds that value calls the method natively. */
+  prototypeOriginals?: Map<string, string>;
   prototypeReflectionRefusal?: string;
   localClass?: {
     context: FnCtx | null;

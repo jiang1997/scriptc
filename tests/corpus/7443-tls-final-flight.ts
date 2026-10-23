@@ -37,7 +37,12 @@ for (const v of ["TLSv1.2", "TLSv1.3"] as Version[]) {
     const server = tls.createServer({ cert, key, maxVersion: v }, (s) => {
       ev.push("secureConnection");
       s.on("data", (d: Buffer) => ev.push(`data ${d}`));
-      s.on("error", (e: NodeJS.ErrnoException) => ev.push(`server socket error ${e.code}`));
+      // A client that closes before it reads the server's TLS 1.3 session
+      // tickets resets the connection. Whether the tickets are read first
+      // depends on the platform's timing, so that reset is not printed.
+      s.on("error", (e: NodeJS.ErrnoException) => {
+        if (e.code !== "ECONNRESET") ev.push(`server socket error ${e.code}`);
+      });
     });
     server.on("tlsClientError", (e: Error) => ev.push(`tlsClientError ${(e as NodeJS.ErrnoException).code}`));
     const port = await listen(server);

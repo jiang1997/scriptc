@@ -72,15 +72,26 @@ void __lsan_unregister_root_region(const void *p, size_t size) __attribute__((we
 
 
 #if !defined(_WIN32) && !defined(__wasi__)
-/* Keep stacks out of malloc's size classes. Reuse a bounded number during
- * a burst of promise/generator work, then unmap the spares before the loop
- * sleeps. This avoids both heap fragmentation and per-call mmap overhead.
- * The sanitizer lane unmaps every finished stack immediately. */
+/* Keep stacks out of malloc's size classes. Reuse a bounded number of
+ * finished stacks, which avoids both heap fragmentation and per-call mmap
+ * overhead. A server's loop sleeps between nearly every pair of requests,
+ * so unmapping the spares at each sleep would map, fault in and unmap a
+ * stack for every request that awaits. Spares therefore outlive short
+ * sleeps: at most once per SCR_FIBER_TRIM_MS, a sleep unmaps the spares
+ * that no fiber took since the previous trim (the pool's low-water mark),
+ * and a sleep longer than twice that unmaps every spare, so an idle
+ * program gives the memory back as before. The sanitizer lane unmaps
+ * every finished stack immediately. */
 #ifndef SCR_ASAN_FIBERS
 #define SCR_FIBER_SPARES 64
+#define SCR_FIBER_TRIM_MS 1000.0
 static SCR_TL void *scr_fiber_spares[SCR_FIBER_SPARES];
 static SCR_TL size_t scr_fiber_nspares;
 static SCR_TL bool scr_fiber_cleanup_registered;
+/* The fewest spares the pool held since the last trim: the spares below
+ * this index went unused for the whole window. */
+static SCR_TL size_t scr_fiber_spares_low;
+static SCR_TL double scr_fiber_trimmed_at;
 #endif
 
 static void scr_fiber_stacks_clear(void) {
@@ -89,6 +100,29 @@ static void scr_fiber_stacks_clear(void) {
     (void)munmap(scr_fiber_spares[--scr_fiber_nspares], SCR_FIBER_STACK);
     scr_fiber_spares[scr_fiber_nspares] = NULL;
   }
+  scr_fiber_spares_low = 0;
+#endif
+}
+
+/* The loop is about to sleep for `wait` ms (see above). */
+static void scr_fiber_stacks_trim(double now, double wait) {
+#ifndef SCR_ASAN_FIBERS
+  if (wait > 2 * SCR_FIBER_TRIM_MS) {
+    scr_fiber_stacks_clear();
+    scr_fiber_trimmed_at = now;
+    return;
+  }
+  if (now - scr_fiber_trimmed_at < SCR_FIBER_TRIM_MS) return;
+  size_t unused = scr_fiber_spares_low;
+  for (size_t i = 0; i < unused; i++) (void)munmap(scr_fiber_spares[i], SCR_FIBER_STACK);
+  scr_fiber_nspares -= unused;
+  memmove(scr_fiber_spares, scr_fiber_spares + unused, scr_fiber_nspares * sizeof *scr_fiber_spares);
+  memset(scr_fiber_spares + scr_fiber_nspares, 0, unused * sizeof *scr_fiber_spares);
+  scr_fiber_spares_low = scr_fiber_nspares;
+  scr_fiber_trimmed_at = now;
+#else
+  (void)now;
+  (void)wait;
 #endif
 }
 
@@ -97,6 +131,7 @@ static void *scr_fiber_stack_new(void) {
   if (scr_fiber_nspares > 0) {
     void *stack = scr_fiber_spares[--scr_fiber_nspares];
     scr_fiber_spares[scr_fiber_nspares] = NULL;
+    if (scr_fiber_nspares < scr_fiber_spares_low) scr_fiber_spares_low = scr_fiber_nspares;
     return stack;
   }
   if (!scr_fiber_cleanup_registered) {
@@ -4599,7 +4634,7 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
     /* An idle moment: a full pass the death rule deferred runs now. */
     if (due > now && scr_cyc_collect_idle()) now = scr_now_ms();
 #if !defined(_WIN32) && !defined(__wasi__)
-    if (due > now) scr_fiber_stacks_clear();
+    if (due > now) scr_fiber_stacks_trim(now, due - now);
 #endif
 #ifdef SCR_WORKERS
     if (due > now) scr_sa_loop_waiting(true);

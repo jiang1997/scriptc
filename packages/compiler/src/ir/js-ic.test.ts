@@ -176,3 +176,64 @@ test("a function holds a site when it calls a classified helper or dispatches a 
   expect(hasJsIcSite({ ...invoker, name: "%init.0" }, sites)).toBe(false);
   expect(hasJsIcSite({ ...caller, name: "%init.0" }, sites)).toBe(true);
 });
+
+test("bag helpers that exit early for values no class branch matches are still the receiver", () => {
+  /** `if (!<test>(v)) return <value>`: the class tables' early exit. */
+  const exit = (test: "classCapsule" | "funcKind", value: IrExpr, negated = true): IrStmt => ({
+    kind: "if",
+    cond: {
+      kind: "dynTest",
+      test,
+      ...(negated ? { negated: true as const } : {}),
+      value: ref("v"),
+      type: BOOL,
+      loc,
+    },
+    then: [ret(value)],
+    else_: null,
+    loc,
+  });
+  const guarded = (name: string, first: IrStmt): IrFunction =>
+    helper(name, ["v"], [first, capsuleBranch("v"), ret(ref("v"))]);
+  const readBag = guarded("%dyn.class.readPropertiesOrEmpty", exit("classCapsule", ref("v")));
+  const writeBag = guarded("%dyn.class.properties", exit("classCapsule", ref("v")));
+  const staticBag = guarded("%dyn.class.staticProperties", exit("funcKind", ref("v")));
+  const getter = getHelper(
+    "%dyn.class.property.0",
+    "x",
+    [],
+    call(staticBag.name, call(readBag.name, ref("p.0"))),
+  );
+  const setter = setHelper("%dyn.class.property.1", "y");
+  // An exit that returns another value, or a test that is not negated,
+  // makes the bag differ from the receiver.
+  const otherExit = guarded(
+    "%dyn.class.other",
+    exit("classCapsule", { kind: "dynObjLit", type: DYN, loc } as IrExpr),
+  );
+  const positive = guarded("%dyn.class.positive", exit("classCapsule", ref("v"), false));
+  const otherGetter = getHelper("%dyn.class.property.2", "x", [], call(otherExit.name, ref("p.0")));
+  const positiveGetter = getHelper(
+    "%dyn.class.property.3",
+    "x",
+    [],
+    call(positive.name, ref("p.0")),
+  );
+  const sites = new JsIcSites({
+    functions: [
+      readBag,
+      writeBag,
+      staticBag,
+      otherExit,
+      positive,
+      getter,
+      setter,
+      otherGetter,
+      positiveGetter,
+    ],
+  });
+  expect(sites.site("%dyn.class.property.0")).toEqual({ kind: "get", key: "x" });
+  expect(sites.site("%dyn.class.property.1")).toEqual({ kind: "set", key: "y" });
+  expect(sites.site("%dyn.class.property.2")).toBeNull();
+  expect(sites.site("%dyn.class.property.3")).toBeNull();
+});

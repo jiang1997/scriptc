@@ -100,7 +100,9 @@ export function lowerShortCircuitAssignment(lowerer: Lowerer, expr: ts.BinaryExp
       write = (value) => eventAccessorWrite(receiver, name, value, lowerer, loc);
     } else if (ts.isPropertyAccessExpression(target)) {
       const probed = tryLowerExpression(lowerer, target.expression);
-      if (probed?.type.kind === "dyn") {
+      // `value.#x ??= v` on a checked-dynamic value names the brand-checked
+      // field (fieldTarget), never a property called "#x".
+      if (probed?.type.kind === "dyn" && !ts.isPrivateIdentifier(target.name)) {
         const receiver = save(probed, "%shortCircuitReceiver");
         const key: IrExpr = { kind: "strLit", value: target.name.text, type: STRING, loc };
         storage = DYN;

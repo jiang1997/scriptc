@@ -391,6 +391,7 @@ const DYN_READ_ONLY = new Set<string>([
   "dyn.forInStable",
   "dyn.getOwnPropertyNames",
   "dyn.getPrototype",
+  "dyn.getPrototypeForIdentity",
   "dyn.hasKey",
   "dyn.hasOwn",
   "dyn.in",

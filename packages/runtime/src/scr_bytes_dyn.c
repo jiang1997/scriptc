@@ -509,8 +509,9 @@ static bool scr_bytes_dyn_buffer(const ScrDyn *recv) {
 /* One entry per method family, so a program links only the families it
  * names: each runs its methods on a Buffer receiver and gives any other
  * receiver the ordinary dispatch. */
-ScrDyn *scr_dyn_invoke_buffer_num(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args,
-                                  size_t argc, const char *what) {
+ScrDyn *scr_dyn_invoke_buffer_num(ScrDyn *recv, ScrDyn *callee, const char *method,
+                                  int32_t *mid_slot, ScrDyn *const *args, size_t argc,
+                                  const char *what) {
   if (scr_bytes_dyn_buffer(recv)) {
     bool read = !strncmp(method, "read", 4);
     const char *rest = method + (read ? 4 : 5);
@@ -518,40 +519,45 @@ ScrDyn *scr_dyn_invoke_buffer_num(ScrDyn *recv, ScrDyn *callee, const char *meth
       if (!strcmp(rest, scr_bytes_dyn_names[at].name)) return scr_bytes_dyn_num_method(recv->v.bytes, read, at, args, argc);
     }
   }
-  return scr_dyn_invoke_prepared(recv, callee, method, args, argc, what);
+  return scr_dyn_invoke_prepared_id(recv, callee, method, mid_slot, args, argc, what);
 }
 
-ScrDyn *scr_dyn_invoke_buffer_write(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args,
-                                    size_t argc, const char *what) {
+ScrDyn *scr_dyn_invoke_buffer_write(ScrDyn *recv, ScrDyn *callee, const char *method,
+                                    int32_t *mid_slot, ScrDyn *const *args, size_t argc,
+                                    const char *what) {
   if (scr_bytes_dyn_buffer(recv)) return scr_bytes_dyn_write(recv->v.bytes, args, argc);
-  return scr_dyn_invoke_prepared(recv, callee, method, args, argc, what);
+  return scr_dyn_invoke_prepared_id(recv, callee, method, mid_slot, args, argc, what);
 }
 
-ScrDyn *scr_dyn_invoke_buffer_fill(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args,
-                                   size_t argc, const char *what) {
+ScrDyn *scr_dyn_invoke_buffer_fill(ScrDyn *recv, ScrDyn *callee, const char *method,
+                                   int32_t *mid_slot, ScrDyn *const *args, size_t argc,
+                                   const char *what) {
   if (scr_bytes_dyn_buffer(recv)) return scr_bytes_dyn_fill(recv, args, argc);
-  return scr_dyn_invoke_prepared(recv, callee, method, args, argc, what);
+  return scr_dyn_invoke_prepared_id(recv, callee, method, mid_slot, args, argc, what);
 }
 
-ScrDyn *scr_dyn_invoke_buffer_to_string(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args,
-                                        size_t argc, const char *what) {
+ScrDyn *scr_dyn_invoke_buffer_to_string(ScrDyn *recv, ScrDyn *callee, const char *method,
+                                        int32_t *mid_slot, ScrDyn *const *args, size_t argc,
+                                        const char *what) {
   if (scr_bytes_dyn_buffer(recv)) return scr_bytes_dyn_to_string(recv->v.bytes, args, argc);
-  return scr_dyn_invoke_prepared(recv, callee, method, args, argc, what);
+  return scr_dyn_invoke_prepared_id(recv, callee, method, mid_slot, args, argc, what);
 }
 
 /* indexOf, lastIndexOf and includes. */
-ScrDyn *scr_dyn_invoke_buffer_search(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args,
-                                     size_t argc, const char *what) {
+ScrDyn *scr_dyn_invoke_buffer_search(ScrDyn *recv, ScrDyn *callee, const char *method,
+                                     int32_t *mid_slot, ScrDyn *const *args, size_t argc,
+                                     const char *what) {
   if (scr_bytes_dyn_buffer(recv)) {
     bool includes = !strcmp(method, "includes");
     return scr_bytes_dyn_index_of(recv->v.bytes, args, argc, strcmp(method, "lastIndexOf") != 0, includes);
   }
-  return scr_dyn_invoke_prepared(recv, callee, method, args, argc, what);
+  return scr_dyn_invoke_prepared_id(recv, callee, method, mid_slot, args, argc, what);
 }
 
 /* toJSON, equals, compare, copy, swap16/32/64, and the refused members. */
-ScrDyn *scr_dyn_invoke_buffer(ScrDyn *recv, ScrDyn *callee, const char *method, ScrDyn *const *args,
-                              size_t argc, const char *what) {
+ScrDyn *scr_dyn_invoke_buffer(ScrDyn *recv, ScrDyn *callee, const char *method,
+                              int32_t *mid_slot, ScrDyn *const *args, size_t argc,
+                              const char *what) {
   if (scr_bytes_dyn_buffer(recv)) {
     ScrBytes *b = recv->v.bytes;
     if (!strcmp(method, "toJSON")) return scr_bytes_dyn_to_json(b);
@@ -584,5 +590,5 @@ ScrDyn *scr_dyn_invoke_buffer(ScrDyn *recv, ScrDyn *callee, const char *method, 
       return NULL;
     }
   }
-  return scr_dyn_invoke_prepared(recv, callee, method, args, argc, what);
+  return scr_dyn_invoke_prepared_id(recv, callee, method, mid_slot, args, argc, what);
 }

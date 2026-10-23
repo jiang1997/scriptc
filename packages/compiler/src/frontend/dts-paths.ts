@@ -34,6 +34,31 @@ export function packageShimRoot(): string {
     : join(installedDeclarationRoot, "shims");
 }
 
+/** The directories of files scriptc itself ships, each with the prefix
+ * that names its files independently of where scriptc is installed
+ * (compilerOwnedFileName). IR artifacts spell source locations in them this
+ * way (serializeModuleParts). */
+export function compilerOwnedFileRoots(): readonly { from: string; to: string }[] {
+  return [{ from: tsgoPath(packageShimRoot()) + "/", to: "scriptc:shims/" }];
+}
+
+/** The name of a file scriptc itself ships (a package shim or one of the
+ * shipped declaration files) that does not depend on where scriptc is
+ * installed: `scriptc:shims/<path below the shim root>` or
+ * `scriptc:<declaration file name>`. Null for every other file. Names and
+ * artifacts that would otherwise spell the installation's absolute path use
+ * it, so two installations of one compiler emit the same output. */
+export function compilerOwnedFileName(file: string): string | null {
+  const path = tsgoPath(file);
+  for (const { from, to } of compilerOwnedFileRoots()) {
+    if (path.startsWith(from)) return to + path.slice(from.length);
+  }
+  for (const declaration of [ambientDtsPath(), overridesDtsPath(), fallbackDtsPath()]) {
+    if (path === declaration) return `scriptc:${path.slice(path.lastIndexOf("/") + 1)}`;
+  }
+  return null;
+}
+
 /** Path of the shipped ambient declarations — the always-shipped CORE
  * (comptime, setTimeout). Part of EVERY program scriptc
  * builds, the project-world preflight program included. */

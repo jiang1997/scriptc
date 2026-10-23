@@ -72,6 +72,7 @@ export const EXECUTABLE_RUNTIME_SOURCES = [
   "scr_itable.c",
   "scr_slots.c",
   "scr_alloc.c",
+  "scr_cipher_info.c",
 ] as const;
 
 export function runtimeSrcDir(): string {

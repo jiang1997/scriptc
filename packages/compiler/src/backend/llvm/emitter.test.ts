@@ -459,6 +459,33 @@ test("class brand probes borrow a local only across an inert literal key", () =>
   expect(computed).toContain("call ptr @scr_dyn_retain_v(");
 });
 
+test("class constructor probes test the function tag and borrow across a literal key", () => {
+  const dyn: IrType = { kind: "dyn" };
+  const key: IrExpr = { kind: "strLit", value: "classval:Example", type: STRING, loc: receiverLoc };
+  const probe: IrExpr = {
+    kind: "libCall",
+    fn: "dyn.classIs",
+    args: [ref(dyn), key],
+    type: BOOL,
+    loc: receiverLoc,
+  };
+  const borrowed = work(probe, dyn);
+  expect(borrowed).not.toContain("call ptr @scr_dyn_retain_v(");
+  expect(borrowed).toContain("icmp ne ptr");
+  expect(borrowed).toContain("icmp eq i32 %t");
+  expect(borrowed).toMatch(/icmp eq i32 %t\d+, 8\b/);
+  expect(borrowed).toContain("call zeroext i1 @scr_dyn_class_is_key(");
+  const computed = work(
+    {
+      ...probe,
+      args: [ref(dyn), { kind: "toString", operand: ref(dyn), type: STRING, loc: receiverLoc }],
+    },
+    dyn,
+  );
+  expect(computed).toContain("call ptr @scr_dyn_retain_v(");
+  expect(computed).toContain("call zeroext i1 @scr_dyn_class_is_key(");
+});
+
 test("class brand probes compare the program's key constant before the key text", () => {
   const dyn: IrType = { kind: "dyn" };
   const key: IrExpr = { kind: "strLit", value: "object:Example", type: STRING, loc: receiverLoc };

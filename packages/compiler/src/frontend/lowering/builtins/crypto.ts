@@ -869,9 +869,17 @@ const IMPLEMENTED_CIPHERS = new Set([
   "id-aes192-gcm",
   "id-aes256-gcm",
   "chacha20-poly1305",
-  ...["128", "192", "256"].flatMap((bits) =>
-    ["ecb", "cfb", "cfb8", "cfb1", "ofb"].map((mode) => `aes-${bits}-${mode}`),
-  ),
+  ...["128", "192", "256"].flatMap((bits) => [
+    ...["ecb", "cfb", "cfb8", "cfb1", "ofb", "ccm"].map((mode) => `aes-${bits}-${mode}`),
+    `id-aes${bits}-ccm`,
+    ...["wrap", "wrap-pad"].flatMap((wrap) => [
+      `aes-${bits}-${wrap}`,
+      `aes${bits}-${wrap}`,
+      `id-aes${bits}-${wrap}`,
+      `aes-${bits}-${wrap}-inv`,
+      `aes${bits}-${wrap}-inv`,
+    ]),
+  ]),
   "des-ede3-cbc",
   "des3",
   "des-ede3",
@@ -889,9 +897,10 @@ const IMPLEMENTED_CIPHERS = new Set([
 ]);
 
 const SUPPORTED_CIPHERS_HINT =
-  "the supported ciphers are aes-128, aes-192 and aes-256 in cbc, ctr, gcm, ecb, cfb, cfb8, cfb1 " +
-  "and ofb modes, des-ede3 in cbc, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede in cbc, ecb, cfb " +
-  "and ofb modes, chacha20, and chacha20-poly1305";
+  "the supported ciphers are aes-128, aes-192 and aes-256 in cbc, ctr, gcm, ccm, ecb, cfb, cfb8, " +
+  "cfb1 and ofb modes and their wrap, wrap-pad, wrap-inv and wrap-pad-inv key wraps, des-ede3 in " +
+  "cbc, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede in cbc, ecb, cfb and ofb modes, chacha20, and " +
+  "chacha20-poly1305";
 
 /** A literal cipher name that Node knows but the runtime does not
  * implement is refused at compile time. Unknown literal names keep Node's
@@ -1380,10 +1389,11 @@ function takesUndefinedError(lowerer: Lowerer, callback: ts.Expression): boolean
 }
 
 /** checkPrime, checkPrimeSync, generatePrime and generatePrimeSync
- * (scr_dh.c): checked-dynamic arguments, which the runtime checks as Node
- * does (a function in the options position is the callback), and the
- * sync forms' boolean, ArrayBuffer or bigint converted to the call site's
- * type. Null for other members. */
+ * (scr_dh.c), and getCipherInfo (scr_cipher_info.c): checked-dynamic
+ * arguments, which the runtime checks as Node does (a function in the
+ * options position is the callback), and the sync forms' boolean,
+ * ArrayBuffer, bigint or info object converted to the call site's type.
+ * Null for other members. */
 function lowerPrimeCall(
   lowerer: Lowerer,
   expr: ts.CallExpression,
@@ -1395,6 +1405,7 @@ function lowerPrimeCall(
     checkPrimeSync: ["crypto.checkPrimeSync", 1, 2, "checkPrimeSync(candidate[, options])"],
     checkPrime: ["crypto.checkPrimeCb", 1, 3, "checkPrime(candidate[, options], callback)"],
     generatePrimeSync: ["crypto.generatePrimeSync", 1, 2, "generatePrimeSync(size[, options])"],
+    getCipherInfo: ["crypto.getCipherInfo", 0, 2, "getCipherInfo(nameOrNid[, options])"],
     generatePrime: ["crypto.generatePrimeCb", 1, 3, "generatePrime(size[, options], callback)"],
   };
   const form = forms[member];
@@ -1455,14 +1466,10 @@ function lowerPkiCall(
       expr,
       `${supported} is supported`,
     );
-  // generateKeyPair(type, callback): Node reads a function in the options
-  // position as the callback.
-  const shifted = fn === "crypto.generateKeyPairCb" && args.length === 2;
+  // generateKeyPair(type, callback): the runtime reads a function in the
+  // options position as the callback, as Node does.
   const values: IrExpr[] = [];
-  for (let i = 0; i < max; i++) {
-    const node = shifted ? (i === 1 ? undefined : i === 2 ? args[1] : args[i]) : args[i];
-    values.push(dynArg(lowerer, node, loc));
-  }
+  for (let i = 0; i < max; i++) values.push(dynArg(lowerer, args[i], loc));
   if (fn === "crypto.generateKeyPairCb")
     return { kind: "libCall", fn, args: values, type: VOID, loc };
   const call: IrExpr = { kind: "libCall", fn, args: values, type: DYN, loc };

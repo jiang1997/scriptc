@@ -239,10 +239,11 @@ struct ScrHttpReq {
   bool close_queued;
   bool close_emitted; /* settled: err/close listeners dropped */
   bool join_dup; /* joinDuplicateHeaders: repeated names read joined ", " */
-  /* pause(): delivery holds — arrived body bytes buffer in pend (the
-   * parser keeps consuming; memory is the buffer, a documented bound)
-   * and 'end' defers (end_pending) until resume() drains through the
-   * emit queue, never the resuming stack. */
+  /* pause(): delivery holds — arrived body bytes buffer in pend and
+   * 'end' defers (end_pending) until resume() drains through the emit
+   * queue, never the resuming stack. A held HTTP/1 server request stops
+   * its socket's reads once pend reaches SCR_HTTP_REQ_HOLD_BYTES
+   * (sock_held), as Node's readStop does. */
   bool paused;
   bool end_pending;
   bool drain_queued;
@@ -257,6 +258,7 @@ struct ScrHttpReq {
   bool received;  /* the whole body arrived (req.complete) */
   bool body_seen; /* body bytes arrived */
   bool destroyed; /* req.destroy()/the teardown ran — req.destroyed */
+  bool sock_held; /* this request stopped its socket's reads */
   ScrNetLs aborted_ls; /* req.on('aborted') — the h2 compat event */
 };
 
@@ -330,7 +332,10 @@ void scr_http_req_release(ScrHttpReq *r) {
     scr_http_client_release(r->pipe_client);
     scr_net_sock_release(r->pipe_sock);
     free(r->pend);
-    if (r->sock) scr_net_sock_release(r->sock);
+    if (r->sock) {
+      if (r->sock_held) scr_net_sock_hold(r->sock, false);
+      scr_net_sock_release(r->sock);
+    }
     if (r->h2_stream) scr_http_h2_ops->release(r->h2_stream);
 #ifdef SCR_RC_AUDIT
     scr_http_live--;
@@ -638,6 +643,22 @@ static bool scr_http_req_holding(const ScrHttpReq *r) {
   return r->paused || (r->gated && !r->flowing);
 }
 
+/* IncomingMessage's readableHighWaterMark (its socket's, 64 KiB): a held
+ * request buffers this many body bytes before its socket stops reading. */
+#define SCR_HTTP_REQ_HOLD_BYTES 65536u
+
+/* Stops the socket's reads while an HTTP/1 server request holds a full
+ * buffer, and restarts them once it flows, ends or is dumped, as Node's
+ * readStop when push() returns false. Client responses and h2 compat
+ * requests keep reading. */
+static void scr_http_req_update_hold(ScrHttpReq *r) {
+  bool hold = r->sock != NULL && r->status == -1 && !r->http2 && !r->ended &&
+              scr_http_req_holding(r) && r->pend_len >= SCR_HTTP_REQ_HOLD_BYTES;
+  if (hold == r->sock_held) return;
+  r->sock_held = hold;
+  scr_net_sock_hold(r->sock, hold);
+}
+
 static void scr_http_req_queue_drain(ScrHttpReq *r) {
   if (r->drain_queued) return;
   r->drain_queued = true;
@@ -650,6 +671,7 @@ static void scr_http_req_flow(ScrHttpReq *r) {
   r->paused = false;
   r->flowing = true;
   if (r->pend_len > 0 || r->end_pending) scr_http_req_queue_drain(r);
+  scr_http_req_update_hold(r);
 }
 
 /* A 'data' listener or pipe() starts the flow unless pause() stopped it,
@@ -658,9 +680,7 @@ static void scr_http_req_consume(ScrHttpReq *r) {
   if (r->gated && !r->paused && !r->flowing) scr_http_req_flow(r);
 }
 
-/* resume(): releases what pause() or the initial paused state held. This
- * parser always consumes body bytes from the socket (SEMANTICS.md); held
- * bytes buffer in memory. */
+/* resume(): releases what pause() or the initial paused state held. */
 void scr_http_req_resume(ScrHttpReq *r) {
   if (!scr_http_req_holding(r)) return;
   scr_http_req_flow(r);
@@ -676,6 +696,7 @@ static void scr_http_req_dump(ScrHttpReq *r) {
   r->pend_len = r->pend_cap = 0;
   r->paused = false;
   r->flowing = true;
+  scr_http_req_update_hold(r);
 }
 
 /* pause(): delivery holds until resume() (scr_http_req_deliver buffers;
@@ -759,6 +780,7 @@ static void scr_http_req_finish(ScrHttpReq *r, bool fire) {
     return;
   }
   r->ended = true;
+  scr_http_req_update_hold(r);
   r->end_consumed = fire && (r->data_ls.n > 0 || r->pipe_res || r->pipe_client || r->pipe_sock);
   if (fire) scr_net_fire0_this(&r->end_ls, r, SCR_DYNH_HTTP_REQ);
   scr_net_ls_drop(&r->data_ls);
@@ -2305,6 +2327,7 @@ static void scr_http_proto_sweep(void) {
         req->pend_len = req->pend_cap = 0;
         if (held_len > 0) scr_http_req_deliver(req, held, held_len);
         free(held);
+        scr_http_req_update_hold(req);
         if (!scr_exc_pending() && !req->paused && req->end_pending) {
           req->end_pending = false;
           scr_http_req_finish(req, true);
@@ -2758,8 +2781,8 @@ static void scr_http_req_deliver(ScrHttpReq *r, const char *data, size_t n) {
   if (!r || n == 0 || r->ended) return;
   r->body_seen = true;
   if (scr_http_req_holding(r)) {
-    /* paused: the parser keeps consuming (memory is the buffer — a
-     * documented bound), delivery waits for the drain */
+    /* held: delivery waits for the drain; a full buffer stops the
+     * socket's reads */
     if (r->pend_len + n > r->pend_cap) {
       size_t cap = r->pend_cap ? r->pend_cap : 4096;
       while (cap < r->pend_len + n) cap *= 2;
@@ -2769,6 +2792,7 @@ static void scr_http_req_deliver(ScrHttpReq *r, const char *data, size_t n) {
     }
     memcpy(r->pend + r->pend_len, data, n);
     r->pend_len += n;
+    scr_http_req_update_hold(r);
     return;
   }
   bool piped = r->pipe_res != NULL || r->pipe_client != NULL || r->pipe_sock != NULL;

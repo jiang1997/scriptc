@@ -382,9 +382,9 @@ export function matchIntegerCountedForLoop(
  *
  * The first counter only grows and the second only shrinks, by positive
  * literal steps, the body writes neither, and the loop runs while the first
- * is below (or at most) the second. Every body entry therefore holds both
- * between the first start and the second start: exact integers when the
- * starts are. A start without a proven integer range is tested at run time
+ * is below (or at most) the second, written either way round (`hi > lo`).
+ * Every body entry therefore holds both between the first start and the
+ * second start: exact integers when the starts are. A start without a proven integer range is tested at run time
  * on a versioned loop, as a counted loop's is. */
 export interface IntegerPairedCounter {
   localId: string;
@@ -412,10 +412,13 @@ export function matchIntegerPairedForLoop(
     cond = stmt.cond;
   if (init?.kind !== "block" || init.body.length !== 2) return null;
   if (update?.kind !== "block" || update.body.length !== 2) return null;
-  if (cond?.kind !== "bin" || (cond.op !== "<" && cond.op !== "<=")) return null;
-  if (cond.left.kind !== "varRef" || cond.right.kind !== "varRef") return null;
-  const lowId = cond.left.localId,
-    highId = cond.right.localId;
+  if (cond?.kind !== "bin" || cond.left.kind !== "varRef" || cond.right.kind !== "varRef")
+    return null;
+  const below = cond.op === "<" || cond.op === "<=";
+  if (!below && cond.op !== ">" && cond.op !== ">=") return null;
+  // `hi > lo` is `lo < hi`.
+  const lowId = below ? cond.left.localId : cond.right.localId,
+    highId = below ? cond.right.localId : cond.left.localId;
   if (lowId === highId) return null;
   const counter = (id: string): IntegerPairedCounter | null => {
     const decl = init.body.find((d) => d.kind === "varDecl" && d.localId === id);
@@ -485,7 +488,7 @@ export function matchIntegerPairedForLoop(
   return {
     low,
     high,
-    inclusive: cond.op === "<=",
+    inclusive: cond.op === "<=" || cond.op === ">=",
     guarded,
     // A loop whose starts already fail the condition never enters the body.
     range: {
