@@ -1570,6 +1570,50 @@ static ScrDyn *scr_dyn_not_iterable(const ScrDyn *src, const ScrStr *msg) {
   return NULL;
 }
 
+static ScrDyn *scr_native_iterator_drain(const ScrDyn *src);
+
+/* Math.max(...src) / Math.min(...src) over an untyped iterable: every
+ * value's ToNumber runs in order, then NaN poisons and ±0 orders as in
+ * Node. A non-iterable source throws V8's call-spread TypeError: `what`
+ * names the source for null and undefined, every other kind gets the
+ * Symbol.iterator wording. NaN with the exception pending when packing or
+ * a coercion throws. */
+double scr_dyn_math_fold(const ScrDyn *src, bool max, const ScrStr *what) {
+  if (src->kind == SCR_DYN_UNDEF || src->kind == SCR_DYN_NULL) {
+    ScrJsonBuf b;
+    scr_jb_init(&b);
+    scr_jb_write(&b, what->data, what->len);
+    scr_jb_puts(&b, src->kind == SCR_DYN_NULL ? " is not iterable (cannot read property null)"
+                                              : " is not iterable (cannot read property undefined)");
+    scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+    return NAN;
+  }
+  static const char spread_msg[] = "Spread syntax requires ...iterable[Symbol.iterator] to be a function";
+  ScrStr *msg = scr_str_new(spread_msg, sizeof spread_msg - 1);
+  /* The spread takes every value before the call: arrays, strings, bytes
+   * and collections pack, a native iterator (a Map's keys()) drains, and
+   * other iterables (a generator, an object with a Symbol.iterator method)
+   * step their iterator to the end. */
+  ScrDyn *pack = src->kind == SCR_DYN_HANDLE && (src->v.handle.tag == SCR_DYNH_ITERATOR ||
+                                                 scr_dyn_handle_ops_of(src)->iter_step)
+                     ? scr_native_iterator_drain(src)
+                     : scr_dyn_destructure_rest(src, msg);
+  scr_str_release(msg);
+  if (!pack) return NAN;
+  double best = max ? -INFINITY : INFINITY;
+  bool nan = false;
+  for (size_t i = 0; i < pack->v.arr.len; i++) {
+    double v = scr_dyn_number_coerce(pack->v.arr.items[i]);
+    if (scr_exc_pending()) break;
+    if (isnan(v)) nan = true;
+    else if (max ? (v > best || (v == 0.0 && best == 0.0 && !signbit(v)))
+                 : (v < best || (v == 0.0 && best == 0.0 && signbit(v))))
+      best = v;
+  }
+  scr_dyn_release(pack);
+  return nan ? NAN : best;
+}
+
 ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
   if (src->kind == SCR_DYN_HANDLE && scr_dyn_handle_ops_of(src)->iter_pack)
     return scr_dyn_handle_ops_of(src)->iter_pack(src->v.handle.ptr);
@@ -3665,7 +3709,8 @@ bool scr_dyn_typed_ref_class_has(const ScrDyn *d, const ScrStr *key) {
 
 static const ScrDynTypedRecordOps *scr_typed_ref_record_ops(const ScrDyn *d) {
   if (!d->v.typed_ref.record || d->v.typed_ref.materialized) return NULL;
-  return (const ScrDynTypedRecordOps *)(const void *)d->v.typed_ref.array;
+  const ScrDynTypedRecordOps *ops = (const ScrDynTypedRecordOps *)(const void *)d->v.typed_ref.array;
+  return ops && ops->select ? ops->select(d->v.typed_ref.ptr) : ops;
 }
 
 const ScrDynTypedRecordOps *scr_dyn_typed_ref_live_record(const ScrDyn *d) {
@@ -16005,4 +16050,63 @@ bool scr_error_has_key(ScrError *e, const ScrStr *key) {
   if (view != NULL && view->kind == SCR_DYN_OBJ && scr_dyn_find_entry(view, key->data, key->len) != NULL)
     return true;
   return scr_dyn_object_proto_name(key);
+}
+
+/* ── declaration-typed boundary: in-place capsules ─────────────────────
+ * scr_decl_adopt.c (linked only into programs with boundary casts) turns a
+ * shared source node into a live capsule of the native value built from
+ * it. The node's old payload moves to a scratch node released here; the
+ * node's weak-collection entries move to the capsule's native identity.
+ * Nothing else in the runtime calls this. */
+static bool scr_dyn_decl_rekey(ScrDyn *node, void *ptr) {
+  bool moved = false;
+  if (!scr_weak_observing) return false;
+  for (;;) {
+    ScrWeakEntry **slot = &scr_weak_entries[scr_weak_bucket(node)];
+    while (*slot && !((*slot)->key == (void *)node && (*slot)->kind == 0)) slot = &(*slot)->all_next;
+    ScrWeakEntry *entry = *slot;
+    if (!entry) return moved;
+    *slot = entry->all_next;
+    entry->key = ptr;
+    entry->kind = 32;
+    ScrWeakEntry **head = &scr_weak_entries[scr_weak_bucket(ptr)];
+    entry->all_next = *head;
+    *head = entry;
+    moved = true;
+  }
+}
+
+void scr_dyn_decl_become(ScrDyn *n, const ScrDyn *capsule);
+void scr_dyn_decl_become(ScrDyn *n, const ScrDyn *capsule) {
+  ScrDynRegion *region = scr_dyn_region_of(n);
+  if (region) region->intact = false;
+  ScrDyn *old = scr_dyn_alloc(SCR_DYN_NULL);
+  old->kind = n->kind;
+  old->buffer = n->buffer;
+  old->null_proto = n->null_proto;
+  old->copied_from_native = n->copied_from_native;
+  old->non_extensible = n->non_extensible;
+  old->v = n->v;
+  old->prototype = n->prototype;
+  old->symbol_properties = n->symbol_properties;
+  old->symbol_keys = n->symbol_keys;
+  n->kind = SCR_DYN_TYPED_REF;
+  n->buffer = false;
+  n->null_proto = false;
+  n->copied_from_native = false;
+  n->non_extensible = false;
+  n->prototype = NULL;
+  n->symbol_properties = NULL;
+  n->symbol_keys = NULL;
+  memset(&n->v, 0, sizeof n->v);
+  n->v.typed_ref = capsule->v.typed_ref;
+  n->v.typed_ref.ptr = capsule->v.typed_ref.retain(capsule->v.typed_ref.ptr);
+  n->v.typed_ref.materialized = NULL;
+  n->v.typed_ref.casts = NULL;
+  if (scr_dyn_decl_rekey(n, n->v.typed_ref.ptr)) n->v.typed_ref.observed = true;
+  if (n->v.typed_ref.type_key_len >= 7 && memcmp(n->v.typed_ref.type_key, "record:", 7) == 0) {
+    ScrDyn *view = scr_record_source_view(n->v.typed_ref.ptr);
+    if (view) n->v.typed_ref.materialized = scr_dyn_retain(view);
+  }
+  scr_dyn_release(old);
 }

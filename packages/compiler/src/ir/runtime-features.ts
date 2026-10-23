@@ -858,6 +858,10 @@ const RUNTIME_FEATURE_RULES = {
   }),
   /** Own properties JavaScript adds to children (scr_dyn_handle_props.c). */
   handleProps: rule({ fns: ["child.propsInstall"] }),
+  /** The declaration-typed boundary's adoption (scr_decl_adopt.c): its
+   * casts, and closures boxed in a boundary program, which adopt their
+   * arguments. */
+  declAdopt: rule({ fns: ["dyn.declAdopt"], initial: (mod) => mod.declBoundary === true }),
   /** for await over checked-dynamic values (scr_dyn_for_await.c). */
   dynForAwait: rule({ fns: ["dyn.asyncIteratorOpen", "dyn.asyncIteratorWasSync"] }),
   /** Buffer.prototype methods called on checked-dynamic values
@@ -1081,6 +1085,7 @@ function noRuntimeFeatures(): RuntimeFeatures {
     stream: false,
     streamDyn: false,
     handleProps: false,
+    declAdopt: false,
     dynForAwait: false,
     dynBuffer: false,
     builtinValues: false,

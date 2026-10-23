@@ -1,3 +1,4 @@
+import { isNavigatorGlobal } from "../builtins/navigator.js";
 import { isSafeToDiscard } from "./evaluation-safety.js";
 import { completeFuncValueArgs } from "../call-arguments.js";
 import { dynUndefinedExpr } from "../../../ir/build.js";
@@ -223,6 +224,16 @@ export function lowerOptionalChain(
   // Native handle methods have no first-class value to guard; when the
   // method read itself has no lowering, re-dispatch the plain call (which
   // reports its own diagnostics) instead of failing on the value read.
+  // `navigator?.userAgent`: Node's navigator global is never nullish and
+  // has no value form, so the guarded step is the plain member read.
+  if (isNavigatorGlobal(lowerer, recvNode)) {
+    lowerer.chainHandled.add(dotNode);
+    try {
+      return lowerer.lowerExpr(expr);
+    } finally {
+      lowerer.chainHandled.delete(dotNode);
+    }
+  }
   let loweredReceiver: IrExpr | null;
   if (dotNode === expr && alwaysPresentStdlibMethod(lowerer, recvNode)) {
     loweredReceiver = tryLowerExpression(lowerer, recvNode);

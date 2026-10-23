@@ -2146,7 +2146,12 @@ export function lowerObjectLiteral(
       orderSegments.push(
         srcLowered.type.kind === "dyn"
           ? { kind: "opaque" }
-          : { kind: "spread", shapeId: srcType.shapeId, maybeAbsent: false },
+          : {
+              kind: "spread",
+              shapeId: srcType.shapeId,
+              maybeAbsent: false,
+              ...(srcLowered.kind === "varRef" ? { value: srcLowered } : {}),
+            },
       );
       for (const f of srcShape.fields) {
         if (laterNames.has(f.name)) continue;

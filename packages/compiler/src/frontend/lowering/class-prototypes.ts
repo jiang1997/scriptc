@@ -207,12 +207,21 @@ export function classPrototypeData(
       // promise-returning signature) gets no data slot.
       const boxedValue = lowerer.coerceToExpected(compiled, DYN);
       if (boxedValue.type.kind !== "dyn") continue;
+      const originalId = `%g.${info.def.prototypeDataHelper}.original.${method}`;
+      lowerer.globalsList.push({
+        id: originalId,
+        name: `${info.def.jsName ?? info.def.name}.prototype.${method}.original`,
+        type: DYN,
+        mutable: true,
+      });
+      info.prototypeOriginals ??= new Map();
+      info.prototypeOriginals.set(method, originalId);
       const descriptor: IrExpr = {
         kind: "dynObjLit",
         fields: [
           {
             key: { kind: "strLit", value: "value", type: STRING, loc },
-            value: boxedValue,
+            value: varRef(originalId, DYN, loc),
           },
           {
             key: { kind: "strLit", value: "writable", type: STRING, loc },
@@ -227,6 +236,8 @@ export function classPrototypeData(
         loc,
       };
       const init = helper.body[0]!;
+      if (init.kind === "if")
+        init.then.push({ kind: "assign", localId: originalId, value: boxedValue, loc });
       if (init.kind === "if")
         init.then.push({
           kind: "exprStmt",

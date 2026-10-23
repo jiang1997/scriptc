@@ -43,7 +43,7 @@ import {
   UNDEFINED_T,
   VOID,
 } from "../ir/ir.js";
-import { BIGINT_T } from "../ir/ir.js";
+import { BIGINT_T, KEY_ORDER_FIELD } from "../ir/ir.js";
 import { literalValues } from "./literal-values.js";
 import { remapUnionDiscriminant } from "./union-discriminants.js";
 
@@ -553,6 +553,21 @@ export class ShapeRegistry {
     if (!extra) return order;
     const missing = extra.filter((name) => !order.includes(name));
     return missing.length === 0 ? order : [...order, ...missing];
+  }
+
+  /** Gives a shape with orderVariants its KEY_ORDER_FIELD, in place,
+   * after the bodies lowered (key-order-witness.ts adds the field to each
+   * of the shape's literals). Allocation zeroes it, which every other
+   * construction keeps. */
+  addKeyOrderField(shapeId: string): void {
+    const shape = this.byId.get(shapeId);
+    if (!shape || shape.fields.some((f) => f.name === KEY_ORDER_FIELD)) return;
+    shape.fields = [...shape.fields, { name: KEY_ORDER_FIELD, type: F64 }].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    );
+    this.revision++;
+    const key = this.keyOf(shape.fields, false, shape.indexValue);
+    if (!this.byKey.has(key)) this.byKey.set(key, shapeId);
   }
 
   /** Adds optional fields to an interned shape in place: members a type

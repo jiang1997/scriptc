@@ -219,6 +219,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * not iterable (cannot read property Symbol(Symbol.iterator))"). In the
    * may-throw seed set. */
   "dyn.iterPack": { argTypes: [DYN, STRING], result: DYN },
+  "dyn.mathFold": { argTypes: [DYN, BOOL, STRING], result: F64 },
   "dyn.destructureRest": { argTypes: [DYN, STRING], result: DYN },
   "dyn.arrayFromIterator": { argTypes: [DYN], result: DYN },
   "dyn.iterator": { argTypes: [DYN, STRING], result: DYN },
@@ -3776,6 +3777,14 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * call: always throws Node's TypeError [ERR_MISSING_ARGS] with Node's
    * own (verbatim, doubly-wrapped) message. */
   "dyn.structuredClone": { argTypes: [DYN, DYN], result: DYN },
+  /** The declaration-typed boundary's adoption (decl-projection.ts):
+   * `source` is the dynamic value a boundary cast just converted, and
+   * `capsule` a live capsule of the native value built from it. Every
+   * object or array of `source` that something else still references
+   * becomes, in place, a live capsule of the native value built from it.
+   * Throws the path TypeError, changing nothing, when a converted object
+   * is not plain data (a prototype, accessors, symbols, frozen state). */
+  "dyn.declAdopt": { argTypes: [DYN, DYN], result: VOID },
   "dyn.cloneMissing": { argTypes: [], result: DYN },
   /** structuredClone with a NON-EMPTY transfer array of static values:
    * nothing static is transferable, so the call always throws Node's

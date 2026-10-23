@@ -70,6 +70,7 @@ export interface EarlyExecutableNativeFeatures {
   dynTier?: boolean;
   streamDyn?: boolean;
   handleProps?: boolean;
+  declAdopt?: boolean;
   dynForAwait?: boolean;
   eventsOnceSignal?: boolean;
   dynBuffer?: boolean;

@@ -306,10 +306,10 @@ export function lowerPropertyAccessExpr(
       };
     }
   }
-  if (!expr.questionDotToken) {
-    const navigator = lowerNavigatorMember(lowerer, expr, NODE_COMPAT_VERSION);
-    if (navigator) return navigator;
-  }
+  // Node's navigator is never nullish, so `navigator?.userAgent` (zod's
+  // Cloudflare probe) folds like `navigator.userAgent`.
+  const navigator = lowerNavigatorMember(lowerer, expr, NODE_COMPAT_VERSION);
+  if (navigator) return navigator;
   // A dgram socket's method read as a value in JavaScript (`emit:
   // socket.emit.bind(socket)`): the socket crosses as its checked-dynamic
   // handle, whose methods are function values that dispatch on their

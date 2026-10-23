@@ -3,6 +3,7 @@ import { predeclareForwardClass } from "../lower-stmts.js";
 import { cjsMemberAliasValueOf } from "../cjs-exports-object.js";
 import { builtinClassValue, builtinMemberClassKind } from "../builtins/builtin-class-dyn.js";
 import * as ts from "../../ts7/adapter.js";
+import type { ClassInfo } from "../lower-classes.js";
 import { InternalCompilerError } from "../../../errors.js";
 import * as posix from "node:path/posix";
 import { type Lowerer, PoisonError } from "../lowerer.js";
@@ -860,9 +861,10 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
   // reach here — their hooks claim the property/new forms first).
   {
     const sym = lowerer.resolveValueSymbol(expr);
+    const classInfo = sym ? currentClassInfo(lowerer, sym) : undefined;
     // A local class referenced from a function hoisted above its statement:
     // its TDZ box, holding the class as a checked-dynamic constructor.
-    if (sym && !lowerer.classBySymbol.has(sym) && predeclareForwardClass(lowerer, sym)) {
+    if (!classInfo && sym && predeclareForwardClass(lowerer, sym)) {
       const local = lowerer.resolveLocal(expr);
       if (local) return { kind: "varRef", localId: local.id, type: local.type, loc };
     }
@@ -928,13 +930,32 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
  * identifier or a shorthand property `{ Name }` spells it): the classRef
  * over the class's immortal class object, or null when `sym` names no
  * program class. */
+/** The program class `sym` names here, or undefined. A class local to a
+ * function lowered once per instantiation (`$constructor` called with
+ * different argument types) registers per instance under the same symbol:
+ * a hoisted function of a later instance, lowered before its own class
+ * statement, must not reach the class an earlier instance collected. */
+function currentClassInfo(lowerer: Lowerer, sym: ts.Symbol): ClassInfo | undefined {
+  const classInfo = lowerer.classBySymbol.get(sym);
+  const declaration = sym.valueDeclaration;
+  if (
+    classInfo &&
+    lowerer.localClassInstantiations.length > 0 &&
+    declaration &&
+    ts.isClassDeclaration(declaration) &&
+    lowerer.classNamer(declaration) !== classInfo.def.name
+  )
+    return undefined;
+  return classInfo;
+}
+
 export function classNameValue(
   lowerer: Lowerer,
   sym: ts.Symbol,
   expr: ts.Identifier,
   loc: SrcLoc,
 ): IrExpr | null {
-  const classInfo = lowerer.classBySymbol.get(sym);
+  const classInfo = currentClassInfo(lowerer, sym);
   if (!classInfo) return null;
   // A GENERIC class name whose CONTEXTUAL type pins one instantiation
   // (`const B: new (v: string) => Counter<string> = Counter`): the

@@ -139,6 +139,7 @@ import {
   typeOnlyReachedFiles,
 } from "./type-only-imports.js";
 import { moduleSourceCandidates } from "./module-source-candidates.js";
+import { planDeclProjection, type DeclProjection } from "./decl-projection.js";
 import { inferredJsDiagnosticSuppressed } from "./inferred-js-diagnostics.js";
 import {
   containsJsx,
@@ -386,6 +387,9 @@ export interface LoadResult {
    * checkPreflight. */
   startupCrash?: StartupCrash | null;
   configDiags: ScrDiagnostic[];
+  /** SC6102 performance notes of the declaration-typed boundary
+   * (decl-projection.ts): files whose projection was dropped. */
+  declBoundaryNotes?: ScrDiagnostic[];
   /** The files whose JSX the program lowers (jsx-source.ts), by file name.
    * The program holds their rewritten text; positions in diagnostics refer
    * to it. */
@@ -397,6 +401,9 @@ export interface LoadResult {
     /** The program's pre-emit diagnostics, computed once. */
     diagnostics: readonly ts.Diagnostic[];
     projectWorld: ts.Program | null;
+    /** The declaration-typed boundary rewrote user files: errors fall
+     * back to the declaration world (load.projectWorld()), as without it. */
+    declWorldFallback?: true;
   };
   /** How scriptc's type world differs from the project's own tsc setup —
    * used only to label the TypeScript errors those differences cause. */
@@ -846,6 +853,9 @@ function loadProgram7(
   externalTypes: ReadonlyMap<string, string> = new Map(),
   /** The --npm-static lowering world: root opted-in packages' deep edges. */
   rootNpmStaticEdges = false,
+  /** The declaration-typed boundary's projection (decl-projection.ts):
+   * answers rewritten user files for the lowering world, or null. */
+  projector?: (program: ts.Program) => DeclProjection | null,
 ): LoadResult & { disposeAll: () => void } {
   const config = adoptProjectConfig7(host, entryPath);
   const configuredPaths = config.options["paths"];
@@ -925,6 +935,7 @@ function loadProgram7(
     // lowering compiles holds them with their JSX lowered.
     const jsx = lowerProgramJsx7(program, options);
     let tscWorld: LoadResult["tscWorld"];
+    const declBoundaryNotes: ScrDiagnostic[] = [];
     if (jsx.refusal !== null) {
       config.diags.push(jsx.refusal);
     } else if (jsx.sources.size > 0) {
@@ -940,6 +951,51 @@ function loadProgram7(
       };
       for (const [file, lowered] of jsx.sources) host.addVirtualFile(file, lowered.text);
       program = host.createProgram([...programRoots, overridesDtsPath()], options);
+    } else if (projector !== undefined) {
+      // The declaration-typed boundary: user files typed from package
+      // declarations (decl-projection.ts). The tsc gate reads the original
+      // text; the lowering compiles the rewritten files.
+      const projection = projector(program);
+      if (projection !== null) {
+        const original = program;
+        const baseline = new Map<string, number>();
+        for (const file of projection.files.keys()) {
+          const sf = original.getSourceFile(file);
+          if (sf !== undefined) baseline.set(file, original.getSemanticDiagnostics(sf).length);
+        }
+        for (const [file, text] of projection.files) host.addVirtualFile(file, text);
+        host.addVirtualFile(projection.declFile, projection.declText);
+        programRoots.push(projection.declFile);
+        program = host.createProgram([...programRoots, overridesDtsPath()], options);
+        // A rewrite the lowering world disagrees with (new errors) is
+        // dropped for that file: the file lowers as it would without it.
+        const dropped: string[] = [];
+        for (const file of projection.files.keys()) {
+          const sf = program.getSourceFile(file);
+          if (sf === undefined) continue;
+          if (program.getSemanticDiagnostics(sf).length > (baseline.get(file) ?? 0)) {
+            dropped.push(file);
+            host.addVirtualFile(file, original.getSourceFile(file)!.text);
+          }
+        }
+        if (dropped.length > 0) {
+          program.dispose();
+          program = host.createProgram([...programRoots, overridesDtsPath()], options);
+          for (const file of dropped) declBoundaryNotes.push(declBoundaryDroppedDiag(file));
+        }
+        if (dropped.length === projection.files.size) {
+          program.dispose();
+          programRoots.pop();
+          program = original;
+        } else {
+          tscWorld = {
+            program: original,
+            diagnostics: ts.getPreEmitDiagnostics(original),
+            projectWorld: null,
+            declWorldFallback: true,
+          };
+        }
+      }
     }
     const entry = program.getSourceFile(entryPath);
     if (!entry) throw new Error(`could not load ${entryPath}`);
@@ -950,6 +1006,7 @@ function loadProgram7(
       entry,
       moduleOrder: [],
       configDiags: config.diags,
+      ...(declBoundaryNotes.length > 0 ? { declBoundaryNotes } : {}),
       typeWorld: {
         nodeFallback: nodeTypes === null,
         projectLib: config.projectLib ?? null,
@@ -1156,31 +1213,69 @@ export function loadProgram(
       (npmShadow?.hideFile(path) ?? false) || projectDtsRuntimeSibling(path) !== null,
   };
   const host = services.createProgramHost({ cwd: dirname(entryPath), fsShadow });
+  let authoredHost: ts.Ts7Host | null = null;
+  let authoredLoad: ReturnType<typeof loadProgram7> | null = null;
+  const authored = (): ReturnType<typeof loadProgram7> => {
+    if (!authoredLoad) {
+      authoredHost = services.createProgramHost({ cwd: dirname(entryPath) });
+      authoredLoad = loadProgram7(authoredHost, entryPath, externalTypes);
+    }
+    return authoredLoad;
+  };
+  const declPackages = npmStaticPackages.filter((pkg) => {
+    const resolved = resolveBareModule(entryPath, pkg, "types-only");
+    return resolved !== null && /\.d\.(?:ts|mts|cts)$/.test(resolved.typesFile);
+  });
+  const projector =
+    declPackages.length === 0
+      ? undefined
+      : (program: ts.Program): DeclProjection | null => {
+          const userFiles = declBoundaryUserFiles(program, declPackages);
+          if (userFiles.length === 0) return null;
+          let projection: DeclProjection | null;
+          try {
+            projection = planDeclProjection({
+              jsProgram: program,
+              declProgram: authored().program,
+              userFiles,
+              outDir: dirname(entryPath),
+            });
+          } catch (error) {
+            if (process.env["SCRIPTC_DEBUG_DECL_BOUNDARY"] === "1") throw error;
+            return null;
+          }
+          if (process.env["SCRIPTC_DEBUG_DECL_BOUNDARY"] === "1") {
+            process.stderr.write(
+              `[decl-boundary] ${projection === null ? "no projection" : projection.plan.join("\n[decl-boundary] ")}\n`,
+            );
+            if (projection !== null) process.stderr.write(projection.declText);
+          }
+          return projection;
+        };
   try {
-    const load = loadProgram7(host, entryPath, externalTypes, npmStaticPackages.length > 0);
-    let authoredHost: ts.Ts7Host | null = null;
-    let authoredLoad: ReturnType<typeof loadProgram7> | null = null;
+    const load = loadProgram7(
+      host,
+      entryPath,
+      externalTypes,
+      npmStaticPackages.length > 0,
+      projector,
+    );
     return {
       ...load,
       services,
       projectWorld:
         npmStaticPackages.length === 0
           ? load.projectWorld
-          : () => {
+          : () =>
               // Check authored code against the package's published declarations.
               // Runtime bodies still lower from JavaScript in the original world;
               // inference there must not manufacture errors in valid user code.
-              if (!authoredLoad) {
-                authoredHost = services.createProgramHost({ cwd: dirname(entryPath) });
-                authoredLoad = loadProgram7(authoredHost, entryPath, externalTypes);
-              }
-              return authoredLoad.projectWorld();
-            },
+              authored().projectWorld(),
       dispose: () => {
         try {
-          authoredLoad?.disposeAll();
+          (authoredLoad as ReturnType<typeof loadProgram7> | null)?.disposeAll();
         } finally {
-          authoredHost?.close();
+          (authoredHost as ts.Ts7Host | null)?.close();
           try {
             load.disposeAll();
           } finally {
@@ -1190,9 +1285,45 @@ export function loadProgram(
       },
     };
   } catch (error) {
+    (authoredLoad as ReturnType<typeof loadProgram7> | null)?.disposeAll();
+    (authoredHost as ts.Ts7Host | null)?.close();
     host.close();
     throw error;
   }
+}
+
+/** User TypeScript files (outside node_modules) that import one of the
+ * packages whose declarations the boundary projects from. */
+function declBoundaryUserFiles(program: ts.Program, packages: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const sf of program.getSourceFiles()) {
+    const name = sf.fileName.split("\\").join("/");
+    if (sf.isDeclarationFile || name.includes("/node_modules/") || !/\.[mc]?tsx?$/.test(name))
+      continue;
+    if (name.endsWith(".tsx")) continue; // JSX files: not projected yet
+    const text = sf.text;
+    if (
+      packages.some(
+        (pkg) =>
+          text.includes(`"${pkg}"`) ||
+          text.includes(`'${pkg}'`) ||
+          text.includes(`"${pkg}/`) ||
+          text.includes(`'${pkg}/`),
+      )
+    )
+      out.push(sf.fileName);
+  }
+  return out;
+}
+
+/** SC6102 — a projected file the lowering world disagreed with. */
+function declBoundaryDroppedDiag(file: string): ScrDiagnostic {
+  return {
+    code: "SC6102",
+    message:
+      "values from npm packages stay checked-dynamic in this file: the types projected from the packages' declarations do not type-check against their JavaScript",
+    loc: { file, start: 0, end: 0 },
+  };
 }
 
 /** tsc diagnostics (syntax + types), the supported-import fence, and the
@@ -4801,7 +4932,9 @@ function preflight7(load: LoadResult): {
     tscWorld === undefined ? errorsOf(program) : keptErrors(tscWorld.program, tscWorld.diagnostics);
   if (tscErrors.length > 0) {
     const world =
-      tscWorld === undefined ? load.projectWorld() : (tscWorld.projectWorld ?? tscWorld.program);
+      tscWorld === undefined || tscWorld.declWorldFallback === true
+        ? load.projectWorld()
+        : (tscWorld.projectWorld ?? tscWorld.program);
     for (const d of errorsOf(world)) {
       const diag = toPassthrough(d);
       const lowered = tscWorld === undefined ? undefined : load.jsxSources?.get(diag.loc.file);

@@ -120,6 +120,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   const moduleLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
   if (mod.workers !== undefined && typeof mod.workers !== "boolean")
     errors.push({ message: "worker execution mode must be a boolean", loc: moduleLoc });
+  if (mod.declBoundary !== undefined && mod.declBoundary !== true)
+    errors.push({ message: "declBoundary must be true when present", loc: moduleLoc });
   if (mod.lifetimeRegions !== undefined && mod.lifetimeRegions !== true)
     errors.push({ message: "lifetimeRegions must be true when present", loc: moduleLoc });
   if (mod.workers && mod.lib !== undefined)

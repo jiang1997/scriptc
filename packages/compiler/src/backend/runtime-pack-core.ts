@@ -86,6 +86,7 @@ export interface RuntimeFeatureSet extends NativeLinkFeatures {
   dynTier: boolean;
   streamDyn: boolean;
   handleProps: boolean;
+  declAdopt: boolean;
   dynForAwait: boolean;
   eventsOnceSignal: boolean;
   dynBuffer: boolean;
@@ -283,6 +284,7 @@ export function effectiveRuntimeFeatures(
     dynTier: features.dynTier === true,
     streamDyn: features.streamDyn === true,
     handleProps: features.handleProps === true,
+    declAdopt: features.declAdopt === true,
     dynForAwait: features.dynForAwait === true,
     eventsOnceSignal: features.eventsOnceSignal === true,
     dynBuffer: features.dynBuffer === true,

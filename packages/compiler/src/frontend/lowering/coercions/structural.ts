@@ -288,6 +288,14 @@ export function applyWidthLift(
     case "dynIn": {
       if (dst.kind !== "dyn")
         throw new InternalCompilerError("lowerer bug: dynIn lift against a non-dyn slot");
+      // The declaration-typed boundary keeps user values' identity when
+      // they cross into package code (decl-projection.ts).
+      if (
+        lowerer.declBoundary &&
+        !/[\\/]node_modules[\\/]/.test(loc.file) &&
+        liveBoxable(lowerer, value.type)
+      )
+        return { kind: "dynFrom", value, liveRef: true, type: DYN, loc };
       return { kind: "dynFrom", value, type: DYN, loc };
     }
     case "dynOut":
@@ -774,4 +782,19 @@ function buildRecordProjection(
     ],
     loc,
   };
+}
+
+/** Records and arrays (and unions holding them), whose identity a live
+ * capsule keeps. */
+function liveBoxable(lowerer: Lowerer, t: IrType, seen = new Set<string>()): boolean {
+  if (t.kind === "record") {
+    const shape = lowerer.shapes.get(t.shapeId);
+    return shape !== undefined && !shape.tuple;
+  }
+  if (t.kind === "array") return true;
+  if (t.kind !== "union" || seen.has(t.unionId)) return false;
+  seen.add(t.unionId);
+  return (
+    lowerer.unions.get(t.unionId)?.arms.some((arm) => liveBoxable(lowerer, arm, seen)) ?? false
+  );
 }
