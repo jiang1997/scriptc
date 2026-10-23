@@ -8,6 +8,7 @@ import {
   RUNTIME_STREAM_CLASSES,
 } from "./ir.js";
 import { everyModuleNode } from "./traverse.js";
+import { eachNodeOfKinds, type IrNodeIndex } from "./node-index.js";
 import { JsIcSites, hasJsIcSite } from "./js-ic.js";
 
 const DYN_BUFFER_NUM_METHODS: ReadonlySet<string> = new Set(
@@ -219,6 +220,8 @@ const STREAM_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.chunkDone",
   "stream.objectMode",
   "stream.decodeStrings",
+  "stream.optionValues",
+  "stream.checkEncodingOption",
   "stream.duplexFromGen",
   "stream.duplexFromDyn",
   "stream.duplexFromPromise",
@@ -400,8 +403,10 @@ export function isDynUndefined(e: IrExpr): boolean {
   return e.kind === "dynFrom" && e.value.kind === "unitLit" && e.value.unit === "undefined";
 }
 
-export function moduleRuntimeFeatures(mod: IrModule): RuntimeFeatures {
-  return scanRuntimeFeatures(mod);
+/** With `nodes` (the module's node index), the scan reads the recorded
+ * expressions and types instead of walking the module. */
+export function moduleRuntimeFeatures(mod: IrModule, nodes?: IrNodeIndex): RuntimeFeatures {
+  return scanRuntimeFeatures(mod, undefined, nodes);
 }
 
 /** The module's record shapes, unions and class layouts by id. */
@@ -858,6 +863,10 @@ const RUNTIME_FEATURE_RULES = {
   }),
   /** Own properties JavaScript adds to children (scr_dyn_handle_props.c). */
   handleProps: rule({ fns: ["child.propsInstall"] }),
+  /** The declaration-typed boundary's adoption (scr_decl_adopt.c): its
+   * casts, and closures boxed in a boundary program, which adopt their
+   * arguments. */
+  declAdopt: rule({ fns: ["dyn.declAdopt"], initial: (mod) => mod.declBoundary === true }),
   /** for await over checked-dynamic values (scr_dyn_for_await.c). */
   dynForAwait: rule({ fns: ["dyn.asyncIteratorOpen", "dyn.asyncIteratorWasSync"] }),
   /** Buffer.prototype methods called on checked-dynamic values
@@ -1081,6 +1090,7 @@ function noRuntimeFeatures(): RuntimeFeatures {
     stream: false,
     streamDyn: false,
     handleProps: false,
+    declAdopt: false,
     dynForAwait: false,
     dynBuffer: false,
     builtinValues: false,
@@ -1121,7 +1131,11 @@ for (const name of RUNTIME_FEATURE_NAMES) {
   if (rule.expr) FEATURE_EXPR_TESTS.push(name);
 }
 
-function scanRuntimeFeatures(mod: IrModule, stopAt?: RuntimeFeatureName): RuntimeFeatures {
+function scanRuntimeFeatures(
+  mod: IrModule,
+  stopAt?: RuntimeFeatureName,
+  nodes?: IrNodeIndex,
+): RuntimeFeatures {
   const features = noRuntimeFeatures();
   const scans: { name: RuntimeFeatureName; scan: RuleScan }[] = [];
   for (const name of RUNTIME_FEATURE_NAMES) {
@@ -1156,7 +1170,18 @@ function scanRuntimeFeatures(mod: IrModule, stopAt?: RuntimeFeatureName): Runtim
     for (const name of FEATURES_BY_TYPE.get(node.kind) ?? []) features[name] = true;
     return keepGoing();
   };
-  if (keepGoing()) everyModuleNode(mod, { expr, stmt: keepGoing, type });
+  // Each condition is a fact about one expression or one type (the rule
+  // scans combine such facts in no particular order), so the index's
+  // expressions and distinct types answer as the walk does. An early stop
+  // (stopAt) keeps the walk.
+  if (nodes !== undefined && stopAt === undefined) {
+    const expressions = nodes.expressions();
+    for (const fn of mod.functions)
+      eachNodeOfKinds(fn, expressions, (node) => {
+        expr(node as IrExpr);
+      });
+    for (const t of nodes.types) type(t);
+  } else if (keepGoing()) everyModuleNode(mod, { expr, stmt: keepGoing, type });
   for (const { name, scan } of scans) if (scan.result()) features[name] = true;
   // Inline-cache sites of dynamic-tier functions use the tier's shapes
   // (scr_js_object.c, with the SCR_JS_TIER build of scr_json.c).

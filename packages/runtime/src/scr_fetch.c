@@ -184,6 +184,23 @@ struct SfResponse {
   int status;
   bool redirected;
   bool null_body;
+  /* @hono/node-server's lightweight-response state (scr_fetch_response_light):
+   * whether a constructed Response is still one the package would write
+   * from its constructor arguments, and in which header form. 0: not (it
+   * was materialized by a body/metadata read, or never qualified); 1: no
+   * init headers; 2: a Headers (or pair list) form; 3: a plain record,
+   * whose raw entries light_record keeps in order. */
+  int8_t light;
+  /* Form 2 reached from form 1 by a headers read: the package's Headers
+   * start with its default text content type when the body is not null. */
+  bool light_default_ct;
+  /* The constructor added the text content type (a string body without
+   * one), which the package's lightweight headers never hold. */
+  bool auto_ct;
+  /* The body's byte length (string or Uint8Array), -1 for a null body,
+   * -2 for a stream. */
+  double light_length;
+  ScrArr *light_record;
 };
 
 #ifndef SCR_FETCH_SIGNAL_ONLY
@@ -713,7 +730,8 @@ static ScrDyn *sf_signal_get(void *ptr, const char *key, size_t len) {
                       : scr_dyn_retain(scr_dyn_undefined());
   }
   if (sf_name(key, len, "onabort")) return scr_et_handler_get(&s->core, "abort");
-  return NULL;
+  /* Inherited from EventTarget: the function every target shares. */
+  return scr_event_target_method_value(key, len);
 }
 
 static bool sf_signal_set(void *ptr, const char *key, size_t len,
@@ -2491,11 +2509,44 @@ static bool sf_headers_sorted_entry(SfHeaders *h, size_t index,
   return found;
 }
 
+/* One step of a live Headers iterator (entries, keys or values): the
+ * `*index`th entry of the current sorted list, as Node's iterator re-reads
+ * the list on every step. The result is { value, done }. */
+static ScrDyn *sf_headers_step(void *ptr, double *index, unsigned selection) {
+  ScrStr *name = NULL;
+  ScrStr *value = NULL;
+  bool found = sf_headers_sorted_entry(ptr, (size_t)*index, &name, &value);
+  ScrDyn *item;
+  if (found) {
+    (*index)++;
+    if (selection == 2) {
+      item = scr_dyn_new_arr();
+      scr_dyn_arr_push(item, scr_dyn_new_str(name));
+      scr_dyn_arr_push(item, scr_dyn_new_str(value));
+    } else {
+      item = scr_dyn_new_str(selection == 1 ? name : value);
+    }
+    scr_str_release(name);
+    scr_str_release(value);
+  } else {
+    item = scr_dyn_retain(scr_dyn_undefined());
+  }
+  ScrDyn *result = scr_dyn_new_obj();
+  scr_dyn_obj_set(result, "value", 5, item);
+  scr_dyn_obj_set(result, "done", 4, scr_dyn_new_bool(!found));
+  return result;
+}
+
 static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
                                  const char *method,
                                  ScrDyn *const *args, size_t argc,
                                  const char *what) {
   SfHeaders *h = ptr;
+  if (strcmp(method, "entries") == 0 || strcmp(method, "keys") == 0 ||
+      strcmp(method, "values") == 0) {
+    return scr_dyn_native_handle_iterator(
+        self, strcmp(method, "entries") == 0 ? 2 : strcmp(method, "keys") == 0 ? 1 : 0);
+  }
   if (strcmp(method, "get") == 0 || strcmp(method, "has") == 0) {
     if (argc < 1) {
       sf_type_error("Headers.get/has requires a header name");
@@ -2627,6 +2678,7 @@ static void sf_response_release(SfResponse *r) {
   sf_headers_release(r->headers);
   scr_str_release(r->url);
   scr_str_release(r->status_text);
+  scr_arr_release(r->light_record);
   free(r);
 }
 
@@ -2635,6 +2687,13 @@ static void *sf_response_retain_v(void *p) {
 }
 static void sf_response_release_v(void *p) {
   sf_response_release((SfResponse *)p);
+}
+
+/* A read the package's lightweight Response answers from its native
+ * response materializes it; status, ok and headers keep it light, and a
+ * headers read turns the header form into a Headers object. */
+static void sf_response_materialize(SfResponse *r) {
+  r->light = 0;
 }
 
 static ScrPromise *sf_response_collect(SfResponse *r, int mode) {
@@ -2675,6 +2734,7 @@ static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
                                   ScrDyn *const *args, size_t argc,
                                   const char *what) {
   SfResponse *r = ptr;
+  sf_response_materialize(r);
   int mode = -1;
   if (strcmp(method, "json") == 0) mode = SF_COLLECT_JSON;
   else if (strcmp(method, "text") == 0) mode = SF_COLLECT_TEXT;
@@ -2698,6 +2758,19 @@ static ScrDyn *sf_response_get(void *ptr, const char *key, size_t len) {
   if (sf_name(key, len, "ok")) {
     return scr_dyn_new_bool(r->status >= 200 && r->status <= 299);
   }
+  if (sf_name(key, len, "headers")) {
+    if (r->light == 1) {
+      r->light = 2;
+      r->light_default_ct = !r->null_body;
+    } else if (r->light == 3) {
+      r->light = 2;
+    }
+    return scr_dyn_new_handle(r->headers, SCR_DYNH_FETCH_HEADERS);
+  }
+  if (sf_name(key, len, "body") || sf_name(key, len, "bodyUsed") ||
+      sf_name(key, len, "url") || sf_name(key, len, "redirected") ||
+      sf_name(key, len, "statusText"))
+    sf_response_materialize(r);
   if (sf_name(key, len, "bodyUsed")) {
     return scr_dyn_new_bool(!r->null_body && r->body->disturbed);
   }
@@ -2713,9 +2786,6 @@ static ScrDyn *sf_response_get(void *ptr, const char *key, size_t len) {
   if (sf_name(key, len, "statusText")) {
     return scr_dyn_new_str(r->status_text);
   }
-  if (sf_name(key, len, "headers")) {
-    return scr_dyn_new_handle(r->headers, SCR_DYNH_FETCH_HEADERS);
-  }
   return NULL;
 }
 
@@ -2727,6 +2797,7 @@ static ScrPromise *sf_response_collect_dyn(ScrDyn *response, int mode) {
                                    &scr_dyn_release_v, NULL);
   }
   SfResponse *r = response->v.handle.ptr;
+  sf_response_materialize(r);
   return sf_response_collect(r, mode);
 }
 
@@ -4719,6 +4790,65 @@ static ScrDyn *sf_response_json_serialize(const ScrDyn *value) {
   return serialized;
 }
 
+/* The lightweight header form of a constructor's init headers (see
+ * SfResponse.light): absent headers are form 1 (Response.json's plain
+ * {"content-type": "application/json"} record is form 3), a Headers object
+ * or pair list form 2, and a plain record form 3, whose names and values
+ * *record receives in order (an array value contributes one entry per
+ * element, as writeHead writes it). Response.json with init headers is
+ * form 2 whatever their shape: the package's Response.json passes them on
+ * as a Headers object, adding the JSON content type when they lack one.
+ * 0 for any other init. */
+static int8_t sf_light_header_form(const ScrDyn *headers, bool json_body,
+                                   ScrArr **record) {
+  if (!headers || headers->kind == SCR_DYN_UNDEF) {
+    if (!json_body) return 1;
+    *record = scr_arr_new(SCR_ELEM_STR, 2);
+    sf_push_header_text(*record, "content-type", "application/json", 16);
+    return 3;
+  }
+  if (json_body) return 2;
+  if (headers->kind == SCR_DYN_ARR ||
+      (headers->kind == SCR_DYN_HANDLE &&
+       headers->v.handle.tag == SCR_DYNH_FETCH_HEADERS))
+    return 2;
+  ScrDyn *materialized = NULL;
+  if (headers->kind == SCR_DYN_TYPED_REF) {
+    materialized = scr_dyn_typed_ref_materialize(headers);
+    if (!materialized) return 0;
+    headers = materialized;
+  }
+  int8_t form = 0;
+  if (headers->kind == SCR_DYN_OBJ) {
+    ScrArr *out = scr_arr_new(SCR_ELEM_STR, 2 * headers->v.obj.len);
+    form = 3;
+    for (size_t i = 0; i < headers->v.obj.len && form == 3; i++) {
+      const ScrDynEntry *e = &headers->v.obj.entries[i];
+      const ScrDyn *value = e->value;
+      size_t count = value->kind == SCR_DYN_ARR ? value->v.arr.len : 1;
+      for (size_t j = 0; j < count; j++) {
+        const ScrDyn *item = value->kind == SCR_DYN_ARR ? value->v.arr.items[j] : value;
+        if (item->kind != SCR_DYN_STR && item->kind != SCR_DYN_NUM &&
+            item->kind != SCR_DYN_BOOL) {
+          form = 0;
+          break;
+        }
+        ScrStr *text = scr_dyn_string_coerce_js(item);
+        if (!text) {
+          form = 0;
+          break;
+        }
+        scr_arr_push_ref(out, scr_str_new(e->key, e->key_len));
+        scr_arr_push_ref(out, text);
+      }
+    }
+    if (form == 3) *record = out;
+    else scr_arr_release(out);
+  }
+  scr_dyn_release(materialized);
+  return form;
+}
+
 static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
                                      const ScrDyn *json_data,
                                      SfJsonSerialize serialize) {
@@ -4733,6 +4863,23 @@ static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
   bool text_body = false;
   int status = 200;
   bool status_range_error = false;
+  /* The lightweight-response classification (see SfResponse.light): a
+   * Response init qualifies only while it is itself still light. */
+  bool light_ok = !(init && init->kind == SCR_DYN_HANDLE &&
+                    init->v.handle.tag == SCR_DYNH_FETCH_RESPONSE &&
+                    ((SfResponse *)init->v.handle.ptr)->light == 0);
+  if (!json_body && !null_body) {
+    if (body->kind == SCR_DYN_BYTES)
+      light_ok = light_ok && body->v.bytes->elem == SCR_BYTES_U8 &&
+                 !body->v.bytes->is_data_view;
+    else if (!(body->kind == SCR_DYN_STR ||
+               (body->kind == SCR_DYN_HANDLE &&
+                body->v.handle.tag == SCR_DYNH_WEB_STREAM)))
+      light_ok = false;
+  }
+  int8_t light_form = 0;
+  ScrArr *light_record = NULL;
+  size_t light_length_bytes = 0;
 
   /* WebIDL converts constructor arguments from left to right. BodyInit's
    * string arm therefore runs before ResponseInit's dictionary conversion,
@@ -4770,6 +4917,7 @@ static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
    * coercions precede status and statusText. Header syntax validation is a
    * later response-initialization step, after body extraction. */
   ScrDyn *init_headers = sf_response_init_get(init, "headers", 7);
+  if (light_ok) light_form = sf_light_header_form(init_headers, json_body, &light_record);
   converted_headers = sf_headers_convert_init(init_headers);
   scr_dyn_release(init_headers);
   if (!converted_headers) goto fail;
@@ -4826,6 +4974,7 @@ static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
     scr_str_release(encoding);
     scr_dyn_release(serialized);
     stream = sf_stream_new_native();
+    light_length_bytes = body_bytes->len;
     sf_stream_enqueue_bytes(stream, body_bytes);
     sf_stream_close(stream);
     scr_bytes_release(body_bytes);
@@ -4844,6 +4993,7 @@ static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
     sf_stream_retain(stream);
   } else {
     stream = sf_stream_new_native();
+    light_length_bytes = body_bytes->len;
     sf_stream_enqueue_bytes(stream, body_bytes);
     sf_stream_close(stream);
     scr_bytes_release(body_bytes);
@@ -4877,9 +5027,11 @@ static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
     sf_type_error(message);
     goto fail;
   }
+  bool auto_ct = false;
   if (text_body && !sf_pairs_have(header_pairs, "content-type")) {
     sf_push_header_text(header_pairs, "content-type",
                         "text/plain;charset=UTF-8", 24);
+    auto_ct = true;
   }
   if (json_body && !sf_pairs_have(header_pairs, "content-type")) {
     static const char json_type[16] = "application/json";
@@ -4897,6 +5049,14 @@ static ScrDyn *sf_response_construct(ScrDyn *body, ScrDyn *init,
   response->status = status;
   response->redirected = false;
   response->null_body = null_body;
+  response->light = light_form;
+  response->auto_ct = auto_ct;
+  response->light_record = light_record;
+  light_record = NULL;
+  response->light_length =
+      null_body ? -1.0
+      : (!json_body && body->kind == SCR_DYN_HANDLE) ? -2.0
+      : (double)light_length_bytes;
   ScrDyn *out =
       scr_dyn_new_handle(response, SCR_DYNH_FETCH_RESPONSE);
   sf_response_release(response);
@@ -4908,7 +5068,41 @@ fail:
   scr_str_release(status_text);
   scr_arr_release(header_pairs);
   scr_arr_release(converted_headers);
+  scr_arr_release(light_record);
   return NULL;
+}
+
+/* @hono/node-server's built-in implementation reads a Response's
+ * lightweight state to write it as the package does: [form, flags,
+ * byte length, ...raw record name/value pairs], with form as in
+ * SfResponse.light ("0" alone when the response is not light), flags "d"
+ * (the package's Headers hold its default content type) and "a" (the
+ * constructor added the text content type), and the length -1 for a null
+ * body or -2 for a stream. */
+ScrArr *scr_fetch_response_light(ScrDyn *response) {
+  ScrArr *out = scr_arr_new(SCR_ELEM_STR, 4);
+  if (!response || response->kind != SCR_DYN_HANDLE ||
+      response->v.handle.tag != SCR_DYNH_FETCH_RESPONSE) {
+    scr_arr_push_ref(out, scr_str_new("0", 1));
+    return out;
+  }
+  SfResponse *r = response->v.handle.ptr;
+  char buf[32];
+  int n = snprintf(buf, sizeof buf, "%d", (int)r->light);
+  scr_arr_push_ref(out, scr_str_new(buf, (size_t)n));
+  if (r->light == 0) return out;
+  char flags[3];
+  size_t f = 0;
+  if (r->light_default_ct) flags[f++] = 'd';
+  if (r->auto_ct) flags[f++] = 'a';
+  scr_arr_push_ref(out, scr_str_new(flags, f));
+  n = snprintf(buf, sizeof buf, "%.0f", r->light_length);
+  scr_arr_push_ref(out, scr_str_new(buf, (size_t)n));
+  if (r->light == 3 && r->light_record) {
+    for (size_t i = 0; i < r->light_record->len; i++)
+      scr_arr_push_ref(out, scr_arr_get_ref(r->light_record, (double)i));
+  }
+  return out;
 }
 
 ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init) {
@@ -4957,7 +5151,7 @@ static ScrDyn *sf_request_get(void *ptr, const char *key, size_t len) {
   if (default_value) { ScrStr *s = scr_str_new(default_value, strlen(default_value)); ScrDyn *v = scr_dyn_new_str(s); scr_str_release(s); return v; }
   if (sf_name(key, len, "keepalive") || sf_name(key, len, "isReloadNavigation") || sf_name(key, len, "isHistoryNavigation")) return scr_dyn_new_bool(false);
   if (sf_name(key, len, "body") || sf_name(key, len, "bodyUsed") || sf_name(key, len, "headers")) return sf_response_get(r->payload, key, len);
-  return scr_dyn_undefined();
+  return NULL;
 }
 static ScrDyn *sf_request_invoke(void *ptr, ScrDyn *self, const char *method, ScrDyn *const *args, size_t argc, const char *what) {
   SfRequest *r = ptr;
@@ -5462,32 +5656,70 @@ static bool sf_no_set(void *ptr, const char *key, size_t len,
   return false;
 }
 
+/* The members invoke answers, as values (ScrDynHandleMethod), with Node's
+ * lengths and the brand check each one runs on another receiver. The
+ * signal's EventTarget methods are EventTarget's own (sf_signal_get). */
+static const ScrDynHandleMethod sf_signal_methods[] = {
+    {"throwIfAborted", 0, false}, {NULL, 0, false}};
+static const ScrDynHandleMethod sf_stream_methods[] = {
+    {"cancel", 0, true}, {"getReader", 0, false}, {NULL, 0, false}};
+static const ScrDynHandleMethod sf_reader_methods[] = {
+    {"read", 0, true}, {"releaseLock", 0, false}, {"cancel", 0, true},
+    {NULL, 0, false}};
+static const ScrDynHandleMethod sf_body_methods[] = {
+    {"json", 0, true}, {"text", 0, true}, {"bytes", 0, true},
+    {"arrayBuffer", 0, true}, {NULL, 0, false}};
+static const ScrDynHandleMethod sf_headers_methods[] = {
+    {"append", 2, false}, {"delete", 1, false}, {"entries", 0, false},
+    {"forEach", 1, false}, {"get", 1, false}, {"getSetCookie", 0, false},
+    {"has", 1, false}, {"keys", 0, false}, {"set", 2, false},
+    {"values", 0, false}, {NULL, 0, false}};
+
+static ScrDyn *sf_rejected(void) {
+  ScrPromise *p = scr_promise_settled_ref(NULL, &scr_dyn_retain_v,
+                                          &scr_dyn_release_v, NULL);
+  ScrDyn *out = scr_dyn_new_promise(p);
+  scr_promise_release(p);
+  return out;
+}
+
 static const ScrDynHandleOps sf_signal_ops = {
     "AbortSignal", &sf_signal_retain_v, &sf_signal_release_v,
-    &sf_signal_invoke, &sf_signal_get, &sf_signal_set, NULL};
+    &sf_signal_invoke, &sf_signal_get, &sf_signal_set, NULL,
+    .methods = sf_signal_methods,
+    .invalid_this = "Value of \"this\" must be of type AbortSignal"};
 static const ScrDynHandleOps sf_abort_controller_ops = {
     "AbortController", &sf_signal_retain_v, &sf_signal_release_v,
     &sf_abort_controller_invoke, &sf_abort_controller_get, &sf_no_set, NULL};
 static const ScrDynHandleOps sf_stream_ops = {
     "ReadableStream", &sf_stream_retain_v, &sf_stream_release_v,
-    &sf_stream_invoke, &sf_stream_get, &sf_no_set, NULL};
+    &sf_stream_invoke, &sf_stream_get, &sf_no_set, NULL,
+    .methods = sf_stream_methods,
+    .invalid_this = "Value of \"this\" must be of type ReadableStream",
+    .rejected = &sf_rejected};
 static const ScrDynHandleOps sf_reader_ops = {
     "ReadableStreamDefaultReader", &sf_reader_handle_retain_v,
     &sf_reader_handle_release_v, &sf_reader_invoke, &sf_reader_get,
-    &sf_no_set, NULL};
+    &sf_no_set, NULL, .methods = sf_reader_methods,
+    .invalid_this =
+        "Value of \"this\" must be of type ReadableStreamDefaultReader",
+    .rejected = &sf_rejected};
 static const ScrDynHandleOps sf_controller_ops = {
     "ReadableStreamDefaultController", &sf_stream_retain_v,
     &sf_stream_release_v, &sf_controller_invoke, &sf_controller_get,
     &sf_no_set, NULL};
 static const ScrDynHandleOps sf_request_ops = {
     "Request", &sf_request_retain_v, &sf_request_release_v,
-    &sf_request_invoke, &sf_request_get, &sf_no_set, NULL};
+    &sf_request_invoke, &sf_request_get, &sf_no_set, NULL,
+    .methods = sf_body_methods, .rejected = &sf_rejected};
 static const ScrDynHandleOps sf_response_ops = {
     "Response", &sf_response_retain_v, &sf_response_release_v,
-    &sf_response_invoke, &sf_response_get, &sf_no_set, NULL};
+    &sf_response_invoke, &sf_response_get, &sf_no_set, NULL,
+    .methods = sf_body_methods, .rejected = &sf_rejected};
 static const ScrDynHandleOps sf_headers_ops = {
     "Headers", &sf_headers_retain_v, &sf_headers_release_v,
-    &sf_headers_invoke, &sf_headers_get, &sf_no_set, NULL};
+    &sf_headers_invoke, &sf_headers_get, &sf_no_set, NULL, NULL,
+    &sf_headers_step, .methods = sf_headers_methods};
 
 static void sf_teardown(void) {
   while (sf_live) {
@@ -5538,9 +5770,13 @@ static bool sf_no_set(void *ptr, const char *key, size_t len, const ScrDyn *valu
   (void)ptr; (void)key; (void)len; (void)value;
   return false;
 }
+static const ScrDynHandleMethod sf_signal_methods[] = {
+    {"throwIfAborted", 0, false}, {NULL, 0, false}};
 static const ScrDynHandleOps sf_signal_ops = {
   "AbortSignal", &sf_signal_retain_v, &sf_signal_release_v,
-  &sf_signal_invoke, &sf_signal_get, &sf_signal_set, NULL };
+  &sf_signal_invoke, &sf_signal_get, &sf_signal_set, NULL,
+  .methods = sf_signal_methods,
+  .invalid_this = "Value of \"this\" must be of type AbortSignal" };
 static const ScrDynHandleOps sf_abort_controller_ops = {
   "AbortController", &sf_signal_retain_v, &sf_signal_release_v,
   &sf_abort_controller_invoke, &sf_abort_controller_get, &sf_no_set, NULL };

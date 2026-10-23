@@ -1,3 +1,4 @@
+import { emitPerKeyOrder } from "./key-orders.js";
 import { typedRefConstructor } from "./shapes.js";
 import { bindLiveArrayOps } from "./expr-stream-bridges.js";
 import { BYTES_ELEM_NUM, SCR_ARR_FIELD, SCR_ARR_STATES, f64Lit, sizeToDouble } from "./common.js";
@@ -37,6 +38,8 @@ import {
   accessorSlotProp,
   DYN_HANDLE_KINDS,
   isDirentShape,
+  KEY_ORDER_FIELD,
+  shapeKeyOrders,
   isDynTypedRefType,
   isRefCounted,
   isUnitType,
@@ -153,6 +156,8 @@ export interface DynHost extends WalkerHost {
   /** See moduleUsesDynBuiltinStream. */
   usesDynBuiltinStream?(): boolean;
   liveDynUnionRefAdapter(t: IrType & { kind: "union" }): string;
+  /** The module has declaration-typed boundary casts (IrModule.declBoundary). */
+  declBoundary?(): boolean;
   dynPromiseAdapter(t: IrType): string;
   isErrorClass(className: string): boolean;
   classSubtypes(className: string): readonly string[];
@@ -363,6 +368,36 @@ export class LlDyn {
   private recordBuilt(B: BlockBuilder, name: string, value: string): void {
     this.host.declare(`declare void @scr_dyn_build_add(ptr, ptr, ptr)`);
     B.line(`call void @scr_dyn_build_add(ptr %d, ptr @${name}, ptr ${value})`);
+  }
+
+  /** The order a dyn value tries a union's arms in: the canonical order,
+   * except that among the record arms, those with more required fields go
+   * first, then those with more fields. Records are width-tolerant, so an
+   * arm with fewer fields (`{}`, or one whose fields are all optional,
+   * matches every object) would otherwise take an object that a wider arm
+   * also matches and drop the fields only the wider arm has. */
+  private unionArmOrder(def: IrUnionDef): number[] {
+    const width = (i: number): [number, number] | null => {
+      const arm = def.arms[i]!;
+      if (arm.kind !== "record") return null;
+      const shape = this.host.recordsById.get(arm.shapeId);
+      if (!shape || shape.tuple) return null;
+      const required = shape.fields.filter(
+        (field) =>
+          field.type.kind !== "union" ||
+          !this.host.unionsById.get(field.type.unionId)?.arms.some((x) => x.kind === "undefinedT"),
+      ).length;
+      return [required, shape.fields.length];
+    };
+    const order = def.arms.map((_, i) => i);
+    const records = order.filter((i) => width(i) !== null);
+    const widest = [...records].sort((x, y) => {
+      const [rx, fx] = width(x)!;
+      const [ry, fy] = width(y)!;
+      return ry - rx || fy - fx || x - y;
+    });
+    records.forEach((slot, k) => (order[slot] = widest[k]!));
+    return order;
   }
 
   /** Branch to a variant only after its literal discriminator and complete
@@ -1107,9 +1142,10 @@ export class LlDyn {
         }
         B.condBr(readable, l0, fail);
         B.startBlock(l0);
-        // dyn ('unknown') fields match ANY value, present or missing.
+        // dyn ('unknown') fields match ANY value, present or missing. The
+        // order index is no key.
         for (const f of shape.fields) {
-          if (f.type.kind === "dyn") continue;
+          if (f.type.kind === "dyn" || f.name === KEY_ORDER_FIELD) continue;
           const { value: m, release } = this.memberRead(B, f.name, f.type);
           const lNext = B.newLabel("dm.n");
           this.pendingBail(
@@ -1292,9 +1328,10 @@ export class LlDyn {
         return (
           shape.fields.every(
             (f) =>
-              !f.name.startsWith("%") &&
-              f.name !== "__proto__" &&
-              this.jsonSchemaSupported(f.type, visiting, true),
+              f.name === KEY_ORDER_FIELD ||
+              (!f.name.startsWith("%") &&
+                f.name !== "__proto__" &&
+                this.jsonSchemaSupported(f.type, visiting, true)),
           ) &&
           (!index || this.jsonSchemaSupported(index, visiting))
         );
@@ -1380,7 +1417,9 @@ export class LlDyn {
         const base = host.nullableUnions.fieldBase(t.shapeId);
         const index = new Map(shape.fields.map((f, i) => [f.name, i + base]));
         // The runtime names kept-source keys by this index (record-sources.ts).
-        const order = recordSourceFieldOrder(shape);
+        // The order index is no key: parsed values keep the table's order
+        // and their source's own order.
+        const order = recordSourceFieldOrder(shape).filter((name) => name !== KEY_ORDER_FIELD);
         if (recordMayKeepSource(shape)) this.keepsRecordSources = true;
         const fieldTy = `{ ptr, ${S}, ${S}, ptr }`;
         const entries = order.map((fieldName) => {
@@ -2156,7 +2195,10 @@ export class LlDyn {
         }
         B.line(`%r0 = call ptr @${mangleRecordNew(t.shapeId)}()`);
         if (recursive) this.recordBuilt(B, name, "%r0");
+        // The order index stays 0: the source's own order is kept below
+        // when it differs from the table.
         for (const f of shape.fields) {
+          if (f.name === KEY_ORDER_FIELD) continue;
           const { value: m, release } = this.memberRead(B, f.name, f.type);
           this.pendingBail(
             B,
@@ -2356,9 +2398,10 @@ export class LlDyn {
           throw new InternalCompilerError(
             `llvm emitter bug: dynCheck of unknown union ${t.unionId}`,
           );
-        // Arms in CANONICAL order, first FULL match wins. The matched
-        // arm's builder can no longer fail.
-        def.arms.forEach((arm, i) => {
+        // Arms in unionArmOrder, first FULL match wins. The matched arm's
+        // builder can no longer fail.
+        for (const i of this.unionArmOrder(def)) {
+          const arm = def.arms[i]!;
           const lHit = B.newLabel("dcu.h");
           const lNext = B.newLabel("dcu.n");
           this.unionArmMatch(B, def, i, lHit, lNext, preserveRefs);
@@ -2402,7 +2445,7 @@ export class LlDyn {
             B.terminate(`ret ptr ${u}`);
           }
           B.startBlock(lNext);
-        });
+        }
         if (preserveRefs) {
           B.line(
             `call void @scr_dyn_check_fail(ptr %path, ptr ${host.cstr("reference with its original layout")}, ptr %d)`,
@@ -2889,70 +2932,79 @@ export class LlDyn {
           host.declare(`declare ptr @scr_dyn_new_obj()`);
           B.line(`${d} = call ptr @scr_dyn_new_obj()`);
         }
-        // Keys insert in DECLARED order (JS insertion order); internal
-        // '%'-fields follow so a record→dyn→record round trip keeps them.
+        // Keys insert in DECLARED order (JS insertion order), or in the
+        // value's own order for a shape with orderVariants; internal
+        // '%'-fields follow so a record→dyn→record round trip keeps them
+        // (all but the order index, which is no key).
         const byName = new Map(shape.fields.map((f) => [f.name, f]));
         // An accessor property is one key whose getter and setter are the
         // slot closures (see accessorSlotProp), in accessorOrder's place.
-        const order = shape.accessorOrder ?? shape.declaredOrder ?? shape.fields.map((f) => f.name);
-        const inOrder = new Set(order);
-        const accessors = new Set(
-          shape.accessorOrder === undefined
-            ? []
-            : shape.fields.flatMap((f) => {
-                const slot = accessorSlotProp(f.name);
-                return slot === null ? [] : [slot.prop];
-              }),
-        );
-        type DynField = { name: string; type: IrType } | { accessor: string };
-        const dynFields: DynField[] = [
-          ...order.flatMap((n) => {
-            if (accessors.has(n)) return [{ accessor: n } as DynField];
-            const f = byName.get(n);
-            return f === undefined ? [] : [f as DynField];
-          }),
-          ...shape.fields.filter(
-            (f) =>
-              !inOrder.has(f.name) && !(accessors.size > 0 && accessorSlotProp(f.name) !== null),
-          ),
-        ];
-        for (const entry of dynFields) {
-          if ("accessor" in entry) {
-            host.declare(
-              `declare void @scr_dyn_obj_set_accessor(ptr, ptr, ${host.sizeType}, ptr, ptr)`,
-            );
-            const boxed = (kind: "get" | "set"): string => {
-              const slot = byName.get(`%${kind}:${entry.accessor}`);
-              if (slot === undefined) return "null";
-              const fv = loadFieldOf(slot.name, slot.type);
-              const conv = B.tmp();
-              B.line(
-                `${conv} = call ptr @${this.toDynHelper(slot.type)}(${this.valTy(slot.type)} ${fv})`,
-              );
-              return conv;
-            };
-            const getter = boxed("get");
-            const setter = boxed("set");
-            B.line(
-              `call void @scr_dyn_obj_set_accessor(ptr ${d}, ptr ${host.cstr(entry.accessor)}, ${host.sizeType} ${Buffer.byteLength(entry.accessor, "utf8")}, ptr ${getter}, ptr ${setter}) ; ${llvmCommentText(entry.accessor)}`,
-            );
-            continue;
-          }
-          const f = entry;
-          const klen = Buffer.byteLength(f.name, "utf8");
-          const fv = loadFieldOf(f.name, f.type);
-          // An ABSENT optional field contributes no key.
-          const lSkip = f.type.kind === "union" ? this.skipIfAbsent(B, fv, f.type) : null;
-          const conv = B.tmp();
-          B.line(`${conv} = call ptr @${this.toDynHelper(f.type)}(${this.valTy(f.type)} ${fv})`);
-          B.line(
-            `call void @scr_dyn_obj_set(ptr ${d}, ptr ${host.cstr(f.name)}, ${host.sizeType} ${klen}, ptr ${conv}) ; ${llvmCommentText(f.name)}`,
+        const orders =
+          shape.accessorOrder !== undefined ? [shape.accessorOrder] : shapeKeyOrders(shape);
+        const perOrder = (order: readonly string[]): void => {
+          const inOrder = new Set(order);
+          const accessors = new Set(
+            shape.accessorOrder === undefined
+              ? []
+              : shape.fields.flatMap((f) => {
+                  const slot = accessorSlotProp(f.name);
+                  return slot === null ? [] : [slot.prop];
+                }),
           );
-          if (lSkip !== null) {
-            B.br(lSkip);
-            B.startBlock(lSkip);
+          type DynField = { name: string; type: IrType } | { accessor: string };
+          const dynFields: DynField[] = [
+            ...order.flatMap((n) => {
+              if (accessors.has(n)) return [{ accessor: n } as DynField];
+              const f = byName.get(n);
+              return f === undefined ? [] : [f as DynField];
+            }),
+            ...shape.fields.filter(
+              (f) =>
+                !inOrder.has(f.name) &&
+                f.name !== KEY_ORDER_FIELD &&
+                !(accessors.size > 0 && accessorSlotProp(f.name) !== null),
+            ),
+          ];
+          for (const entry of dynFields) {
+            if ("accessor" in entry) {
+              host.declare(
+                `declare void @scr_dyn_obj_set_accessor(ptr, ptr, ${host.sizeType}, ptr, ptr)`,
+              );
+              const boxed = (kind: "get" | "set"): string => {
+                const slot = byName.get(`%${kind}:${entry.accessor}`);
+                if (slot === undefined) return "null";
+                const fv = loadFieldOf(slot.name, slot.type);
+                const conv = B.tmp();
+                B.line(
+                  `${conv} = call ptr @${this.toDynHelper(slot.type)}(${this.valTy(slot.type)} ${fv})`,
+                );
+                return conv;
+              };
+              const getter = boxed("get");
+              const setter = boxed("set");
+              B.line(
+                `call void @scr_dyn_obj_set_accessor(ptr ${d}, ptr ${host.cstr(entry.accessor)}, ${host.sizeType} ${Buffer.byteLength(entry.accessor, "utf8")}, ptr ${getter}, ptr ${setter}) ; ${llvmCommentText(entry.accessor)}`,
+              );
+              continue;
+            }
+            const f = entry;
+            const klen = Buffer.byteLength(f.name, "utf8");
+            const fv = loadFieldOf(f.name, f.type);
+            // An ABSENT optional field contributes no key.
+            const lSkip = f.type.kind === "union" ? this.skipIfAbsent(B, fv, f.type) : null;
+            const conv = B.tmp();
+            B.line(`${conv} = call ptr @${this.toDynHelper(f.type)}(${this.valTy(f.type)} ${fv})`);
+            B.line(
+              `call void @scr_dyn_obj_set(ptr ${d}, ptr ${host.cstr(f.name)}, ${host.sizeType} ${klen}, ptr ${conv}) ; ${llvmCommentText(f.name)}`,
+            );
+            if (lSkip !== null) {
+              B.br(lSkip);
+              B.startBlock(lSkip);
+            }
           }
-        }
+        };
+        if (orders.length === 1) perOrder(orders[0]!);
+        else emitPerKeyOrder(B, shape, base, "%v", perOrder);
         // A Dirent row takes Node's Dirent prototype (the type probes) and
         // its Symbol(type) key; %dtype stays readable but non-enumerable.
         if (isDirentShape(shape)) {
@@ -4526,6 +4578,31 @@ export class LlDyn {
   /** The dyn argument spelling of one static value: dyn passes through
    * (+1), funcs box anonymously, everything else rides toDyn. `expr` is
    * BORROWED in every arm. Emits into the given builder. */
+  /** A live capsule of a record or array value (+1; the value is
+   * borrowed), as `dynFrom` with `liveRef` builds it; null for other
+   * types. Closures boxed in a declaration-typed boundary program return
+   * their records and arrays this way. */
+  private liveToDyn(B: BlockBuilder, t: IrType, expr: string): string | null {
+    const host = this.host;
+    if (t.kind === "union") {
+      const arms = host.unionsById.get(t.unionId)?.arms ?? [];
+      if (!arms.some((arm) => arm.kind === "record" || arm.kind === "array")) return null;
+      const boxed = B.tmp();
+      B.line(`${boxed} = call ptr @${host.liveDynUnionRefAdapter(t)}(ptr ${expr})`);
+      return boxed;
+    }
+    if ((t.kind !== "record" && t.kind !== "array") || !streamTypedRefEligible(t)) return null;
+    const key = typeKey(t);
+    const adapter = host.liveDynRefAdapter(t);
+    const rc = vAdapters(host, t);
+    const boxed = B.tmp();
+    B.line(
+      `${boxed} = call ptr ${typedRefConstructor(host, t)}(ptr ${expr}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
+    );
+    for (const line of bindLiveArrayOps(host, adapter, boxed)) B.line(line);
+    return boxed;
+  }
+
   private toDynExpr(B: BlockBuilder, t: IrType, expr: string): string {
     if (t.kind === "dyn") return this.retainDyn(B, expr);
     if (t.kind === "func") {
@@ -4657,6 +4734,26 @@ export class LlDyn {
           },
           "ptr null",
         );
+        // Declaration-typed boundary programs: an argument package code
+        // passes keeps its identity (scr_dyn_decl_adopt).
+        const capsule = this.host.declBoundary?.() === true ? this.liveToDyn(B, p, a) : null;
+        if (capsule !== null) {
+          host.declare(`declare void @scr_dyn_decl_adopt(ptr, ptr)`);
+          host.declare(`declare void @scr_dyn_release(ptr)`);
+          B.line(`call void @scr_dyn_decl_adopt(ptr ${ad}, ptr ${capsule})`);
+          B.line(`call void @scr_dyn_release(ptr ${capsule})`);
+          this.pendingBail(
+            B,
+            "dfk.adopt",
+            () => {
+              t.params.slice(0, i + 1).forEach((q, j) => {
+                const name = j === i ? a : argNames[j];
+                if (isRefCounted(q)) B.line(`call void ${releaseSym(host, q)}(ptr ${name})`);
+              });
+            },
+            "ptr null",
+          );
+        }
         argNames.push(a);
       }
     });
@@ -4689,7 +4786,10 @@ export class LlDyn {
       const r = B.tmp();
       B.line(`${r} = call ${retTy} ${fn}(${callArgs})`);
       this.pendingBail(B, "dfkr", () => {}, "ptr null");
-      const out = this.toDynExpr(B, t.ret, r);
+      const out =
+        this.host.declBoundary?.() === true
+          ? (this.liveToDyn(B, t.ret, r) ?? this.toDynExpr(B, t.ret, r))
+          : this.toDynExpr(B, t.ret, r);
       if (isRefCounted(t.ret)) B.line(`call void ${releaseSym(host, t.ret)}(ptr ${r})`);
       B.terminate(`ret ptr ${out}`);
     }

@@ -556,6 +556,10 @@ struct ScrNetSocket {
    * unconsumed stream). resume() clears user_paused and sets flowing. */
   bool user_paused;
   bool flowing;
+  /* scr_net_sock_hold: a protocol consumer (an HTTP/1 server request
+   * holding unread body bytes) stops reads without touching the user's
+   * pause state */
+  bool hold;
   /* EOF arrived while the socket buffered for a consumer it does not have
    * yet: 'end' waits until one drains the buffer (Node's readable state) */
   bool eof_pending;
@@ -978,7 +982,7 @@ static ScrNetSocket *scr_net_sock_new(void) {
 #define SCR_NET_READ_AHEAD 65536u
 
 static void scr_net_sock_update_read(ScrNetSocket *s) {
-  bool want = s->fd >= 0 && !s->connecting && !s->rd_eof && !s->user_paused &&
+  bool want = s->fd >= 0 && !s->connecting && !s->rd_eof && !s->user_paused && !s->hold &&
               (s->data_ls.n > 0 || s->pipe_dst != NULL || s->native_data != NULL ||
                (s->tunnel != NULL && !s->tunnel->send_only) /* the proxy's CONNECT answer */ ||
                s->flowing /* resume(): flow (and discard sans listeners) */ ||
@@ -1303,7 +1307,7 @@ static void scr_net_sock_read(ScrNetSocket *s) {
   if (s->tunnel != NULL) return; /* readiness feeds the tunnel pump instead */
   if (s->tops && !s->t_est) return; /* readiness feeds the handshake pump instead */
   for (;;) {
-    if (s->fd < 0 || s->user_paused) return;
+    if (s->fd < 0 || s->user_paused || s->hold) return;
     bool flowing = s->data_ls.n > 0 || s->pipe_dst || s->native_data || s->flowing;
     /* buffered (peeked/unshifted) bytes first — they precede the
      * kernel's in the stream; a TLS engine drains them through its bio */
@@ -3100,6 +3104,15 @@ ScrNetSocket *scr_net_sock_pause(ScrNetSocket *s) {
   s->user_paused = true;
   scr_net_sock_update_read(s);
   return scr_net_sock_retain(s);
+}
+
+/* Stops (hold) or restarts reads for a protocol consumer that has
+ * buffered as much as it accepts, as Node's readStop when push() returns
+ * false. Separate from pause()/resume(), which stay the user's. */
+void scr_net_sock_hold(ScrNetSocket *s, bool hold) {
+  if (s->hold == hold) return;
+  s->hold = hold;
+  scr_net_sock_update_read(s);
 }
 
 /* socket.resume(): flowing mode — a consumer even with no 'data'
@@ -5271,7 +5284,7 @@ static bool scr_net_flags_pending(void) {
      * plaintext inside a transport, or unshifted bytes in the receive
      * buffer: the poller can't re-signal them, the sweep must deliver */
     bool consumers = (s->data_ls.n > 0 || s->pipe_dst || s->native_data || s->flowing) &&
-                     !s->user_paused;
+                     !s->user_paused && !s->hold;
     if (consumers && s->fd >= 0) {
       if (s->tops && s->t_est && s->tops->pending && s->tops->pending(s->tctx)) return true;
       if (!s->tops && s->rlen > s->rhead) return true;
@@ -5377,7 +5390,7 @@ static void scr_net_sweep(void) {
   while (sock) {
     ScrNetSocket *next = sock->next; /* may unregister below */
     scr_net_sock_retain(sock);      /* callbacks may drop every other ref */
-    if (sock->fd >= 0 && !sock->user_paused &&
+    if (sock->fd >= 0 && !sock->user_paused && !sock->hold &&
         (sock->data_ls.n > 0 || sock->pipe_dst || sock->native_data || sock->flowing) &&
         ((sock->tops && sock->t_est && sock->tops->pending && sock->tops->pending(sock->tctx)) ||
          (!sock->tops && sock->rlen > sock->rhead))) {

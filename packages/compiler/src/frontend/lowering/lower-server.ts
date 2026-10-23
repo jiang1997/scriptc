@@ -7581,7 +7581,7 @@ function lowerHttpReqMethodCall(
       loc,
     };
   }
-  if (name === "resume" || name === "destroy") {
+  if (name === "resume" || name === "pause" || name === "destroy") {
     requireStatementPosition(lowerer, call, `req.${name}()`);
     if (args.length !== 0) {
       lowerer.noLowering(
@@ -7591,7 +7591,8 @@ function lowerHttpReqMethodCall(
       );
     }
     const receiver = coerceToHandle(lowerer, access.expression, HTTPREQ_T);
-    const fn: IrLibFn = name === "resume" ? "http.reqResume" : "http.reqDestroy";
+    const fn: IrLibFn =
+      name === "resume" ? "http.reqResume" : name === "pause" ? "http.reqPause" : "http.reqDestroy";
     return { kind: "libCall", fn, args: [receiver], type: VOID, loc };
   }
   if (name === "setEncoding") {

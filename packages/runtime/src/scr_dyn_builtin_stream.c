@@ -34,7 +34,7 @@
  * receiver without a reference; the hook closures outlive the record.
  *
  * Not supported here (each throws the "not supported yet" Error where it
- * runs): the options scr_stream.c's dyn option walk refuses, `_writev` and `_construct`, symbol event names, listeners() /
+ * runs): the options scr_stream.c's dyn option walk refuses, symbol event names, listeners() /
  * rawListeners(), `wrap()`, and pipes into values that are neither runtime
  * streams nor constructor-function streams. */
 #include "scr_runtime.h"
@@ -898,20 +898,15 @@ static ScrDyn *bcs_construct(int kind, ScrDyn *self, ScrDyn *const *args, size_t
   }
   bool failed = false;
   bool writes = kind != BCS_READABLE;
-  bool transformish = kind == BCS_TRANSFORM || kind == BCS_PASSTHROUGH;
   ScrDyn *opts = bcs_arg(args, argc, 0);
   /* Node's constructors assign options.writev and options.construct to
    * the instance (this._writev = options.writev), then read _writev and
    * _construct, so an option shadows the prototype's method. */
   if (opts->kind == SCR_DYN_OBJ) {
-    if (writes && !transformish && !bcs_copy_option(self, opts, "writev", "_writev")) return NULL;
+    if (writes && !bcs_copy_option(self, opts, "writev", "_writev")) return NULL;
     if (!bcs_copy_option(self, opts, "construct", "_construct")) return NULL;
   }
   bool has_writev = writes && bcs_is_function(self, "_writev", &failed);
-  if (has_writev && transformish) {
-    bcs_unsupported("_writev on a constructor-function Transform is not supported yet");
-    return NULL;
-  }
   bool has_construct = !failed && bcs_is_function(self, "_construct", &failed);
   if (failed) return NULL;
   ScrStream *s = kind == BCS_READABLE   ? scr_stream_new_readable_dyn(opts)

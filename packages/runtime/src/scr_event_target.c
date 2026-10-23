@@ -1043,6 +1043,9 @@ static ScrDyn *scr_et_method_value(const char *key, size_t len, bool target) {
     const char *name = scr_et_method_names[i];
     if (strlen(name) != len || memcmp(name, key, len) != 0) continue;
     if (!scr_et_method_values[i]) {
+      /* An AbortSignal answers these without the unit ever installing:
+       * exit releases the cached function either way. */
+      scr_et_register_teardown();
       ScrClosure *clo = scr_closure_new(NULL, 1);
       clo->caps[0] = scr_box_new(SCR_BOX_F64);
       scr_box_set_f64(clo->caps[0], (double)i);
@@ -1052,6 +1055,10 @@ static ScrDyn *scr_et_method_value(const char *key, size_t len, bool target) {
     return scr_dyn_retain(scr_et_method_values[i]);
   }
   return NULL;
+}
+
+ScrDyn *scr_event_target_method_value(const char *key, size_t len) {
+  return scr_et_method_value(key, len, true);
 }
 
 static ScrDyn *scr_event_target_value(const ScrEvent *ev) {

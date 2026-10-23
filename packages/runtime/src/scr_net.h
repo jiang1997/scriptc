@@ -232,6 +232,7 @@ void scr_net_sock_destroy(ScrNetSocket *s);
  * counters/flags the compat surface reads. */
 ScrNetSocket *scr_net_sock_pause(ScrNetSocket *s);            /* +1: chaining */
 ScrNetSocket *scr_net_sock_resume(ScrNetSocket *s);           /* +1: chaining */
+void scr_net_sock_hold(ScrNetSocket *s, bool hold); /* protocol read hold (not pause) */
 ScrNetSocket *scr_net_sock_set_nodelay(ScrNetSocket *s, bool enable); /* +1: chaining */
 void scr_net_sock_set_keepalive(ScrNetSocket *s, bool enable, double delay_ms);
 void scr_net_sock_destroy_soon(ScrNetSocket *s);

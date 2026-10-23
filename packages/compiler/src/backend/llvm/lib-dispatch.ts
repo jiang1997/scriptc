@@ -297,6 +297,41 @@ export function emitGenericLibCall(host: LlvmEmitterContext, e: LibCallExpr): Ll
     B.line(`${result} = load i1, ptr ${slot}`);
     return { name: result, type: e.type };
   }
+  if (e.fn === "dyn.classIs") {
+    // Only a class constructor's function value can match. Expose the
+    // function tag to LLVM so a chain of constructor probes (a static
+    // property bag's dispatch) costs one test for every other value, and
+    // borrow the receiver across a literal key as the capsule probes do.
+    const literal = e.args[1]!.kind === "strLit";
+    const value = literal ? host.emitReadReceiver(e.args[0]!) : host.emitExpr(e.args[0]!);
+    const key = host.emitExpr(e.args[1]!);
+    const slot = B.slot();
+    B.entryAllocas.push(`${slot} = alloca i1`);
+    B.line(`store i1 false, ptr ${slot}`);
+    const present = B.tmp();
+    const inspect = B.newLabel("ctor.inspect");
+    const compare = B.newLabel("ctor.compare");
+    const done = B.newLabel("ctor.done");
+    B.line(`${present} = icmp ne ptr ${value.name}, null`);
+    B.condBr(present, inspect, done);
+    B.startBlock(inspect);
+    const kind = host.dynKind(value.name);
+    const fn = B.tmp();
+    B.line(`${fn} = icmp eq i32 ${kind}, ${DYN_KIND.FUNC}`);
+    B.condBr(fn, compare, done);
+    B.startBlock(compare);
+    host.declare("declare zeroext i1 @scr_dyn_class_is_key(ptr, ptr)");
+    const matches = B.tmp();
+    B.line(
+      `${matches} = call zeroext i1 @scr_dyn_class_is_key(ptr ${value.name}, ptr ${key.name})`,
+    );
+    B.line(`store i1 ${matches}, ptr ${slot}`);
+    B.br(done);
+    B.startBlock(done);
+    const result = B.tmp();
+    B.line(`${result} = load i1, ptr ${slot}`);
+    return { name: result, type: e.type };
+  }
   if (e.fn === "crypto.randomFillCb" || e.fn === "crypto.randomFillCbDyn") {
     host.usesTimers = true;
     const args = e.args.map((arg) => host.emitExpr(arg));

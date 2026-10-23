@@ -49,6 +49,8 @@ export const BASE_RUNTIME_SOURCES = [
   "scr_itable.c",
   "scr_slots.c",
   "scr_alloc.c",
+  // crypto.getCipherInfo's table; it links only into programs that call it.
+  "scr_cipher_info.c",
 ];
 
 export const OPTIONAL_RUNTIME_SOURCES = [
@@ -127,6 +129,7 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_stream_dyn.c", "streamDyn"],
   // Own properties JavaScript adds to children.
   ["scr_dyn_handle_props.c", "handleProps"],
+  ["scr_decl_adopt.c", "declAdopt"],
   // for await over checked-dynamic values.
   ["scr_dyn_for_await.c", "dynForAwait"],
   ["scr_dyn_for_await_stream.c", all("dynForAwait", "stream", "dynAsync")],

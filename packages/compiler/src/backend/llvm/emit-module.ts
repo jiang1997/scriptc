@@ -873,6 +873,8 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     out.push(`@${sym} = internal constant { ptr, ptr, ptr, ptr, ptr, ptr, ptr } { ${body} }`);
   }
   if (emitter.mapOpsConsts.size > 0) out.push(``);
+  for (const sym of emitter.methodIdSlots.values()) out.push(`@${sym} = internal global i32 -1`);
+  if (emitter.methodIdSlots.size > 0) out.push(``);
 
   for (const line of ffiCallbacks.globals) out.push(line);
   if (ffiCallbacks.globals.length > 0) out.push(``);

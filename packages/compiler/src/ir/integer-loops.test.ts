@@ -402,6 +402,16 @@ test("paired counters closing in on each other run as integers", () => {
     guarded: false,
     range: { min: 0, max: 9 },
   });
+  // `hi > lo` and `hi >= lo` are `lo < hi` and `lo <= hi`.
+  for (const op of [">", ">="] as const) {
+    const reversed = paired(number(0), number(9));
+    reversed.cond = { kind: "bin", op, left: ref("hi"), right: ref("lo"), type: BOOL, loc };
+    expect(matchIntegerPairedForLoop(reversed, vars)).toMatchObject({
+      low: { localId: "lo", step: 1 },
+      high: { localId: "hi", step: -1 },
+      inclusive: op === ">=",
+    });
+  }
   // A start without a known range is tested at run time.
   expect(matchIntegerPairedForLoop(paired(number(0), ref("head")), vars)).toMatchObject({
     high: { startGuarded: true },

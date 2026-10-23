@@ -3,7 +3,7 @@
  * emitter guards them. */
 import type { IrExpr, IrModule, IrStmt, IrType } from "../ir/ir.js";
 import { typeKey } from "../ir/ir.js";
-import { everyStmtList } from "../ir/traverse.js";
+import { eachNodeOfKinds, type IrNodeIndex, type IrNodeKind } from "../ir/node-index.js";
 import { computeConstructionFacts } from "./immutability.js";
 
 /** Array methods that write their receiver (the guarded ones). */
@@ -71,17 +71,22 @@ export class PublishedTypes {
   }
 }
 
-export function computePublishedTypes(mod: IrModule): PublishedTypes | null {
+/** The nodes that publish a value: intrinsics. */
+const PUBLISHING_KINDS: readonly IrNodeKind[] = ["intrinsic"];
+
+export function computePublishedTypes(mod: IrModule, nodes?: IrNodeIndex): PublishedTypes | null {
   const roots: IrType[] = [];
-  const visit = (e: IrExpr): boolean => {
-    // Values read from an InternTable were published by whichever thread
-    // stored them.
-    if (e.kind === "intrinsic" && (e.name === "threads.publish" || e.name === "itable.value"))
-      roots.push(e.type);
-    return true;
-  };
+  const scan = nodes?.scan(PUBLISHING_KINDS);
   for (const fn of mod.functions)
-    everyStmtList(fn.body, { expr: visit, stmt: (_s: IrStmt) => true });
+    eachNodeOfKinds(fn, scan, (node) => {
+      // Values read from an InternTable were published by whichever thread
+      // stored them.
+      if (
+        node.kind === "intrinsic" &&
+        (node.name === "threads.publish" || node.name === "itable.value")
+      )
+        roots.push(node.type);
+    });
   if (roots.length === 0) return null;
 
   const classes = new Map((mod.classes ?? []).map((c) => [c.name, c]));
@@ -95,7 +100,7 @@ export function computePublishedTypes(mod: IrModule): PublishedTypes | null {
   const records = new Map((mod.records ?? []).map((r) => [r.id, r]));
   const unions = new Map((mod.unions ?? []).map((u) => [u.id, u]));
   const out = new PublishedTypes();
-  out.privateStores = computeConstructionFacts(mod).privateStores;
+  out.privateStores = computeConstructionFacts(mod, nodes).privateStores;
   const seen = new Set<string>();
   const stack = [...roots];
   const addHierarchy = (className: string): void => {

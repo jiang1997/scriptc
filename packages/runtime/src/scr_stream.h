@@ -561,8 +561,15 @@ void scr_stream_set_writev_concat(ScrStream *s);
 /* The user construct option / _construct method (scheduled now; cb
  * moves), and the writev option / _writev method (cb moves). */
 void scr_stream_set_construct(ScrStream *s, ScrClosure *cb, ScrStreamPlainInv inv);
+/* `s._construct = fn` after construction: replaces a construct hook whose
+ * tick has not run yet (Node's constructNT reads _construct then), and has
+ * no effect otherwise (cb moves). */
+void scr_stream_replace_construct(ScrStream *s, ScrClosure *cb, ScrStreamPlainInv inv);
 void scr_stream_set_writev(ScrStream *s, ScrClosure *cb, ScrStreamWritevInv inv);
 void scr_stream_set_writev_default(ScrStream *s, ScrClosure *cb, ScrStreamWritevInv inv);
+/* A compiled writev whose entries declare `encoding` a string: entries
+ * without an encoding (object mode) get "" before the conversion. */
+void scr_stream_writev_fill_encodings(struct ScrDyn *chunks);
 /* Duplex.from (duplexify.js): over an async generator function (the
  * compiled stage takes the source generator that the compiled source
  * makes from next() and ack(); all borrowed, helpers too), and over a
@@ -605,6 +612,11 @@ ScrStream *scr_stream_duplex_from_promise(struct ScrPromise *p, ScrClosure *box)
  * forms answer the stream (+1). */
 void scr_stream_set_decode_strings(ScrStream *s, bool decode);
 ScrStream *scr_stream_decode_strings(ScrStream *s, bool decode);
+/* Runtime decodeStrings/defaultEncoding option values: checked before
+ * construction (ERR_UNKNOWN_ENCODING thrown), then applied to the fresh
+ * stream, answering it (+1). Values borrowed. */
+void scr_stream_check_encoding_option(struct ScrDyn *v);
+ScrStream *scr_stream_option_values(ScrStream *s, struct ScrDyn *decode_strings, struct ScrDyn *default_encoding);
 void scr_stream_set_write_encoding(ScrStream *s, ScrStr *enc);
 ScrStream *scr_stream_write_encoding(ScrStream *s, ScrStr *enc);
 ScrStream *scr_stream_set_default_encoding(ScrStream *s, struct ScrDyn *enc);

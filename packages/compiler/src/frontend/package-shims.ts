@@ -63,7 +63,7 @@ interface ImplementationShim {
    * and this file) is the package itself. */
   mainFile: string;
   /** The package's declaration entry relative to its directory, when it
-   * is not `index.d.ts`. */
+   * is not `index.d.ts` (a `.d.mts` or `.d.cts` entry included). */
   typesFile?: string;
   /** An alternative entry for this installation (relative to the shim
    * root), or undefined for the version's own entry. */
@@ -115,6 +115,15 @@ const IMPLEMENTATION_SHIMS: ReadonlyMap<string, ImplementationShim> = new Map<
           ? undefined
           : "hot-shots/v8-unix-dgram.ts",
       variants: ["hot-shots/v8-unix-dgram.ts"],
+    },
+  ],
+  [
+    "@hono/node-server",
+    {
+      name: "@hono/node-server",
+      mainFile: "dist/index.mjs",
+      typesFile: "dist/index.d.mts",
+      versions: new Map([[2, "hono-node-server/v2.ts"]]),
     },
   ],
   [
@@ -324,7 +333,7 @@ export function isShimmedImport(fromFile: string, specifier: string): boolean {
 /** The shimmed package whose declaration entry `path` is, with the
  * package directory: `<pkg>/index.d.ts`, or the entry's own `typesFile`. */
 function shimOfDeclarationPath(path: string): { pkgDir: string; shim: ImplementationShim } | null {
-  if (!path.endsWith(".d.ts")) return null;
+  if (!/\.d\.[cm]?ts$/.test(path)) return null;
   if (path.endsWith("/index.d.ts")) {
     const pkgDir = dirname(path);
     const shim = IMPLEMENTATION_SHIMS.get(pkgDir.slice(pkgDir.lastIndexOf("/") + 1));
@@ -377,7 +386,7 @@ export function isPackageShimFile(fileName: string): boolean {
 /** True for a name a shipped shim may declare as a bodiless runtime
  * intrinsic (lower-calls.ts lowers its calls to runtime calls). */
 export function isShimIntrinsicName(name: string): boolean {
-  return name.startsWith("scriptcUnixDgram");
+  return name.startsWith("scriptcUnixDgram") || name === "scriptcResponseLight";
 }
 
 /** Resets per-compile caches. */

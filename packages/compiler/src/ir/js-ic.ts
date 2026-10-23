@@ -170,6 +170,18 @@ export class JsIcSites {
     );
   }
 
+  /** An early exit for values a class table never matches: `if (!<kind
+   * test>(value)) return <value>`, with no else. A plain object takes it
+   * and gets itself back. */
+  private kindExit(s: IrStmt, param: string): boolean {
+    if (s.kind !== "if" || s.else_ !== null || s.then.length !== 1) return false;
+    const { cond } = s;
+    if (cond.kind !== "dynTest" || cond.negated !== true || !isVar(cond.value, param)) return false;
+    if (cond.test !== "classCapsule" && cond.test !== "funcKind") return false;
+    const ret = s.then[0]!;
+    return ret.kind === "return" && ret.value !== null && this.bagOf(ret.value, param);
+  }
+
   /** A property-bag helper that returns its argument unless a capsule
    * branch is taken. */
   private identityHelper(name: string): boolean {
@@ -190,7 +202,9 @@ export class JsIcSites {
       const param = fn.params[0]!.localId;
       const last = fn.body[fn.body.length - 1];
       identity =
-        fn.body.slice(0, -1).every((s) => this.capsuleBranch(s, param)) &&
+        fn.body
+          .slice(0, -1)
+          .every((s) => this.capsuleBranch(s, param) || this.kindExit(s, param)) &&
         last?.kind === "return" &&
         last.value !== null &&
         this.bagOf(last.value, param);

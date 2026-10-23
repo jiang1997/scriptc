@@ -727,6 +727,17 @@ export function streamCbThunkFor(
         const ty = host.llType(p);
         host.declare(`declare zeroext i1 @scr_exc_pending()`);
         if (hasThis) host.declare(`declare void @scr_stream_release_v(ptr)`);
+        // An entry `encoding` declared as a string (the declarations'
+        // `encoding: string`) receives "" where Node passes undefined or
+        // null (an object-mode write), as a write's encoding parameter does.
+        const entry =
+          p.kind === "array" && p.elem.kind === "record"
+            ? host.recordsById.get(p.elem.shapeId)
+            : undefined;
+        if (entry?.fields.some((f) => f.name === "encoding" && f.type.kind === "string")) {
+          host.declare(`declare void @scr_stream_writev_fill_encodings(ptr)`);
+          d.push(`  call void @scr_stream_writev_fill_encodings(ptr %chunks)`);
+        }
         d.push(
           `  %vt${i} = call ${ty === "i1" ? "zeroext i1" : ty} @${helper}(ptr %chunks, ptr null)`,
           `  %vtbad${i} = call zeroext i1 @scr_exc_pending()`,

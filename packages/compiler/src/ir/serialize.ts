@@ -46,11 +46,41 @@ function encodeFunction(fn: IrFunction): string | undefined {
   return ordinaryNumbers(fn) ? JSON.stringify(fn) : JSON.stringify(fn, encodeNumber);
 }
 
+/** A directory whose source location files an IR artifact names by a
+ * prefix of its own: a location file `from + rest` serializes as
+ * `to + rest`. */
+export interface SerializedFileRoot {
+  from: string;
+  to: string;
+}
+
+/** Respells the source location files under `roots` in serialized parts.
+ * A location's file is the first member of its JSON object, and the
+ * escaped spelling of a path prefix is the prefix of the escaped path. */
+function relocateFiles(parts: string[], roots: readonly SerializedFileRoot[]): string[] {
+  const needles = roots.map(({ from, to }) => ({
+    from: `"file":${JSON.stringify(from).slice(0, -1)}`,
+    to: `"file":${JSON.stringify(to).slice(0, -1)}`,
+  }));
+  return parts.map((part) =>
+    needles.reduce(
+      (text, { from, to }) => (text.includes(from) ? text.replaceAll(from, to) : text),
+      part,
+    ),
+  );
+}
+
 /** The compact encoding as ordered parts: the module header up to the
  * function array, one part per function (with separate comma parts), and the
  * header's remainder. Concatenating the parts yields exactly
- * `serializeModule(mod, true)`; writers stream them to disk in batches. */
-export function serializeModuleParts(mod: IrModule): string[] {
+ * `serializeModule(mod, true)`; writers stream them to disk in batches.
+ * `fileRoots` respells the source locations in those directories, so
+ * artifacts do not depend on where the compiler that wrote them is
+ * installed. */
+export function serializeModuleParts(
+  mod: IrModule,
+  fileRoots: readonly SerializedFileRoot[] = [],
+): string[] {
   // A replacer reads through live native views. Serializing the complete
   // function array through one view refreshes every function capsule for
   // each element, making large compiler artifacts quadratic. The sentinel
@@ -65,7 +95,7 @@ export function serializeModuleParts(mod: IrModule): string[] {
     parts.push(encodeFunction(fn) ?? "null");
   }
   parts.push("]" + header.slice(offset + slot.length));
-  return parts;
+  return fileRoots.length === 0 ? parts : relocateFiles(parts, fileRoots);
 }
 
 /** Compiler artifacts use compact JSON; API consumers can retain the

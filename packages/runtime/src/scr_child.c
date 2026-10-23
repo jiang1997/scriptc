@@ -2780,7 +2780,8 @@ static void scr_child_settle(ScrChild *c) {
     scr_children_reffed_n--;
   }
   if (c->state == SCR_CHILD_EXITED) {
-    scr_child_stream_drain_now(c->out_stream);
+    if (!c->spawn_done) scr_child_fire_spawn(c);
+    if (!scr_exc_pending()) scr_child_stream_drain_now(c->out_stream);
     if (!scr_exc_pending()) scr_child_stream_drain_now(c->err_stream);
     if (!scr_exc_pending()) scr_ipc_settle(c->ipc);
   }
@@ -5607,9 +5608,12 @@ static void scr_child_settle(ScrChild *c) {
   /* Streams first, settled after: an exit listener registered from a
    * draining 'data'/'end' callback still fires below, like Node's. The
    * SPAWN-FAILURE path skips the drain — Node fires 'error' first and
-   * the streams' immediate EOF delivers 'end' on the next turn. */
+   * the streams' immediate EOF delivers 'end' on the next turn. A child
+   * spawned during this pass can exit before the next pass fires 'spawn';
+   * Node emits 'spawn' before any data or 'exit', so it fires here first. */
   if (c->state == SCR_CHILD_EXITED) {
-    scr_child_stream_drain_now(c->out_stream);
+    if (!c->spawn_done) scr_child_fire_spawn(c);
+    if (!scr_exc_pending()) scr_child_stream_drain_now(c->out_stream);
     if (!scr_exc_pending()) scr_child_stream_drain_now(c->err_stream);
     if (!scr_exc_pending()) scr_ipc_settle(c->ipc);
   }

@@ -361,6 +361,21 @@ export function lowerArrayMethodCall(
     if (probe.type.kind === "array") {
       receiverIr = probe.type;
       probedUntyped = true;
+    } else if (
+      probe.type.kind === "dyn" &&
+      !isJsSourceFile(ts.getSourceFileOfNode(access)) &&
+      lowerer.isStdlibMember(access)
+    ) {
+      // An `unknown[]` (or `any[]`) array stored checked-dynamic — a
+      // generic body instantiated at `unknown`, a spread of unknown
+      // elements: the method runs on the runtime array (dynInvoke, JS
+      // exact), and a typed result is checked like any member read.
+      const dispatched = lowerDynDispatchMethodCall(lowerer, call, access, probe, true);
+      if (!dispatched) return null;
+      const result = lowerer.mapTypeOf(lowerer.typeOf(call));
+      return result && result.kind !== "void" && result.kind !== "dyn"
+        ? lowerer.coerceInto(call, dispatched, result)
+        : dispatched;
     }
   }
   if (receiverIr?.kind === "union") {

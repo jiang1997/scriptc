@@ -342,6 +342,7 @@ export function analyzeBorrowedReturns(emitter: LlEmitter): void {
       borrowsWithoutOwning: (e: IrExpr) => emitter.borrowsWithoutOwning(e),
       borrowedReturn: (callee: string) => emitter.borrowedReturns.has(callee),
       parameterAllowed: (id: string) => allowed.has(id),
+      nodes: emitter.nodeIndex,
     };
     return emitter.referenceEffects.functions.has(fn.name)
       ? host

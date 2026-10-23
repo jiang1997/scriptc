@@ -177,11 +177,11 @@ export function loadNativeToolchain(
         : [...target.defaultLinkerArgs];
   return {
     compilerVersion: manifest.compiler_version,
-    // tsc-ts, the default checker except on Windows, comes with the distribution;
-    // a development build takes it from the tsc-ts package installed with the
-    // compiler or for the working directory. SCRIPTC_CHECKER selects a checker.
+    // tsc-ts, the default checker, comes with the distribution; a development
+    // build takes it from the tsc-ts package installed with the compiler or for
+    // the working directory. SCRIPTC_CHECKER selects a checker.
     ts7Executable:
-      checkerBackend(env, host.platform) === "tsgo"
+      checkerBackend(env) === "tsgo"
         ? pathFrom(root, manifest.ts7)
         : manifest.tsc_ts !== undefined
           ? pathFrom(root, manifest.tsc_ts)

@@ -92,6 +92,13 @@ scriptc implements a few packages itself and compiles that implementation in pla
 - graceful-fs's retry queue, which fs-extra uses under Node.js, isn't part of the implementation, so a program that runs out of file descriptors fails at the first `EMFILE` error instead of retrying.
 - An ES module that imports fs-extra can use any of its exports by name. Node.js only exposes the names its CommonJS lexer finds in fs-extra's source, so a name like `readFile` throws a `SyntaxError` there.
 
+`@hono/node-server` 2.x is built in. `serve`, `createAdaptorServer`, `getRequestListener` and `RequestError` serve a fetch handler such as Hono's `app.fetch` over `node:http` with native `Request` and `Response` objects, and write each response the way the package does under Node.js: the same status line, header names, header order and content length, for buffered and streamed bodies, including the package's shortcut for a response that is still exactly what its constructor received. Request bodies stream to the handler as it reads them, and a body the handler leaves unread is drained after the response, up to 64 MiB or 500 ms, as the package does. Known differences:
+
+- Only HTTP/1.1 servers are declared: the `createServer` and `serverOptions` options for `node:https` and `node:http2`, the `websocket` option and `upgradeWebSocket` aren't declared, so using one is a type error at build time. Subpath modules such as `@hono/node-server/serve-static` compile from the package's own files.
+- The fetch handler must return a `Response` or a promise of one; the handler's second argument holds `incoming` and `outgoing`.
+- The global `Request` and `Response` stay the built-in classes, so `overrideGlobalObjects` has no effect, and a `Response` reads its default text content type as `text/plain;charset=UTF-8` where the package's replacement reads `text/plain; charset=UTF-8`. Written responses carry the package's spelling.
+- A streamed response is written without waiting for `drain`, and a failed handler answers 504 only for an error whose `name` is `TimeoutError`.
+
 Small polyfill packages whose module is exactly a Node.js built-in on Node.js 24 compile as that built-in, at the `require()` that loads them, from your program's CommonJS files, from compiled packages, and from esbuild bundles whose module paths name the package and its version (as pnpm installs do). The package's own files aren't compiled.
 
 <table>

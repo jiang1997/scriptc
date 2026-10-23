@@ -250,8 +250,10 @@ export function emitDynamicExpr(
       }
       // Buffer.prototype method names take their scr_bytes_dyn.c entry, which
       // runs them on Buffer receivers and dispatches any other receiver.
-      const invoke = DYN_BUFFER_METHODS.get(e.method) ?? "scr_dyn_invoke_prepared";
-      host.declare(`declare ptr @${invoke}(ptr, ptr, ptr, ptr, ${host.sizeType}, ptr)`);
+      // Each call passes its method name's id slot, so only the first call
+      // looks the name up.
+      const invoke = DYN_BUFFER_METHODS.get(e.method) ?? "scr_dyn_invoke_prepared_id";
+      host.declare(`declare ptr @${invoke}(ptr, ptr, ptr, ptr, ptr, ${host.sizeType}, ptr)`);
       let name = host.cstr(e.calleeName);
       if (e.calleeNameValue !== undefined) {
         const value = emitBorrowedInput(host, e.calleeNameValue);
@@ -260,7 +262,7 @@ export function emitDynamicExpr(
       }
       const t = B.tmp();
       B.line(
-        `${t} = call ptr @${invoke}(ptr ${recv.name}, ptr ${prepared}, ptr ${host.cstr(e.method)}, ptr ${argsPtr}, ${host.sizeType} ${args.length}, ptr ${name})`,
+        `${t} = call ptr @${invoke}(ptr ${recv.name}, ptr ${prepared}, ptr ${host.cstr(e.method)}, ptr ${host.methodIdSlot(e.method)}, ptr ${argsPtr}, ${host.sizeType} ${args.length}, ptr ${name})`,
       );
       const out = host.own({ name: t, type: e.type });
       host.emitPendingCheck();
@@ -717,6 +719,10 @@ export function emitDynamicExpr(
         B.line(
           `${test} = call zeroext i1 @scr_dyn_typed_array_is(ptr ${d.name}, i32 ${BYTES_ELEM_NUM[e.bytesElem ?? "u8"]})`,
         );
+      } else if (e.test === "classCapsule") {
+        host.declare(`declare zeroext i1 @scr_dyn_is_class_capsule(ptr)`);
+        test = B.tmp();
+        B.line(`${test} = call zeroext i1 @scr_dyn_is_class_capsule(ptr ${d.name})`);
       } else if (e.test === "truthy") {
         host.declare(`declare zeroext i1 @scr_dyn_truthy(ptr)`);
         test = B.tmp();
@@ -837,6 +843,7 @@ export function emitDynamicExpr(
             undefined: DYN_KIND.UNDEF,
             null: DYN_KIND.NULL,
             bytes: DYN_KIND.BYTES,
+            funcKind: DYN_KIND.FUNC,
           };
           test = oneOf([kindOf[e.test]!]);
         }

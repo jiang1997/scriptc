@@ -6,6 +6,7 @@ import {
   type IrUnionDef,
 } from "../../ir/ir.js";
 import { everyModuleNode } from "../../ir/traverse.js";
+import type { IrNodeIndex } from "../../ir/node-index.js";
 
 /** A union of exactly one reference arm and one or two unit arms
  * (`C | undefined`, `C | null`, `C | null | undefined`) whose VALUES are
@@ -120,12 +121,12 @@ export class NullableUnions {
 
   /** `shapes`: allow shape unions (debug builds keep boxes, whose
    * debug-info layouts describe every arm). */
-  constructor(mod: IrModule, shapes = true) {
+  constructor(mod: IrModule, shapes = true, nodes?: IrNodeIndex) {
     const emitted = new Set<string>();
     for (const cls of mod.classes ?? []) if (!cls.runtime) emitted.add(cls.name);
     const records = new Set<string>();
     for (const shape of mod.records ?? []) records.add(shape.id);
-    const boxed = boxedUnionIds(mod);
+    const boxed = boxedUnionIds(mod, nodes);
     // Shape unions stay out of library builds (their host ABI marshals
     // boxes) and of programs with lifetime regions (whose walks report a
     // reference slot by its type's release entry point).
@@ -277,13 +278,20 @@ function shapeUnion(
 /** Unions the runtime itself inspects as tagged boxes keep that
  * representation: Map keys and Set elements hash and compare union keys by
  * tag and payload inside the C map. */
-function boxedUnionIds(mod: IrModule): Set<string> {
+function boxedUnionIds(mod: IrModule, nodes?: IrNodeIndex): Set<string> {
   const boxed = new Set<string>();
   // Only the module's union definitions consult the result.
   if (!mod.unions?.length) return boxed;
   const mark = (t: IrType): void => {
     if (t.kind === "union") boxed.add(t.unionId);
   };
+  if (nodes !== undefined) {
+    for (const t of nodes.types) {
+      if (t.kind === "map") mark(t.key);
+      else if (t.kind === "set") mark(t.elem);
+    }
+    return boxed;
+  }
   everyModuleNode(mod, {
     expr: () => true,
     stmt: () => true,

@@ -1,4 +1,6 @@
 import { F64, type IrExpr, type IrFunction, type IrModule, type IrStmt } from "./ir.js";
+
+type SwitchCase = Extract<IrStmt, { kind: "switch" }>["cases"][number];
 import { reparseExpr } from "./serialize.js";
 import {
   everyExprChild,
@@ -382,20 +384,26 @@ function rewriteCandidates(
       if (!call || simple(call.args[1]!)) return [s];
       const { decl, ref } = bind(call.args[1]!);
       const read: IrExpr = { ...call, args: [call.args[0]!, ref] };
-      return [decl, s.kind === "varDecl" ? { ...s, init: read } : { ...s, value: read }];
+      if (s.kind === "varDecl") return [decl, { ...s, init: read }];
+      return [decl, { ...s, value: read }];
     });
+  const hoistCase = (c: SwitchCase): SwitchCase => ({ ...c, body: hoist(c.body) });
   const lists = (s: IrStmt): IrStmt => {
     switch (s.kind) {
       case "if":
         return { ...s, then: hoist(s.then), else_: s.else_ === null ? null : hoist(s.else_) };
       case "block":
+        return { ...s, body: hoist(s.body) };
       case "while":
+        return { ...s, body: hoist(s.body) };
       case "doWhile":
+        return { ...s, body: hoist(s.body) };
       case "for":
+        return { ...s, body: hoist(s.body) };
       case "forOf":
         return { ...s, body: hoist(s.body) };
       case "switch":
-        return { ...s, cases: s.cases.map((c) => ({ ...c, body: hoist(c.body) })) };
+        return { ...s, cases: s.cases.map((c) => hoistCase(c)) };
       case "tryCatch":
         return {
           ...s,
@@ -425,7 +433,10 @@ function rewriteCandidates(
       };
     }
     const call = readerCall(e);
-    if (!call) return e.kind === "seqExpr" ? { ...e, stmts: hoist(e.stmts) } : e;
+    if (!call) {
+      if (e.kind === "seqExpr") return { ...e, stmts: hoist(e.stmts) };
+      return e;
+    }
     const helper = readers.get(call.callee)!;
     const array = call.args[0]!;
     const [arrayParam, indexParam] = helper.params;
@@ -448,7 +459,9 @@ function rewriteCandidates(
       },
       stmt: (x) => x,
     });
-    const typed: IrExpr = { ...body, loc: e.loc };
+    // The ternary is a fresh copy (reparseExpr): it takes the call's location.
+    const typed = body;
+    typed.loc = e.loc;
     return stmts.length === 0
       ? typed
       : { kind: "seqExpr", stmts, result: typed, type: typed.type, loc: e.loc };

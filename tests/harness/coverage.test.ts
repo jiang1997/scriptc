@@ -561,13 +561,14 @@ test("types only a package's .d.ts declares stay static through re-exports and .
   // shape-kinds re-exports types its .d.ts entry imports; row-module's
   // runtime entry is an .mjs file. Without their declared types the
   // program's uses of Form, Kind and Row run in the dynamic tier (12
-  // statements); with them only the packages' own JavaScript and one
-  // arithmetic on a JavaScript return value do (4).
+  // statements); with them only the packages' own JavaScript does (3).
+  // readRows's result keeps its declared number type, so `count - 1` is
+  // native arithmetic too.
   const { coverage } = analyze(
     join(repoRoot, "tests/corpus/7004-package-declared-type-reexports/main.ts"),
   );
   expect(coverage.diagnostics).toEqual([]);
-  expect(coverage.stats.statementsDynamic).toBe(4);
+  expect(coverage.stats.statementsDynamic).toBe(3);
 });
 
 test("any-typed checked-dynamic operators compile natively", () => {

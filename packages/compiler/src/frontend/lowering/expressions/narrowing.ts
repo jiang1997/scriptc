@@ -13,6 +13,7 @@ import {
   STRING,
   type SrcLoc,
   UNDEFINED_T,
+  VOID,
   arrayOf,
   canAdaptDynFuncTo,
   canDynCheckTo,
@@ -32,6 +33,7 @@ import {
   isOptionalProcessVersionsRead,
 } from "../builtins/process.js";
 import { requestGeneralStreamSurface } from "../general-streams.js";
+import { isOptionalReadlineCursorRead } from "../builtins/readline.js";
 import { literalValues } from "../../literal-values.js";
 import { literalUnionArm } from "../../union-discriminants.js";
 import { checkedArmExtraction } from "../coercions/unions.js";
@@ -47,6 +49,7 @@ import {
 import { isConstAssertionTypeNode, unitOnlyUnion } from "../../type-mapper.js";
 import { assertsGlobalObject, extractionCopiesReference } from "../assertion-identity.js";
 import { iterableSlotValue, iterableUnionOf } from "../iterable-values.js";
+import { isDeclBoundaryTypeNode } from "../../decl-projection.js";
 
 /** `c ? a : b`. An explicit destination constructs each branch at that
  * layout before joining it. Without one, retain the expression's inferred
@@ -615,6 +618,8 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
   if (ts.isPropertyAccessExpression(node) && isOptionalProcessStreamProperty(lowerer, node))
     return expr;
   if (isOptionalProcessVersionsRead(lowerer, node)) return expr;
+  if (ts.isPropertyAccessExpression(node) && isOptionalReadlineCursorRead(lowerer, node))
+    return expr;
 
   // Represented fields and index values can include undefined even when
   // checker inference or lib.d.ts declares strings (RegExp captures).
@@ -1516,6 +1521,12 @@ export function lowerAsExpression(
   const target = lowerer.mapTypeOf(targetTs) ?? dynFallbackType(lowerer, expr.type, targetTs);
   if (!target) lowerer.badType(expr.type, targetTs);
   if (target.kind === "dyn") return inner; // `as unknown`: erasure
+  // The declaration-typed boundary (decl-projection.ts): an identity-
+  // preserving checked conversion of a value package code produced.
+  if (isDeclBoundaryTypeNode(expr.type)) {
+    const adopted = declBoundaryCast(lowerer, inner, target, locOf(expr));
+    if (adopted) return adopted;
+  }
   // An all-`unknown`-fields record target (`err as { code?: unknown }`
   // — the errno-probing idiom): there is nothing to validate (every
   // field is unknown, exactly what the dyn value already answers) and
@@ -1602,4 +1613,84 @@ export function lowerAsExpression(
     );
   }
   return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
+}
+
+/** True when a type holds a record or an array somewhere (values whose
+ * identity can be observed). */
+function holdsReference(lowerer: Lowerer, t: IrType, seen = new Set<string>()): boolean {
+  if (t.kind === "record" || t.kind === "array") return true;
+  if (t.kind !== "union" || seen.has(t.unionId)) return false;
+  seen.add(t.unionId);
+  return (
+    lowerer.unions.get(t.unionId)?.arms.some((arm) => holdsReference(lowerer, arm, seen)) ?? false
+  );
+}
+
+/** `(<package expr> as __scriptc_decl_N)`: check the dynamic value against
+ * the projected type and build the native value (dynCheck), then adopt:
+ * every source object or array that something else still references
+ * becomes a live capsule of the value built from it
+ * (scr_dyn_decl_adopt), so identity and mutation visibility hold on both
+ * sides. Scalar targets are ordinary checked casts. */
+function declBoundaryCast(
+  lowerer: Lowerer,
+  inner: IrExpr,
+  target: IrType,
+  loc: SrcLoc,
+): IrExpr | null {
+  if (
+    !canDynCheckTo(
+      target,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    ) &&
+    !(target.kind === "union" && lowerer.dynConvertible(target))
+  )
+    return null;
+  if (!holdsReference(lowerer, target)) {
+    return { kind: "dynCheck", value: inner, type: target, loc };
+  }
+  const source = lowerer.declareHiddenLocal("%boundarySource", DYN);
+  const value = lowerer.declareHiddenLocal("%boundaryValue", target);
+  return {
+    kind: "seqExpr",
+    stmts: [
+      { kind: "varDecl", localId: source.id, init: inner, loc },
+      {
+        kind: "varDecl",
+        localId: value.id,
+        init: {
+          kind: "dynCheck",
+          value: varRef(source.id, DYN, loc),
+          adopt: true,
+          type: target,
+          loc,
+        },
+        loc,
+      },
+      {
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "dyn.declAdopt",
+          args: [
+            varRef(source.id, DYN, loc),
+            {
+              kind: "dynFrom",
+              value: varRef(value.id, target, loc),
+              liveRef: true,
+              type: DYN,
+              loc,
+            },
+          ],
+          type: VOID,
+          loc,
+        },
+        loc,
+      },
+    ],
+    result: varRef(value.id, target, loc),
+    type: target,
+    loc,
+  };
 }

@@ -56,6 +56,11 @@ void scr_et_core_drop(ScrEventTargetCore *core);
 ScrDyn *scr_et_add_listener(ScrEventTargetCore *core, ScrDyn *const *args, size_t argc);
 ScrDyn *scr_et_remove_listener(ScrEventTargetCore *core, ScrDyn *const *args, size_t argc);
 ScrDyn *scr_et_dispatch_event(ScrEventTargetCore *core, ScrDyn *self, ScrDyn *const *args, size_t argc);
+/* EventTarget.prototype's method `key` (addEventListener,
+ * removeEventListener, dispatchEvent) as a function value (+1), the one
+ * every EventTarget answers, AbortSignal included: it runs on any target
+ * its `this` is. NULL for another name. */
+ScrDyn *scr_event_target_method_value(const char *key, size_t len);
 /* Dispatches an event handle (borrowed) without the argument checks. */
 void scr_et_dispatch(ScrEventTargetCore *core, ScrDyn *self, ScrDyn *event);
 /* `on<type>` attributes (Node's defineEventHandler): get answers +1 (null

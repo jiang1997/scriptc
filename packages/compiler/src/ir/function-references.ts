@@ -11,6 +11,9 @@ export function exprFunctionReference(expr: IrExpr): string | undefined {
   return undefined;
 }
 
+/** The expression kinds exprFunctionReference answers for. */
+export const FUNCTION_REFERENCE_KINDS = ["closure", "orDefault"] as const;
+
 /** Functions the module's metadata names: the entry, library exports and
  * the class prototype helpers the runtime calls. Class methods and
  * constructors follow the `%<class>.<method>` convention instead of being

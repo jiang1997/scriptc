@@ -1593,6 +1593,9 @@ export const BUILTIN_MODULE_FNS: Record<
     // Prime checks and generation (lowerPrimeCall): checked-dynamic
     // arguments, results converted to the call site's type.
     checkPrimeSync: { fn: "crypto.checkPrimeSync", params: [], result: DYN },
+    // Checked-dynamic arguments, the result converted to the call site's
+    // type (lowerPrimeCall).
+    getCipherInfo: { fn: "crypto.getCipherInfo", params: [], result: DYN },
     checkPrime: { fn: "crypto.checkPrimeCb", params: [], result: VOID },
     generatePrimeSync: { fn: "crypto.generatePrimeSync", params: [], result: DYN },
     generatePrime: { fn: "crypto.generatePrimeCb", params: [], result: VOID },
@@ -3101,14 +3104,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
     diffieHellman:
       "crypto.diffieHellman takes DH, EC or X25519 KeyObjects and has no lowering; " +
       "the objects of createDiffieHellman, getDiffieHellman and createECDH compute shared secrets",
-    ...Object.fromEntries(
-      ["getCipherInfo"].map((m) => [
-        m,
-        "cipher metadata has no lowering — createCipheriv and createDecipheriv support " +
-          "aes-128/192/256 in cbc, ctr, gcm, ecb, cfb, cfb8, cfb1, and ofb modes, des-ede3 and " +
-          "des-ede, chacha20, and chacha20-poly1305",
-      ]),
-    ),
     setFips:
       "a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) " +
       "in a non-FIPS build — getFips() answers 0 here",

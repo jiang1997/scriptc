@@ -27,6 +27,7 @@ import {
   type FrontendInputExclusions,
   trackedReadFile,
 } from "../frontend/input-tracker.js";
+import { compilerOwnedFileRoots } from "../frontend/dts-paths.js";
 import { provenanceSources } from "../frontend/provenance-registry.js";
 import { processFork } from "../frontend/process-fork.js";
 import { tokenEquivalentSource } from "../frontend/token-equivalence.js";
@@ -377,7 +378,7 @@ export function prepareNativeExecutable(
   if (irInput !== "") timing("ir-input");
   const ir =
     outputKind === "ir" || options.emitIr
-      ? batchTextParts(serializeModuleParts(prepared.mod))
+      ? batchTextParts(serializeModuleParts(prepared.mod, compilerOwnedFileRoots()))
       : null;
   timing("ir-serialize");
   const llvm =
@@ -510,7 +511,9 @@ export function prepareNativeLibrary(
   const input: NativeExecutableInput = {
     ok: true,
     llvm,
-    ir: options.emitIr ? batchTextParts(serializeModuleParts(prepared.mod)) : null,
+    ir: options.emitIr
+      ? batchTextParts(serializeModuleParts(prepared.mod, compilerOwnedFileRoots()))
+      : null,
     sidecarJson: prepared.sidecarJson,
     features: executableLinkFeatures(prepared.mod),
     sources: [...prepared.sourceTexts],
