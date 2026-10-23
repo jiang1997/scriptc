@@ -44,6 +44,7 @@ import type { NullableRefField } from "./nullable-fields.js";
 import { emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { inlineUnionCopyLines } from "./inline-unions.js";
 import { recordMayKeepSource } from "./record-sources.js";
+import { registerReplay } from "./emit-journal.js";
 
 /** An owned (+1) union value for a nullable-pointer class field slot `p`
  * (the unit arm's immortal instance, or a fresh box around a retained
@@ -91,6 +92,7 @@ export function dynPromiseAdapter(host: LlvmEmitterContext, inner: IrType): stri
   if (existing) return existing;
   const sym = `sc_dpa_${host.dynPromiseAdapters.size}`;
   host.dynPromiseAdapters.set(key, sym);
+  host.journal?.allocated(sym, "dynPromiseAdapter", [inner]);
   host.declare(`declare ptr @scr_promise_payload_ref(ptr)`);
   host.declare(`declare void @scr_dyn_release_v(ptr)`);
   host.declare(`declare void @scr_promise_reject_pending(ptr)`);
@@ -146,6 +148,7 @@ export function dynPromiseAdapter(host: LlvmEmitterContext, inner: IrType): stri
     `}`,
     ``,
   );
+  host.journal?.built();
   return sym;
 }
 
@@ -602,6 +605,7 @@ export function liveDynUnionRefAdapter(
 
   const sym = `sc_ldu_${host.liveDynUnionRefAdapters.size}`;
   host.liveDynUnionRefAdapters.set(key, sym);
+  host.journal?.allocated(sym, "liveDynUnionRefAdapter", [t]);
 
   const adapters = new Map<number, LlStreamTypedRefAdapter>();
   for (const { arm, tag } of mutableArms) {
@@ -684,6 +688,7 @@ export function liveDynUnionRefAdapter(
     `}`,
     ``,
   );
+  host.journal?.built();
   return sym;
 }
 
@@ -732,6 +737,11 @@ export function streamTypedRefMaterializeAdapter(
   const snapshot = `sc_ldr_${host.liveDynRefAdapters.size}_materialize`;
   const adapter: LlStreamTypedRefAdapter = { snapshot, commit: "null" };
   host.liveDynRefAdapters.set(key, adapter);
+  host.journal?.allocated(
+    snapshot.replace(/_materialize$/, ""),
+    "streamTypedRefMaterializeAdapter",
+    [t],
+  );
   if (isDynTypedRefType(t)) {
     const fields = host.classMeta.get(t.className)?.def.fields;
     if (
@@ -744,6 +754,7 @@ export function streamTypedRefMaterializeAdapter(
     ) {
       host.declare(`declare ptr @scr_dyn_class_view_unavailable(ptr)`);
       adapter.snapshot = "scr_dyn_class_view_unavailable";
+      host.journal?.built();
       return adapter;
     }
   }
@@ -1185,6 +1196,7 @@ export function streamTypedRefMaterializeAdapter(
     `}`,
     ``,
   );
+  host.journal?.built();
   return adapter;
 }
 
@@ -1469,6 +1481,7 @@ export function streamFromArrayAdapter(
   if (existing) return existing;
   const sym = `sc_sfa_${host.streamFromArrayAdapters.size}`;
   host.streamFromArrayAdapters.set(key, sym);
+  host.journal?.allocated(sym, "streamFromArrayAdapter", [t]);
   const B = new BlockBuilder();
   const unionDef = elem.kind === "union" ? host.unionsById.get(elem.unionId) : undefined;
   if (elem.kind === "union" && !unionDef) {
@@ -1585,5 +1598,17 @@ export function streamFromArrayAdapter(
     `}`,
     ``,
   );
+  host.journal?.built();
   return sym;
 }
+
+registerReplay("dynPromiseAdapter", (host, args) => dynPromiseAdapter(host, args[0] as IrType));
+registerReplay("liveDynUnionRefAdapter", (host, args) =>
+  liveDynUnionRefAdapter(host, args[0] as IrType & { kind: "union" }),
+);
+registerReplay("streamTypedRefMaterializeAdapter", (host, args) =>
+  streamTypedRefMaterializeAdapter(host, args[0] as IrType).snapshot.replace(/_materialize$/, ""),
+);
+registerReplay("streamFromArrayAdapter", (host, args) =>
+  streamFromArrayAdapter(host, args[0] as IrType & { kind: "array" }),
+);

@@ -181,3 +181,63 @@ test("hashed number-key lookups probe inline and call the runtime only for wide 
     );
   }
 });
+
+/** work(map): map.size, and keep(map): map returned as an owned value. */
+function sizeFixture(): IrModule {
+  const map: IrType = { kind: "map", key: F64, value: F64 };
+  const params = [{ localId: "map", name: "map", type: map }];
+  const locals = params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: true }));
+  const size: IrExpr = {
+    kind: "mapIntrinsic",
+    method: "size",
+    receiver: ref("map", map),
+    args: [],
+    type: F64,
+    loc,
+  };
+  return {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "main",
+    records: [],
+    unions: [],
+    functions: [
+      { name: "main", params: [], locals: [], returnType: VOID, body: [], loc },
+      {
+        name: "work",
+        params,
+        returnType: F64,
+        loc,
+        locals,
+        body: [{ kind: "return", value: size, loc }],
+      },
+      {
+        name: "keep",
+        params,
+        returnType: map,
+        loc,
+        locals,
+        body: [{ kind: "return", value: ref("map", map), loc }],
+      },
+    ],
+  };
+}
+
+test("Map.size and Map retains need no runtime call in release builds", () => {
+  const mod = sizeFixture();
+  expect(validateModule(mod)).toEqual([]);
+  for (const bits of [32, 64] as const) {
+    const module = emitLlvmModule(mod, { pointerBits: bits, inlineRc: "release" });
+    const fn = (name: string) =>
+      new RegExp(`^define internal [^\\n]*@sc_(?:b)?f_${name}(?:\\.i32)?\\([^]*?^}`, "m").exec(
+        module,
+      )![0];
+    // Field 9 is the live entry count (scr_map.h).
+    expect(module).toMatch(/^define internal double @sc_map_size\(ptr %m\)/m);
+    expect(module).toContain(`getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 9`);
+    expect(fn("work")).toContain("call double @sc_map_size(");
+    expect(module).not.toContain("call double @scr_map_size(");
+    expect(fn("keep")).toContain("@sc_rc_retain_map(");
+    expect(module).not.toContain("call ptr @scr_map_retain_v(");
+  }
+});

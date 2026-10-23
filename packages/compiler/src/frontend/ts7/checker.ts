@@ -631,6 +631,14 @@ export class CheckerFacade {
     return aliased;
   }
 
+  /** A module symbol's exports, with the members of its `export *`
+   * declarations resolved (a symbol's own export table lists only the
+   * module's own declarations). */
+  getExportsOfModule(symbol: Ts7Symbol): readonly Ts7Symbol[] {
+    this.ensureActive();
+    return this.raw.getExportsOfModule(symbol);
+  }
+
   getDeclaredTypeOfSymbol(symbol: Ts7Symbol): Type {
     this.ensureActive();
     let type = this.cache.declaredTypeOfSymbol.get(symbol);

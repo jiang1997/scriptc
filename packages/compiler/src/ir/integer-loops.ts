@@ -333,7 +333,12 @@ export function matchIntegerCountedForLoop(
     )
       useful = true;
     // A string read at the counter indexes with the integer directly.
-    if (e.kind === "strIntrinsic" && e.method === "charCodeAt" && e.args[0] && counter(e.args[0]))
+    if (
+      e.kind === "strIntrinsic" &&
+      (e.method === "charCodeAt" || e.method === "charAt") &&
+      e.args[0] &&
+      counter(e.args[0])
+    )
       useful = true;
     // So does an array element read; only a loop that needs no versioned
     // copy takes the integer counter for it.
@@ -456,7 +461,12 @@ export function matchIntegerPairedForLoop(
       (isCounter(e.left) || isCounter(e.right)));
   const expr = (e: IrExpr): boolean => {
     if (e.kind === "arrayGet" && isCounter(e.index)) useful = true;
-    if (e.kind === "strIntrinsic" && e.method === "charCodeAt" && e.args[0] && isCounter(e.args[0]))
+    if (
+      e.kind === "strIntrinsic" &&
+      (e.method === "charCodeAt" || e.method === "charAt") &&
+      e.args[0] &&
+      isCounter(e.args[0])
+    )
       useful = true;
     if (e.kind === "bytesIntrinsic" && e.method === "get" && e.args[0] && isCounter(e.args[0]))
       useful = true;

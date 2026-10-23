@@ -199,7 +199,7 @@ static void test_generate(void) {
   mbedtls_mpi_lset(&g, 2);
   for (size_t i = 0; i < sizeof adds / sizeof adds[0]; i++) {
     for (int trial = 0; trial < 2; trial++) {
-      bool ok = sd_generate_safe_prime(&p, 512, adds[i], adds[i] - 1);
+      bool ok = sd_generate_safe_prime(&p, 512, adds[i], adds[i] - 1, false);
       mbedtls_mpi_uint r = 0;
       ok = ok && mbedtls_mpi_bitlen(&p) == 512 && mbedtls_mpi_mod_int(&r, &p, adds[i]) == 0 && r == adds[i] - 1;
       mbedtls_mpi_copy(&q, &p);
@@ -217,12 +217,64 @@ static void test_generate(void) {
   mbedtls_mpi_free(&g);
 }
 
+/* generatePrime's search: the sizes and add forms with one possible
+ * result, top-two-bit safe-prime starts, and checks above OpenSSL's
+ * round count. */
+static void test_generate_prime(void) {
+  static const struct {
+    size_t bits;
+    bool safe;
+    int add, rem;
+    int want;
+  } cases[] = {
+    {2, false, 0, 0, 3},     {3, false, 0, 0, 7},     {4, false, 0, 0, 13},   {3, true, 0, 0, 7},
+    {6, true, 0, 0, 59},     {7, true, 0, 0, 107},    {8, false, 200, 1, 401}, {8, false, 128, 0, 257},
+    {5, false, 16, 3, 19},
+  };
+  mbedtls_mpi p, add, rem, q;
+  mbedtls_mpi_init(&p);
+  mbedtls_mpi_init(&add);
+  mbedtls_mpi_init(&rem);
+  mbedtls_mpi_init(&q);
+  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    mbedtls_mpi_lset(&add, cases[i].add);
+    mbedtls_mpi_lset(&rem, cases[i].rem);
+    bool ok = sd_generate_prime(&p, cases[i].bits, cases[i].safe, cases[i].add ? &add : NULL,
+                                cases[i].rem ? &rem : NULL) &&
+              mbedtls_mpi_cmp_int(&p, cases[i].want) == 0;
+    char what[96];
+    snprintf(what, sizeof what, "generatePrime(%zu, safe %d, add %d, rem %d) is %d", cases[i].bits, cases[i].safe,
+             cases[i].add, cases[i].rem, cases[i].want);
+    check(ok, what);
+  }
+  for (int trial = 0; trial < 2; trial++) {
+    bool ok = sd_generate_safe_prime(&p, 128, 12, 11, true) && mbedtls_mpi_bitlen(&p) == 128 &&
+              mbedtls_mpi_get_bit(&p, 126) == 1;
+    mbedtls_mpi_copy(&q, &p);
+    mbedtls_mpi_shift_r(&q, 1);
+    ok = ok && mbedtls_mpi_is_prime_ext(&p, 40, sd_random, NULL) == 0 &&
+         mbedtls_mpi_is_prime_ext(&q, 40, sd_random, NULL) == 0;
+    check(ok, "a 128-bit safe prime with its top two bits set");
+  }
+  ScDhSmallPrimes *small = sd_small_primes();
+  mbedtls_mpi_read_string(&q, 10, "3215031751");
+  check(!sd_is_prime_checks(small, &q, 200), "200 rounds reject a strong pseudoprime to 2, 3, 5 and 7");
+  mbedtls_mpi_read_string(&q, 10, "2305843009213693951");
+  check(sd_is_prime_checks(small, &q, 200), "200 rounds accept 2^61 - 1");
+  free(small);
+  mbedtls_mpi_free(&p);
+  mbedtls_mpi_free(&add);
+  mbedtls_mpi_free(&rem);
+  mbedtls_mpi_free(&q);
+}
+
 int main(void) {
   test_mont_pow();
   test_is_prime();
   test_check_params();
   test_long_exponent();
   test_generate();
+  test_generate_prime();
   fprintf(stderr, "%ld/%ld cases passed\n", total - failed, total);
   return failed ? 1 : 0;
 }

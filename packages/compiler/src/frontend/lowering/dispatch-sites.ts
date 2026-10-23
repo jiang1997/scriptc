@@ -11,6 +11,18 @@ import { everyStmtList } from "../../ir/traverse.js";
 import { toPrimitiveHint } from "./class-dynamic-dispatch.js";
 import { GENERATOR_STEP_METHODS, HELPER_METHODS } from "./generator-dynamic-dispatch.js";
 
+/** Runtime entry points that step a checked-dynamic iterable's iterator:
+ * destructuring rest, and the collection constructors' and
+ * Object.fromEntries' seeds. */
+const RUNTIME_STEP_LIB_FNS: ReadonlySet<string> = new Set([
+  "dyn.destructureRest",
+  "dyn.nativeSetNew",
+  "dyn.mapSeedEntries",
+  "dyn.fromEntries",
+  "weakMap.new",
+  "weakSet.new",
+]);
+
 /** What one function's body holds for the class dispatch pass and its
  * caught-value, generator and class construction sub-passes, collected in
  * one walk. Lists keep the order the walk meets their entries. */
@@ -68,6 +80,7 @@ const DISPATCH_LIB_CALLS = new Set<string>([
   "dyn.propertyIsEnumerableComputed",
   "dyn.defineProperty",
   "dyn.getPrototype",
+  "dyn.inheritsErrorPrototype",
   "dyn.reflectGet",
   "dyn.reflectSet",
 ]);
@@ -186,7 +199,7 @@ function scanSites(statements: IrStmt[]): FunctionSites {
           expr.key.kind === "strLit" &&
           HELPER_METHODS.has(expr.key.value)) ||
         expr.kind === "dynIterN" ||
-        (expr.kind === "libCall" && expr.fn === "dyn.destructureRest")
+        (expr.kind === "libCall" && RUNTIME_STEP_LIB_FNS.has(expr.fn))
       )
         sites.runtimeSteps = true;
       switch (expr.kind) {

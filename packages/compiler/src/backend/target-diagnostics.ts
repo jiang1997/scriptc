@@ -3,6 +3,7 @@ import type { LlvmUnsupportedError } from "./llvm/emitter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import { type IrModule, type SrcLoc } from "../ir/ir.js";
 import {
+  DH_LIB_FNS,
   PKI_LIB_FNS,
   moduleUsesFetch,
   moduleUsesWebCryptoAsymmetric,
@@ -232,9 +233,12 @@ export function moduleWasiUnavailableSurface(
         };
         return false;
       }
-      if (node.fn === "crypto.dhNew" || node.fn === "crypto.dhGroupNew") {
+      if (DH_LIB_FNS.has(node.fn)) {
         found = {
-          surface: "DiffieHellman (the wasm32-wasi runtime does not include the mbedTLS library)",
+          surface:
+            node.fn === "crypto.dhNew" || node.fn === "crypto.dhGroupNew"
+              ? "DiffieHellman (the wasm32-wasi runtime does not include the mbedTLS library)"
+              : "checkPrime and generatePrime (the wasm32-wasi runtime does not include the mbedTLS library)",
           loc,
         };
         return false;

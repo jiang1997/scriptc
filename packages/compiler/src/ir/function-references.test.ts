@@ -208,6 +208,7 @@ const MODULE_FIELDS: Record<StringFields<Omit<IrModule, "functions">>, Role> = {
   "contracts.int32Returns[]": "fact",
   "contracts.int32Locals[]": "other",
   "contracts.int32Elements[]": "other",
+  "int32ArrayCandidates[]": "other",
   "contracts.noThrow[]": "fact",
   "contracts.acyclic[]": "other",
   "contracts.immortalGlobals[]": "other",

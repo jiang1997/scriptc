@@ -55,6 +55,13 @@ double scr_dgram_addr_port(ScrDgramSocket *s);
 void scr_dgram_close(ScrDgramSocket *s, ScrClosure *cb /*moves, nullable*/); /* throws on closed */
 void scr_dgram_unref(ScrDgramSocket *s);
 void scr_dgram_ref(ScrDgramSocket *s);
+/* Unix datagram sockets for the hot-shots package shim (the unix-dgram
+ * addon's surface): each answers its result (fd, 0) or a negative errno;
+ * send answers 1 when the socket would block. */
+double scr_dgram_unix_socket(void);
+double scr_dgram_unix_connect(double fd, ScrStr *path /*borrowed*/);
+double scr_dgram_unix_send(double fd, ScrBytes *data /*borrowed*/);
+double scr_dgram_unix_close(double fd);
 /* Socket options: Node's checks and errors (ErrnoException "<syscall>
  * <CODE>", ERR_SOCKET_BAD_BUFFER_SIZE, ERR_SOCKET_BUFFER_SIZE, the
  * TypeError after close()). The TTL setters and setMulticastLoopback

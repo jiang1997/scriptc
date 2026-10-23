@@ -85,6 +85,7 @@ export function findAppendedArrayLiterals(module: IrModule): ReadonlySet<IrExpr>
     for (const field of fieldAliases.get(binding) ?? []) appendedFields.add(field);
 
   const result = new Set<IrExpr>();
+  if (appendedBindings.size === 0 && appendedFields.size === 0) return result;
   const consider = (value: IrExpr | null, appended: boolean): void => {
     if (value && appended && isEmptyLiteral(value)) result.add(value);
   };

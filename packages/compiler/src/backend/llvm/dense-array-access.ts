@@ -14,22 +14,47 @@
  * state bytes altogether: the runtime keeps every state below it a present
  * value, so reads load the slot directly and writes replace it without
  * touching its state. Other dense indices take the state-checked path,
- * whose writes extend the bound when they continue it. */
+ * whose writes extend the bound when they continue it. An array without
+ * state bytes (SCR_ARR_STATES clear in `spare`) keeps its bound at its
+ * length, so reads never reach the state check for it; a write past the
+ * bound tests the flag and, without states, appends at the length. */
 
 import { isRefCounted, type IrExpr, type IrType } from "../../ir/ir.js";
 import {
   f64Lit,
   loadArrCount,
   SCR_ARR_FIELD,
+  SCR_ARR_STATES,
   scrArrStatePtr,
   scrArrStates,
   sizeToDouble,
   storeArrCount,
 } from "./common.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
-import { exactInteger, widenInteger } from "./integer-values.js";
+import { compactRefLoadLines, compactRefStoreLines } from "./classes.js";
+import { elemAccess } from "./shapes.js";
+import { indexInteger } from "./integer-values.js";
+import { integerOrNaNIndex } from "./wrapping-sums.js";
 
 const SCR_ARR_VALUE = 1;
+
+/** Whether the array at `array` has state bytes, as an i1. `spare` changes
+ * only in runtime calls, so its loads take their own alias tag. */
+export function emitArrayHasStates(host: LlvmEmitterContext, array: string): string {
+  const B = host.B;
+  const sparePtr = B.tmp(),
+    spare = B.tmp(),
+    bit = B.tmp(),
+    has = B.tmp();
+  B.line(
+    `${sparePtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.spare}`,
+  );
+  host.markMemoryPointer(sparePtr, "array:spare");
+  B.line(`${spare} = load i16, ptr ${sparePtr}${host.fieldAliasAttachment(sparePtr)}`);
+  B.line(`${bit} = and i16 ${spare}, ${SCR_ARR_STATES}`);
+  B.line(`${has} = icmp ne i16 ${bit}, 0`);
+  return has;
+}
 
 /** Call-site effects of the non-retaining read fallbacks: they only read
  * module-visible memory, or trap without returning to the caller (the trap
@@ -74,13 +99,21 @@ function emitDenseGuard(
 ): DenseGuard {
   const B = host.B;
   const size = host.sizeType;
-  const integer = exactInteger(host, index, indexExpr);
+  const integer = indexInteger(host, index, indexExpr);
+  const nanIndex = integer === null ? integerOrNaNIndex(host, index, indexExpr) : null;
   let wide: string;
   let integral: string | null = null;
-  if (integer) {
-    // A proven integer needs no double round-trip. Negative signed values
-    // compare above any length or capacity as unsigned 64-bit integers.
-    wide = widenInteger(host, integer);
+  if (integer !== null) {
+    // A proven integer, or a wide view that equals the double at every
+    // index below a length, needs no double round-trip. Negative signed
+    // values compare above any length or capacity as unsigned 64-bit
+    // integers, and every index that fails the comparisons takes the
+    // double's path.
+    wide = integer;
+  } else if (nanIndex) {
+    // An exact integer or NaN is an index exactly when it is ordered.
+    wide = nanIndex.wide;
+    integral = nanIndex.ordered;
   } else {
     // freeze keeps NaN/out-of-range conversions from producing poison; the
     // exact round-trip comparison then rejects every value that is not an
@@ -209,26 +242,52 @@ function statePointer(
   return statePtr;
 }
 
-/** The dense slot type: boolean arrays store one byte per element, every
- * other element kind an 8-byte slot. */
-function slotType(acc: ArrayAccess): "i8" | "i64" {
-  return acc === "bool" ? "i8" : "i64";
+/** How an array's dense slots hold its elements: the access kind (`i32`
+ * for int32 arrays, ir/int32-arrays.ts), or `cref` for references to compact
+ * class instances (SCR_ELEM_CREF: a 4-byte slot holding the address over 8;
+ * LlEmitter.compactArrayElem). */
+type SlotKind = ArrayAccess | "cref";
+
+function slotKind(host: LlvmEmitterContext, acc: ArrayAccess, element: IrType): SlotKind {
+  return acc === "ref" && host.compactArrayElem(element) ? "cref" : acc;
+}
+
+/** The dense slot type: boolean arrays store one byte per element, compact
+ * references and int32 arrays four, every other element kind an 8-byte slot. */
+function slotType(kind: SlotKind): "i8" | "i32" | "i64" {
+  return kind === "bool" ? "i8" : kind === "cref" || kind === "i32" ? "i32" : "i64";
 }
 
 /** Bytes per dense slot (scr_arr_slot_width). */
-export function slotWidth(acc: ArrayAccess): number {
-  return acc === "bool" ? 1 : 8;
+export function slotWidth(kind: SlotKind): number {
+  return kind === "bool" ? 1 : kind === "cref" || kind === "i32" ? 4 : 8;
+}
+
+/** Bytes per dense slot of an array of `element` (scr_arr_slot_width). */
+export function denseSlotWidth(host: LlvmEmitterContext, element: IrType): number {
+  return slotWidth(slotKind(host, elemAccess(element), element));
+}
+
+/** The runtime accessor family of an access: int32 arrays answer through
+ * the double-valued entry points, which convert their slots. */
+export function runtimeAccess(acc: ArrayAccess): "f64" | "bool" | "ref" {
+  return acc === "i32" ? "f64" : acc;
+}
+
+/** The LLVM type of an access's values at the emitter's interface. */
+function valueType(acc: ArrayAccess): "double" | "i1" | "ptr" {
+  return acc === "f64" || acc === "i32" ? "double" : acc === "bool" ? "i1" : "ptr";
 }
 
 function valuePointer(
   host: LlvmEmitterContext,
   guard: Pick<DenseGuard, "offset" | "data">,
-  acc: ArrayAccess,
+  kind: SlotKind,
 ): string {
   const B = host.B;
   const valuePtr = B.tmp();
   B.line(
-    `${valuePtr} = getelementptr inbounds ${slotType(acc)}, ptr ${guard.data}, ${host.sizeType} ${guard.offset}`,
+    `${valuePtr} = getelementptr inbounds ${slotType(kind)}, ptr ${guard.data}, ${host.sizeType} ${guard.offset}`,
   );
   host.markMemoryPointer(valuePtr, "array:elements");
   return valuePtr;
@@ -241,7 +300,13 @@ function loadState(host: LlvmEmitterContext, guard: DenseGuard): string {
   return state;
 }
 
-export type ArrayAccess = "f64" | "bool" | "ref";
+/** The ScrElemKind of int32 arrays (scr_array.h). */
+export const SCR_ELEM_I32 = 7;
+
+/** How a dense array's slots are read and written: doubles, booleans,
+ * references, or the int32 slots of SCR_ELEM_I32 arrays (ir/int32-arrays.ts),
+ * whose values are doubles at the emitter's interface. */
+export type ArrayAccess = "f64" | "bool" | "ref" | "i32";
 
 /** Before a self-append (`a[i] = a[i] + suffix`) replaces a reference
  * element: when `index` lies in the hole-free prefix and the slot still
@@ -297,14 +362,33 @@ export function emitDenseArrayGet(
   retain: boolean,
   proven = false,
 ): string {
+  return emitDenseArrayRead(host, array, index, indexExpr, acc, element, getter, retain, proven)
+    .value;
+}
+
+/** emitDenseArrayGet, with the int32 of an int32 array's element: the
+ * slot itself on the dense path, the runtime getter's double converted
+ * (exactly: the element is an int32) on the other. */
+export function emitDenseArrayRead(
+  host: LlvmEmitterContext,
+  array: string,
+  index: LlValue,
+  indexExpr: IrExpr | undefined,
+  acc: ArrayAccess,
+  element: IrType,
+  getter: string,
+  retain: boolean,
+  proven = false,
+): { value: string; int32: string | null } {
   const B = host.B;
-  const ty = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
+  const ty = valueType(acc);
   const ret = acc === "bool" ? "zeroext i1" : ty;
+  const kind = slotKind(host, acc, element);
   host.declare(`declare ${ret} @${getter}(ptr, double)`);
   if (acc === "ref" && retain && !isRefCounted(element)) {
     const t = B.tmp();
     B.line(`${t} = call ${ty} @${getter}(ptr ${array}, double ${index.name})`);
-    return t;
+    return { value: t, int32: null };
   }
   const slow = B.newLabel("arr.get.slow"),
     join = B.newLabel("arr.get.join"),
@@ -322,7 +406,7 @@ export function emitDenseArrayGet(
     slow,
     true,
     valueLabel,
-    slotWidth(acc),
+    slotWidth(kind),
     proven,
     induction,
   );
@@ -333,12 +417,18 @@ export function emitDenseArrayGet(
     B.condBr(present, valueLabel, slow);
   }
   B.startBlock(valueLabel);
-  const ptr = valuePointer(host, guard, acc);
+  const ptr = valuePointer(host, guard, kind);
   let fast: string;
+  let fastInt: string | null = null;
   let fastLabel = valueLabel;
   if (acc === "f64") {
     fast = B.tmp();
     B.line(`${fast} = load double, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+  } else if (acc === "i32") {
+    fastInt = B.tmp();
+    fast = B.tmp();
+    B.line(`${fastInt} = load i32, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+    B.line(`${fast} = sitofp i32 ${fastInt} to double`);
   } else if (acc === "bool") {
     const raw = B.tmp();
     fast = B.tmp();
@@ -347,7 +437,13 @@ export function emitDenseArrayGet(
   } else {
     const raw = B.tmp(),
       nonnull = B.tmp();
-    B.line(`${raw} = load ptr, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+    if (kind === "cref") {
+      const ref = B.tmp();
+      B.line(`${ref} = load i32, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+      for (const line of compactRefLoadLines(ref, raw, `${raw}.r`)) B.line(line.trimStart());
+    } else {
+      B.line(`${raw} = load ptr, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+    }
     B.line(`${nonnull} = icmp ne ptr ${raw}, null`);
     fastLabel = B.newLabel("arr.get.ref");
     B.condBr(nonnull, fastLabel, slow);
@@ -359,11 +455,21 @@ export function emitDenseArrayGet(
   const slowValue = B.tmp();
   const attrs = acc === "ref" && retain ? " cold" : READ_FALLBACK;
   B.line(`${slowValue} = call ${ty} @${getter}(ptr ${array}, double ${index.name})${attrs}`);
+  let slowInt: string | null = null;
+  if (fastInt !== null) {
+    slowInt = B.tmp();
+    B.line(`${slowInt} = fptosi double ${slowValue} to i32`);
+  }
   B.br(join);
   B.startBlock(join);
   const result = B.tmp();
   B.line(`${result} = phi ${ty} [ ${fast}, %${fastLabel} ], [ ${slowValue}, %${slow} ]`);
-  return result;
+  let int32: string | null = null;
+  if (fastInt !== null && slowInt !== null) {
+    int32 = B.tmp();
+    B.line(`${int32} = phi i32 [ ${fastInt}, %${fastLabel} ], [ ${slowInt}, %${slow} ]`);
+  }
+  return { value: result, int32 };
 }
 
 /** `scr_arr_get_number`: a numeric element, or NaN for every missing,
@@ -374,13 +480,14 @@ export function emitDenseArrayNumber(
   index: LlValue,
   indexExpr: IrExpr | undefined,
   proven = false,
+  acc: "f64" | "i32" = "f64",
 ): string {
   return emitDenseArrayGet(
     host,
     array,
     index,
     indexExpr,
-    "f64",
+    acc,
     { kind: "f64" },
     "scr_arr_get_number",
     false,
@@ -435,7 +542,9 @@ export function emitDenseArrayState(
  * value's reference. A dense index stores the slot, marks it present, and
  * extends the length when it lands at or past it; a replaced present
  * reference is released after the new edge is published (a release can
- * collect cycles). Every other index takes the unchanged runtime call. */
+ * collect cycles). Every other index takes the unchanged runtime call.
+ * `int32`, for an int32 array, is the value as an i32 when the caller has
+ * it at hand. */
 export function emitDenseArraySet(
   host: LlvmEmitterContext,
   array: string,
@@ -445,16 +554,25 @@ export function emitDenseArraySet(
   element: IrType,
   value: string,
   proven = false,
+  int32: string | null = null,
 ): void {
   const B = host.B;
-  const ty = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
-  const setter = `scr_arr_set_${acc}`;
+  const ty = valueType(acc);
+  const kind = slotKind(host, acc, element);
+  const setter = `scr_arr_set_${runtimeAccess(acc)}`;
   host.declare(`declare void @${setter}(ptr, double, ${acc === "bool" ? "i1 zeroext" : ty})`);
   const call = (attrs: string): void =>
     B.line(`call void @${setter}(ptr ${array}, double ${index.name}, ${ty} ${value})${attrs}`);
   if (acc === "ref" && !isRefCounted(element)) {
     call("");
     return;
+  }
+  // An int32 array's stores are proven int32s (ir/int32-arrays.ts); both
+  // dense paths below store the converted value.
+  let int32Value: string | null = int32;
+  if (acc === "i32" && int32Value === null) {
+    int32Value = B.tmp();
+    B.line(`${int32Value} = fptosi double ${value} to i32`);
   }
   const slow = B.newLabel("arr.set.slow"),
     join = B.newLabel("arr.set.join"),
@@ -467,33 +585,70 @@ export function emitDenseArraySet(
     slow,
     false,
     filledLabel,
-    slotWidth(acc),
+    slotWidth(kind),
     proven,
   );
   const { offset, len } = guard;
   const storeValue = (valuePtr: string): void => {
     if (acc === "f64") {
       B.line(`store double ${value}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+    } else if (acc === "i32") {
+      B.line(`store i32 ${int32Value}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
     } else if (acc === "bool") {
       const bits = B.tmp();
       B.line(`${bits} = zext i1 ${value} to i8`);
       B.line(`store i8 ${bits}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+    } else if (kind === "cref") {
+      const ref = B.tmp();
+      for (const line of compactRefStoreLines(value, ref, `${ref}.r`)) B.line(line.trimStart());
+      B.line(`store i32 ${ref}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
     } else {
       B.line(`store ptr ${value}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
     }
   };
+  const stated = B.newLabel("arr.set.states"),
+    plain = B.newLabel("arr.set.plain"),
+    plainStore = B.newLabel("arr.set.values"),
+    stored = B.newLabel("arr.set.stored.slot");
+  B.condBr(emitArrayHasStates(host, array), stated, plain);
+  B.startBlock(stated);
   const statePtr = statePointer(host, guard);
-  const valuePtr = valuePointer(host, guard, acc);
-  let oldState: string | null = null;
-  let old: string | null = null;
-  if (acc === "ref") {
-    oldState = B.tmp();
-    old = B.tmp();
+  const valuePtr = valuePointer(host, guard, kind);
+  let statedOld: string | null = null;
+  let statedHad: string | null = null;
+  // Compact instances are never released: a replaced one needs nothing.
+  if (kind === "ref") {
+    const oldState = B.tmp();
+    statedOld = B.tmp();
+    statedHad = B.tmp();
     B.line(`${oldState} = load i8, ptr ${statePtr}${host.fieldAliasAttachment(statePtr)}`);
-    B.line(`${old} = load ptr, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+    B.line(`${statedOld} = load ptr, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+    B.line(`${statedHad} = icmp eq i8 ${oldState}, ${SCR_ARR_VALUE}`);
   }
   storeValue(valuePtr);
   B.line(`store i8 ${SCR_ARR_VALUE}, ptr ${statePtr}${host.fieldAliasAttachment(statePtr)}`);
+  const statedEnd = B.currentLabel();
+  B.br(stored);
+  // Without states the bound is the length, so a store here appends at
+  // the length (it replaces no value) or leaves holes, which the runtime
+  // gives states.
+  B.startBlock(plain);
+  const appends = B.tmp();
+  B.line(`${appends} = icmp eq ${host.sizeType} ${offset}, ${len}`);
+  B.condBr(appends, plainStore, slow);
+  B.startBlock(plainStore);
+  storeValue(valuePointer(host, guard, kind));
+  const plainEnd = B.currentLabel();
+  B.br(stored);
+  B.startBlock(stored);
+  let old: string | null = null;
+  let hadValue: string | null = null;
+  if (kind === "ref") {
+    old = B.tmp();
+    hadValue = B.tmp();
+    B.line(`${old} = phi ptr [ ${statedOld}, %${statedEnd} ], [ null, %${plainEnd} ]`);
+    B.line(`${hadValue} = phi i1 [ ${statedHad}, %${statedEnd} ], [ false, %${plainEnd} ]`);
+  }
   // A store at the bound continues the hole-free prefix.
   const filledWide = sizedFilled(host, guard.filled),
     continues = B.tmp();
@@ -537,9 +692,7 @@ export function emitDenseArraySet(
   storeArrCount(host, nextLen, lenPtr, host.fieldAliasAttachment(lenPtr));
   B.br(storedLabel);
   B.startBlock(storedLabel);
-  if (acc === "ref" && oldState && old) {
-    const hadValue = B.tmp();
-    B.line(`${hadValue} = icmp eq i8 ${oldState}, ${SCR_ARR_VALUE}`);
+  if (kind === "ref" && hadValue && old) {
     const releaseLabel = B.newLabel("arr.set.release");
     B.condBr(hadValue, releaseLabel, join);
     B.startBlock(releaseLabel);
@@ -549,9 +702,9 @@ export function emitDenseArraySet(
   // Below the bound the slot holds a present value: replace it, leaving
   // the state alone, and release a replaced reference after the store.
   B.startBlock(filledLabel);
-  const filledValuePtr = valuePointer(host, guard, acc);
+  const filledValuePtr = valuePointer(host, guard, kind);
   let filledOld: string | null = null;
-  if (acc === "ref") {
+  if (kind === "ref") {
     filledOld = B.tmp();
     B.line(
       `${filledOld} = load ptr, ptr ${filledValuePtr}${host.fieldAliasAttachment(filledValuePtr)}`,
@@ -578,10 +731,12 @@ export function emitDenseArrayPop(
   host: LlvmEmitterContext,
   array: string,
   acc: ArrayAccess,
+  element: IrType,
   empty: string,
   slow: string,
 ): string {
   const B = host.B;
+  const kind = slotKind(host, acc, element);
   const size = host.sizeType;
   const header = (field: number): string => {
     const ptr = B.tmp();
@@ -615,19 +770,42 @@ export function emitDenseArrayPop(
     states = B.tmp();
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
   loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
-  scrArrStates(host, states, data, cap, slotWidth(acc));
-  const valuePtr = valuePointer(host, { offset: last, data }, acc);
+  scrArrStates(host, states, data, cap, slotWidth(kind));
+  const valuePtr = valuePointer(host, { offset: last, data }, kind);
   const statePtr = statePointer(host, { offset: last, states });
-  const slotTy = slotType(acc);
+  const slotTy = slotType(kind);
   let raw = B.tmp();
   B.line(`${raw} = load ${slotTy}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
   if (slotTy === "i8") {
     const wide = B.tmp();
     B.line(`${wide} = zext i8 ${raw} to i64`);
     raw = wide;
+  } else if (slotTy === "i32") {
+    if (kind === "cref") {
+      // The 8-byte slot of a compact reference is its address.
+      const wide = B.tmp(),
+        address = B.tmp();
+      B.line(`${wide} = zext i32 ${raw} to i64`);
+      B.line(`${address} = shl nuw nsw i64 ${wide}, 3`);
+      raw = address;
+    } else {
+      // The slot bits of an int32 element's double, as the f64 path returns them.
+      const number = B.tmp(),
+        bits = B.tmp();
+      B.line(`${number} = sitofp i32 ${raw} to double`);
+      B.line(`${bits} = bitcast double ${number} to i64`);
+      raw = bits;
+    }
   }
   B.line(`store ${slotTy} 0, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+  // Only an array with states has a state byte to clear.
+  const clear = B.newLabel("arr.pop.state"),
+    cleared = B.newLabel("arr.pop.cleared");
+  B.condBr(emitArrayHasStates(host, array), clear, cleared);
+  B.startBlock(clear);
   B.line(`store i8 0, ptr ${statePtr}${host.fieldAliasAttachment(statePtr)}`);
+  B.br(cleared);
+  B.startBlock(cleared);
   let last32 = last;
   if (size === "i64") {
     last32 = B.tmp();
@@ -648,12 +826,14 @@ export function emitDenseArrayPush(
   host: LlvmEmitterContext,
   array: string,
   acc: ArrayAccess,
+  element: IrType | null,
   value: string,
 ): string {
   const B = host.B;
   const size = host.sizeType;
-  const ty = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
-  const pusher = `scr_arr_push_${acc}`;
+  const kind = element === null ? acc : slotKind(host, acc, element);
+  const ty = valueType(acc);
+  const pusher = `scr_arr_push_${runtimeAccess(acc)}`;
   host.declare(`declare double @${pusher}(ptr, ${acc === "bool" ? "i1 zeroext" : ty})`);
   const header = (field: number): string => {
     const ptr = B.tmp();
@@ -685,20 +865,35 @@ export function emitDenseArrayPush(
   B.line(`${spare} = sub nuw ${size} ${cap}, ${len}`);
   B.line(`${near} = getelementptr inbounds i8, ptr ${data}, ${size} ${spare}`);
   B.line(
-    `${statePtr} = getelementptr inbounds [${slotWidth(acc)} x i8], ptr ${near}, ${size} ${cap}, ${size} -1`,
+    `${statePtr} = getelementptr inbounds [${slotWidth(kind)} x i8], ptr ${near}, ${size} ${cap}, ${size} -1`,
   );
   host.markMemoryPointer(statePtr, "array:present");
-  const valuePtr = valuePointer(host, { offset: len, data }, acc);
+  const valuePtr = valuePointer(host, { offset: len, data }, kind);
   if (acc === "f64") {
     B.line(`store double ${value}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+  } else if (acc === "i32") {
+    const int32 = B.tmp();
+    B.line(`${int32} = fptosi double ${value} to i32`);
+    B.line(`store i32 ${int32}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
   } else if (acc === "bool") {
     const bits = B.tmp();
     B.line(`${bits} = zext i1 ${value} to i8`);
     B.line(`store i8 ${bits}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+  } else if (kind === "cref") {
+    const ref = B.tmp();
+    for (const line of compactRefStoreLines(value, ref, `${ref}.r`)) B.line(line.trimStart());
+    B.line(`store i32 ${ref}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
   } else {
     B.line(`store ptr ${value}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
   }
+  // Only an array with states has a state byte to mark.
+  const mark = B.newLabel("arr.push.state"),
+    marked = B.newLabel("arr.push.marked");
+  B.condBr(emitArrayHasStates(host, array), mark, marked);
+  B.startBlock(mark);
   B.line(`store i8 ${SCR_ARR_VALUE}, ptr ${statePtr}${host.fieldAliasAttachment(statePtr)}`);
+  B.br(marked);
+  B.startBlock(marked);
   const next = B.tmp(),
     fastValue = B.tmp();
   B.line(`${next} = add nuw ${size} ${len}, 1`);
@@ -716,6 +911,7 @@ export function emitDenseArrayPush(
   B.line(`${bumped} = select i1 ${packed}, i32 ${nextFilled}, i32 ${filled}`);
   B.line(`store i32 ${bumped}, ptr ${filledPtr}${host.fieldAliasAttachment(filledPtr)}`);
   B.line(`${fastValue} = ${sizeToDouble(size)} ${size} ${next} to double`);
+  const fastEnd = B.currentLabel();
   B.br(join);
   B.startBlock(slow);
   const slowValue = B.tmp();
@@ -723,6 +919,6 @@ export function emitDenseArrayPush(
   B.br(join);
   B.startBlock(join);
   const result = B.tmp();
-  B.line(`${result} = phi double [ ${fastValue}, %${fast} ], [ ${slowValue}, %${slow} ]`);
+  B.line(`${result} = phi double [ ${fastValue}, %${fastEnd} ], [ ${slowValue}, %${slow} ]`);
   return result;
 }

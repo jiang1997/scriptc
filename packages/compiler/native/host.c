@@ -56,3 +56,78 @@ void scr_collect_cycles_phase(void);
 void scriptc_native_collect_cycles(void) {
   scr_collect_cycles_phase();
 }
+
+/* Forked lowering workers (frontend/process-fork.ts). A worker shares the
+ * parent's heap copy-on-write, writes its results to a file and leaves with
+ * _exit, so no buffered output or exit handler of the parent runs twice.
+ * Checker requests from workers hold an exclusive flock on a file each
+ * worker opens after the fork, so every worker has its own open file
+ * description and the lock excludes the other workers. */
+#ifdef _WIN32
+int32_t scriptc_native_fork(void) { return -1; }
+void scriptc_native_exit(int32_t code) { ExitProcess((UINT)code); }
+int32_t scriptc_native_wait(int32_t pid) { (void)pid; return -1; }
+uint8_t scriptc_native_lock_open(const uint8_t *bytes, size_t size) { (void)bytes; (void)size; return 0; }
+void scriptc_native_lock(void) {}
+void scriptc_native_unlock(void) {}
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/wait.h>
+
+int32_t scriptc_native_fork(void) { return (int32_t)fork(); }
+
+void scriptc_native_exit(int32_t code) { _exit(code); }
+
+/* The worker's exit status, 128 plus the signal for a worker a signal
+ * ended, or -1 when waitpid fails. */
+int32_t scriptc_native_wait(int32_t pid) {
+  int status = 0;
+  while (waitpid((pid_t)pid, &status, 0) < 0) {
+    if (errno != EINTR) return -1;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return -1;
+}
+
+static int scriptc_native_lock_fd = -1;
+
+uint8_t scriptc_native_lock_open(const uint8_t *bytes, size_t size) {
+  if (size == 0 || memchr(bytes, 0, size) != NULL) return 0;
+  char *path = malloc(size + 1);
+  if (!path) return 0;
+  memcpy(path, bytes, size);
+  path[size] = 0;
+  if (scriptc_native_lock_fd >= 0) close(scriptc_native_lock_fd);
+  scriptc_native_lock_fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  free(path);
+  return scriptc_native_lock_fd >= 0;
+}
+
+void scriptc_native_lock(void) {
+  if (scriptc_native_lock_fd < 0) return;
+  while (flock(scriptc_native_lock_fd, LOCK_EX) < 0 && errno == EINTR) {
+  }
+}
+
+void scriptc_native_unlock(void) {
+  if (scriptc_native_lock_fd >= 0) flock(scriptc_native_lock_fd, LOCK_UN);
+}
+#endif
+
+/* The runtime's growth cap for full cycle passes (scr_rc.h). */
+void scr_cyc_set_growth_cap(long cap);
+
+/* Bounds the cyclic garbage a build can hold to twice its live heap.
+ * Lowering a large program leaves hundreds of megabytes of cyclic garbage,
+ * and whether a scheduled full pass reclaims it before the build's peak
+ * depends on where the growth rule fires: with the default cap of 16, small
+ * changes to the compiler moved the peak of one build by 390 MB. With a cap
+ * of 2 a full pass runs once the heap has grown to three times its size
+ * after the last one; a cap of 1 bounds the garbage further but runs more
+ * passes over the live heap. SCR_CYCLE_GROWTH_CAP still overrides it. */
+void scriptc_native_bound_cycle_growth(void) {
+  scr_cyc_set_growth_cap(2);
+}

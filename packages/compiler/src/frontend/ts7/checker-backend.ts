@@ -4,17 +4,13 @@ import { fileURLToPath } from "node:url";
 
 /** The TypeScript 7 API servers a compile can check with: tsc-ts, the default,
  * and tsgo from the `typescript` package, selected with `SCRIPTC_CHECKER=tsgo`.
- * Both serve the same API and give the same results. On Windows the default is
- * tsgo: the compiler connects to the server over a named pipe there, and tsc-ts's
- * API server has no named-pipe transport yet. */
+ * Both serve the same API and give the same results. On Windows the Node host
+ * connects to either over a named pipe the server creates (rpc-process.ts). */
 export type CheckerBackend = "tsgo" | "tsc-ts";
 
-export function checkerBackend(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: string = process.platform,
-): CheckerBackend {
+export function checkerBackend(env: NodeJS.ProcessEnv = process.env): CheckerBackend {
   const value = env["SCRIPTC_CHECKER"];
-  if (value === undefined || value === "") return platform === "win32" ? "tsgo" : "tsc-ts";
+  if (value === undefined || value === "") return "tsc-ts";
   if (value === "tsc-ts") return "tsc-ts";
   if (value === "tsgo") return "tsgo";
   throw new Error(`SCRIPTC_CHECKER must be tsgo or tsc-ts, not ${JSON.stringify(value)}`);

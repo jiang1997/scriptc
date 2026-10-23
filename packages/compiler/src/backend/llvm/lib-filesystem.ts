@@ -163,7 +163,7 @@ function emitObjEntryPairs(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
   B.line(`${row} = call ptr @${mangleRecordNew(rowT.shapeId)}()`);
   host.storeField(host.recordFieldPtr(row, rowT.shapeId, "0").ptr, STRING, key, false);
   host.storeField(host.recordFieldPtr(row, rowT.shapeId, "1").ptr, DYN, item, false);
-  host.arrPush(arr, "ref", row); // push takes ownership of the row
+  host.arrPush(arr, "ref", row, null); // push takes ownership of the row
   const next = B.tmp();
   B.line(`${next} = add ${size} ${i}, 1`);
   B.line(`store ${size} ${next}, ptr ${iSlot}`);
@@ -536,7 +536,7 @@ export function emitFilesystemLibCall(host: LlvmEmitterContext, e: LibCallExpr):
     const parent = B.tmp();
     B.line(`${parent} = call ptr @scr_fs_glob_parent(ptr ${snap}, ${host.sizeType} ${i}) ; +1`);
     B.line(`store ptr ${parent}, ptr ${host.recordFieldPtr(row, recT.shapeId, "parentPath").ptr}`);
-    host.arrPush(arr, "ref", row); // push takes ownership of the row
+    host.arrPush(arr, "ref", row, null); // push takes ownership of the row
     const i2 = B.tmp();
     B.line(`${i2} = add ${host.sizeType} ${i}, 1`);
     B.line(`store ${host.sizeType} ${i2}, ptr ${iSlot}`);
@@ -620,7 +620,7 @@ export function emitFilesystemLibCall(host: LlvmEmitterContext, e: LibCallExpr):
     B.line(
       `store ptr ${host.retainHeap(path.name, STRING)}, ptr ${host.recordFieldPtr(row, recT.shapeId, "parentPath").ptr}`,
     );
-    host.arrPush(arr, "ref", row); // push takes ownership of the row
+    host.arrPush(arr, "ref", row, null); // push takes ownership of the row
     const i2 = B.tmp();
     B.line(`${i2} = add ${host.sizeType} ${i}, 1`);
     B.line(`store ${host.sizeType} ${i2}, ptr ${iSlot}`);
@@ -955,7 +955,7 @@ export function emitPathUrlLibCall(host: LlvmEmitterContext, e: LibCallExpr): Ll
     B.startBlock(lj);
     const rows = B.tmp();
     B.line(`${rows} = load ptr, ptr ${rowsSlot}`);
-    host.arrPush(rows, "ref", row); // push takes ownership of the row
+    host.arrPush(rows, "ref", row, null); // push takes ownership of the row
     B.line(`call void @scr_arr_release(ptr ${rows})`);
     B.line(`call void @scr_str_release(ptr ${nm})`);
     const i2 = B.tmp();

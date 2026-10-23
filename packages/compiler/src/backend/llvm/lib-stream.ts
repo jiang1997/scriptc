@@ -187,18 +187,24 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     e.fn === "stream.setFinal" ||
     e.fn === "stream.setDestroy" ||
     e.fn === "stream.setTransform" ||
-    e.fn === "stream.setFlush"
+    e.fn === "stream.setFlush" ||
+    e.fn === "stream.setConstruct" ||
+    e.fn === "stream.setWritev" ||
+    e.fn === "stream.setWritevDefault"
   ) {
     // The underscore-method assignment surface: the runtime slot swaps
     // its closure (+1 moves in) and invoke thunk — the next
     // _read/_write/... dispatch uses it, Node's timing.
-    const kindOf: Record<string, "r" | "w" | "f" | "d" | "t" | "l"> = {
+    const kindOf: Record<string, "r" | "w" | "f" | "d" | "t" | "l" | "c" | "v"> = {
       "stream.setRead": "r",
       "stream.setWrite": "w",
       "stream.setFinal": "f",
       "stream.setDestroy": "d",
       "stream.setTransform": "t",
       "stream.setFlush": "l",
+      "stream.setConstruct": "c",
+      "stream.setWritev": "v",
+      "stream.setWritevDefault": "v",
     };
     const symOf: Record<string, string> = {
       "stream.setRead": "scr_stream_set_read",
@@ -207,6 +213,9 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
       "stream.setDestroy": "scr_stream_set_destroy",
       "stream.setTransform": "scr_stream_set_transform",
       "stream.setFlush": "scr_stream_set_flush",
+      "stream.setConstruct": "scr_stream_set_construct",
+      "stream.setWritev": "scr_stream_set_writev",
+      "stream.setWritevDefault": "scr_stream_set_writev_default",
     };
     const recv = host.emitExpr(e.args[0]!);
     const cb = host.emitExpr(e.args[1]!);
@@ -692,12 +701,15 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
   }
   if (
     e.fn === "sp.pipelineStages" ||
+    e.fn === "sp.pipelineStagesOpts" ||
     e.fn === "stream.pipelineStages" ||
-    e.fn === "stream.pipelineStagesDyn"
+    e.fn === "stream.pipelineStagesDyn" ||
+    e.fn === "stream.composeStages"
   ) {
     // (n, k, positions, flags, mask, s1..sn, stage1..stagek, helpers...,
-    // box?, (signal, abort)?[, cb]): the streams, the stage closures and
-    // the helpers ride stack arrays; absent groups pass null.
+    // box?, (signal, abort)?[, cb | end, signal?]): the streams, the
+    // stage closures and the helpers ride stack arrays; absent groups
+    // pass null.
     const [nArg, kArg, positionsArg, flagsArg, maskArg] = e.args;
     if (
       nArg?.kind !== "numLit" ||
@@ -710,7 +722,7 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     const n = nArg.value;
     const k = kArg.value;
     const flags = flagsArg.value;
-    const helperCount = 3 * pipelinePumpedRuns(n + k, positionsArg.value);
+    const helperCount = 3 * pipelinePumpedRuns(n + k, positionsArg.value, flags);
     const args = e.args.map((a) => host.emitExpr(a));
     const packed = (from: number, count: number): string => {
       if (count === 0) return "null";
@@ -740,6 +752,21 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     if (e.fn === "sp.pipelineStages") {
       host.declare(`declare ptr @scr_sp_pipeline_stages(${params})`);
       B.line(`${t} = call ptr @scr_sp_pipeline_stages(${head})`);
+    } else if (e.fn === "sp.pipelineStagesOpts") {
+      const end = args[at++]!.name;
+      const outer = take((flags & 64) !== 0);
+      let add = "null";
+      if (outer !== "null") {
+        host.declare(`declare ptr @scr_events_add_abort_listener(ptr, ptr)`);
+        add = "@scr_events_add_abort_listener";
+      }
+      host.declare(`declare ptr @scr_sp_pipeline_stages_opts(${params}, i1, ptr, ptr)`);
+      B.line(
+        `${t} = call ptr @scr_sp_pipeline_stages_opts(${head}, i1 ${end}, ptr ${outer}, ptr ${add})`,
+      );
+    } else if (e.fn === "stream.composeStages") {
+      host.declare(`declare ptr @scr_stream_compose_stages(${params})`);
+      B.line(`${t} = call ptr @scr_stream_compose_stages(${head})`);
     } else if (e.fn === "stream.pipelineStagesDyn") {
       host.declare(`declare ptr @scr_stream_pipeline_stages_dyn(${params}, ptr)`);
       B.line(

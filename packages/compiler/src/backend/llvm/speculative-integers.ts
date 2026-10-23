@@ -35,12 +35,12 @@ export interface SpeculativeLoopPlan {
 type SpeculativeLoop = Extract<IrStmt, { kind: "for" | "while" | "doWhile" }>;
 
 /** The fast copy duplicates the loop; keep the duplicated code small. */
-const MAX_LOOP_NODES = 400;
+export const MAX_LOOP_NODES = 400;
 
 /** Statements whose emission is plain control flow or a single write.
  * Nested loops, switches and try statements keep the loop on the ordinary
  * path (their emission keeps state that the two copies would not share). */
-const SIMPLE_STATEMENTS = new Set<string>([
+export const SIMPLE_STATEMENTS: ReadonlySet<string> = new Set<string>([
   "varDecl",
   "assign",
   "exprStmt",

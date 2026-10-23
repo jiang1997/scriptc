@@ -62,6 +62,21 @@ export class LlWalkers {
 
   constructor(private readonly host: WalkerHost) {}
 
+  /** Journal replay (emit-journal.ts): builds or finds the helper a chunk
+   * emitter recorded, and answers its name. */
+  replayHelper(op: string, args: readonly unknown[]): string {
+    switch (op) {
+      case "walkers.jsonWriteHelper":
+        return this.jsonWriteHelper(args[0] as IrType);
+      case "walkers.recordFieldWriter":
+        return this.recordFieldWriter(args[0] as string);
+      case "walkers.unionJoinHelper":
+        return this.unionJoinHelper(args[0] as string);
+      default:
+        throw new InternalCompilerError(`llvm emitter bug: no walker replay ${op}`);
+    }
+  }
+
   private get S(): "i32" | "i64" {
     return this.host.sizeType;
   }
@@ -191,6 +206,7 @@ export class LlWalkers {
     if (existing) return existing;
     const name = `sc_jw_${this.jsonWriters.size}`;
     this.jsonWriters.set(key, name);
+    this.host.journalAllocated?.(name, "walkers.jsonWriteHelper", [t]);
     const B = new BlockBuilder();
     switch (t.kind) {
       case "f64":
@@ -244,6 +260,7 @@ export class LlWalkers {
       `}`,
       ``,
     );
+    this.host.journalBuilt?.();
     return name;
   }
 
@@ -457,6 +474,7 @@ export class LlWalkers {
       throw new InternalCompilerError(`llvm emitter bug: field writer of unknown shape ${shapeId}`);
     const name = `sc_jwf_${this.recordFieldWriters.size}`;
     this.recordFieldWriters.set(shapeId, name);
+    this.host.journalAllocated?.(name, "walkers.recordFieldWriter", [shapeId]);
     const fieldBase = this.host.nullableUnions.fieldBase(shapeId);
     const fieldIndex = new Map(shape.fields.map((f, i) => [f.name, i + fieldBase]));
     const byName = new Map(shape.fields.map((f) => [f.name, f]));
@@ -508,6 +526,7 @@ export class LlWalkers {
       `}`,
       ``,
     );
+    this.host.journalBuilt?.();
     return name;
   }
 
@@ -852,6 +871,7 @@ export class LlWalkers {
     if (!def) throw new InternalCompilerError(`llvm emitter bug: join of unknown union ${unionId}`);
     const name = `sc_uj_${this.unionJoinFns.size}`;
     this.unionJoinFns.set(unionId, name);
+    this.host.journalAllocated?.(name, "walkers.unionJoinHelper", [unionId]);
 
     const host = this.host;
     host.declare(`declare void @scr_jb_init(ptr)`);
@@ -946,6 +966,7 @@ export class LlWalkers {
       `}`,
       ``,
     );
+    this.host.journalBuilt?.();
     return name;
   }
 }

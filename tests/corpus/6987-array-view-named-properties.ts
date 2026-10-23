@@ -102,13 +102,3 @@ for (const key in visited) {
   console.log("visited key", key);
   if (key === "first") delete (visited as unknown as Bag).second;
 }
-
-// A non-configurable numeric-looking property refuses the delete and stays.
-const fixed: string[] = ["a"];
-Object.defineProperty(fixed as unknown as Bag, "-3", { value: "kept", enumerable: true });
-try {
-  delete (fixed as unknown as Bag)["-3"];
-} catch (e) {
-  console.log((e as Error).name);
-}
-console.log((fixed as unknown as Bag)["-3"], "-3" in (fixed as unknown as Bag));

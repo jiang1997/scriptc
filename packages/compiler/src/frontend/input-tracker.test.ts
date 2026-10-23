@@ -60,6 +60,28 @@ test("semantic validation reads non-source dependencies once and still invalidat
   expect(reads.mock.calls.filter(([path]) => path === dependency)).toHaveLength(1);
 });
 
+test("an equivalent edit of a file whose raw text the frontend read does not match", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-inputs-"));
+  scratch.push(dir);
+  const source = join(dir, "entry.ts");
+  const previous = "export const answer = 1;\n";
+  await writeFile(source, previous);
+  const tracker = new FrontendInputTracker();
+  tracker.run(() => {
+    trackedReadFile(source);
+    tracker.record({ op: "text", path: source });
+  });
+  const snapshot = tracker.snapshot();
+  expect(validFrontendInputSnapshot(snapshot)).toBe(true);
+  expect(frontendInputsStillMatch(snapshot)).toBe(true);
+  await writeFile(source, `// comment\n${previous}`);
+  const equivalent = vi.fn(() => true);
+  expect(
+    frontendInputsSemanticallyMatch(snapshot, new Map([[source, previous]]), equivalent),
+  ).toBeNull();
+  expect(equivalent).not.toHaveBeenCalled();
+});
+
 test("tracked frontend reads invalidate on byte edits", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-inputs-"));
   scratch.push(dir);

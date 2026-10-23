@@ -117,7 +117,7 @@ fenced.ts:69:71 - error SC2020: 'createSecureServer option 'streamResetBurst' wi
 
 fenced.ts:76:1 - error SC2020: 'crypto.publicEncrypt' is typed by @types/node but has no scriptc lowering yet
 
-  75 | import { checkPrimeSync, createCipheriv, publicEncrypt, setFips } from "node:crypto";
+  75 | import { createCipheriv, publicEncrypt, secureHeapUsed, setFips } from "node:crypto";
   76 | publicEncrypt("key", Buffer.alloc(1));
      | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   77 | createCipheriv("aes-128-ccm", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
@@ -129,22 +129,22 @@ fenced.ts:77:16 - error SC2020: 'crypto.createCipheriv with cipher 'aes-128-ccm'
   76 | publicEncrypt("key", Buffer.alloc(1));
   77 | createCipheriv("aes-128-ccm", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
      |                ^~~~~~~~~~~~~
-  78 | checkPrimeSync(7n);
+  78 | secureHeapUsed();
 
-  hint: the supported ciphers are aes-128-cbc, aes-192-cbc, aes-256-cbc, aes-128-ctr, aes-192-ctr, aes-256-ctr, aes-128-gcm, aes-192-gcm, aes-256-gcm, and chacha20-poly1305
+  hint: the supported ciphers are aes-128, aes-192 and aes-256 in cbc, ctr, gcm, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede3 in cbc, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede in cbc, ecb, cfb and ofb modes, chacha20, and chacha20-poly1305
 
-fenced.ts:78:1 - error SC2020: 'crypto.checkPrimeSync' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:78:1 - error SC2020: 'crypto.secureHeapUsed' is typed by @types/node but has no scriptc lowering yet
 
   77 | createCipheriv("aes-128-ccm", Buffer.alloc(16), Buffer.alloc(12), { authTagLength: 16 });
-  78 | checkPrimeSync(7n);
-     | ^~~~~~~~~~~~~~~~~~
+  78 | secureHeapUsed();
+     | ^~~~~~~~~~~~~~~~
   79 | setFips(false);
 
   hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 fenced.ts:79:1 - error SC2020: 'crypto.setFips' is typed by @types/node but has no scriptc lowering yet
 
-  78 | checkPrimeSync(7n);
+  78 | secureHeapUsed();
   79 | setFips(false);
      | ^~~~~~~~~~~~~~
   80 | fetch("https://example.invalid/", {

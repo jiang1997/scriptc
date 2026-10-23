@@ -24,15 +24,11 @@ function writePackage(directory: string, name: string, executable?: string): voi
   writeFileSync(join(directory, "lib", executable), "");
 }
 
-test("tsc-ts is the default checker except on Windows, and SCRIPTC_CHECKER selects one", () => {
-  expect(checkerBackend({}, "linux")).toBe("tsc-ts");
-  expect(checkerBackend({ SCRIPTC_CHECKER: "" }, "linux")).toBe("tsc-ts");
-  expect(checkerBackend({}, "darwin")).toBe("tsc-ts");
-  expect(checkerBackend({}, "win32")).toBe("tsgo");
-  expect(checkerBackend({ SCRIPTC_CHECKER: "" }, "win32")).toBe("tsgo");
-  expect(checkerBackend({ SCRIPTC_CHECKER: "tsc-ts" }, "linux")).toBe("tsc-ts");
-  expect(checkerBackend({ SCRIPTC_CHECKER: "tsc-ts" }, "win32")).toBe("tsc-ts");
-  expect(checkerBackend({ SCRIPTC_CHECKER: "tsgo" }, "linux")).toBe("tsgo");
+test("tsc-ts is the default checker, and SCRIPTC_CHECKER selects one", () => {
+  expect(checkerBackend({})).toBe("tsc-ts");
+  expect(checkerBackend({ SCRIPTC_CHECKER: "" })).toBe("tsc-ts");
+  expect(checkerBackend({ SCRIPTC_CHECKER: "tsc-ts" })).toBe("tsc-ts");
+  expect(checkerBackend({ SCRIPTC_CHECKER: "tsgo" })).toBe("tsgo");
   expect(() => checkerBackend({ SCRIPTC_CHECKER: "tsc" })).toThrow(
     'SCRIPTC_CHECKER must be tsgo or tsc-ts, not "tsc"',
   );

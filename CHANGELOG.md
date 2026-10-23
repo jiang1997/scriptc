@@ -6,6 +6,161 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.4.2
+
+### Highlights
+
+- **Faster builds of large programs:**
+  - scriptc checks with tsc-ts 0.0.7, which answers contextual types and resolved signatures in batches, so lowering asks for them in one request per chunk instead of one per node. A native build of tsc-ts is 7% faster (110.5 → 103.5 s on 8 vCPUs, lowering 12% faster), with an identical executable.
+  - The native compiler is built with profile-guided optimization, so tsc-ts builds 6.9% faster cold and 10.7% faster after an edit.
+  - The native compiler's optimization profile is refreshed, so a native build of tsc-ts is a further 10% faster (124.7 → 111.7 s on 16 vCPUs), with lowering 17% faster.
+  - The class dispatch passes index their receivers by name instead of testing each one, and they reuse their per-function scans while a function's body is unchanged.
+  - Checker replies resolve objects the compiler already holds from their ids without decoding them.
+- **Leaner builds:**
+  - The frontend of an optimized executable's first build runs in a child process, so the native code generator starts after its memory is released. The cold build of tsc-ts peaks at 2.21 GB instead of 3.30 GB.
+  - The compiler collects its heap as lowering and LLVM emission grow it.
+- **WebCrypto:**
+  - The `crypto` global, `node:crypto`'s `webcrypto` and `crypto.subtle` are one object.
+  - `generateKey`, `importKey`, `exportKey`, `encrypt`, `decrypt`, `deriveBits`, `deriveKey`, `wrapKey` and `unwrapKey` cover HMAC, AES-GCM, AES-CBC, AES-CTR, AES-KW, PBKDF2, HKDF and JSON Web Keys.
+  - `crypto.subtle` signs and verifies with ECDSA, RSASSA-PKCS1-v1_5, RSA-PSS and Ed25519.
+  - All of it follows Node 24's argument conversion, algorithm normalization and `DOMException`s. jose's symmetric JWE paths run as in Node.
+- **JSX:** `.tsx`, `.jsx` and JavaScript files with JSX compile under the project's `jsx` options.
+  - `react`, `react-jsx` and `react-jsxdev` lower to the factory calls TypeScript emits, with the same keys, fallbacks and source positions.
+  - `preserve` and `react-native` are refused with a named diagnostic.
+- **Faster worker messages:**
+  - A message is encoded into one block sized to its contents.
+  - A typed record is posted from its fields.
+  - A `'message'` listener with a typed parameter builds it from the message, without a checked-dynamic copy.
+  - Messages between `MessageChannel` ports take 90 ms where they took 250 ms in 0.4.1 (Node: 337 ms), with a peak RSS of 45 MB instead of 115 MB.
+- **Loops over typed arrays vectorize:** a loop to a typed array's length keeps one bounds test for every typed array it indexes.
+  - Index temporaries such as `const j = i * 4` are computed as integers.
+  - Uint8ClampedArray stores convert inline.
+  - Row-major index terms such as `r * cols + j` are tested once before the loop.
+  - Typed-array callback methods call a literal callback directly on an integer counter.
+  - An 896 × 896 matrix-vector product with four accumulators takes 55 ms instead of 396 ms (Node: 275 ms). `Uint8Array.map` is 4.5 times as fast and `Int32Array.some` 7.8 times as fast as in 0.4.1.
+
+### Features
+
+- **Asymmetric keys and signatures in `node:crypto`:**
+  - `generateKeyPair`, `generateKeyPairSync`, `createPrivateKey` and `createPublicKey` handle RSA, EC and Ed25519 keys in PEM, DER and JWK.
+  - `sign`, `verify`, `createSign` and `createVerify` sign and verify with those keys, with Node's output and errors.
+  - Ed25519 verification matches Node on 2,083 test vectors, including small-order and mixed-order keys.
+- **`crypto.createDiffieHellman`, `crypto.getDiffieHellman` and `crypto.createDiffieHellmanGroup`:**
+  - The modp1, modp2 and modp5 to modp18 groups, explicit primes and generators, and generated safe primes are supported, with Node 24's key widths, `verifyError` bits, key range checks and errors.
+  - Secrets of 0, 1 and p − 1 are rejected, and so are peer keys outside the RFC 5114 subgroups.
+  - Primes longer than 8192 bits are refused.
+- **TLS:**
+  - `tls.connect` and `tls.createServer` negotiate `ALPNProtocols`, and both sockets report `alpnProtocol`. `minVersion` and `maxVersion` bound the handshake, and `getProtocol()` reports the version it picked.
+  - `tls.createServer` takes an `SNICallback` that answers a `SecureContext` synchronously or later.
+  - `new tls.TLSSocket(socket, { isServer: true, ... })` and `tls.connect({ socket })` run the handshake on an open socket, such as an HTTP `CONNECT` tunnel.
+  - A client whose peer closes before the handshake completes fails with Node's `ECONNRESET`.
+- **Streams:**
+  - Readable, Writable, Duplex, Transform and PassThrough streams take `objectMode`, `readableObjectMode` and `writableObjectMode`, and an object-mode side carries any value through `push`, `write`, `pipe`, `pipeline`, `for await` and `'data'` listeners.
+  - `_write` and `_transform` receive the encoding argument as Node passes it.
+  - `Cipheriv` and `Decipheriv` are Transforms: they can be piped, used as `pipeline()` stages, read and iterated.
+  - `pipeline()` accepts function stages anywhere among its streams, and an array, a string or a synchronous generator as its source.
+- **Packages compiled from their JavaScript:**
+  - js-yaml and smol-toml compile statically and match Node: ES5 error constructors (`Object.create(Error.prototype)`, `Error.call(this)`, `Error.captureStackTrace`) and classes extending `Date` behave as in Node.
+  - TypeScript's UMD module wrapper compiles as the module body, and tsc's `__importDefault` and `__importStar` helpers around builtin modules compile as plain `require()` calls.
+  - Interfaces, type aliases and enums that only a package's `.d.ts` declares keep their types.
+- **JavaScript sources:**
+  - Error constructors can be read as values, so `err.constructor === TypeError` works.
+  - `workerData` can be destructured.
+  - Unary `+` converts unions of strings, numbers, booleans, `null` and `undefined` as `Number()` does, so `+process.argv[2]` compiles.
+  - These compile and behave as in Node:
+    - chained readline listener registration;
+    - `Number.parseInt` without a radix;
+    - `match` and `search` with a possibly undefined regular expression;
+    - `Buffer.from` over an untyped `ArrayBuffer`, with its byte offset;
+    - Atomics on untyped arrays.
+  - Buffer methods run on Buffers held as untyped values.
+- **`fs`:**
+  - The synchronous functions (`readFileSync`, `writeFileSync`, `statSync`, `readdirSync`, `mkdirSync`, `rmSync`, `openSync` and the others) accept `file:` URLs wherever they accept a path, with Node's conversion errors.
+  - `fs.promises.rm` takes `recursive`, `force`, `maxRetries` and `retryDelay`, and removing a directory without `recursive` throws Node's `ERR_FS_EISDIR`.
+- **`TypedArray.of`** creates a typed array of its arguments, and a dynamic iterable spread into `Array.of`, `push` or `TypedArray.of` is drained through the iterator protocol.
+- **Global `isFinite` converts its argument with ToNumber,** as `isNaN` does. The Math functions and `String.fromCharCode` evaluate every argument before converting any.
+- **`Object.freeze`, `Object.seal` and `Object.preventExtensions` of a function** act on its own properties, and `Object.isFrozen`, `Object.isSealed` and `Object.isExtensible` answer for functions. @noble/hashes' frozen hashers work.
+- **EventEmitters used through both typed and untyped references** share one listener list. An untyped `emit` reaches typed listeners, an untyped `emit('error')` follows Node's contract, and `listenerCount`, `eventNames`, `listeners`, `rawListeners`, `removeAllListeners`, `setMaxListeners` and `getMaxListeners` work on untyped values.
+- **Template literals, `join`, `Array.prototype.toString` and the default `sort()`** call an object's own or inherited `toString`, as `String()` does, instead of printing `[object Object]`.
+- **Classes and generics:**
+  - A generic factory declared to return a constructor type can return one of its local classes, including an anonymous class expression, and `class X extends factory(...)` extends it.
+  - Static methods of a function-local class compile.
+  - Constructor types declared in the program (`new () => unknown`, types that also name static members, construct overloads) hold class values.
+  - Members typed by a conditional type over a literal class type argument (`Field<string, "required">`) resolve.
+  - Object literals under an erased generic member may hold callbacks with optional or defaulted parameters.
+- **Assignment and update targets wrapped in parentheses or non-null assertions** (`(x) = 1`, `h.sums[k]! += 10`) compile.
+- **Untyped values keep what JavaScript code adds:**
+  - Properties that untyped code adds to a typed object literal stay on it.
+  - Named properties written to an array through an `unknown` view stay on the array, and `for...in` visits them after the indices.
+  - An `unknown` value asserted to a structural type with methods keeps its class's methods.
+  - The type inferred from an empty object literal holds any non-nullish value, as TypeScript's `{}` does.
+- **A WebAssembly module the build finds but does not translate** rejects with a `CompileError` that names the reason, for example a proposal outside the translated feature set.
+- **SC6101 names the functions that likely run often and use untyped values:**
+  - It shows up to five, most likely hot first, with why their values are untyped: an `any`, an untyped `JSON.parse` result or an untyped JavaScript file.
+  - `scriptc coverage --fail-on=dynamic` fails on it, and `--no-dynamic-tier-warning` leaves it out.
+
+### Performance
+
+- **Regular expressions skip start positions that their leading character sets rule out,** testing 16 positions at once. Searching 50 MB of text for nine case-insensitive alternations takes 0.83 s instead of 3.88 s (Node: 4.38 s).
+- **Loop counters stay integers in more loops:**
+  - Counters that step beside a counted loop's counter (`for (let i = 0, p = 0; i < n; i++, p += 4)`) stay integers: a pixel-stride loop takes 114 ms instead of 340 ms (Node: 190 ms).
+  - So do two counters that close in on each other (`lo++, hi--`), 17% faster on a permutation-reversal loop.
+  - So do counters of loops bounded by a string's length or by an invariant limit other than an array's length, and while-loop counters that nested scans advance. A non-ASCII lexer is 9.5% faster.
+- **Loops that call a known callback** test its closure once before the loop and call the function directly, so captured `let` bindings stay in registers. `forEach` sums with a captured accumulator are 25 to 55% faster.
+- **A speculative integer loop whose check fails** finishes the iteration outside the ordinary loop, which stays optimizable, and a loop site that keeps failing stops trying. With the hole-free-prefix test that element reads now take first, a pairwise loop over an array of class instances with number fields is about 1.25 times as fast as in 0.4.1.
+- **Typed arrays over a SharedArrayBuffer** read and write elements inline as relaxed atomic accesses. A numeric kernel over shared `Float64Array`s takes 0.78 s instead of 1.56 s (Node: 0.84 s).
+- **`Math.pow(2, n)` for integer exponents** builds the result from its bits. A counter that masks with `Math.pow(2, length)` takes 11.0 s instead of 20.4 s.
+- **Async calls that never suspend run in place,** and so does `await Promise.all` of such calls, with Node's microtask turns and rejection handling. An async pipeline takes 5.5 ms instead of 9.7 ms.
+- **Strings:**
+  - `Number()` of a short integer string returns the integer directly.
+  - `split` builds its result in one inline block, and `indexOf` and `slice` on ASCII strings skip the UTF-16 index map. A log summary is 20% faster.
+  - `charAt` and `s[i]` on ASCII strings read the character from a table.
+  - Chains of one-character `replace` calls (the HTML-escape idiom) replace a block of 16 bytes at a time, 12.8% faster on a template renderer.
+- **`JSON.parse` and `JSON.stringify`** scan whole words and append parsed typed arrays in bulk, 22% faster to parse and 10% faster to stringify records.
+- **Smaller arrays, maps and program-lifetime instances:**
+  - The array header is 32 bytes instead of 48.
+  - Arrays of up to 16 known elements keep their slots in their own block.
+  - Arrays of a known final length get exactly that capacity.
+  - Small map entry arrays grow in finer steps.
+  - On Linux, `ProgramLifetime` instances take a 32-bit header and are referenced in 4 bytes.
+  - They lower the peak memory of a large TypeScript type checker: the 4-byte references alone take a large project's check from 4.13 GB to 3.75 GB, and the 32-bit header saves a further 5%.
+- **Worker messages queued together are delivered in one batch** before immediates run. 20,000 messages interleaved with a worker's output drain in 0.5 s instead of 5.6 s (Node: 0.57 s).
+- **The cycle collector** never buffers instances of classes whose fields hold nothing cycle-capable, and its per-object paths are shorter. A workload of cyclic graphs is about 5% faster.
+- **Array helpers specialized for a callback that cannot throw** skip the pending-exception test, 4.5% faster on a functional pipeline.
+- **Compile time:**
+  - A file's function declarations are walked once for their references, so lowering a 10 MB single-module bundle takes 69 s instead of 219 s.
+  - LLVM emission computes its module facts once, 6.9% faster on tsc-ts.
+  - AST walks visit subtrees by their node ranges and read node words through a `Uint32Array`.
+  - Program builds no longer import runtime bitcode, so builds through Node and through the native compiler produce identical executables.
+
+### Fixes
+
+- **Member reads and method calls on an array hole** held in a binding narrowed to one arm of a wide union throw Node's `Cannot read properties of undefined` TypeError.
+- **`AsyncLocalStorage`:**
+  - A store entered before an async function's first await, or in a body that never suspends, is the caller's store after the call.
+  - Each synchronous generator step runs in its resumer's context, as in Node.
+- **Generic arrow and function-expression bindings used before their declarations** behave as in Node, including the `ReferenceError` of a `let` or `const`.
+- **Assignment expressions into a module `let` declared without an initializer** (`new Promise((r) => (resolve = r))`) store the value instead of throwing a `ReferenceError`.
+- **The `extends` expression of a class defined inside a function** is evaluated each time the definition runs.
+- **A `super()` call that leads an `if` condition's comma chain** compiles.
+- **A catch binding tests `instanceof`** correctly for values thrown as `unknown`, rejected promises and runtime errors.
+- **zlib callbacks receive `undefined` as their result when the operation fails,** as in Node, and a callback may assign a fallback to it.
+- **`Readable.push` and `Writable.write` with `string | null` or `Buffer | null` chunks** no longer crash.
+- **Object literals keep their key order** through compiler rewrites and on shapes a typed `JSON.parse` also builds, so `JSON.stringify`, `Object.keys` and `console.log` match Node.
+- **`console.log` prints class instances with their class name** in programs that test `instanceof` on unknown values.
+- **`String`, `Number` and `Boolean` passed to array methods** convert as their direct calls do, and nested array literals in a recursive JSON-style union build.
+- **A dynamic method call that the program also reads through a prototype** finds the method when the instance's property bag does not hold it.
+- **Storing an element on `Array.prototype`** fails with SC2020, because holes in native arrays do not read inherited elements.
+- **A recursive type alias in a generic signature** no longer crashes the compiler.
+- **A `Buffer` view of an untyped typed array** compiles.
+- **JSX programs checked with tsgo** compile as they do with tsc-ts.
+- **Two programs whose entries share a name and build into one directory** no longer share a cached translation unit, so a later cache hit always relinks the right program.
+- **A warm build whose cached LLVM exceeds the engine's string limit** reads it in parts instead of failing with `Invalid string length`.
+- **The same program compiles to the same executable wherever it sits on disk** and whatever order its functions lower in, and edits outside a declaration do not rename the helpers and closures inside it.
+- **Libraries that use untyped byte arrays** link.
+
+<!-- release:end -->
+
 ## 0.4.1
 
 ### Highlights
@@ -76,8 +231,6 @@ All notable changes to scriptc will be documented in this file.
 - **Untyped async methods called through overrides or untyped receivers return their promises,** which fixes internal compiler errors in programs that use zod's `parseAsync` this way.
 - **TypeScript enum exports in compiled packages stay `undefined` until they are assigned,** as in Node.
 - **Element writes accept a possibly undefined index** (typed-array writes, compound and update writes, element assignments used as values and destructuring targets) and convert it with ToNumber, as element reads already did.
-
-<!-- release:end -->
 
 ## 0.4.0
 

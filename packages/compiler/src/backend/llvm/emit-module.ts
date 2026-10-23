@@ -2,6 +2,10 @@
 import { relieveHeapPressure } from "../../heap-pressure.js";
 import { emitWasmModules } from "./wasm-modules.js";
 import { type LlEmitter, ffiCallbackDummyLl, llStrBytes } from "./emitter.js";
+import { type ChunkResult, EmitJournal } from "./emit-journal.js";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { JS_IC_WORDS } from "./js-ic.js";
 import {
   mangleAsyncSpawn,
@@ -24,7 +28,7 @@ import {
 } from "../../ir/ir.js";
 import {
   FN_ATTRS,
-  limitInlineDynReleases,
+  limitInlineReleases,
   releaseSym,
   typedRefConstructor,
   vAdapters,
@@ -35,9 +39,11 @@ import { emitClassMembershipHelper } from "./classes.js";
 import { type RegexMatcherCode, compileRegexMatcher } from "./regex-matchers.js";
 import {
   MAP_ITER_DECL,
+  MAP_SIZE_DECL,
   MAP_ITER_NUM_DECL,
   SCR_MAP_NUM_DEAD,
   NUMBER_MAP_ENTRY_DECL,
+  STRING_MAP_ENTRY_C_DECL,
   STRING_MAP_ENTRY_DECL,
 } from "./map-number-lookup.js";
 import { RUNTIME_ABI_MARKER } from "../runtime-abi.js";
@@ -59,16 +65,150 @@ import { STRING_READ_HELPERS, stringScanDecl } from "./string-reads.js";
 import { emitLibraryIdentityLines } from "../library-identity-markers.js";
 import { InternalCompilerError } from "../../errors.js";
 
+/** The function bodies emitted in `chunks` contiguous ranges, each by its
+ * own emitter (LlEmitter.chunkEmitter), then merged in function order: the
+ * text one emitter gives. */
+function emitFunctionsInChunks(emitter: LlEmitter, chunks: number): string[] {
+  const functions = emitter.mod.functions;
+  const size = Math.ceil(functions.length / chunks);
+  const ranges: { chunk: LlEmitter; texts: string[] }[] = [];
+  for (let start = 0; start < functions.length; start += size) {
+    const chunk = emitter.chunkEmitter();
+    const texts = functions.slice(start, start + size).map((fn) => {
+      const text = chunk.emitFunction(fn);
+      if (chunk.journal!.overclosed)
+        throw new Error(`llvm emitter bug: journal definition closed twice in ${fn.name}`);
+      if (chunk.journal!.unclosed.length > 0)
+        throw new Error(
+          `llvm emitter bug: unclosed journal definitions after ${fn.name}: ${chunk.journal!.unclosed.join(", ")}`,
+        );
+      return text;
+    });
+    ranges.push({ chunk, texts });
+  }
+  const fnDefs: string[] = [];
+  for (const { chunk, texts } of ranges) {
+    // The plain-data result a worker process would write, round-tripped.
+    const result = JSON.parse(JSON.stringify(chunk.chunkResult())) as ChunkResult;
+    const rename = emitter.mergeChunk(result);
+    for (const text of texts) {
+      const def = rename(text);
+      emitter.fnDefText.set(functions[fnDefs.length]!.name, def);
+      fnDefs.push(def);
+    }
+  }
+  return fnDefs;
+}
+
+/** Modules with fewer functions emit in one process: forking and merging
+ * would cost more than the workers save (SCRIPTC_EMIT_WORKER_FUNCTIONS
+ * lowers it, for tests). */
+function workerMinFunctions(): number {
+  const value = Number(process.env["SCRIPTC_EMIT_WORKER_FUNCTIONS"] ?? "2000");
+  return Number.isFinite(value) && value > 0 ? value : 2000;
+}
+
+/** The function bodies emitted on forked worker processes, `workers` at a
+ * time: the function list splits into contiguous ranges, each emitted in
+ * its own process, which inherits this emitter as it is at the fork and
+ * records a journal (emit-journal.ts). Ranges merge in function order, so
+ * the text is the serial text. A range whose worker fails is emitted here
+ * when its turn comes. Null without fork primitives (Node, Windows, inside
+ * a worker) or when the module is small. */
+function emitFunctionsOnWorkers(emitter: LlEmitter, workers: number): string[] | null {
+  const fork = emitter.targetOptions.forkPrimitives;
+  const functions = emitter.mod.functions;
+  if (fork === undefined || workers < 2) return null;
+  if (functions.length < workerMinFunctions()) return null;
+  // More ranges than workers: a range's merge overlaps the later ranges'
+  // emission, and a slow range holds back less.
+  const count = Math.min(functions.length, workers * 3);
+  const size = Math.ceil(functions.length / count);
+  const dir = mkdtempSync(join(tmpdir(), "scriptc-emit-"));
+  const pids: number[] = [];
+  const start = (range: number): void => {
+    const pid = fork.fork();
+    if (pid === 0) {
+      let code = 1;
+      try {
+        emitter.journal = new EmitJournal();
+        const texts: string[] = [];
+        for (const fn of functions.slice(range * size, (range + 1) * size)) {
+          texts.push(emitter.emitFunction(fn));
+          relieveHeapPressure();
+        }
+        writeFileSync(join(dir, `${range}.json`), JSON.stringify(emitter.chunkResult()));
+        // Function text never holds NUL, so it separates the functions.
+        writeFileSync(join(dir, `${range}.ll`), texts.join("\0"));
+        code = 0;
+      } catch {
+        // The parent emits the range itself.
+      }
+      fork.exit(code);
+    }
+    pids.push(pid);
+  };
+  const fnDefs: string[] = [];
+  try {
+    for (let range = 0; range < Math.min(workers, count); range++) start(range);
+    for (let range = 0; range < count; range++) {
+      const pid = pids[range]!;
+      const status = pid > 0 ? fork.wait(pid) : -1;
+      // The next worker starts from this emitter as merged so far, which
+      // the journal allows: it records requests, not table contents.
+      const merged = status === 0 ? readRange(dir, range) : null;
+      const slice = functions.slice(range * size, (range + 1) * size);
+      if (merged !== null && merged.texts.length === slice.length) {
+        const rename = emitter.mergeChunk(merged.result);
+        slice.forEach((fn, index) => {
+          const def = rename(merged.texts[index]!);
+          emitter.fnDefText.set(fn.name, def);
+          fnDefs.push(def);
+        });
+      } else
+        for (const fn of slice) {
+          const def = emitter.emitFunction(fn);
+          emitter.fnDefText.set(fn.name, def);
+          fnDefs.push(def);
+          relieveHeapPressure();
+        }
+      if (pids.length < count) start(pids.length);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return fnDefs;
+}
+
+/** A worker's range result, or null when its files are missing. */
+function readRange(dir: string, range: number): { result: ChunkResult; texts: string[] } | null {
+  try {
+    const result = JSON.parse(readFileSync(join(dir, `${range}.json`), "utf8")) as ChunkResult;
+    const texts = readFileSync(join(dir, `${range}.ll`), "utf8").split("\0");
+    return { result, texts };
+  } catch {
+    return null;
+  }
+}
+
 export function emitModuleParts(emitter: LlEmitter): string[] {
   // Function bodies first (the literal/unit/fn-value tables fill as they
   // emit), then the file assembles around them — the runtime ABI’s order.
-  const fnDefs: string[] = [];
-  for (const fn of emitter.mod.functions) {
-    const def = emitter.emitFunction(fn);
-    fnDefs.push(def);
-    emitter.fnDefText.set(fn.name, def);
-    relieveHeapPressure();
-  }
+  // Debug metadata is numbered per emitter and not journaled, so a debug
+  // build emits every body here.
+  const ranges = emitter.debug === null;
+  const chunks = emitter.targetOptions.functionChunks ?? 1;
+  const fnDefs =
+    (ranges && chunks > 1 ? emitFunctionsInChunks(emitter, chunks) : null) ??
+    (ranges ? emitFunctionsOnWorkers(emitter, emitter.targetOptions.functionWorkers ?? 1) : null) ??
+    [];
+  if (fnDefs.length === 0)
+    for (const fn of emitter.mod.functions) {
+      const def = emitter.emitFunction(fn);
+      fnDefs.push(def);
+      emitter.fnDefText.set(fn.name, def);
+      relieveHeapPressure();
+    }
   emitter.selectStacklessAsync(fnDefs);
   const errorViews: string[] = [];
   for (const property of ["name", "message"])
@@ -456,15 +596,18 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     // RC fast paths test the traced byte (shapes.ts).
     ...(emitter.rcHelpers === null ? [] : [`%ScrMapRc = type { ${emitter.sizeType}, i8, i8, i8 }`]),
     // The complete ScrMap and its entries, read by the inline number-key
-    // lookup (sc_map_entry_f64) and the inline iteration steps
-    // (sc_map_iter_entry, sc_map_iter_entry_num): field 8 is the i32 entry
+    // lookup (sc_map_entry_f64), the inline iteration steps
+    // (sc_map_iter_entry, sc_map_iter_entry_num) and Map.size
+    // (sc_map_size): field 8 is the i32 entry count, field 9 the i32 live
     // count, field 10 the i64 absent-key filter, entries is field 11,
     // nbuckets and buckets fields 13 and 14, the direct index and its i32
     // length fields 15 and 16.
     ...(emitter.decls.has(NUMBER_MAP_ENTRY_DECL) ||
     emitter.decls.has(STRING_MAP_ENTRY_DECL) ||
+    emitter.decls.has(STRING_MAP_ENTRY_C_DECL) ||
     emitter.decls.has(MAP_ITER_DECL) ||
-    emitter.decls.has(MAP_ITER_NUM_DECL)
+    emitter.decls.has(MAP_ITER_NUM_DECL) ||
+    emitter.decls.has(MAP_SIZE_DECL)
       ? [
           `%ScrMapIx = type { ${emitter.sizeType}, i8, i8, i8, i8, i32, ptr, ptr, i32, i32, i64, ptr, i32, i32, ptr, ptr, i32, i32 }`,
         ]
@@ -478,6 +621,11 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     emitter.decls.has(MAP_ITER_DECL) ||
     emitter.decls.has(MAP_ITER_NUM_DECL)
       ? [`%ScrMapEntry = type { i64, i64, i64 }`, `%ScrMapNumEntry = type { i64, i64 }`]
+      : []),
+    // A compact-value map's { key, hash, val } entry (scr_map.h ScrMapCEntry):
+    // a 32-bit hash and the value as an address over 8.
+    ...(emitter.decls.has(STRING_MAP_ENTRY_C_DECL)
+      ? [`%ScrMapCEntry = type { i64, i32, i32 }`]
       : []),
     // The runtime error prefix { rc, vt, name, message, code, cause } and the
     // class-object shape { rc, pre, post, ctor, name } — field reads on
@@ -545,7 +693,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     ``,
     `@scr_error_vts = external ${tl}global [${RUNTIME_ERROR_CLASSES.size} x %ScrVt]`,
     `declare void @scr_init()`,
-    ...(emitter.usesCompactRefs ? [`declare void @scr_plr_init()`] : []),
+    ...(emitter.compactRegion ? [`declare void @scr_plr_init()`] : []),
     `declare void @scr_lib_init(i32, ptr)`,
     ...(emitter.mod.workers ? [`declare void @scr_runtime_workers_v8()`] : []),
     ...(emitter.stackChecks?.size ? [`declare void @scr_stack_guard_init()`] : []),
@@ -699,21 +847,19 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
   for (const code of regexMatchers.values()) out.push(...code.lines, ``);
   for (const [, inst] of emitter.templateStringsInstances) {
     // One immortal ScrArr per tagged-template site: a data global of
-    // interned cooked-string literals followed by their states (the
-    // runtime finds them before data + cap * 9), and the ScrArr header over
-    // it (rc == SIZE_MAX, len == cap == filled, SCR_ELEM_STR = 2, no REF
-    // entry points). Every dense slot is present; reads retain immortal
-    // strings — a no-op. Slots are 8 bytes on every target: on 32-bit
-    // targets each holds the pointer in its low half and zero in its high
-    // half, so the states start where the runtime looks for them.
+    // interned cooked-string literals, and the ScrArr header over it
+    // (rc == SIZE_MAX, len == cap == filled, SCR_ELEM_STR = 2, no REF entry
+    // points, no state bytes: every dense slot is present). Reads retain
+    // immortal strings — a no-op. Slots are 8 bytes on every target: on
+    // 32-bit targets each holds the pointer in its low half and zero in its
+    // high half.
     const n = inst.slots.length;
-    const present = n === 0 ? "zeroinitializer" : `[ ${inst.slots.map(() => "i8 1").join(", ")} ]`;
     const wide = emitter.sizeType === "i64";
     const slot = wide ? "ptr" : "<{ ptr, i32 }>";
     const slotValue = (s: string): string =>
       wide ? `ptr ${s}` : `<{ ptr, i32 }> <{ ptr ${s}, i32 0 }>`;
     out.push(
-      `@${inst.sym}_data = internal constant <{ [${n} x ${slot}], [${n} x i8] }> <{ [${n} x ${slot}] [ ${inst.slots.map(slotValue).join(", ")} ], [${n} x i8] ${present} }>, align 8`,
+      `@${inst.sym}_data = internal constant [${n} x ${slot}] [ ${inst.slots.map(slotValue).join(", ")} ], align 8`,
       `@${inst.sym} = internal global %ScrArr { ${emitter.sizeType} -1, i32 ${n}, i32 ${n}, i8 2, i8 0, i16 0, i32 ${n}, ptr @${inst.sym}_data }`,
     );
   }
@@ -840,7 +986,7 @@ export function emitModuleParts(emitter: LlEmitter): string[] {
     `  call void @scr_init()`,
     // Compressed fields hold addresses in the program-lifetime region, which
     // is reserved below 32 GiB before compiled code runs.
-    ...(emitter.usesCompactRefs ? [`  call void @scr_plr_init()`] : []),
+    ...(emitter.compactRegion ? [`  call void @scr_plr_init()`] : []),
     // Each context (the main thread, every worker) installs its stack
     // guard before running compiled code that checks it.
     ...(emitter.stackChecks?.size ? [`  call void @scr_stack_guard_init()`] : []),
@@ -1293,6 +1439,18 @@ export function helperDefs(emitter: LlEmitter): string[] {
       ``,
     );
   }
+  // Map.size and Set.size read the live entry count (scr_map_size).
+  if (emitter.decls.has(MAP_SIZE_DECL))
+    defs.push(
+      `define internal double @sc_map_size(ptr %m) ${FN_ATTRS} {`,
+      `entry:`,
+      `  %np = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 9`,
+      `  %n = load i32, ptr %np`,
+      `  %nf = uitofp i32 %n to double`,
+      `  ret double %nf`,
+      `}`,
+      ``,
+    );
   // String-key Map/Set lookups test the map's absent-key filter inline
   // (scr_map.c scr_map_filter_bits): a key whose two filter bits are not
   // both set is absent, so most misses on small and medium maps return
@@ -1301,36 +1459,69 @@ export function helperDefs(emitter: LlEmitter): string[] {
   // and the filter reads its bits 44..55, which are the capacity word's
   // own. A key without a cached hash, and every possible hit, take the
   // runtime lookup.
-  if (emitter.decls.has(STRING_MAP_ENTRY_DECL)) {
+  // A compact-value map's lookup (sc_map_entry_str_c) tests the same filter
+  // and calls scr_map_entry_str_c; its iteration step (sc_map_iter_entry_c)
+  // reads 16-byte entries and their 32-bit hash.
+  const stringMapEntry = (helper: string, runtime: string): string[] => [
+    `define internal ptr @${helper}(ptr %m, ptr %k) ${FN_ATTRS} {`,
+    `entry:`,
+    ...(emitter.sizeType === "i64"
+      ? [
+          `  %fp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 10`,
+          `  %filter = load i64, ptr %fp`,
+          `  %capp = getelementptr inbounds %ScrStr, ptr %k, i32 0, i32 2`,
+          `  %cap = load i64, ptr %capp`,
+          `  %cached = icmp uge i64 %cap, 4294967296`,
+          `  br i1 %cached, label %test, label %slow`,
+          `test:`,
+          `  %s1 = lshr i64 %cap, 44`,
+          `  %i1 = and i64 %s1, 63`,
+          `  %b1 = shl i64 1, %i1`,
+          `  %s2 = lshr i64 %cap, 50`,
+          `  %i2 = and i64 %s2, 63`,
+          `  %b2 = shl i64 1, %i2`,
+          `  %bits = or i64 %b1, %b2`,
+          `  %have = and i64 %filter, %bits`,
+          `  %maybe = icmp eq i64 %have, %bits`,
+          `  br i1 %maybe, label %slow, label %absent`,
+          `absent:`,
+          `  ret ptr null`,
+        ]
+      : [`  br label %slow`]),
+    `slow:`,
+    `  %r = call ptr @${runtime}(ptr %m, ptr %k)`,
+    `  ret ptr %r`,
+    `}`,
+    ``,
+  ];
+  if (emitter.decls.has(STRING_MAP_ENTRY_DECL))
+    defs.push(...stringMapEntry("sc_map_entry_str", "scr_map_entry_str"));
+  if (emitter.decls.has(STRING_MAP_ENTRY_C_DECL)) {
+    const sz = emitter.sizeType;
     defs.push(
-      `define internal ptr @sc_map_entry_str(ptr %m, ptr %k) ${FN_ATTRS} {`,
+      ...stringMapEntry("sc_map_entry_str_c", "scr_map_entry_str_c"),
+      `define internal ptr @sc_map_iter_entry_c(ptr %m, double %i) ${FN_ATTRS} {`,
       `entry:`,
-      ...(emitter.sizeType === "i64"
-        ? [
-            `  %fp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 10`,
-            `  %filter = load i64, ptr %fp`,
-            `  %capp = getelementptr inbounds %ScrStr, ptr %k, i32 0, i32 2`,
-            `  %cap = load i64, ptr %capp`,
-            `  %cached = icmp uge i64 %cap, 4294967296`,
-            `  br i1 %cached, label %test, label %slow`,
-            `test:`,
-            `  %s1 = lshr i64 %cap, 44`,
-            `  %i1 = and i64 %s1, 63`,
-            `  %b1 = shl i64 1, %i1`,
-            `  %s2 = lshr i64 %cap, 50`,
-            `  %i2 = and i64 %s2, 63`,
-            `  %b2 = shl i64 1, %i2`,
-            `  %bits = or i64 %b1, %b2`,
-            `  %have = and i64 %filter, %bits`,
-            `  %maybe = icmp eq i64 %have, %bits`,
-            `  br i1 %maybe, label %slow, label %absent`,
-            `absent:`,
-            `  ret ptr null`,
-          ]
-        : [`  br label %slow`]),
-      `slow:`,
-      `  %r = call ptr @scr_map_entry_str(ptr %m, ptr %k)`,
-      `  ret ptr %r`,
+      `  %np = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 8`,
+      `  %n = load i32, ptr %np`,
+      `  %nf = uitofp i32 %n to double`,
+      `  %lo = fcmp oge double %i, 0.0`,
+      `  %hi = fcmp olt double %i, %nf`,
+      `  %in = and i1 %lo, %hi`,
+      `  br i1 %in, label %load, label %none`,
+      `load:`,
+      `  %ix = fptoui double %i to ${sz}`,
+      `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11`,
+      `  %entries = load ptr, ptr %ep`,
+      `  %e = getelementptr inbounds %ScrMapCEntry, ptr %entries, ${sz} %ix`,
+      `  %hp = getelementptr inbounds %ScrMapCEntry, ptr %e, i32 0, i32 1`,
+      `  %h = load i32, ptr %hp`,
+      `  %live = icmp ne i32 %h, 0`,
+      `  br i1 %live, label %yes, label %none`,
+      `yes:`,
+      `  ret ptr %e`,
+      `none:`,
+      `  ret ptr null`,
       `}`,
       ``,
     );
@@ -2278,7 +2469,7 @@ export function emitFfiCallbackDefs(emitter: LlEmitter): { globals: string[]; de
 
 export function emitParts(emitter: LlEmitter): string[] {
   const parts = [
-    ...limitInlineDynReleases(emitter.emitModuleParts()),
+    ...limitInlineReleases(emitter.emitModuleParts(), emitter.shapeHost.rcMode),
     ...emitter.disposeObserverGates(),
   ];
   if (!emitter.executableTls) return parts;

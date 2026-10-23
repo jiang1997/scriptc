@@ -48,6 +48,8 @@ export class ImmutableFields {
 export function computeImmutableFields(
   mod: IrModule,
   stores?: DynamicFieldStores,
+  /** computeCycleMutability's answer for this module, when the caller has it. */
+  precomputed?: CycleMutability,
 ): ImmutableFields | null {
   if (mod.lib !== undefined) return null;
   const baseOf = new Map((mod.classes ?? []).map((c) => [c.name, c.base ?? null] as const));
@@ -62,7 +64,7 @@ export function computeImmutableFields(
     return cur;
   };
   const unitOfClass = (name: string): string => `object:${rootOf(name)}`;
-  const mutability = computeCycleMutability(mod, unitOfClass, stores);
+  const mutability = precomputed ?? computeCycleMutability(mod, unitOfClass, stores);
   return mutability.all ? null : new ImmutableFields(mutability, unitOfClass);
 }
 
@@ -213,6 +215,9 @@ export function stableGlobals(mod: IrModule): Set<string> {
     }
     return everyStmtChild(s, expr, stmt);
   };
-  for (const fn of mod.functions) fn.body.every(stmt);
+  for (const fn of mod.functions) {
+    if (candidates.size === 0) break;
+    fn.body.every(stmt);
+  }
   return candidates;
 }

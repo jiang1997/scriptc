@@ -22,6 +22,7 @@ import {
   isPrimitiveCollectionKey,
   isUnitType,
   typeEquals,
+  UNDEFINED_T,
 } from "../../../ir/ir.js";
 import {
   COLLECTION_ITERATOR_METHODS,
@@ -44,7 +45,7 @@ import { strCharsCall } from "./array-construction.js";
 import { arrayElementRead } from "./array-iteration.js";
 import { isSearchParamsIterable } from "../builtins/url.js";
 import { classGeneratorIterable } from "../class-iterables.js";
-import { generatorDrain } from "../iterator-adapters.js";
+import { generatorDrain, lowerCollectionIteratorValue } from "../iterator-adapters.js";
 
 /** Ambient Map method calls. `get`/`set`/`has`/`delete`/`clear` lower to
  * mapIntrinsic; `forEach` desugars to a direct call of a synthetic loop
@@ -1344,6 +1345,17 @@ export function mapFromSeedValue(
     };
     const drained = generatorDrain(lowerer, generator, entry, loc);
     return drained ? mapFromSeedValue(lowerer, drained, mapT) : null;
+  }
+  // A Set of [key, value] pairs walks its values like a generator of them.
+  if (seed.type.kind === "set" && seed.type.elem.kind === "record") {
+    const walk = lowerCollectionIteratorValue(
+      lowerer,
+      seed,
+      "values",
+      { kind: "generator", yieldT: seed.type.elem, retT: VOID, nextT: UNDEFINED_T },
+      loc,
+    );
+    return walk ? mapFromSeedValue(lowerer, walk, mapT) : null;
   }
   if (seed.type.kind === "map") {
     if (!typeEquals(seed.type, mapT)) return null;

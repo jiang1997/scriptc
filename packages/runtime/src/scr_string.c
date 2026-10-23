@@ -2571,15 +2571,11 @@ ScrArr *scr_str_split_limit(ScrStr *s, ScrStr *sep, double limit_num) {
   while (count < 64 && (bytes = scr_str_split_span(s, sep, &cursor, false, &len)))
     slots[count++] = (uint64_t)(uintptr_t)(s->ascii ? scr_str_from_span_ascii(bytes, len)
                                                     : scr_str_from_span(bytes, len));
-  ScrArr *out = scr_arr_new_inline(SCR_ELEM_STR, count);
+  ScrArr *out = scr_arr_new_inline(SCR_ELEM_STR, count, false);
   if (count) {
-    /* A fresh inline array of exactly `count` slots: store the pieces and
-     * their states directly. */
-    uint8_t *states = scr_arr_states_end(out);
-    for (size_t k = 0; k < count; k++) {
-      out->data[k] = slots[k];
-      *scr_arr_state_in(states, k) = SCR_ARR_VALUE;
-    }
+    /* A fresh inline array of exactly `count` slots: store the pieces
+     * directly. */
+    for (size_t k = 0; k < count; k++) out->data[k] = slots[k];
     out->len = (uint32_t)count;
     out->filled = (uint32_t)count;
   }

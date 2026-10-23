@@ -1414,7 +1414,8 @@ const BUF_ENCODINGS: Record<string, string | undefined> = {
  * does not know — the ladder callers (stream options) turn unknown
  * literals into Node's runtime ERR_UNKNOWN_ENCODING throw. */
 export function knownBufEncoding(name: string): string | undefined {
-  return own(BUF_ENCODINGS, name);
+  // Buffer.isEncoding: any letter case
+  return own(BUF_ENCODINGS, name) ?? own(BUF_ENCODINGS, name.toLowerCase());
 }
 
 /** The literal encoding argument of a Buffer surface, normalized — or a

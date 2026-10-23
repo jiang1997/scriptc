@@ -612,8 +612,10 @@ export function lowerDgramMethodCall(
       const fn: IrLibFn = data.type.kind === "string" ? "dgram.sendStr" : "dgram.sendBytes";
       return { kind: "libCall", fn, args: [receiver, data, port, host], type: VOID, loc };
     }
+    // TypeScript reaches the ladder for the completion-callback form
+    // send(msg, port, address, callback) (the hot-shots package shim).
     if (
-      isJsSourceFile(ts.getSourceFileOfNode(call)) &&
+      (isJsSourceFile(ts.getSourceFileOfNode(call)) || args.length === 4) &&
       args.length <= 6 &&
       !args.some(ts.isSpreadElement)
     ) {

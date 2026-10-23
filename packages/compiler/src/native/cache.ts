@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -11,7 +14,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { resolveBuildCacheRoot } from "../backend/cache-root.js";
-import { writeTextPartsSync } from "./text-file.js";
+import { joinedParts, writeTextGeneratedSync } from "./text-file.js";
 
 /** UTF-8 bytes one native compiler string can hold (the runtime's
  * SCR_STR_MAX_CAP). Exceeding it traps rather than throwing, so payloads
@@ -22,6 +25,30 @@ export function contentDigest(value: string | Uint8Array): string {
   const hash = createHash("sha256");
   if (typeof value === "string") hash.update(value);
   else hash.update(value);
+  return hash.digest("hex");
+}
+
+/** contentDigest of the text the parts concatenate to. */
+export function partsDigest(parts: readonly string[]): string {
+  const hash = createHash("sha256");
+  for (const part of joinedParts(parts)) hash.update(part);
+  return hash.digest("hex");
+}
+
+/** contentDigest of a file's bytes, read in 1 MiB blocks so a large file
+ * (a module's LLVM text) is never held whole. */
+export function fileDigest(path: string): string {
+  const hash = createHash("sha256");
+  const block = Buffer.alloc(1024 * 1024);
+  const fd = openSync(path, "r");
+  try {
+    for (let read = readSync(fd, block, 0, block.length, null); read > 0;) {
+      hash.update(block.subarray(0, read));
+      read = readSync(fd, block, 0, block.length, null);
+    }
+  } finally {
+    closeSync(fd);
+  }
   return hash.digest("hex");
 }
 
@@ -86,15 +113,15 @@ export class NativeCache {
   }
 
   /** Publish text parts without joining them into one string. */
-  writeParts(family: string, key: string, parts: readonly string[]): void {
+  writeParts(family: string, key: string, parts: Generator<string>): void {
     let stage: string | null = null;
     try {
       const directory = join(this.root, family);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       stage = mkdtempSync(join(directory, ".write-"));
-      writeTextPartsSync(join(stage, "payload"), parts);
+      // One pass over the parts: they may be generated while they are written.
       const hash = createHash("sha256");
-      for (const part of parts) hash.update(part);
+      writeTextGeneratedSync(join(stage, "payload"), parts, (slice) => hash.update(slice));
       writeFileSync(join(stage, "digest"), hash.digest("hex") + "\n");
       const path = join(directory, key);
       renameSync(join(stage, "payload"), path);

@@ -108,10 +108,6 @@ static ScrDyn *bcs_undefined(void) {
   return scr_dyn_retain(scr_dyn_undefined());
 }
 
-static ScrDyn *bcs_str(const char *text) {
-  return bcs_key(text);
-}
-
 static void bcs_unsupported(const char *message) {
   scr_throw_error_msg_code(SCR_ERR_ERROR, message, strlen(message), "SC2020");
 }
@@ -231,7 +227,7 @@ static ScrStream *bcs_need(ScrDyn *self, const char *reading) {
 
 /* ── completion callbacks ───────────────────────────────────────────── */
 
-enum { BCS_DONE_WRITE, BCS_DONE_FINAL, BCS_DONE_DESTROY, BCS_DONE_TRANSFORM, BCS_DONE_FLUSH };
+enum { BCS_DONE_WRITE, BCS_DONE_FINAL, BCS_DONE_DESTROY, BCS_DONE_TRANSFORM, BCS_DONE_FLUSH, BCS_DONE_CONSTRUCT };
 
 static void bcs_run_destroy_cbs(ScrStream *s, ScrError *err) {
   BcsRec *rec = bcs_rec(s);
@@ -265,6 +261,9 @@ static ScrDyn *bcs_done_call(ScrClosure *closure, ScrDyn *const *args, size_t ar
     break;
   case BCS_DONE_FINAL:
     scr_stream_final_done(s, err);
+    break;
+  case BCS_DONE_CONSTRUCT:
+    scr_stream_construct_done(s, err);
     break;
   case BCS_DONE_DESTROY: {
     ScrError *kept = err ? scr_error_retain(err) : NULL;
@@ -400,6 +399,30 @@ static void bcs_plain_call(ScrClosure *cb, ScrStream *s, const char *method, int
 }
 
 static bool bcs_is_function(ScrDyn *object, const char *name, bool *failed);
+
+/* constructNT: `try { stream._construct(cb) } catch (err) { onConstruct(err) }`. */
+static void bcs_construct_inv(ScrClosure *cb, ScrStream *s) {
+  ScrDyn *object = scr_box_get_ref(cb->caps[0]);
+  ScrDyn *callback = bcs_done(s, BCS_DONE_CONSTRUCT);
+  ScrDyn *result = bcs_invoke(object, "_construct", &callback, 1);
+  scr_dyn_release(callback);
+  if (result) scr_dyn_release(result);
+  else if (scr_exc_pending()) scr_stream_construct_done(s, bcs_take_error());
+  scr_dyn_release(object);
+}
+
+/* clearBuffer's batch: this._writev(chunks, cb); a throw reaches the
+ * write() caller, as in Node. */
+static void bcs_writev_inv(ScrClosure *cb, ScrStream *s, ScrDyn *chunks) {
+  ScrDyn *object = scr_box_get_ref(cb->caps[0]);
+  ScrDyn *args[2];
+  args[0] = scr_dyn_retain(chunks);
+  args[1] = bcs_done(s, BCS_DONE_WRITE);
+  ScrDyn *result = bcs_invoke(object, "_writev", args, 2);
+  for (int i = 0; i < 2; i++) scr_dyn_release(args[i]);
+  if (result) scr_dyn_release(result);
+  scr_dyn_release(object);
+}
 
 /* prefinish reads `stream._final` when the writable side finishes, so a
  * method assigned after the constructor runs; without one the finish goes
@@ -875,16 +898,22 @@ static ScrDyn *bcs_construct(int kind, ScrDyn *self, ScrDyn *const *args, size_t
   }
   bool failed = false;
   bool writes = kind != BCS_READABLE;
-  if (writes && bcs_is_function(self, "_writev", &failed)) {
-    bcs_unsupported("_writev on a constructor-function stream is not supported yet");
-    return NULL;
-  }
-  if (!failed && bcs_is_function(self, "_construct", &failed)) {
-    bcs_unsupported("_construct on a constructor-function stream is not supported yet");
-    return NULL;
-  }
-  if (failed) return NULL;
+  bool transformish = kind == BCS_TRANSFORM || kind == BCS_PASSTHROUGH;
   ScrDyn *opts = bcs_arg(args, argc, 0);
+  /* Node's constructors assign options.writev and options.construct to
+   * the instance (this._writev = options.writev), then read _writev and
+   * _construct, so an option shadows the prototype's method. */
+  if (opts->kind == SCR_DYN_OBJ) {
+    if (writes && !transformish && !bcs_copy_option(self, opts, "writev", "_writev")) return NULL;
+    if (!bcs_copy_option(self, opts, "construct", "_construct")) return NULL;
+  }
+  bool has_writev = writes && bcs_is_function(self, "_writev", &failed);
+  if (has_writev && transformish) {
+    bcs_unsupported("_writev on a constructor-function Transform is not supported yet");
+    return NULL;
+  }
+  bool has_construct = !failed && bcs_is_function(self, "_construct", &failed);
+  if (failed) return NULL;
   ScrStream *s = kind == BCS_READABLE   ? scr_stream_new_readable_dyn(opts)
                : kind == BCS_WRITABLE   ? scr_stream_new_writable_dyn(opts)
                : kind == BCS_DUPLEX     ? scr_stream_new_duplex_dyn(opts)
@@ -936,6 +965,9 @@ static ScrDyn *bcs_construct(int kind, ScrDyn *self, ScrDyn *const *args, size_t
     }
   }
   scr_stream_set_destroy(s, bcs_hook(self, (void *)bcs_destroy_inv), bcs_destroy_inv);
+  if (has_writev) scr_stream_set_writev(s, bcs_hook(self, (void *)bcs_writev_inv), bcs_writev_inv);
+  if (has_construct)
+    scr_stream_set_construct(s, bcs_hook(self, (void *)bcs_construct_inv), bcs_construct_inv);
   bcs_hide(self, s);
   if (!failed) failed = !bcs_adopt_listeners(s, self);
   if (!failed && kind != BCS_WRITABLE) failed = !bcs_state_view(self, s, true);
@@ -1020,17 +1052,6 @@ static ScrClosure *bcs_callback(ScrDyn *fn, ScrDyn *self, ScrStream *s) {
   return closure;
 }
 
-/* Strings in another encoding than utf8 have no write path here. */
-static bool bcs_utf8_only(const ScrDyn *encoding) {
-  if (encoding->kind != SCR_DYN_STR) return true;
-  ScrStr *canonical = bcs_encoding(encoding);
-  if (!canonical) return false;
-  bool utf8 = bcs_is(canonical, "utf8");
-  scr_str_release(canonical);
-  if (!utf8) bcs_unsupported("writing strings in an encoding other than utf8 to a constructor-function stream is not supported yet");
-  return utf8;
-}
-
 static ScrDyn *bcs_write(ScrStream *s, ScrDyn *self, ScrDyn *const *args, size_t argc) {
   ScrDyn *chunk = bcs_arg(args, argc, 0);
   ScrDyn *encoding = bcs_arg(args, argc, 1);
@@ -1039,14 +1060,9 @@ static ScrDyn *bcs_write(ScrStream *s, ScrDyn *self, ScrDyn *const *args, size_t
     cb = encoding;
     encoding = scr_stream_writes_values(s) ? scr_dyn_new_null() : scr_dyn_undefined();
   }
-  bool below;
-  if (scr_stream_writes_values(s)) {
-    /* an object-mode side hands the encoding argument to _write */
-    below = scr_stream_write_enc(s, chunk, encoding, bcs_callback(cb, self, s));
-  } else {
-    if (chunk->kind == SCR_DYN_STR && !bcs_utf8_only(encoding)) return NULL;
-    below = scr_stream_write_dyn(s, chunk, bcs_callback(cb, self, s));
-  }
+  /* an object-mode side hands the encoding argument to _write; a byte-mode
+   * side encodes a string with it (or the default encoding) */
+  bool below = scr_stream_write_enc(s, chunk, encoding, bcs_callback(cb, self, s));
   if (scr_exc_pending()) return NULL;
   return scr_dyn_new_bool(below);
 }
@@ -1064,24 +1080,17 @@ static ScrDyn *bcs_end(ScrStream *s, ScrDyn *self, ScrDyn *const *args, size_t a
     encoding = scr_dyn_new_null();
   }
   ScrStream *chained = NULL;
-  if (!bcs_nullish(chunk) && scr_stream_writes_values(s)) {
-    /* end(chunk) writes the value with the encoding argument */
+  if (!bcs_nullish(chunk)) {
+    /* end(chunk) writes the chunk with the encoding argument first */
+    if (scr_stream_prop(s, "writableObjectMode") == 0 && chunk->kind != SCR_DYN_STR &&
+        chunk->kind != SCR_DYN_BYTES) {
+      scr_dyn_arg_type_fail("chunk", "of type string or an instance of Buffer, TypedArray, or DataView", chunk);
+      return NULL;
+    }
     scr_stream_write_enc(s, chunk, encoding, NULL);
     if (scr_exc_pending()) return NULL;
-    chained = scr_stream_end(s, NULL, NULL, bcs_callback(cb, self, s));
-  } else if (chunk->kind == SCR_DYN_STR && !bcs_utf8_only(encoding)) {
-    return NULL;
-  } else if (bcs_nullish(chunk)) {
-    chained = scr_stream_end(s, NULL, NULL, bcs_callback(cb, self, s));
-  } else if (chunk->kind == SCR_DYN_STR) {
-    chained = scr_stream_end(s, NULL, chunk->v.str, bcs_callback(cb, self, s));
-  } else if (chunk->kind == SCR_DYN_BYTES) {
-    ScrBytes *bytes = scr_bytes_raw_view(chunk->v.bytes);
-    chained = scr_stream_end(s, bytes, NULL, bcs_callback(cb, self, s));
-    scr_bytes_release(bytes);
-  } else {
-    scr_dyn_arg_type_fail("chunk", "of type string or an instance of Buffer, TypedArray, or DataView", chunk);
   }
+  chained = scr_stream_end(s, NULL, NULL, bcs_callback(cb, self, s));
   if (chained) scr_stream_release(chained);
   if (scr_exc_pending()) return NULL;
   return scr_dyn_retain(self);
@@ -1164,8 +1173,26 @@ static ScrDyn *bcs_method_call(ScrClosure *closure, ScrDyn *const *args, size_t 
   switch (method) {
   case BCS_M_READ_DEFAULT:
     return bcs_not_implemented("_read()");
-  case BCS_M_WRITE_DEFAULT:
+  case BCS_M_WRITE_DEFAULT: {
+    /* Writable.prototype._write: this._writev([{ chunk, encoding }], cb) */
+    ScrDyn *self = scr_dyn_this_get();
+    bool failed = false;
+    if (bcs_is_function(self, "_writev", &failed)) {
+      ScrDyn *chunks = scr_dyn_new_arr();
+      ScrDyn *entry = scr_dyn_new_obj();
+      scr_dyn_obj_set(entry, "chunk", 5, scr_dyn_retain(bcs_arg(args, argc, 0)));
+      scr_dyn_obj_set(entry, "encoding", 8, scr_dyn_retain(bcs_arg(args, argc, 1)));
+      scr_dyn_arr_push(chunks, entry);
+      ScrDyn *pass[2] = {chunks, bcs_arg(args, argc, 2)};
+      ScrDyn *result = bcs_invoke(self, "_writev", pass, 2);
+      scr_dyn_release(chunks);
+      scr_dyn_release(self);
+      return result;
+    }
+    scr_dyn_release(self);
+    if (failed) return NULL;
     return bcs_not_implemented("_write()");
+  }
   case BCS_M_TRANSFORM_DEFAULT:
     return bcs_not_implemented("_transform()");
   case BCS_M_DESTROY_DEFAULT:
@@ -1317,9 +1344,12 @@ static ScrDyn *bcs_method_call(ScrClosure *closure, ScrDyn *const *args, size_t 
     scr_stream_uncork(s);
     result = bcs_undefined();
     break;
-  case BCS_M_SET_DEFAULT_ENCODING:
-    if (bcs_utf8_only(first)) result = scr_dyn_retain(self);
+  case BCS_M_SET_DEFAULT_ENCODING: {
+    ScrStream *chained = scr_stream_set_default_encoding(s, first);
+    if (chained) scr_stream_release(chained);
+    if (!scr_exc_pending()) result = scr_dyn_retain(self);
     break;
+  }
   default:
     bcs_unsupported("Readable.prototype.wrap on a constructor-function stream is not supported yet");
     break;

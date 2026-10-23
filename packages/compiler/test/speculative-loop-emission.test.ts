@@ -78,15 +78,14 @@ test("a failed check finishes its iteration outside the ordinary copy", async ()
 
 test("a loop site stops entering its fast copy after repeated bails", async () => {
   const llvm = await emitLlvm(source);
-  const site = /^(@scr\.spec\.bails\.\d+) = internal global i8 0$/m.exec(llvm)?.[1];
+  const site = /^(@sc_spec_bails_\d+) = internal global i8 0$/m.exec(llvm)?.[1];
   expect(site).toBeDefined();
   const fn = /^define internal double @sc_bf_scaled\([^]*?^}/m.exec(llvm)?.[0] ?? "";
-  const escaped = site!.replace(/\./g, "\\.");
   // The entry test reads the count, a bail adds one, and a completed fast
   // copy clears it.
   expect(fn).toMatch(
     new RegExp(
-      `(%\\S+) = load atomic i8, ptr ${escaped} unordered, align 1\\n\\s*%\\S+ = icmp ult i8 \\1, 8`,
+      `(%\\S+) = load atomic i8, ptr ${site} unordered, align 1\\n\\s*%\\S+ = icmp ult i8 \\1, 8`,
     ),
   );
   expect(fn).toMatch(new RegExp(`call i8 @llvm\\.uadd\\.sat\\.i8\\(i8 %\\S+, i8 1\\)`));

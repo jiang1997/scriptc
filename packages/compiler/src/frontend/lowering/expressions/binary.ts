@@ -1,6 +1,11 @@
 /* Binary operators: arithmetic, comparisons and equality, logical and nullish pairs, and string conversion for concatenation. */
 import { keyedHelperName } from "../stable-names.js";
 import * as ts from "../../ts7/adapter.js";
+import {
+  lowerOptionalIndex,
+  splitUndefinedIndex,
+  undefinedTypedArrayKeyFence,
+} from "../undefined-index.js";
 import { cleanFuncAdaptable } from "../coercions/function-adapters.js";
 import { type Lowerer, jsFuncNameOf } from "../lowerer.js";
 import {
@@ -1160,12 +1165,26 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
         }
         if (recv?.type.kind === "array" || recv?.type.kind === "bytes") {
           const receiver = lowerer.declareHiddenLocal("%setArray", recv.type);
-          const index = lowerOptionalNumber(
-            lowerer,
-            lowerer.lowerExpr(expr.left.argumentExpression),
-            locOf(expr.left.argumentExpression),
-            expr.left.argumentExpression,
-          );
+          // An undefined index names the "undefined" property
+          // (undefined-index.ts), which a typed array cannot hold.
+          const rawIndex = lowerer.lowerExpr(expr.left.argumentExpression);
+          const split =
+            recv.type.kind === "bytes"
+              ? splitUndefinedIndex(
+                  lowerer,
+                  rawIndex,
+                  expr.left.argumentExpression,
+                  locOf(expr.left.argumentExpression),
+                )
+              : null;
+          const index =
+            split?.index ??
+            lowerOptionalIndex(
+              lowerer,
+              rawIndex,
+              locOf(expr.left.argumentExpression),
+              expr.left.argumentExpression,
+            );
           if (index.type.kind !== "f64")
             lowerer.unsupported(
               "SC1090",
@@ -1178,7 +1197,7 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
           const result = varRef(value.id, raw.type, loc);
           const arr = varRef(receiver.id, recv.type, loc);
           const idx = varRef(key.id, F64, loc);
-          const write: IrStmt =
+          const store: IrStmt =
             recv.type.kind === "array"
               ? arrayValueStore(lowerer, arr, idx, result, recv.type.elem, loc)
               : {
@@ -1188,10 +1207,20 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
                   value: lowerer.coerceInto(expr.right, result, F64),
                   loc,
                 };
+          const write: IrStmt = split
+            ? {
+                kind: "if",
+                cond: split.isUndefined,
+                then: [undefinedTypedArrayKeyFence(lowerer, expr.left, loc)],
+                else_: [store],
+                loc,
+              }
+            : store;
           return {
             kind: "seqExpr",
             stmts: [
               { kind: "varDecl", localId: receiver.id, init: recv, loc },
+              ...(split?.stmts ?? []),
               { kind: "varDecl", localId: key.id, init: index, loc },
               { kind: "varDecl", localId: value.id, init: raw, loc },
               write,

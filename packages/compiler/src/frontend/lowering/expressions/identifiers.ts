@@ -1,4 +1,5 @@
 /* Identifier references in expression position: lowerExprInner's identifier branch and its helpers. */
+import { predeclareForwardClass } from "../lower-stmts.js";
 import { cjsMemberAliasValueOf } from "../cjs-exports-object.js";
 import { builtinClassValue, builtinMemberClassKind } from "../builtins/builtin-class-dyn.js";
 import * as ts from "../../ts7/adapter.js";
@@ -41,6 +42,7 @@ import {
   runtimeOptionalUseOf,
 } from "../lower-exprs.js";
 import { runtimeOptionalReceiverRead } from "./narrowing.js";
+import { iterableUnionOf } from "../iterable-values.js";
 import { builtinGlobalValueAt } from "./property-access.js";
 import { varRef } from "../../../ir/build.js";
 import {
@@ -69,6 +71,7 @@ import {
   builtinModuleConstOf,
   builtinModuleFnOf,
   builtinModulesArrayLit,
+  identifierReadSymbol,
   stdlibGlobalNameOf,
 } from "../surfaces.js";
 import { builtinConstantsObject } from "../lower-builtin-values.js";
@@ -321,6 +324,16 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
       // value arm before routing the member/element operation so dynamic
       // keys and builtin record walkers do not see a union receiver.
       const narrowed = lowerer.mapTypeOf(lowerer.typeOf(expr));
+      // An optional Iterable proven present re-tags into the Iterable.
+      if (
+        g.type.kind === "union" &&
+        narrowed?.kind === "union" &&
+        narrowed.unionId !== g.type.unionId &&
+        iterableUnionOf(lowerer, narrowed)
+      ) {
+        const helper = lowerer.narrowedRetagHelper(expr, g.type.unionId, narrowed.unionId, loc);
+        if (helper) return { kind: "call", callee: helper, args: [ref], type: narrowed, loc };
+      }
       const arithmeticUnion =
         g.type.kind === "union" &&
         lowerer.unions.get(g.type.unionId)?.arms.length === 2 &&
@@ -753,7 +766,7 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
     return lowerGlobalValue(lowerer, expr);
   }
   {
-    const sym = lowerer.checker.getSymbolAtLocation(expr);
+    const sym = identifierReadSymbol(lowerer, expr);
     // The temporal global is typed (TS 7's lib slice) but Node 24 does
     // not define it: the read throws Node's ReferenceError.
     if (isTemporalGlobalRoot(lowerer, expr, sym)) {
@@ -789,8 +802,6 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
           "ArrayBuffer constructor values have no native lowering; use new ArrayBuffer(length) for fixed-length shared storage",
         WeakRef:
           "deref()-after-collect exposes GC timing — genuinely dynamic; hold a strong reference instead",
-        FinalizationRegistry:
-          "finalization callbacks expose GC timing — genuinely dynamic; release resources explicitly instead",
         eval: "runtime code evaluation cannot be compiled ahead of time",
       };
       lowerer.noLowering(expr.text, expr, globalHints[expr.text], sym ?? undefined);
@@ -850,6 +861,12 @@ export function lowerIdentifierExpr(lowerer: Lowerer, expr: ts.Identifier, loc: 
   {
     const sym = lowerer.resolveValueSymbol(expr);
     const classInfo = sym ? lowerer.classBySymbol.get(sym) : undefined;
+    // A local class referenced from a function hoisted above its statement:
+    // its TDZ box, holding the class as a checked-dynamic constructor.
+    if (!classInfo && sym && predeclareForwardClass(lowerer, sym)) {
+      const local = lowerer.resolveLocal(expr);
+      if (local) return { kind: "varRef", localId: local.id, type: local.type, loc };
+    }
     // A GENERIC class name whose CONTEXTUAL type pins one instantiation
     // (`const B: new (v: string) => Counter<string> = Counter`): the
     // value is that instantiation's class object — the generic-fn

@@ -25,16 +25,21 @@ const PREFIX = "%class.construct:";
 const PACKED = `${PREFIX}packed`;
 const INSTANCEOF = "%class.instanceof:dynamic";
 
+/** `value instanceof callee` for an untyped constructor value, through one
+ * shared helper. `refusal` is the site's message for a runtime
+ * constructor with no instance test. */
 export function checkedClassInstanceOf(
   lowerer: Lowerer,
   value: IrExpr,
   callee: IrExpr,
+  refusal: string,
   loc: SrcLoc,
 ): IrExpr {
   if (!lowerer.liftedFns.some((fn) => fn.name === INSTANCEOF)) {
     const params = [
       { localId: "value", name: "value", type: DYN },
       { localId: "callee", name: "callee", type: DYN },
+      { localId: "refusal", name: "refusal", type: STRING },
     ];
     lowerer.liftedFns.push({
       name: INSTANCEOF,
@@ -47,7 +52,11 @@ export function checkedClassInstanceOf(
           value: {
             kind: "libCall",
             fn: "bytes.instanceOf",
-            args: [varRef("value", DYN, loc), varRef("callee", DYN, loc)],
+            args: [
+              varRef("value", DYN, loc),
+              varRef("callee", DYN, loc),
+              varRef("refusal", STRING, loc),
+            ],
             type: BOOL,
             loc,
           },
@@ -57,7 +66,13 @@ export function checkedClassInstanceOf(
       loc,
     });
   }
-  return { kind: "call", callee: INSTANCEOF, args: [value, callee], type: BOOL, loc };
+  return {
+    kind: "call",
+    callee: INSTANCEOF,
+    args: [value, callee, { kind: "strLit", value: refusal, type: STRING, loc }],
+    type: BOOL,
+    loc,
+  };
 }
 
 /** Checked construction dispatches to emitted native constructor thunks. */

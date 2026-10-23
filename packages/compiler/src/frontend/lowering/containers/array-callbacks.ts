@@ -59,6 +59,7 @@ import {
 } from "./array-iteration.js";
 import { dynamicReceiverThrows } from "./dynamic-receivers.js";
 import { defaultAfterUndefined, lowerStaticallyUndefinedArgument } from "../optional-arguments.js";
+import { checkedFilterNarrowing } from "./filter-predicates.js";
 
 /** `a.map(fn)` / `a.filter(fn)` / `a.forEach(fn)` desugar to a direct
  * call of a synthetic module function — one per method + element/result
@@ -123,10 +124,11 @@ export function lowerArrayHofCall(
     }
     lowerer.badType(argNode, lowerer.typeOf(argNode));
   }
-  const outElem =
+  const filtered =
     method === "filter"
       ? filterResultElem(lowerer, call, argNode, elem, valueT, booleanFilter)
-      : callbackArrayElement(lowerer, call, fnRet);
+      : null;
+  const outElem = filtered !== null ? filtered.elem : callbackArrayElement(lowerer, call, fnRet);
   // A filter that re-tags its elements keeps the single union-typed visit.
   const fast =
     present || booleanFilter || (method === "filter" && !typeEquals(outElem, elem))
@@ -145,19 +147,33 @@ export function lowerArrayHofCall(
     present,
   );
   const resultType: IrType = method === "map" || method === "filter" ? arrayOf(outElem) : VOID;
-  return {
+  const result: IrExpr = {
     kind: "call",
     callee: helper,
     args: [receiver, fnArg, ...(fast ? [fast] : [])],
     type: resultType,
     loc,
   };
+  const narrowing = filtered?.narrowing ?? null;
+  if (narrowing === null) return result;
+  return {
+    kind: "call",
+    callee: narrowing.helper,
+    args: [result],
+    type: arrayOf(narrowing.elem),
+    loc,
+  };
 }
 
-/** The checker-selected element of a filter result, with the same trust
- * boundary as the historical narrowing filter: an inferred inline type
- * predicate may prove one source arm; a written predicate annotation may
- * not. Boolean is safe when every discarded arm is a nullish unit. */
+/** The element a filter keeps, and the checked conversion of the result
+ * to the checker's narrower element when the predicate does not prove it.
+ * An inferred inline type predicate proves one source arm, or a class
+ * view, so the loop keeps that type directly. A written predicate (`(p): p
+ * is Cat => ...`, a guard function passed as a value) is an assertion
+ * TypeScript does not check, and an inferred predicate that keeps several
+ * arms has no single arm to re-tag: the loop keeps the receiver's element
+ * and `narrowing` (checkedFilterNarrowing) converts each kept element.
+ * Boolean is safe when every discarded arm is a nullish unit. */
 function filterResultElem(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -165,7 +181,37 @@ function filterResultElem(
   elem: IrType,
   valueT: IrType,
   booleanFilter: boolean,
-): IrType {
+): { elem: IrType; narrowing: { helper: string; elem: IrType } | null } {
+  const kept = filterKeptElem(lowerer, call, argNode, elem, valueT, booleanFilter);
+  if (typeof kept !== "string") return { elem: kept, narrowing: null };
+  return { elem, narrowing: { helper: kept, elem: filterCheckerElem(lowerer, call, elem) } };
+}
+
+/** The checker's spelling of a filter result's element type. */
+function filterTypeText(lowerer: Lowerer, call: ts.CallExpression): string {
+  const result = lowerer.typeOf(call);
+  const element = lowerer.checker.isArrayType(result)
+    ? lowerer.checker.getTypeArguments(result as ts.TypeReference)[0]
+    : undefined;
+  return element === undefined ? "" : lowerer.checker.typeToString(element);
+}
+
+/** The checker's element of a filter result, or the receiver's when the
+ * filter introduces no refinement. */
+function filterCheckerElem(lowerer: Lowerer, call: ts.CallExpression, elem: IrType): IrType {
+  const result = lowerer.mapTypeOf(lowerer.typeOf(call));
+  return result?.kind === "array" ? result.elem : elem;
+}
+
+/** filterResultElem's element, or the name of the checked narrowing helper. */
+function filterKeptElem(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  argNode: ts.Expression,
+  elem: IrType,
+  valueT: IrType,
+  booleanFilter: boolean,
+): IrType | string {
   const callT = lowerer.typeOf(call);
   const result = lowerer.mapTypeOf(callT);
   let outElem = result?.kind === "array" ? result.elem : elem;
@@ -191,23 +237,31 @@ function filterResultElem(
     "keep the receiver's element type instead — annotate the callback's return ': boolean' " +
     "(the checker then skips the predicate) or annotate the result with the receiver's own " +
     "element type — and narrow the elements after";
-  if (!booleanFilter) {
+  const written =
+    !booleanFilter &&
+    ((!ts.isArrowFunction(argNode) && !ts.isFunctionExpression(argNode)) ||
+      argNode.type !== undefined);
+  const narrowing = booleanFilter
+    ? null
+    : (): string | null =>
+        checkedFilterNarrowing(lowerer, elem, outElem, filterTypeText(lowerer, call), locOf(call));
+  if (written) {
+    const helper = narrowing!();
+    if (helper !== null) return helper;
     if (!ts.isArrowFunction(argNode) && !ts.isFunctionExpression(argNode)) {
       lowerer.unsupported(
         "SC1090",
         argNode,
-        `narrowing '.filter' through a callback VALUE (only an inline callback whose predicate ` +
-          `the checker inferred can re-tag — ${annotateEscape})`,
+        `narrowing '.filter' to '${lowerer.fmt(outElem)}' through a callback VALUE (no checked ` +
+          `conversion from '${lowerer.fmt(elem)}' — ${annotateEscape})`,
       );
     }
-    if (argNode.type) {
-      lowerer.unsupported(
-        "SC1090",
-        argNode,
-        `narrowing '.filter' with a hand-written type predicate (a written 'x is T' is an ` +
-          `unchecked assertion nothing validates at runtime — ${annotateEscape})`,
-      );
-    }
+    lowerer.unsupported(
+      "SC1090",
+      argNode,
+      `narrowing '.filter' to '${lowerer.fmt(outElem)}' with a hand-written type predicate (no ` +
+        `checked conversion from '${lowerer.fmt(elem)}' — ${annotateEscape})`,
+    );
   }
   const classRefinement =
     !booleanFilter && outElem.kind === "object" && canAssertClassValue(lowerer, valueT, outElem);
@@ -215,6 +269,8 @@ function filterResultElem(
     !classRefinement &&
     (valueT.kind !== "union" || lowerer.armTag(valueT.unionId, outElem) < 0)
   ) {
+    const helper = narrowing?.() ?? null;
+    if (helper !== null) return helper;
     const multiArm = outElem.kind === "union";
     lowerer.unsupported(
       "SC1090",
@@ -778,6 +834,10 @@ function buildArrayHofFn(
         loc,
       },
       readLen,
+      // map's result has the receiver's length, holes where the receiver
+      // has them. Storage for it is reserved first and the length is set
+      // after the loop, so a result without holes is filled by appends and
+      // gets no state bytes.
       ...(method === "map"
         ? [
             {
@@ -785,6 +845,7 @@ function buildArrayHofFn(
               arr: varRef("out.0", outT, loc),
               length: varRef("n.0", F64, loc),
               loc,
+              reserve: true,
             } satisfies IrStmt,
           ]
         : []),
@@ -816,6 +877,16 @@ function buildArrayHofFn(
           loc,
         },
       ]),
+      ...(method === "map"
+        ? [
+            {
+              kind: "arraySetLength",
+              arr: varRef("out.0", outT, loc),
+              length: varRef("n.0", F64, loc),
+              loc,
+            } satisfies IrStmt,
+          ]
+        : []),
       { kind: "return", value: varRef("out.0", outT, loc), loc },
     ];
   } else if (method === "filter" && fastT) {
@@ -1501,6 +1572,19 @@ export function lowerArrayFlatMapCall(
   }
   if (fnRet.kind === "union") {
     const def = lowerer.unions.get(fnRet.unionId);
+    const plan = def?.arms.some((a) => a.kind === "array")
+      ? flatMapUnionPlan(lowerer, call, argNode, fnRet)
+      : null;
+    if (plan) {
+      const helper = flatMapUnionHelper(lowerer, elem, fnRet, arity, plan, loc, present);
+      return {
+        kind: "call",
+        callee: helper,
+        args: [receiver, fnArg],
+        type: arrayOf(plan.outElem),
+        loc,
+      };
+    }
     if (def?.arms.some((a) => a.kind === "array")) {
       lowerer.unsupported(
         "SC1090",
@@ -1564,6 +1648,278 @@ export function lowerArrayFlatMapCall(
     type: fnRet,
     loc,
   };
+}
+
+/** How each arm of a flatMap callback's union result contributes to the
+ * output: an array arm appends its elements, an array arm the checker
+ * types `never[]` (an empty literal such as `s ? s : []`) appends nothing,
+ * and any other arm appends itself. */
+interface FlatMapUnionPlan {
+  outElem: IrType;
+  arms: ("spread" | "empty" | "value")[];
+}
+
+/** The plan for a callback returning `T | U[]`: every non-array arm must
+ * convert into the result's element type without a check, and every
+ * array arm's element type must be the result's. Null when an arm does
+ * not. */
+function flatMapUnionPlan(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  argNode: ts.Expression,
+  fnRet: IrType & { kind: "union" },
+): FlatMapUnionPlan | null {
+  const out = lowerer.mapTypeOf(lowerer.typeOf(call));
+  if (out?.kind !== "array") return null;
+  const outElem = out.elem;
+  const arms = lowerer.unions.get(fnRet.unionId)?.arms;
+  if (!arms) return null;
+  // The `never[]` constituents of the callback's checked result.
+  const emptyArms: IrType[] = [];
+  const signature = lowerer.checker.getCallSignatures(lowerer.typeOf(argNode))[0];
+  if (signature) {
+    const ret = lowerer.checker.getReturnTypeOfSignature(signature);
+    for (const part of ret.isUnionType() ? ts.constituentTypes(ret) : [ret]) {
+      if (!lowerer.checker.isArrayType(part)) continue;
+      const [element] = lowerer.checker.getTypeArguments(part as ts.TypeReference);
+      if (element === undefined || (element.flags & ts.TypeFlags.Never) === 0) continue;
+      const mapped = lowerer.mapTypeOf(part);
+      if (mapped) emptyArms.push(mapped);
+    }
+  }
+  const converts = (t: IrType): boolean => {
+    if (typeEquals(t, outElem)) return true;
+    if (outElem.kind !== "union") return false;
+    return lowerer.armTag(outElem.unionId, t) >= 0;
+  };
+  const plan: FlatMapUnionPlan["arms"] = [];
+  for (const arm of arms) {
+    if (arm.kind === "array" && emptyArms.some((e) => typeEquals(e, arm))) plan.push("empty");
+    // An array arm copies its elements as they are stored, a present
+    // undefined included, so its element type is the result's.
+    else if (arm.kind === "array" && typeEquals(arm.elem, outElem)) plan.push("spread");
+    else if (arm.kind !== "array" && converts(arm)) plan.push("value");
+    else return null;
+  }
+  return { outElem, arms: plan };
+}
+
+/** The flatMap loop over a union-returning callback: each result tests
+ * its arm and appends its elements, nothing, or itself (Node's
+ * IsArray decision per value). */
+function flatMapUnionHelper(
+  lowerer: Lowerer,
+  elem: IrType,
+  fnRet: IrType & { kind: "union" },
+  arity: number,
+  plan: FlatMapUnionPlan,
+  loc: SrcLoc,
+  present: boolean,
+): string {
+  // The plan is part of the key: one union result type can carry an empty
+  // `never[]` arm in one callback and a populated array arm in another.
+  const key = `flatMapUnion:${typeKey(elem)}:${typeKey(fnRet)}:${typeKey(plan.outElem)}:${plan.arms.join(",")}:${arity}${present ? ":present" : ""}`;
+  const existing = lowerer.arrHofHelpers.get(key);
+  if (existing) return existing;
+  const name = `%arr.flatMap.${lowerer.arrHofHelpers.size}`;
+  lowerer.arrHofHelpers.set(key, name);
+  const arrT = arrayOf(elem);
+  const outT = arrayOf(plan.outElem);
+  const fnT = funcOf([callbackValueType(lowerer, elem, present), F64, arrT].slice(0, arity), fnRet);
+  const arms = lowerer.unions.get(fnRet.unionId)!.arms;
+  const outRef = (): IrExpr => varRef("out.0", outT, loc);
+  const resultRef = (): IrExpr => varRef("r.0", fnRet, loc);
+  const outLength = (): IrExpr => ({
+    kind: "arrIntrinsic",
+    method: "length",
+    receiver: outRef(),
+    args: [],
+    type: F64,
+    loc,
+  });
+  const locals: IrLocal[] = [
+    ...arrayCallbackLocals(arrT, fnT),
+    { id: "out.0", name: "out", type: outT, mutable: false },
+    { id: "r.0", name: "r", type: fnRet, mutable: false },
+  ];
+  const armBody = (tag: number): IrStmt[] => {
+    const arm = arms[tag]!;
+    const narrowed: IrExpr = {
+      kind: "unionNarrow",
+      unionId: fnRet.unionId,
+      tag,
+      value: resultRef(),
+      type: arm,
+      loc,
+    };
+    if (plan.arms[tag] === "empty") return [];
+    if (plan.arms[tag] === "value") {
+      return [
+        arrayValueStore(
+          lowerer,
+          outRef(),
+          outLength(),
+          lowerer.coerceToExpected(
+            // A unit arm's value is the unit itself, which has no
+            // narrowed representation.
+            isUnitType(arm)
+              ? {
+                  kind: "unitLit",
+                  unit: arm.kind === "nullT" ? "null" : "undefined",
+                  type: arm,
+                  loc,
+                }
+              : narrowed,
+            plan.outElem,
+          ),
+          plan.outElem,
+          loc,
+        ),
+      ];
+    }
+    const innerT = arm as IrType & { kind: "array" };
+    const listId = `list.${tag}`;
+    const lengthId = `m.${tag}`;
+    const indexId = `j.${tag}`;
+    const itemId = `inner.${tag}`;
+    locals.push(
+      { id: listId, name: "list", type: innerT, mutable: false },
+      { id: lengthId, name: "m", type: F64, mutable: false },
+      { id: indexId, name: "j", type: F64, mutable: true },
+      { id: itemId, name: "inner", type: arrayValueType(lowerer, innerT.elem), mutable: false },
+    );
+    const list = (): IrExpr => varRef(listId, innerT, loc);
+    const index = (): IrExpr => varRef(indexId, F64, loc);
+    return [
+      { kind: "varDecl", localId: listId, init: narrowed, loc },
+      {
+        kind: "varDecl",
+        localId: lengthId,
+        init: {
+          kind: "arrIntrinsic",
+          method: "length",
+          receiver: list(),
+          args: [],
+          type: F64,
+          loc,
+        },
+        loc,
+      },
+      {
+        kind: "for",
+        init: { kind: "varDecl", localId: indexId, init: numLit(0, loc), loc },
+        cond: {
+          kind: "bin",
+          op: "<",
+          left: index(),
+          right: varRef(lengthId, F64, loc),
+          type: BOOL,
+          loc,
+        },
+        update: {
+          kind: "assign",
+          localId: indexId,
+          value: { kind: "bin", op: "+", left: index(), right: numLit(1, loc), type: F64, loc },
+          loc,
+        },
+        body: [
+          {
+            kind: "if",
+            cond: arrayIndexPresent(list(), index(), loc),
+            then: [
+              {
+                kind: "varDecl",
+                localId: itemId,
+                init: arrayValueRead(lowerer, list(), index(), innerT.elem, loc),
+                loc,
+              },
+              arrayValueStore(
+                lowerer,
+                outRef(),
+                outLength(),
+                varRef(itemId, arrayValueType(lowerer, innerT.elem), loc),
+                plan.outElem,
+                loc,
+              ),
+            ],
+            else_: null,
+            loc,
+          },
+        ],
+        loc,
+      },
+    ];
+  };
+  let dispatch: IrStmt[] = armBody(arms.length - 1);
+  for (let tag = arms.length - 2; tag >= 0; tag--) {
+    dispatch = [
+      {
+        kind: "if",
+        cond: {
+          kind: "unionIsTag",
+          unionId: fnRet.unionId,
+          tag,
+          value: resultRef(),
+          negated: false,
+          type: BOOL,
+          loc,
+        },
+        then: armBody(tag),
+        else_: dispatch,
+        loc,
+      },
+    ];
+  }
+  const body: IrStmt[] = [
+    {
+      kind: "varDecl",
+      localId: "out.0",
+      init: { kind: "arrayLit", elems: [], type: outT, loc },
+      loc,
+    },
+    arrayLengthDeclaration(arrT, loc),
+    countedFor(loc, varRef("n.0", F64, loc), () => [
+      {
+        kind: "if",
+        cond: currentArrayIndexPresent(arrT, loc),
+        then: [
+          {
+            kind: "varDecl",
+            localId: "r.0",
+            init: callArrayCallback(
+              arrT,
+              fnT,
+              fnRet,
+              arity,
+              callbackValueRead(
+                lowerer,
+                varRef("a.0", arrT, loc),
+                varRef("i.0", F64, loc),
+                elem,
+                present,
+                loc,
+              ),
+              loc,
+            ),
+            loc,
+          },
+          ...dispatch,
+        ],
+        else_: null,
+        loc,
+      },
+    ]),
+    { kind: "return", value: outRef(), loc },
+  ];
+  lowerer.liftedFns.push({
+    name,
+    params: arrayCallbackParams(arrT, fnT),
+    returnType: outT,
+    locals,
+    body,
+    loc,
+  });
+  return name;
 }
 
 /** The flatMap loop (array-returning callback), from existing IR nodes:
@@ -2650,6 +3006,7 @@ export function lowerTuplePredicateCall(
   // the value type an array find narrows from.
   let foundT: IrType = elem;
   let retag: string | null = null;
+  let narrowing: { helper: string; elem: IrType } | null = null;
   if (method === "filter") {
     // The element union is built in position order, so the checker's
     // result element can list the same arms in another order.
@@ -2660,9 +3017,11 @@ export function lowerTuplePredicateCall(
       checkerResult?.kind === "array" &&
       arms(checkerResult.elem).length === arms(elem).length &&
       arms(checkerResult.elem).every((arm) => arms(elem).some((other) => typeEquals(arm, other)));
-    outElem = unchanged
-      ? elem
-      : filterResultElem(lowerer, call, argNode, elem, elem, booleanFilter);
+    if (!unchanged) {
+      const filtered = filterResultElem(lowerer, call, argNode, elem, elem, booleanFilter);
+      outElem = filtered.elem;
+      narrowing = filtered.narrowing;
+    }
     resultT = arrayOf(outElem);
   } else if (method === "find") {
     resultT = lowerer.irTypeOf(call);
@@ -2795,5 +3154,19 @@ export function lowerTuplePredicateCall(
       loc,
     });
   }
-  return { kind: "call", callee: helper, args: [receiver, fnArg], type: resultT, loc };
+  const result: IrExpr = {
+    kind: "call",
+    callee: helper,
+    args: [receiver, fnArg],
+    type: resultT,
+    loc,
+  };
+  if (narrowing === null) return result;
+  return {
+    kind: "call",
+    callee: narrowing.helper,
+    args: [result],
+    type: arrayOf(narrowing.elem),
+    loc,
+  };
 }

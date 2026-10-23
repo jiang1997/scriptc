@@ -1,3 +1,4 @@
+import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { declareTypedArguments } from "./typed-arguments.js";
 import { dynUndefinedExpr, varRef } from "../../ir/build.js";
 import { everyStmtList, transformStmtList } from "../../ir/traverse.js";
@@ -17,6 +18,7 @@ import {
   type IrLocal,
   type IrParam,
   type IrStmt,
+  type IrType,
   type SrcLoc,
   VOID,
   canBoxFuncIntoDyn,
@@ -857,4 +859,80 @@ function isBufferCheckOf(e: IrExpr, slotId: string): boolean {
     e.type.kind === "bytes" &&
     e.type.elem === "u8"
   );
+}
+
+/** The diagnostics of a TypeScript function whose signature did not
+ * compile, for the coverage remainder: its statements lower for their
+ * diagnostics only (the remainder's output is discarded), so the report
+ * lists them with the signature's blocker instead of hiding them behind it.
+ * Each parameter whose type maps is declared, and a use of any other
+ * parameter reports SC2004 back to the declaration. The statements already
+ * count as failed (countSkippedBody), so the pass leaves the stats alone.
+ * The pass adds diagnostics only: an internal error while it lowers drops
+ * what it found, and the signature's blocker stands alone as before. */
+export function blockedBodyDiagnostics(
+  lowerer: Lowerer,
+  decl: ts.FunctionDeclaration,
+): ScrDiagnostic[] {
+  const body = decl.body;
+  if (!body || decl.typeParameters || decl.asteriskToken) return [];
+  if (isJsSourceFile(ts.getSourceFileOfNode(decl))) return [];
+  const symbol = declSymbolOf(lowerer, decl);
+  if (!symbol || lowerer.fnSigsBySymbol.has(symbol)) return [];
+  const diagsBefore = lowerer.diags.length;
+  const fencesBefore = lowerer.runtimeFences.length;
+  const suppressStats = lowerer.suppressStats;
+  lowerer.suppressStats = true;
+  let declared: IrType = DYN;
+  lowersCleanly(lowerer, () => {
+    declared = lowerer.declaredReturnType(decl, decl);
+  });
+  const isAsync = decl.modifiers?.nodes.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+  const ctx = newFnCtx(false, null, null, lowerer.bodyReturnType(isAsync, declared));
+  ctx.isAsync = isAsync;
+  lowerer.fnStack.push(ctx);
+  let internal = false;
+  try {
+    // A declared `this` parameter gives the body its receiver, as
+    // lowerFunction declares it.
+    if (decl.parameters.nodes.some(isThisParameter)) declareCallReceiver(lowerer, decl, false);
+    for (const param of decl.parameters.nodes) {
+      if (isThisParameter(param)) continue;
+      const declaredParam = lowersCleanly(lowerer, () => {
+        lowerer.declareParams([param], lowerer.paramShapes([param]));
+      });
+      if (declaredParam) continue;
+      const symbol = ts.isIdentifier(param.name)
+        ? lowerer.checker.getSymbolAtLocation(param.name)
+        : undefined;
+      if (symbol) lowerer.blockedBindings.add(symbol);
+    }
+    lowersCleanly(lowerer, () => {
+      lowerer.lowerStmts(body.statements.nodes);
+    });
+  } catch (error) {
+    if (!(error instanceof InternalCompilerError)) throw error;
+    internal = true;
+  } finally {
+    lowerer.fnStack.pop();
+    lowerer.suppressStats = suppressStats;
+  }
+  lowerer.runtimeFences.splice(fencesBefore);
+  const diags = lowerer.diags.splice(diagsBefore);
+  return internal || diags.some((d) => d.code === "SC9001") ? [] : diags;
+}
+
+/** Runs `lower`, for blockedBodyDiagnostics: false when it poisons, with the
+ * diagnostics it recorded dropped (a failed mapping reports what the
+ * signature's blocker already reports). */
+function lowersCleanly(lowerer: Lowerer, lower: () => void): boolean {
+  const before = lowerer.diags.length;
+  try {
+    lower();
+    return true;
+  } catch (error) {
+    if (!(error instanceof PoisonError)) throw error;
+    lowerer.diags.splice(before);
+    return false;
+  }
 }

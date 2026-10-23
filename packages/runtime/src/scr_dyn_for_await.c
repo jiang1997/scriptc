@@ -38,6 +38,11 @@ ScrDyn *scr_dyn_async_iterator_open(ScrDyn *value, ScrStr *spell) {
   return iterator;
 }
 
+/* For an iterator another open path made (scr_dyn_for_await_stream.c). */
+void scr_dyn_async_iterator_set_sync(bool sync) {
+  scr_for_await_sync = sync;
+}
+
 /* Whether the iterator the last scr_dyn_async_iterator_open returned is a
  * synchronous one. Read immediately after the open. */
 bool scr_dyn_async_iterator_was_sync(void) {

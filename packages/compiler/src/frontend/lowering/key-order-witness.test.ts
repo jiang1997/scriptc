@@ -157,6 +157,36 @@ test("a synthesized construction pins today's table", () => {
   expect(f.order(ab)).toEqual(["a", "b"]);
 });
 
+test("a runtime builder typed by its use site pins today's table", () => {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  // net.serverAddress's signature result is VOID: the call takes its record
+  // type from its use site, and the runtime builds the record in that order.
+  const built: IrExpr = { kind: "libCall", fn: "net.serverAddress", args: [], type: ab, loc };
+  f.run([observe(f.literal(ab, ["b", "a"])), observe(built)]);
+  expect(f.order(ab)).toEqual(["a", "b"]);
+});
+
+test("an always-throwing call typed as the record leaves its literals' order", () => {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const thrown: IrExpr = { kind: "libCall", fn: "error.nodeThrow", args: [], type: ab, loc };
+  f.run([observe(f.literal(ab, ["b", "a"])), observe(thrown)]);
+  expect(f.order(ab)).toEqual(["b", "a"]);
+});
+
 test("a checked conversion alone pins today's table", () => {
   const f = fixture();
   const ab = f.record(

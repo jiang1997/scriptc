@@ -85,7 +85,7 @@ import {
   lowerDynamicEmitterOn,
 } from "./lower-event-emitter.js";
 import { protocolArm, protocolFieldArm } from "./class-protocol-dispatch.js";
-import { STREAM_OPERATORS } from "./lower-stream.js";
+import { STREAM_OPERATORS, operatorSignalOptions, reduceSignalSetup } from "./lower-stream.js";
 import { deletedPropertyNames, fixedFieldFamily } from "./js-class-fields.js";
 
 const STREAM_METHODS = new Set([
@@ -908,6 +908,11 @@ export class ClassDynamicDispatch {
   private readonly prototypeClasses = new Set<string>();
   private prototypeIdentityHelper: IrFunction | null = null;
   private readonly prototypeIdentityClasses = new Set<string>();
+  /** `value instanceof Error` through Error.prototype: boxed instances of
+   * classes with a heritage evaluated at run time test their prototype
+   * data's chain. */
+  private errorPrototypeHelper: IrFunction | null = null;
+  private readonly errorPrototypeClasses = new Set<string>();
   private readonly instancePrototypes = new Map<string, { fn: IrFunction; classes: Set<string> }>();
   private readonly checkedCasts = new Map<string, { fn: IrFunction; classes: Set<string> }>();
   /** The for-in key helpers, by libCall (dyn and native string[] keys). */
@@ -1109,6 +1114,49 @@ export class ClassDynamicDispatch {
               loc,
             },
             then: [{ kind: "return", value: prototype, loc }],
+            else_: null,
+            loc,
+          });
+        changed = true;
+      }
+      if (
+        this.errorPrototypeHelper &&
+        !this.errorPrototypeClasses.has(className) &&
+        hasRuntimeHeritage(info)
+      ) {
+        this.errorPrototypeClasses.add(className);
+        const loc = this.errorPrototypeHelper.loc;
+        const type: IrType = { kind: "object", className };
+        const value = varRef("value", DYN, loc);
+        const prototype = classPrototypeData(lowerer, info, loc, {
+          kind: "dynCheck",
+          value,
+          type,
+          loc,
+        });
+        if (prototype)
+          this.errorPrototypeHelper.body.unshift({
+            kind: "if",
+            cond: {
+              kind: "libCall",
+              fn: "dyn.typedRefIs",
+              args: [value, { kind: "strLit", value: typeKey(type), type: STRING, loc }],
+              type: BOOL,
+              loc,
+            },
+            then: [
+              {
+                kind: "return",
+                value: {
+                  kind: "libCall",
+                  fn: "dyn.inheritsErrorPrototype",
+                  args: [prototype],
+                  type: BOOL,
+                  loc,
+                },
+                loc,
+              },
+            ],
             else_: null,
             loc,
           });
@@ -1515,6 +1563,31 @@ export class ClassDynamicDispatch {
               changed = true;
             }
             return { kind: "call", callee: cast.fn.name, args: [expr.value], type, loc: expr.loc };
+          }
+          if (expr.kind === "libCall" && expr.fn === "dyn.inheritsErrorPrototype") {
+            if (!this.errorPrototypeHelper) {
+              const loc = expr.loc;
+              this.errorPrototypeHelper = {
+                name: "%dyn.class.inheritsErrorPrototype",
+                params: [{ localId: "value", name: "value", type: DYN }],
+                locals: [{ id: "value", name: "value", type: DYN, mutable: false }],
+                returnType: BOOL,
+                loc,
+                body: [
+                  { kind: "return", value: { ...expr, args: [varRef("value", DYN, loc)] }, loc },
+                ],
+              };
+              lowerer.liftedFns.push(this.errorPrototypeHelper);
+              this.generated.add(this.errorPrototypeHelper);
+              changed = true;
+            }
+            return {
+              kind: "call",
+              callee: this.errorPrototypeHelper.name,
+              args: expr.args,
+              type: BOOL,
+              loc: expr.loc,
+            };
           }
           if (
             expr.kind === "libCall" &&
@@ -5640,13 +5713,16 @@ export class ClassDynamicDispatch {
         const readableT: IrType = { kind: "object", className: "%Readable" };
         const op = (fn: string, args: IrExpr[], type: IrType): IrStmt[] =>
           ret({ kind: "libCall", fn: fn as IrLibFn, args: [receiver, ...args], type, loc });
+        // Node passes every callback its { signal }; the callback's
+        // declared parameters are not known here.
+        const sig = (): IrExpr => operatorSignalOptions(lowerer, arg(1), loc);
         switch (method) {
           case "map":
-            return op("readable.opMap", [arg(0), arg(1)], readableT);
+            return op("readable.opMap", [arg(0), arg(1), sig()], readableT);
           case "filter":
-            return op("readable.opFilter", [arg(0), arg(1)], readableT);
+            return op("readable.opFilter", [arg(0), arg(1), sig()], readableT);
           case "flatMap":
-            return op("readable.opFlatMap", [arg(0), arg(1)], readableT);
+            return op("readable.opFlatMap", [arg(0), arg(1), sig()], readableT);
           case "drop":
             return op("readable.opDrop", [arg(0), arg(1)], readableT);
           case "take":
@@ -5654,25 +5730,49 @@ export class ClassDynamicDispatch {
           case "toArray":
             return op("readable.opToArray", [arg(0)], { kind: "promise", inner: DYN });
           case "forEach":
-            return op("readable.opForEach", [arg(0), arg(1)], { kind: "promise", inner: VOID });
+            return op("readable.opForEach", [arg(0), arg(1), sig()], {
+              kind: "promise",
+              inner: VOID,
+            });
           case "some":
-            return op("readable.opSome", [arg(0), arg(1)], { kind: "promise", inner: BOOL });
+            return op("readable.opSome", [arg(0), arg(1), sig()], { kind: "promise", inner: BOOL });
           case "every":
-            return op("readable.opEvery", [arg(0), arg(1)], { kind: "promise", inner: BOOL });
+            return op("readable.opEvery", [arg(0), arg(1), sig()], {
+              kind: "promise",
+              inner: BOOL,
+            });
           case "find":
-            return op("readable.opFind", [arg(0), arg(1)], { kind: "promise", inner: DYN });
-          case "reduce":
-            return op(
-              "readable.opReduce",
-              [
-                arg(0),
-                arg(1),
-                { kind: "boolLit", value: dispatch.source.args.length >= 2, type: BOOL, loc },
-                arg(2),
-                { kind: "numLit", value: 0, type: F64, loc },
-              ],
-              { kind: "promise", inner: DYN },
-            );
+            return op("readable.opFind", [arg(0), arg(1), sig()], { kind: "promise", inner: DYN });
+          case "reduce": {
+            // the dispatch function's locals: there is no function
+            // context while dispatch bodies are built
+            const setup = reduceSignalSetup(lowerer, arg(2), loc, (name, type) => {
+              const local = {
+                id: `${name}.${dispatch.fn.locals.length}`,
+                name,
+                type,
+                mutable: false,
+              };
+              dispatch.fn.locals.push(local);
+              return local;
+            });
+            return [
+              ...setup.stmts,
+              ...op(
+                "readable.opReduceSignal",
+                [
+                  arg(0),
+                  arg(1),
+                  { kind: "boolLit", value: dispatch.source.args.length >= 2, type: BOOL, loc },
+                  arg(2),
+                  { kind: "numLit", value: 0, type: F64, loc },
+                  setup.abort,
+                  setup.cbOpts,
+                ],
+                { kind: "promise", inner: DYN },
+              ),
+            ];
+          }
         }
       }
       if (method === "destroy" && (!incoming.length || incoming[0]?.kind === "unitLit"))
@@ -5915,3 +6015,11 @@ const INHERITED_OBJECT_METHODS: ReadonlySet<string> = new Set([
   "hasOwnProperty",
   "propertyIsEnumerable",
 ]);
+
+/** Whether a class or one of its bases has a heritage evaluated at run
+ * time, whose prototype chain may reach Error.prototype. */
+function hasRuntimeHeritage(info: ClassInfo): boolean {
+  for (let current: ClassInfo | null = info; current; current = current.base)
+    if (current.callableBase) return true;
+  return false;
+}

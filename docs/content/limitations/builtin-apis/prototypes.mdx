@@ -3,4 +3,6 @@
   Plain objects, arrays, functions, class instances, and Date, RegExp, Map, Set, WeakMap, WeakSet, and Promise values inherit `constructor`, `valueOf`, `toString`, `hasOwnProperty`, and `propertyIsEnumerable` from `Object.prototype` as in Node, so `value.constructor === Object` and `value.valueOf === Object.prototype.valueOf` compare identities exactly.
   Named reads such as `value.valueOf` answer these inherited members; computed-key reads such as `value[key]` do not.
   `Object.prototype`'s own members read as values; its mutation and other reflection, such as `isPrototypeOf` and `__proto__`, are unsupported.
-  The constructors `Object`, `Function`, `Date`, `RegExp`, `Map`, `Set`, `WeakMap`, `WeakSet`, and `Promise` read as function values; through a stored value only `Object` can be called, and `instanceof` and `new` against them remain unsupported.
+  The constructors `Object`, `Function`, `Date`, `RegExp`, `Map`, `Set`, `WeakMap`, `WeakSet`, and `Promise` read as function values; through a stored value only `Object` can be called.
+  `new` through a stored `Object`, `Date`, `Map`, `Set`, `WeakMap`, or `WeakSet` builds the same value as the `new` expression.
+  `new` through a stored `RegExp` or `Promise`, `new` of a stored `Object` with a primitive argument, and `instanceof` against these constructors are unsupported.

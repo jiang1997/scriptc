@@ -1,6 +1,5 @@
 import * as ts from "../ts7/adapter.js";
 import { DYN, STRING, arrayOf, type IrExpr } from "../../ir/ir.js";
-import { strLit } from "../../ir/build.js";
 import { locOf } from "../program.js";
 import type { Lowerer } from "./lowerer.js";
 import { TEMPORAL_GLOBAL } from "../builtin-modules.js";
@@ -19,10 +18,14 @@ export function lowerGlobalValue(lowerer: Lowerer, expr: ts.Expression): IrExpr 
   return {
     kind: "libCall",
     fn: "global.native",
+    // One immortal name table per program (keyed by its contents): reading
+    // the global object in a hot path allocates nothing, and the runtime
+    // recognizes a table it has already registered.
     args: [
       {
-        kind: "arrayLit",
-        elems: names.map((name) => strLit(name, loc)),
+        kind: "templateStrings",
+        key: `%globalThis.names:${names.join(",")}`,
+        cooked: names,
         type: arrayOf(STRING),
         loc,
       },

@@ -183,22 +183,27 @@ static void sd_value_too_long(void) {
   scr_throw_error_msg_code(SCR_ERR_ERROR, message, n < 0 ? 0 : (size_t)n, "SC2020");
 }
 
-/* validateInt32(value, name). */
-static bool sd_validate_int32(const char *name, double value) {
+/* validateInt32(value, name, min). */
+static bool sd_validate_int32_min(const char *name, double value, int32_t min) {
   bool integer = isfinite(value) && trunc(value) == value;
-  if (integer && value >= INT32_MIN && value <= INT32_MAX) return true;
+  if (integer && value >= min && value <= INT32_MAX) return true;
   char received[48];
   scr_num_received(value, received);
   char text[192];
   int n = integer ? snprintf(text, sizeof text,
-                             "The value of \"%s\" is out of range. It must be >= -2147483648 && <= 2147483647. "
+                             "The value of \"%s\" is out of range. It must be >= %ld && <= 2147483647. "
                              "Received %s",
-                             name, received)
+                             name, (long)min, received)
                   : snprintf(text, sizeof text,
                              "The value of \"%s\" is out of range. It must be an integer. Received %s", name,
                              received);
   scr_throw_error_msg_code(SCR_ERR_RANGE, text, n < 0 ? 0 : (size_t)n, "ERR_OUT_OF_RANGE");
   return false;
+}
+
+/* validateInt32(value, name). */
+static bool sd_validate_int32(const char *name, double value) {
+  return sd_validate_int32_min(name, value, INT32_MIN);
 }
 
 /* ── arithmetic ───────────────────────────────────────────────────────── */
@@ -630,9 +635,9 @@ static int sd_mr_rounds(size_t bits) {
   return bits > 2048 ? 128 : 64;
 }
 
-/* BN_check_prime: trial division by the small primes, then Miller-Rabin
- * rounds with random bases. */
-static bool sd_is_prime(ScDhSmallPrimes *t, const mbedtls_mpi *x) {
+/* BN_is_prime_ex(x, checks): trial division by the small primes, then
+ * Miller-Rabin rounds with random bases, at least OpenSSL's round count. */
+static bool sd_is_prime_checks(ScDhSmallPrimes *t, const mbedtls_mpi *x, int checks) {
   if (mbedtls_mpi_cmp_int(x, 2) < 0) return false;
   if (mbedtls_mpi_get_bit(x, 0) == 0) return mbedtls_mpi_cmp_int(x, 2) == 0;
   if (!sd_small_residues(t, x)) return false;
@@ -643,9 +648,15 @@ static bool sd_is_prime(ScDhSmallPrimes *t, const mbedtls_mpi *x) {
   ScDhMillerRabin m;
   bool prime = sd_mr_init(&m, x);
   int rounds = sd_mr_rounds(mbedtls_mpi_bitlen(x));
+  if (checks > rounds) rounds = checks;
   for (int i = 0; i < rounds && prime; i++) prime = sd_mr_round(&m, x, false) == 1;
   sd_mr_free(&m);
   return prime;
+}
+
+/* BN_check_prime. */
+static bool sd_is_prime(ScDhSmallPrimes *t, const mbedtls_mpi *x) {
+  return sd_is_prime_checks(t, x, 0);
 }
 
 /* DH_check for parameters without q, as ncrypto's CheckDhParams reports
@@ -793,8 +804,9 @@ static void sd_sieve_window(ScDhSieve *sv, unsigned add) {
  * when p is a strong probable prime to the base 2 and q = (p - 1) / 2
  * passes OpenSSL's Miller-Rabin round count; a prime q then proves p prime
  * (Pocklington's criterion with 2^(p-1) ≡ 1 and gcd(2^2 - 1, p) = 1).
- * Candidates past `bits` bits take a new start. */
-static bool sd_generate_safe_prime(mbedtls_mpi *p, size_t bits, unsigned add, unsigned rem) {
+ * Candidates past `bits` bits take a new start. With `top_two`, starts
+ * also set the second-highest bit, as BN_RAND_TOP_TWO does. */
+static bool sd_generate_safe_prime(mbedtls_mpi *p, size_t bits, unsigned add, unsigned rem, bool top_two) {
   ScDhSieve *sv = sd_sieve_new(bits, add);
   int rounds = sd_mr_rounds(bits);
   mbedtls_mpi start, q;
@@ -803,7 +815,8 @@ static bool sd_generate_safe_prime(mbedtls_mpi *p, size_t bits, unsigned add, un
   int ret = 0;
   while (ret == 0) {
     mbedtls_mpi_uint r;
-    if (!sd_random_bits(&start, bits, true) || mbedtls_mpi_mod_int(&r, &start, add) != 0 ||
+    if (!sd_random_bits(&start, bits, true) || (top_two && mbedtls_mpi_set_bit(&start, bits - 2, 1) != 0) ||
+        mbedtls_mpi_mod_int(&r, &start, add) != 0 ||
         mbedtls_mpi_sub_int(&start, &start, (mbedtls_mpi_sint)r) != 0 ||
         mbedtls_mpi_add_int(&start, &start, rem) != 0 ||
         (mbedtls_mpi_bitlen(&start) < bits && mbedtls_mpi_add_int(&start, &start, add) != 0)) {
@@ -900,7 +913,7 @@ static ScrDyn *sd_generate(double bits, const ScrBytes *generator_bytes, double 
   if (generator == 2) add = 24;
   else if (generator == 5) add = 60;
   ScDh *d = sd_alloc();
-  if (!sd_generate_safe_prime(&d->p, (size_t)bits, add, add - 1) || mbedtls_mpi_lset(&d->g, (mbedtls_mpi_sint)generator) != 0) {
+  if (!sd_generate_safe_prime(&d->p, (size_t)bits, add, add - 1, false) || mbedtls_mpi_lset(&d->g, (mbedtls_mpi_sint)generator) != 0) {
     sd_release(d);
     sd_throw(SCR_ERR_TYPE, "ERR_INVALID_ARG_VALUE", "Invalid DH parameters");
     return NULL;
@@ -1032,6 +1045,505 @@ ScrDyn *scr_crypto_dh_group_new(ScrDyn *name) {
     scr_trap("scriptc: out of memory\n");
   d->verify_error = 0;
   return sd_box(d);
+}
+
+/* ── checkPrime and generatePrime ─────────────────────────────────────────
+ * crypto.checkPrime(Sync) and generatePrime(Sync) over the primality test
+ * and prime search above, with random.js's argument checks and ncrypto's
+ * RandomPrimeConfig and BN_generate_prime_ex2 errors. The callback forms
+ * compute at once and call back in a later macrotask. */
+
+/* The longest candidate the Miller-Rabin rounds take: sd_mont_init's R^2
+ * has twice the candidate's limbs, within MBEDTLS_MPI_MAX_LIMBS, and
+ * mbedtls_mpi_exp_mod stops at MBEDTLS_MPI_MAX_BITS. */
+#if SD_MONT
+#define SD_MAX_PRIME_BITS 262144
+#else
+#define SD_MAX_PRIME_BITS MBEDTLS_MPI_MAX_BITS
+#endif
+
+static void sd_prime_too_long(const char *what) {
+  char message[128];
+  int n = snprintf(message, sizeof message, "%s longer than %d bits have no native implementation", what,
+                   SD_MAX_PRIME_BITS);
+  scr_throw_error_msg_code(SCR_ERR_ERROR, message, n < 0 ? 0 : (size_t)n, "SC2020");
+}
+
+/* An OpenSSL bignum error as a crypto job reports it: an Error with the
+ * formatted message and no other properties. */
+static void sd_throw_bignum(const char *packed, const char *reason) {
+  char message[96];
+  int n = snprintf(message, sizeof message, "error:%s:bignum routines::%s", packed, reason);
+  ScrStr *text = scr_str_new(message, n < 0 ? 0 : (size_t)n);
+  ScrError *e = scr_error_new(SCR_ERR_ERROR, text);
+  scr_str_release(text);
+  scr_throw_obj(e, &scr_error_retain_v, &scr_error_release_v, scr_error_trace_arg());
+}
+
+/* validateObject(value, name): an object that is neither null nor an
+ * array. */
+static bool sd_validate_object(const char *name, const ScrDyn *value) {
+  ScrStr *type = scr_dyn_typeof(value);
+  bool object = type->len == 6 && memcmp(type->data, "object", 6) == 0;
+  scr_str_release(type);
+  if (object && value->kind != SCR_DYN_NULL && value->kind != SCR_DYN_ARR) return true;
+  scr_dyn_arg_type_fail(name, "of type object", value);
+  return false;
+}
+
+static bool sd_validate_function(const char *name, const ScrDyn *value) {
+  if (scr_dyn_is_callable(value)) return true;
+  scr_dyn_arg_type_fail(name, "of type function", value);
+  return false;
+}
+
+/* options[key] (borrowed), or undefined. */
+static const ScrDyn *sd_option(const ScrDyn *options, const char *key) {
+  const ScrDyn *value = options->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(options, key, strlen(key)) : NULL;
+  return value ? value : scr_dyn_undefined();
+}
+
+static const char sd_large_number_types[] =
+  "of type bigint or an instance of ArrayBuffer, TypedArray, Buffer, or DataView";
+
+/* A LargeNumberLike argument as a bignum: a bigint (unsignedBigIntToBuffer,
+ * which rejects negative values), or the bytes of an ArrayBuffer or view.
+ * False with the error pending. */
+static bool sd_large_number(mbedtls_mpi *x, const char *name, bool property, const ScrDyn *value) {
+  if (value->kind == SCR_DYN_BIGINT) {
+    ScrStr *text = scr_bigint_to_string(value->v.bigint, 16);
+    if (!text) return false;
+    bool negative = text->len > 0 && text->data[0] == '-';
+    if (negative) {
+      scr_str_release(text);
+      ScrStr *decimal = scr_bigint_to_string(value->v.bigint, 10);
+      if (!decimal) return false;
+      /* ERR_OUT_OF_RANGE's received value groups the digits of a bigint
+       * past 2^32 in threes. */
+      ScrBigInt *limit = scr_bigint_from_i64(-((int64_t)1 << 32));
+      bool group = scr_bigint_cmp_f64(value->v.bigint, limit) < 0;
+      scr_bigint_release(limit);
+      char digits[160];
+      size_t len = decimal->len < 120 ? decimal->len : 120, out = 0;
+      for (size_t i = 0; i < len; i++) {
+        size_t rest = len - i;
+        if (group && i > 1 && rest % 3 == 0) digits[out++] = '_';
+        digits[out++] = decimal->data[i];
+      }
+      digits[out] = '\0';
+      scr_str_release(decimal);
+      char message[256];
+      int n = snprintf(message, sizeof message, "The value of \"%s\" is out of range. It must be >= 0. Received %sn",
+                       name, digits);
+      scr_throw_error_msg_code(SCR_ERR_RANGE, message, n < 0 ? 0 : (size_t)n, "ERR_OUT_OF_RANGE");
+      return false;
+    }
+    char *hex = malloc(text->len + 1);
+    if (!hex) scr_trap("scriptc: out of memory\n");
+    memcpy(hex, text->data, text->len);
+    hex[text->len] = '\0';
+    scr_str_release(text);
+    bool ok = strlen(hex) <= SD_MAX_VALUE_BYTES * 2;
+    if (ok && mbedtls_mpi_read_string(x, 16, hex) != 0) scr_trap("scriptc: out of memory\n");
+    free(hex);
+    if (!ok) sd_value_too_long();
+    return ok;
+  }
+  if (!sd_is_view(value)) {
+    if (property) scr_dyn_prop_type_fail(name, sd_large_number_types, value);
+    else scr_dyn_arg_type_fail(name, sd_large_number_types, value);
+    return false;
+  }
+  ScrBytes *bytes = scr_bytes_buffer_source(value);
+  if (!bytes) return false;
+  bool held = sd_read(x, bytes);
+  scr_bytes_release(bytes);
+  if (!held) sd_value_too_long();
+  return held;
+}
+
+/* calc_trial_divisions: how many of the first primes (2 included) the
+ * search divides a candidate of `bits` bits by. */
+static size_t sd_trial_divisions(size_t bits) {
+  return bits <= 512 ? 64 : bits <= 1024 ? 128 : bits <= 2048 ? 384 : bits <= 4096 ? 1024 : 2048;
+}
+
+static uint64_t sd_word(const mbedtls_mpi *x) {
+  if (mbedtls_mpi_bitlen(x) > 64) return UINT64_MAX;
+  unsigned char buf[8];
+  if (mbedtls_mpi_write_binary(x, buf, 8) != 0) return UINT64_MAX;
+  uint64_t w = 0;
+  for (int i = 0; i < 8; i++) w = w << 8 | buf[i];
+  return w;
+}
+
+static bool sd_add_word(mbedtls_mpi *x, uint64_t w) {
+  unsigned char buf[8];
+  for (int i = 7; i >= 0; i--, w >>= 8) buf[i] = (unsigned char)w;
+  mbedtls_mpi t;
+  mbedtls_mpi_init(&t);
+  bool ok = mbedtls_mpi_read_binary(&t, buf, 8) == 0 && mbedtls_mpi_add_mpi(x, x, &t) == 0;
+  mbedtls_mpi_free(&t);
+  return ok;
+}
+
+/* probable_prime and bn_probable_prime_dh: a random odd candidate of
+ * `bits` bits (the top two bits set, or with `add` the top bit, moved to
+ * rem modulo add), then the first one stepping by 2, by 4 for a safe
+ * prime, or by add, that no trial-division prime divides, nor for a safe
+ * prime divides (p - 1) / 2. */
+static bool sd_probable_prime(ScDhSmallPrimes *t, mbedtls_mpi *rnd, size_t bits, bool safe, const mbedtls_mpi *add,
+                              const mbedtls_mpi *rem) {
+  size_t trials = sd_trial_divisions(bits) - 1; /* odd primes */
+  uint64_t step = safe ? 4 : 2;
+  uint64_t maxdelta = UINT64_MAX - t->primes[trials - 1];
+  if (add) {
+    step = sd_word(add);
+    if (maxdelta > UINT64_MAX - step) maxdelta = UINT64_MAX - step;
+  }
+  mbedtls_mpi r;
+  mbedtls_mpi_init(&r);
+  bool ok = true;
+  for (;;) {
+    if (!sd_random_bits(rnd, bits, true)) ok = false;
+    if (ok && !add) {
+      if ((bits >= 2 && mbedtls_mpi_set_bit(rnd, bits - 2, 1) != 0) || (safe && mbedtls_mpi_set_bit(rnd, 1, 1) != 0))
+        ok = false;
+    } else if (ok) {
+      ok = mbedtls_mpi_mod_mpi(&r, rnd, add) == 0 && mbedtls_mpi_sub_mpi(rnd, rnd, &r) == 0 &&
+           (rem ? mbedtls_mpi_add_mpi(rnd, rnd, rem) == 0 : mbedtls_mpi_add_int(rnd, rnd, safe ? 3 : 1) == 0);
+      if (ok && (mbedtls_mpi_bitlen(rnd) < bits || sd_word(rnd) < (safe ? 5u : 3u)))
+        ok = mbedtls_mpi_add_mpi(rnd, rnd, add) == 0;
+    }
+    if (!ok || !sd_small_residues(t, rnd)) {
+      ok = false;
+      break;
+    }
+    uint64_t delta = 0, word = sd_word(rnd);
+    bool again = false;
+    for (size_t i = 0; i < trials && !again;) {
+      uint64_t prime = t->primes[i];
+      /* A one-word candidate needs only the primes up to its square root. */
+      if (bits <= 31 && delta <= 0x7fffffff && prime * prime > word + delta) break;
+      uint64_t m = (t->mods[i] + delta) % prime;
+      if (safe ? m <= 1 : m == 0) {
+        delta += step;
+        if (delta > maxdelta) again = true;
+        i = 0;
+        continue;
+      }
+      i++;
+    }
+    if (again) continue;
+    if (!sd_add_word(rnd, delta)) {
+      ok = false;
+      break;
+    }
+    if (add || mbedtls_mpi_bitlen(rnd) == bits) break;
+  }
+  mbedtls_mpi_free(&r);
+  return ok;
+}
+
+/* BN_generate_prime_ex2(p, bits, safe, add, rem): false with OpenSSL's
+ * error pending. Long safe primes without add take the sieve over
+ * p ≡ 11 (mod 12), which every safe prime above 7 satisfies. */
+static bool sd_generate_prime(mbedtls_mpi *p, size_t bits, bool safe, const mbedtls_mpi *add, const mbedtls_mpi *rem) {
+  if (bits < 2 || (!add && safe && bits < 6 && bits != 3)) {
+    sd_throw_bignum("01800076", "bits too small");
+    return false;
+  }
+  if (add && mbedtls_mpi_cmp_int(add, 0) == 0) {
+    sd_throw_bignum("01800067", "div by zero");
+    return false;
+  }
+  if (!add && safe && bits >= 64) {
+    if (!sd_generate_safe_prime(p, bits, 12, 11, true)) scr_trap("scriptc: out of memory\n");
+    return true;
+  }
+  ScDhSmallPrimes *t = sd_small_primes();
+  mbedtls_mpi q;
+  mbedtls_mpi_init(&q);
+  bool found = false;
+  while (!found) {
+    if (!sd_probable_prime(t, p, bits, safe, add, rem)) scr_trap("scriptc: out of memory\n");
+    if (!safe) {
+      found = sd_is_prime(t, p);
+    } else {
+      if (mbedtls_mpi_copy(&q, p) != 0 || mbedtls_mpi_shift_r(&q, 1) != 0) scr_trap("scriptc: out of memory\n");
+      found = sd_is_prime(t, p) && sd_is_prime(t, &q);
+    }
+  }
+  mbedtls_mpi_free(&q);
+  free(t);
+  return true;
+}
+
+/* checkPrime's arguments after the candidate: Node's options and checks
+ * rules. -1 with the error pending. */
+static int sd_prime_checks(const ScrDyn *options) {
+  if (!sd_validate_object("options", options)) return -1;
+  const ScrDyn *checks = sd_option(options, "checks");
+  if (checks->kind == SCR_DYN_UNDEF) return 0;
+  if (checks->kind != SCR_DYN_NUM) {
+    scr_dyn_prop_type_fail("options.checks", "of type number", checks);
+    return -1;
+  }
+  if (!sd_validate_int32_min("options.checks", checks->v.num, 0)) return -1;
+  return (int)checks->v.num;
+}
+
+/* The candidate's verdict as a boolean dyn (+1), or NULL with the error
+ * pending. */
+static ScrDyn *sd_check_prime(const mbedtls_mpi *candidate, int checks) {
+  if (mbedtls_mpi_bitlen(candidate) > SD_MAX_PRIME_BITS) {
+    sd_prime_too_long("checkPrime candidates");
+    return NULL;
+  }
+  ScDhSmallPrimes *t = sd_small_primes();
+  bool prime = sd_is_prime_checks(t, candidate, checks);
+  free(t);
+  return scr_dyn_new_bool(prime);
+}
+
+/* A borrowed, unboxed view of each argument (+1 each); false after a
+ * throw. */
+static bool sd_unbox_all(ScrDyn **out, ScrDyn *const *args, size_t count) {
+  for (size_t i = 0; i < count; i++) out[i] = NULL;
+  for (size_t i = 0; i < count; i++) {
+    ScrDyn *value = args[i];
+    out[i] = value->kind == SCR_DYN_TYPED_REF ? scr_dyn_typed_ref_materialize(value) : scr_dyn_retain(value);
+    if (!out[i]) return false;
+  }
+  return true;
+}
+
+static void sd_release_all(ScrDyn **values, size_t count) {
+  for (size_t i = 0; i < count; i++)
+    if (values[i]) scr_dyn_release(values[i]);
+}
+
+/* checkPrimeSync(candidate[, options]). */
+ScrDyn *scr_crypto_check_prime_sync(ScrDyn *candidate, ScrDyn *options) {
+  ScrDyn *args[2] = {candidate, options};
+  ScrDyn *v[2];
+  ScrDyn *result = NULL;
+  mbedtls_mpi x;
+  mbedtls_mpi_init(&x);
+  if (sd_unbox_all(v, args, 2) && sd_large_number(&x, "candidate", false, v[0])) {
+    ScrDyn *empty = v[1]->kind == SCR_DYN_UNDEF ? scr_dyn_new_obj() : NULL;
+    int checks = sd_prime_checks(empty ? empty : v[1]);
+    if (empty) scr_dyn_release(empty);
+    if (checks >= 0) result = sd_check_prime(&x, checks);
+  }
+  mbedtls_mpi_free(&x);
+  sd_release_all(v, 2);
+  return result;
+}
+
+/* A deferred callback(...args): the callback and its one or two
+ * arguments, each in a box. */
+static void sd_deliver(ScrClosure *self) {
+  ScrDyn *callback = (ScrDyn *)scr_box_get_ref(self->caps[0]);
+  size_t argc = self->ncaps - 1;
+  ScrDyn *args[2] = {NULL, NULL};
+  for (size_t i = 0; i < argc; i++) args[i] = (ScrDyn *)scr_box_get_ref(self->caps[i + 1]);
+  ScrDyn *result = scr_dyn_call(callback, args, argc, "callback");
+  if (result) scr_dyn_release(result);
+  for (size_t i = 0; i < argc; i++) scr_dyn_release(args[i]);
+  scr_dyn_release(callback);
+}
+
+/* Calls callback(first[, second]) in a later macrotask (moves first and
+ * second). */
+static void sd_defer(const ScrDyn *callback, ScrDyn *first, ScrDyn *second) {
+  ScrDyn *values[3] = {scr_dyn_retain((ScrDyn *)callback), first, second};
+  size_t count = second ? 3 : 2;
+  ScrClosure *c = scr_closure_new((void *)sd_deliver, count);
+  for (size_t i = 0; i < count; i++) {
+    c->caps[i] = scr_box_new_obj(scr_dyn_retain_v, scr_dyn_release_v, NULL);
+    scr_box_set_ref(c->caps[i], values[i]);
+  }
+  scr_loop_defer(c);
+}
+
+/* The callback's error argument on success (+1): Node's undefined, or
+ * null for a callback typed to take Error | null. */
+static ScrDyn *sd_no_error(bool null_error) {
+  return null_error ? scr_dyn_new_null() : scr_dyn_retain((ScrDyn *)scr_dyn_undefined());
+}
+
+/* The pending error, taken as a dyn value (+1). */
+static ScrDyn *sd_take_error(void) {
+  ScrCaught *caught = scr_exc_take();
+  ScrDyn *error = scr_caught_to_dyn(caught);
+  scr_caught_release(caught);
+  return error;
+}
+
+/* checkPrime(candidate[, options], callback): argument errors throw; the
+ * callback receives (undefined, verdict) in a later macrotask (null for
+ * undefined when `null_error`). */
+void scr_crypto_check_prime_async(ScrDyn *candidate, ScrDyn *options, ScrDyn *callback, bool null_error) {
+  ScrDyn *args[3] = {candidate, options, callback};
+  ScrDyn *v[3];
+  mbedtls_mpi x;
+  mbedtls_mpi_init(&x);
+  if (sd_unbox_all(v, args, 3) && sd_large_number(&x, "candidate", false, v[0])) {
+    ScrDyn *bag = v[1], *fn = v[2];
+    ScrDyn *empty = NULL;
+    if (scr_dyn_is_callable(bag)) {
+      fn = bag;
+      bag = empty = scr_dyn_new_obj();
+    } else if (bag->kind == SCR_DYN_UNDEF) {
+      bag = empty = scr_dyn_new_obj();
+    }
+    int checks = sd_validate_function("callback", fn) ? sd_prime_checks(bag) : -1;
+    ScrDyn *verdict = checks >= 0 ? sd_check_prime(&x, checks) : NULL;
+    if (verdict) sd_defer(fn, sd_no_error(null_error), verdict);
+    if (empty) scr_dyn_release(empty);
+  }
+  mbedtls_mpi_free(&x);
+  sd_release_all(v, 3);
+}
+
+/* RandomPrimeConfig: the size and options checks, then the add and rem
+ * bounds. False with the error pending. */
+typedef struct {
+  size_t bits;
+  bool safe, bigint, has_add, has_rem;
+  mbedtls_mpi add, rem;
+} ScDhPrimeConfig;
+
+static void sd_prime_config_free(ScDhPrimeConfig *c) {
+  mbedtls_mpi_free(&c->add);
+  mbedtls_mpi_free(&c->rem);
+}
+
+static bool sd_prime_size(const ScrDyn *size) {
+  if (size->kind != SCR_DYN_NUM) {
+    scr_dyn_arg_type_fail("size", "of type number", size);
+    return false;
+  }
+  return sd_validate_int32_min("size", size->v.num, 1);
+}
+
+static bool sd_prime_config(ScDhPrimeConfig *c, double size, const ScrDyn *options) {
+  if (!sd_validate_object("options", options)) return false;
+  const ScrDyn *safe = sd_option(options, "safe");
+  const ScrDyn *bigint = sd_option(options, "bigint");
+  const ScrDyn *add = sd_option(options, "add");
+  const ScrDyn *rem = sd_option(options, "rem");
+  if (safe->kind != SCR_DYN_UNDEF && safe->kind != SCR_DYN_BOOL) {
+    scr_dyn_prop_type_fail("options.safe", "of type boolean", safe);
+    return false;
+  }
+  if (bigint->kind != SCR_DYN_UNDEF && bigint->kind != SCR_DYN_BOOL) {
+    scr_dyn_prop_type_fail("options.bigint", "of type boolean", bigint);
+    return false;
+  }
+  c->safe = safe->kind == SCR_DYN_BOOL && safe->v.b;
+  c->bigint = bigint->kind == SCR_DYN_BOOL && bigint->v.b;
+  c->has_add = add->kind != SCR_DYN_UNDEF;
+  c->has_rem = rem->kind != SCR_DYN_UNDEF;
+  if (c->has_add && !sd_large_number(&c->add, "options.add", true, add)) return false;
+  if (c->has_rem && !sd_large_number(&c->rem, "options.rem", true, rem)) return false;
+  c->bits = (size_t)size;
+  if (c->has_add) {
+    if (mbedtls_mpi_bitlen(&c->add) > c->bits) {
+      sd_throw(SCR_ERR_RANGE, "ERR_OUT_OF_RANGE", "invalid options.add");
+      return false;
+    }
+    if (c->has_rem && mbedtls_mpi_cmp_mpi(&c->add, &c->rem) <= 0) {
+      sd_throw(SCR_ERR_RANGE, "ERR_OUT_OF_RANGE", "invalid options.rem");
+      return false;
+    }
+  }
+  if (c->bits > SD_MAX_PRIME_BITS) {
+    sd_prime_too_long("generatePrime sizes");
+    return false;
+  }
+  return true;
+}
+
+/* The generated prime as an ArrayBuffer of its bytes, or a bigint (+1),
+ * or NULL with OpenSSL's error pending. */
+static ScrDyn *sd_prime_result(ScDhPrimeConfig *c) {
+  mbedtls_mpi p;
+  mbedtls_mpi_init(&p);
+  ScrDyn *result = NULL;
+  if (sd_generate_prime(&p, c->bits, c->safe, c->has_add ? &c->add : NULL, c->has_add && c->has_rem ? &c->rem : NULL)) {
+    if (c->bigint) {
+      size_t len = 0;
+      mbedtls_mpi_write_string(&p, 16, NULL, 0, &len);
+      char *hex = malloc(len + 2);
+      if (!hex) scr_trap("scriptc: out of memory\n");
+      hex[0] = '0';
+      hex[1] = 'x';
+      if (mbedtls_mpi_write_string(&p, 16, hex + 2, len, &len) != 0) scr_trap("scriptc: out of memory\n");
+      ScrStr *text = scr_str_new(hex, strlen(hex));
+      free(hex);
+      ScrBigInt *value = scr_bigint_parse(text);
+      scr_str_release(text);
+      if (value) {
+        result = scr_dyn_new_bigint(value);
+        scr_bigint_release(value);
+      }
+    } else {
+      size_t len = mbedtls_mpi_size(&p);
+      ScrBytes *bytes = scr_bytes_new(SCR_BYTES_U8, (double)len);
+      if (mbedtls_mpi_write_binary(&p, bytes->data, len) != 0) scr_trap("scriptc: out of memory\n");
+      result = scr_array_buffer_from_bytes(bytes);
+      scr_bytes_release(bytes);
+    }
+  }
+  mbedtls_mpi_free(&p);
+  return result;
+}
+
+/* generatePrimeSync(size[, options]). */
+ScrDyn *scr_crypto_generate_prime_sync(ScrDyn *size, ScrDyn *options) {
+  ScrDyn *args[2] = {size, options};
+  ScrDyn *v[2];
+  ScrDyn *result = NULL;
+  ScDhPrimeConfig c = {0};
+  mbedtls_mpi_init(&c.add);
+  mbedtls_mpi_init(&c.rem);
+  if (sd_unbox_all(v, args, 2) && sd_prime_size(v[0])) {
+    ScrDyn *empty = v[1]->kind == SCR_DYN_UNDEF ? scr_dyn_new_obj() : NULL;
+    if (sd_prime_config(&c, v[0]->v.num, empty ? empty : v[1])) result = sd_prime_result(&c);
+    if (empty) scr_dyn_release(empty);
+  }
+  sd_prime_config_free(&c);
+  sd_release_all(v, 2);
+  return result;
+}
+
+/* generatePrime(size[, options], callback): argument errors throw; the
+ * callback receives (undefined, prime), or OpenSSL's error alone, in a
+ * later macrotask (null for undefined when `null_error`). */
+void scr_crypto_generate_prime_async(ScrDyn *size, ScrDyn *options, ScrDyn *callback, bool null_error) {
+  ScrDyn *args[3] = {size, options, callback};
+  ScrDyn *v[3];
+  ScDhPrimeConfig c = {0};
+  mbedtls_mpi_init(&c.add);
+  mbedtls_mpi_init(&c.rem);
+  if (sd_unbox_all(v, args, 3) && sd_prime_size(v[0])) {
+    ScrDyn *bag = v[1], *fn = v[2];
+    ScrDyn *empty = NULL;
+    if (scr_dyn_is_callable(bag)) {
+      fn = bag;
+      bag = empty = scr_dyn_new_obj();
+    }
+    if (sd_validate_function("callback", fn) && sd_prime_config(&c, v[0]->v.num, bag)) {
+      ScrDyn *prime = sd_prime_result(&c);
+      if (prime) sd_defer(fn, sd_no_error(null_error), prime);
+      else sd_defer(fn, sd_take_error(), NULL);
+    }
+    if (empty) scr_dyn_release(empty);
+  }
+  sd_prime_config_free(&c);
+  sd_release_all(v, 3);
 }
 
 /* ── methods ──────────────────────────────────────────────────────────── */

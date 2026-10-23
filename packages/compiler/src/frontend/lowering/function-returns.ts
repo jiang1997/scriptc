@@ -1,3 +1,4 @@
+import { iterableGeneratorArm } from "./iterable-values.js";
 import { mapAsyncGeneratorAnnotation } from "../type-mapper.js";
 import { dynUndefinedExpr } from "../../ir/build.js";
 import * as ts from "../ts7/adapter.js";
@@ -14,6 +15,7 @@ import {
 import { isJsSourceFile } from "../program.js";
 import { PoisonError, dynFallbackType } from "./lowerer.js";
 import { functionCanReturnUndefined } from "../function-completion.js";
+import { jsBindingAppendsOnly, jsBindingHasOpenWrites } from "./lower-stmts.js";
 import type { FnCtx } from "./function-context.js";
 
 /** Keep the conservative completion rule shared by return construction
@@ -123,6 +125,32 @@ export function producesConstructor(lowerer: Lowerer, type: ts.Type): boolean {
   return false;
 }
 
+/** Whether a return of `decl` itself (not of a nested function) is a bare
+ * read of a JavaScript variable whose writes the checker does not
+ * constrain. A string that is only appended to stays a string. */
+function returnsOpenJsBinding(lowerer: Lowerer, decl: ts.SignatureDeclaration): boolean {
+  let open = false;
+  const opens = (value: ts.Expression | undefined): boolean => {
+    while (value && ts.isParenthesizedExpression(value)) value = value.expression;
+    if (!value || !ts.isIdentifier(value)) return false;
+    const binding = lowerer.resolveValueSymbol(value)?.valueDeclaration;
+    return (
+      binding !== undefined &&
+      ts.isVariableDeclaration(binding) &&
+      jsBindingHasOpenWrites(lowerer, binding) &&
+      !jsBindingAppendsOnly(lowerer, binding)
+    );
+  };
+  const scan = (node: ts.Node): void => {
+    if (open || (node !== decl && ts.isFunctionLike(node))) return;
+    if (ts.isReturnStatement(node) && opens(node.expression)) open = true;
+    ts.forEachChild(node, scan);
+  };
+  if (ts.isArrowFunction(decl) && decl.body && !ts.isBlock(decl.body)) open = opens(decl.body);
+  else scan(decl);
+  return open;
+}
+
 /** Map a declaration's return contract while retaining JavaScript
  * inference fallbacks. Diagnostics preserve the caller's blame node. */
 export function declaredReturnType(
@@ -147,6 +175,9 @@ export function declaredReturnType(
   // (`.action(() => { throw ... })`). `never` VALUES stay unmapped.
   if (retTsType.flags & ts.TypeFlags.Never) return VOID;
   let mappedReturn = lowerer.mapTypeOf(retTsType);
+  // A generator declared to return Iterable<T> returns a generator over T.
+  if (mappedReturn && decl.asteriskToken)
+    mappedReturn = iterableGeneratorArm(lowerer, mappedReturn);
   if (
     mappedReturn === null &&
     decl.asteriskToken &&
@@ -208,6 +239,23 @@ export function declaredReturnType(
     lowerer.unions.get(mappedReturn.unionId)?.arms.some((arm) => arm.kind === "func")
   )
     return DYN;
+  // A JS function returning a local that holds whatever its writes store
+  // (jsBindingHasOpenWrites): the inferred result is the initializer's
+  // type, which the returned value need not have.
+  // An async function's promise fulfills with that value.
+  if (
+    isJsSourceFile(ts.getSourceFileOfNode(decl)) &&
+    !decl.type &&
+    !decl.asteriskToken &&
+    !hasExplicitJsDocReturn(decl) &&
+    mappedReturn !== null &&
+    mappedReturn.kind !== "dyn" &&
+    !(mappedReturn.kind === "promise" && mappedReturn.inner.kind === "dyn") &&
+    returnsOpenJsBinding(lowerer, decl)
+  )
+    return decl.modifiers?.nodes.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+      ? { kind: "promise", inner: DYN }
+      : DYN;
   // JS inference assigns Number to arithmetic over any, although the
   // runtime operands can both be BigInts. Preserve that native result.
   if (

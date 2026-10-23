@@ -992,6 +992,15 @@ ScrStr *scr_insp_error(ScrError *e, double recurse, double depth) {
 
 /* Property-name rendering: bare when the key matches Node's keyStrRegExp
  * (/^[a-zA-Z_][a-zA-Z_0-9]*$/, '__proto__' excepted), quoted otherwise. */
+/* util.inspect's text for an accessor property: [Getter], [Setter] or
+ * [Getter/Setter], by which of the two are functions. +1. */
+static ScrStr *insp_accessor_tag(const ScrDynEntry *ent) {
+  bool get = ent->getter && ent->getter->kind == SCR_DYN_FUNC;
+  bool set = ent->setter && ent->setter->kind == SCR_DYN_FUNC;
+  const char *text = get && set ? "[Getter/Setter]" : get ? "[Getter]" : set ? "[Setter]" : "undefined";
+  return scr_str_new(text, strlen(text));
+}
+
 static void insp_key_into(InspBuf *b, const char *key, size_t len) {
   if (len == 9 && memcmp(key, "__proto__", 9) == 0) {
     ib_cstr(b, "['__proto__']");
@@ -1499,14 +1508,20 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
       return scr_insp_str(d->v.str);
     case SCR_DYN_ARR: {
       size_t len = d->v.arr.len;
-      if (len == 0) return scr_str_new("[]", 2);
+      /* Named and noncanonical numeric properties follow the elements as
+       * `key: value` entries (Node's array extras). */
+      const ScrDyn *props = d->v.arr.properties;
+      size_t nprops = 0;
+      for (size_t i = 0; props && i < props->v.obj.len; i++) nprops += props->v.obj.entries[i].enumerable;
+      if (len == 0 && nprops == 0) return scr_str_new("[]", 2);
       if (recurse > depth) return scr_str_new("[Array]", 7);
       scr_insp_begin(recurse + 1);
       /* Node's maxArrayLength (100) counts output entries; a run of holes
        * is one `<n empty items>` entry (formatSpecialArray). */
       const unsigned char *presence = d->v.arr.presence;
       size_t i = 0;
-      for (size_t shown = 0; i < len && shown < 100; shown++) {
+      size_t shown = 0;
+      for (; i < len && shown < 100; shown++) {
         if (presence && !presence[i]) {
           size_t next = i + 1;
           while (next < len && !presence[next]) next++;
@@ -1524,15 +1539,38 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
         scr_str_release(s);
       }
       bool more = i < len;
+      size_t entries = shown + (more ? 1 : 0);
       if (more) {
         ScrStr *m = scr_insp_more_items((double)(len - i));
         scr_insp_entry(m, d->v.arr.items[i]->kind == SCR_DYN_NUM);
         scr_str_release(m);
       }
+      for (size_t k = 0; props && k < props->v.obj.len; k++) {
+        const ScrDynEntry *ent = &props->v.obj.entries[k];
+        if (!ent->enumerable) continue;
+        ScrStr *val = ent->accessor ? insp_accessor_tag(ent) : scr_insp_dyn(ent->value, recurse + 1, depth);
+        InspBuf eb = {0};
+        insp_key_into(&eb, ent->key, ent->key_len);
+        ib_cstr(&eb, ": ");
+        ib_bytes(&eb, val->data, val->len);
+        scr_str_release(val);
+        ScrStr *entry = ib_take(&eb);
+        /* Node's grouping pads by the array element at the entry's output
+         * position (value[i] in groupArrayElements), not by the entry. */
+        bool number = entries < len && (!presence || presence[entries]) &&
+                      d->v.arr.items[entries]->kind == SCR_DYN_NUM;
+        scr_insp_entry(entry, number);
+        scr_str_release(entry);
+        entries++;
+      }
+      /* Node's grouping leaves out the last entry when there are more
+       * entries than maxArrayLength (the `... more items` entry when the
+       * array has no properties). */
+      bool last_out = entries > 100;
       ScrStr *base = scr_str_new("", 0);
       ScrStr *b0 = scr_str_new("[", 1);
       ScrStr *b1 = scr_str_new("]", 1);
-      ScrStr *out = scr_insp_end(base, b0, b1, recurse + 1, true, more);
+      ScrStr *out = scr_insp_end(base, b0, b1, recurse + 1, true, last_out);
       scr_str_release(base);
       scr_str_release(b0);
       scr_str_release(b1);

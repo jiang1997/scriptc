@@ -687,8 +687,12 @@ export function lowerForAwaitGenerator(
   lowerer.scopes.push(new Map());
   try {
     const g = lowerer.declareHiddenLocal("%fag", genT);
-    const done = lowerer.declareHiddenLocal("%fagdone", BOOL);
-    done.mutable = true;
+    // Whether a value has arrived and the body holds the generator open:
+    // leaving the loop then (break, return, a throw, or a return() at a
+    // yield in the body) closes it, as AsyncIteratorClose does; an
+    // exhausted generator and a rejected next() are not closed.
+    const active = lowerer.declareHiddenLocal("%fagactive", BOOL);
+    active.mutable = true;
     const p = lowerer.declareHiddenLocal("%fagpromise", promiseT);
     const r = lowerer.declareHiddenLocal("%fagresult", recT);
     const gRef = (): IrExpr => ({ kind: "varRef", localId: g.id, type: genT, loc });
@@ -709,7 +713,14 @@ export function lowerForAwaitGenerator(
         `for-await over an async generator yielding '${lowerer.fmt(genT.yieldT)}' (no per-element extraction exists)`,
       );
     }
+    const setActive = (value: boolean): IrStmt => ({
+      kind: "assign",
+      localId: active.id,
+      value: { kind: "boolLit", value, type: BOOL, loc },
+      loc,
+    });
     const head: IrStmt[] = [
+      setActive(false),
       {
         kind: "varDecl",
         localId: p.id,
@@ -737,19 +748,12 @@ export function lowerForAwaitGenerator(
           type: BOOL,
           loc,
         },
-        then: [
-          {
-            kind: "assign",
-            localId: done.id,
-            value: { kind: "boolLit", value: true, type: BOOL, loc },
-            loc,
-          },
-          { kind: "break", loc },
-        ],
+        then: [{ kind: "break", loc }],
         else_: null,
         loc,
       },
       ...generatorLoopBinding(lowerer, stmt, extracted, genT.yieldT),
+      setActive(true),
     ];
     const body = lowerer.inCtl("loop", () => lowerer.lowerScopedBlock(stmt.statement), labels);
     const closePromise: IrExpr = {
@@ -766,34 +770,40 @@ export function lowerForAwaitGenerator(
         { kind: "varDecl", localId: g.id, init: iterable, loc },
         {
           kind: "varDecl",
-          localId: done.id,
+          localId: active.id,
           init: { kind: "boolLit", value: false, type: BOOL, loc },
           loc,
         },
         {
-          kind: "while",
-          cond: { kind: "boolLit", value: true, type: BOOL, loc },
-          body: [...head, ...body],
-          ...(labels && { labels }),
-          loc,
-        },
-        {
-          kind: "if",
-          cond: {
-            kind: "unary",
-            op: "!",
-            operand: { kind: "varRef", localId: done.id, type: BOOL, loc },
-            type: BOOL,
-            loc,
-          },
-          then: [
+          kind: "tryCatch",
+          tryBody: [
             {
-              kind: "exprStmt",
-              expr: { kind: "awaitExpr", value: closePromise, type: recT, loc },
+              kind: "while",
+              cond: { kind: "boolLit", value: true, type: BOOL, loc },
+              body: [...head, ...body],
+              ...(labels && { labels }),
               loc,
             },
           ],
-          else_: null,
+          catchBody: null,
+          catchLocalId: null,
+          // After a throw, an error from closing the generator is dropped.
+          dropFinallyErrors: true,
+          finallyBody: [
+            {
+              kind: "if",
+              cond: { kind: "varRef", localId: active.id, type: BOOL, loc },
+              then: [
+                {
+                  kind: "exprStmt",
+                  expr: { kind: "awaitExpr", value: closePromise, type: recT, loc },
+                  loc,
+                },
+              ],
+              else_: null,
+              loc,
+            },
+          ],
           loc,
         },
       ],

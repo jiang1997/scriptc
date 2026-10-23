@@ -49,7 +49,9 @@ import { InternalCompilerError } from "../../../errors.js";
 import { tryLowerExpression } from "./try-lower-expression.js";
 import { isJsSourceFile, locOf } from "../../program.js";
 import { checkedClassInstanceOf } from "../class-construction.js";
+import { unsupportedDiag } from "../../../diagnostics/diagnostic.js";
 import { globalSymbolKey } from "./global-symbols.js";
+import { builtinGlobalHasKey } from "../builtins/global-namespace-keys.js";
 import { foldedStringKeyOf } from "./object-literals.js";
 import { NARROW_FIRST, sideEffectFreeOptionValue } from "../surfaces.js";
 import { isExecExceptionType, refuseExecExceptionCode } from "../builtins/errors.js";
@@ -146,6 +148,10 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
       type: BOOL,
       loc,
     };
+  }
+  if (lowerer.isStdlibGlobal(expr.right, "FinalizationRegistry")) {
+    const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
+    return { kind: "libCall", fn: "finalizationRegistry.is", args: [value], type: BOOL, loc };
   }
   const rhsBuiltin = ts.isIdentifier(expr.right)
     ? lowerer.builtinImportOf(expr.right)
@@ -490,7 +496,13 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
     const constructor = tryLowerExpression(lowerer, expr.right);
     if (constructor?.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))) {
       const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
-      return checkedClassInstanceOf(lowerer, value, constructor, loc);
+      return checkedClassInstanceOf(
+        lowerer,
+        value,
+        constructor,
+        dynInstanceOfRefusal(lowerer, expr),
+        loc,
+      );
     }
     // `this instanceof Glob` in a JavaScript constructor function: the
     // function's prototype against the value's prototype chain.
@@ -1419,6 +1431,16 @@ export function lowerInExpression(
       "'in' with computed (non-literal) keys (a const whose type is one string literal folds; a string-typed key answers over index-signature record receivers)",
     );
   }
+  // A feature probe on a builtin constructor global (`"captureStackTrace"
+  // in Error`): the global is a fixed object, so the answer is static.
+  {
+    let recvNode = expr.right;
+    while (ts.isParenthesizedExpression(recvNode)) recvNode = recvNode.expression;
+    if (ts.isIdentifier(recvNode) && lowerer.isStdlibGlobal(recvNode, recvNode.text)) {
+      const has = builtinGlobalHasKey(recvNode.text, key);
+      if (has !== null) return { kind: "boolLit", value: has, type: BOOL, loc };
+    }
+  }
   // A receiver re-read (the static folds below) is safe for plain reads
   // AND for side-effect-free expressions (an object literal of literals
   // — the `"a" in { a: true }` shape).
@@ -1492,6 +1514,32 @@ export function lowerInExpression(
       loc,
     );
     if (helper) recv = { kind: "call", callee: helper, args: [recv], type: siteType, loc };
+  }
+  // A builtin class held as a brand record (TextEncoder, TextDecoder: only
+  // `%`-prefixed internal fields): its members are the class's prototype
+  // members, which the standard library declares, so `"encodeInto" in
+  // encoder` answers from the checker's type, plus Object.prototype's keys.
+  // The receiver evaluates for its effects.
+  if (recv.type.kind === "record") {
+    const shape = lowerer.shapes.get(recv.type.shapeId);
+    if (shape && shape.fields.length > 0 && shape.fields.every((f) => f.name.startsWith("%"))) {
+      const declared =
+        lowerer.checker.getPropertyOfType(lowerer.typeOf(expr.right), key) !== undefined;
+      const answer: IrExpr = {
+        kind: "boolLit",
+        value: declared || OBJECT_PROTOTYPE_KEYS.has(key),
+        type: BOOL,
+        loc,
+      };
+      if (recv.kind === "varRef") return answer;
+      return {
+        kind: "seqExpr",
+        stmts: [{ kind: "exprStmt", expr: recv, loc }],
+        result: answer,
+        type: BOOL,
+        loc,
+      };
+    }
   }
   // Error-rooted receivers (builtin or user subclass — the isErrnoException
   // predicate's `err instanceof Error && "code" in err` shape): `code`
@@ -1999,4 +2047,26 @@ function lowerRuntimeKeyIn(
     });
   }
   return { kind: "call", callee: helper, args: [keyIr, recv], type: BOOL, loc };
+}
+
+/** Standard-library constructors the untyped instanceof helper has no
+ * instance test for: an untyped `x instanceof Object` always refuses. */
+const DYN_INSTANCEOF_REFUSED: ReadonlySet<string> = new Set(["Object", "Function"]);
+
+/** The SC1090 message `x instanceof C` throws, with the site's position,
+ * when `C` is a runtime constructor with no instance test. A right-hand
+ * side that names one of DYN_INSTANCEOF_REFUSED always reaches that
+ * refusal, so the site is listed with the runtime fences. */
+function dynInstanceOfRefusal(lowerer: Lowerer, expr: ts.BinaryExpression): string {
+  const diag = unsupportedDiag("SC1090", locOf(expr), "instanceof against this native constructor");
+  const symbol = lowerer.checker.getSymbolAtLocation(expr.right);
+  if (
+    symbol !== undefined &&
+    lowerer.isStdlibSymbol(symbol) &&
+    DYN_INSTANCEOF_REFUSED.has(ts.symbolName(symbol))
+  )
+    lowerer.runtimeFences.push(diag);
+  const sf = ts.getSourceFileOfNode(expr);
+  const line = ts.getLineAndCharacterOfPosition(sf, diag.loc.start).line + 1;
+  return `${diag.message} [${diag.code} at ${diag.loc.file}:${line}]`;
 }

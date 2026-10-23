@@ -20,16 +20,30 @@
 
 #include "mbedtls/aes.h"
 #include "mbedtls/chacha20.h"
+#include "mbedtls/des.h"
 #include "mbedtls/gcm.h"
 #include "mbedtls/poly1305.h"
 #include "mbedtls/platform_util.h"
 
-typedef enum { SC_CBC, SC_CTR, SC_GCM, SC_CHACHA } ScCipherMode;
+/* SC_CHACHA is chacha20-poly1305; SC_CHACHA20 the bare stream cipher. */
+typedef enum {
+  SC_CBC,
+  SC_CTR,
+  SC_GCM,
+  SC_CHACHA,
+  SC_ECB,
+  SC_CFB,
+  SC_CFB8,
+  SC_CFB1,
+  SC_OFB,
+  SC_CHACHA20,
+} ScCipherMode;
 
 typedef struct {
   const char *name;
   ScCipherMode mode;
   unsigned key_len;
+  bool des; /* triple DES (two- or three-key) rather than AES */
 } ScCipherSpec;
 
 /* Node's names for the implemented ciphers, including OpenSSL's aliases.
@@ -41,6 +55,35 @@ static const ScCipherSpec sc_specs[] = {
   {"aes-128-gcm", SC_GCM, 16},       {"aes-192-gcm", SC_GCM, 24},       {"aes-256-gcm", SC_GCM, 32},
   {"id-aes128-gcm", SC_GCM, 16},     {"id-aes192-gcm", SC_GCM, 24},     {"id-aes256-gcm", SC_GCM, 32},
   {"chacha20-poly1305", SC_CHACHA, 32},
+  {"aes-128-ecb", SC_ECB, 16},       {"aes-192-ecb", SC_ECB, 24},       {"aes-256-ecb", SC_ECB, 32},
+  {"aes-128-cfb", SC_CFB, 16},       {"aes-192-cfb", SC_CFB, 24},       {"aes-256-cfb", SC_CFB, 32},
+  {"aes-128-cfb8", SC_CFB8, 16},     {"aes-192-cfb8", SC_CFB8, 24},     {"aes-256-cfb8", SC_CFB8, 32},
+  {"aes-128-cfb1", SC_CFB1, 16},     {"aes-192-cfb1", SC_CFB1, 24},     {"aes-256-cfb1", SC_CFB1, 32},
+  {"aes-128-ofb", SC_OFB, 16},       {"aes-192-ofb", SC_OFB, 24},       {"aes-256-ofb", SC_OFB, 32},
+  {"des-ede3-cbc", SC_CBC, 24, true}, {"des3", SC_CBC, 24, true},
+  {"des-ede3", SC_ECB, 24, true},     {"des-ede3-ecb", SC_ECB, 24, true},
+  {"des-ede3-cfb", SC_CFB, 24, true}, {"des-ede3-cfb8", SC_CFB8, 24, true},
+  {"des-ede3-cfb1", SC_CFB1, 24, true}, {"des-ede3-ofb", SC_OFB, 24, true},
+  {"des-ede-cbc", SC_CBC, 16, true},  {"des-ede", SC_ECB, 16, true},
+  {"des-ede-ecb", SC_ECB, 16, true},  {"des-ede-cfb", SC_CFB, 16, true},
+  {"des-ede-ofb", SC_OFB, 16, true},
+  {"chacha20", SC_CHACHA20, 32},
+};
+
+/* Ciphers OpenSSL 3 keeps in its legacy provider, which Node 24 does not
+ * load: crypto.getCipherInfo() knows them, and createCipheriv checks their
+ * IV length, then fails with OpenSSL's "unsupported" error. */
+static const struct {
+  const char *name;
+  unsigned iv_len;
+} sc_legacy[] = {
+  {"des", 8}, {"des-cbc", 8}, {"des-ecb", 0}, {"des-cfb", 8}, {"des-cfb1", 8}, {"des-cfb8", 8},
+  {"des-ofb", 8}, {"desx", 8}, {"desx-cbc", 8}, {"bf", 8}, {"bf-cbc", 8}, {"bf-ecb", 0},
+  {"bf-cfb", 8}, {"bf-ofb", 8}, {"blowfish", 8}, {"cast", 8}, {"cast-cbc", 8}, {"cast5-cbc", 8},
+  {"cast5-ecb", 0}, {"cast5-cfb", 8}, {"cast5-ofb", 8}, {"rc2", 8}, {"rc2-cbc", 8}, {"rc2-ecb", 0},
+  {"rc2-cfb", 8}, {"rc2-ofb", 8}, {"rc2-40-cbc", 8}, {"rc2-64-cbc", 8}, {"rc4", 0}, {"rc4-40", 0},
+  {"rc4-hmac-md5", 0}, {"seed", 16}, {"seed-cbc", 16}, {"seed-ecb", 0}, {"seed-cfb", 16},
+  {"seed-ofb", 16}, {"idea", 8}, {"idea-cbc", 8}, {"idea-ecb", 0}, {"idea-cfb", 8}, {"idea-ofb", 8},
 };
 
 /* crypto.getCiphers() on Node 24.22 (OpenSSL 3.5). Names in this list that
@@ -88,15 +131,21 @@ typedef struct ScCipher {
   ScCipherMode mode;
   bool decrypt;
   bool active;       /* false after final() or a failed backend call */
-  bool pad;          /* CBC automatic padding */
+  bool pad;          /* CBC and ECB automatic padding */
+  bool des;          /* triple DES rather than AES */
+  unsigned bs;       /* the block size: 16 for AES, 8 for triple DES */
   bool data_started; /* a non-empty update() ran, so non-empty AAD is refused */
   int tag_len;       /* SC_NO_TAG until known */
   int tag_state;
   unsigned char tag[16];
-  unsigned char block[16]; /* CBC: chaining value; CTR: counter block */
-  unsigned char buf[16];   /* CBC: buffered input; CTR: keystream block */
-  size_t bufsz;            /* CBC: buffered bytes; CTR: keystream offset */
+  unsigned char block[16]; /* CBC: chaining value; CTR: counter block; CFB, OFB:
+                              shift register; chacha20: the IV */
+  unsigned char buf[16];   /* CBC, ECB: buffered input; CTR: keystream block */
+  size_t bufsz;            /* CBC, ECB: buffered bytes; CTR, CFB, OFB: keystream
+                              offset */
+  uint64_t chacha_left;    /* chacha20: bytes before the low counter word wraps */
   mbedtls_aes_context aes;
+  mbedtls_des3_context des3;
   mbedtls_gcm_context gcm;
   mbedtls_chacha20_context chacha;
   mbedtls_poly1305_context poly;
@@ -127,6 +176,7 @@ static void sc_trace(void *h, ScrTraceVisit visit, void *ctx) {
 static void sc_gcfree(void *h) {
   ScCipher *c = h;
   mbedtls_aes_free(&c->aes);
+  mbedtls_des3_free(&c->des3);
   mbedtls_gcm_free(&c->gcm);
   mbedtls_chacha20_free(&c->chacha);
   mbedtls_poly1305_free(&c->poly);
@@ -184,18 +234,21 @@ static void sc_invalid_tag(unsigned long length) {
 /* An OpenSSL provider error as Node reports it: the formatted message plus
  * own opensslErrorStack, library, reason and code properties, in Node's
  * key order. */
-static void sc_throw_openssl(const char *packed, const char *reason, const char *code) {
+/* OpenSSL's error with its library, reason and error stack; Node's
+ * code. */
+static void sc_throw_openssl_in(const char *packed, const char *library, const char *reason,
+                                const char *code) {
   char message[128];
-  snprintf(message, sizeof message, "error:%s:Provider routines::%s", packed, reason);
+  snprintf(message, sizeof message, "error:%s:%s::%s", packed, library, reason);
   ScrStr *text = scr_str_new(message, strlen(message));
   ScrError *e = scr_error_new(SCR_ERR_ERROR, text);
   ScrDyn *stack = scr_dyn_new_arr();
   scr_dyn_arr_push(stack, scr_dyn_new_str(text));
   scr_str_release(text);
   scr_error_set_prop(e, "opensslErrorStack", 17, stack);
-  ScrStr *library = scr_str_new("Provider routines", 17);
-  scr_error_set_prop(e, "library", 7, scr_dyn_new_str(library));
-  scr_str_release(library);
+  ScrStr *library_text = scr_str_new(library, strlen(library));
+  scr_error_set_prop(e, "library", 7, scr_dyn_new_str(library_text));
+  scr_str_release(library_text);
   ScrStr *reason_text = scr_str_new(reason, strlen(reason));
   scr_error_set_prop(e, "reason", 6, scr_dyn_new_str(reason_text));
   scr_str_release(reason_text);
@@ -204,6 +257,10 @@ static void sc_throw_openssl(const char *packed, const char *reason, const char 
   scr_error_set_prop(e, "code", 4, scr_dyn_new_str(code_text));
   scr_str_release(code_text);
   scr_throw_obj(e, &scr_error_retain_v, &scr_error_release_v, scr_error_trace_arg());
+}
+
+static void sc_throw_openssl(const char *packed, const char *reason, const char *code) {
+  sc_throw_openssl_in(packed, "Provider routines", reason, code);
 }
 
 /* ERR_INVALID_ARG_VALUE's property flavor: "The property 'options.x' is
@@ -440,6 +497,27 @@ static const ScCipherSpec *sc_lookup(const ScrStr *name) {
   return NULL;
 }
 
+/* The legacy-provider IV length of `name`, or -1 for other names. */
+static int sc_legacy_iv(const ScrStr *name) {
+  for (size_t i = 0; i < sizeof sc_legacy / sizeof sc_legacy[0]; i++)
+    if (sc_ascii_eq_ci(name->data, name->len, sc_legacy[i].name)) return (int)sc_legacy[i].iv_len;
+  return -1;
+}
+
+/* The IV length a mode takes; SC_GCM takes any nonzero length. */
+static size_t sc_iv_length(ScCipherMode mode, bool des) {
+  switch (mode) {
+  case SC_ECB:
+    return 0;
+  case SC_CHACHA:
+    return 12;
+  case SC_CHACHA20:
+    return 16;
+  default:
+    return des ? 8 : 16;
+  }
+}
+
 static bool sc_known_name(const ScrStr *name) {
   for (size_t i = 0; i < sizeof sc_known / sizeof sc_known[0]; i++)
     if (sc_ascii_eq_ci(name->data, name->len, sc_known[i])) return true;
@@ -451,9 +529,10 @@ static void sc_unsupported_cipher(const ScrStr *name) {
   scr_jb_init(&b);
   scr_jb_puts(&b, "The cipher '");
   scr_jb_put_str(&b, name);
-  scr_jb_puts(&b, "' has no native implementation; the supported ciphers are aes-128-cbc, aes-192-cbc, "
-                  "aes-256-cbc, aes-128-ctr, aes-192-ctr, aes-256-ctr, aes-128-gcm, aes-192-gcm, "
-                  "aes-256-gcm and chacha20-poly1305");
+  scr_jb_puts(&b, "' has no native implementation; the supported ciphers are aes-128, aes-192 and "
+                  "aes-256 in cbc, ctr, gcm, ecb, cfb, cfb8, cfb1 and ofb modes, des-ede3 in cbc, ecb, "
+                  "cfb, cfb8, cfb1 and ofb modes, des-ede in cbc, ecb, cfb and ofb modes, chacha20 and "
+                  "chacha20-poly1305");
   ScrStr *message = scr_jb_finish(&b);
   scr_throw_error_msg_code(SCR_ERR_ERROR, message->data, message->len, "SC2020");
   scr_str_release(message);
@@ -522,14 +601,24 @@ static ScrDyn *sc_cipher_new(bool decrypt, ScrDyn *cipher, ScrDyn *key, ScrDyn *
     goto done;
   }
   const ScCipherSpec *spec = sc_lookup(cipher->v.str);
+  size_t iv_len = iv_bytes ? iv_bytes->len : 0;
   if (!spec) {
-    if (sc_known_name(cipher->v.str)) sc_unsupported_cipher(cipher->v.str);
-    else sc_throw(SCR_ERR_ERROR, "ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher");
+    int legacy_iv = sc_legacy_iv(cipher->v.str);
+    if (legacy_iv >= 0) {
+      if (iv_len != (size_t)legacy_iv || (legacy_iv > 0 && !iv_bytes))
+        sc_throw(SCR_ERR_TYPE, "ERR_CRYPTO_INVALID_IV", "Invalid initialization vector");
+      else
+        sc_throw_openssl_in("0308010C", "digital envelope routines", "unsupported",
+                            "ERR_OSSL_EVP_UNSUPPORTED");
+    } else if (sc_known_name(cipher->v.str)) {
+      sc_unsupported_cipher(cipher->v.str);
+    } else {
+      sc_throw(SCR_ERR_ERROR, "ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher");
+    }
     goto done;
   }
-  size_t iv_len = iv_bytes ? iv_bytes->len : 0;
-  bool aead = spec->mode == SC_GCM || spec->mode == SC_CHACHA;
-  if (iv_len == 0 || (!aead && iv_len != 16) || (spec->mode == SC_CHACHA && iv_len != 12)) {
+  size_t expected_iv = sc_iv_length(spec->mode, spec->des);
+  if (spec->mode == SC_GCM ? iv_len == 0 : iv_len != expected_iv || (expected_iv > 0 && !iv_bytes)) {
     sc_throw(SCR_ERR_TYPE, "ERR_CRYPTO_INVALID_IV", "Invalid initialization vector");
     goto done;
   }
@@ -570,8 +659,11 @@ static ScrDyn *sc_cipher_new(bool decrypt, ScrDyn *cipher, ScrDyn *key, ScrDyn *
   c->decrypt = decrypt;
   c->active = true;
   c->pad = true;
+  c->des = spec->des;
+  c->bs = spec->des ? 8 : 16;
   c->tag_len = tag_len;
   mbedtls_aes_init(&c->aes);
+  mbedtls_des3_init(&c->des3);
   mbedtls_gcm_init(&c->gcm);
   mbedtls_chacha20_init(&c->chacha);
   mbedtls_poly1305_init(&c->poly);
@@ -579,9 +671,39 @@ static ScrDyn *sc_cipher_new(bool decrypt, ScrDyn *cipher, ScrDyn *key, ScrDyn *
   unsigned bits = spec->key_len * 8;
   switch (spec->mode) {
   case SC_CBC:
-    rc = decrypt ? mbedtls_aes_setkey_dec(&c->aes, key_bytes->data, bits)
-                 : mbedtls_aes_setkey_enc(&c->aes, key_bytes->data, bits);
+  case SC_ECB:
+  case SC_CFB:
+  case SC_CFB8:
+  case SC_CFB1:
+  case SC_OFB: {
+    /* CBC and ECB decrypt with the inverse cipher; the feedback modes run
+     * the forward cipher both ways. */
+    bool inverse = decrypt && (spec->mode == SC_CBC || spec->mode == SC_ECB);
+    if (spec->des && spec->key_len == 24)
+      rc = inverse ? mbedtls_des3_set3key_dec(&c->des3, key_bytes->data)
+                   : mbedtls_des3_set3key_enc(&c->des3, key_bytes->data);
+    else if (spec->des)
+      rc = inverse ? mbedtls_des3_set2key_dec(&c->des3, key_bytes->data)
+                   : mbedtls_des3_set2key_enc(&c->des3, key_bytes->data);
+    else
+      rc = inverse ? mbedtls_aes_setkey_dec(&c->aes, key_bytes->data, bits)
+                   : mbedtls_aes_setkey_enc(&c->aes, key_bytes->data, bits);
+    if (expected_iv) memcpy(c->block, iv_bytes->data, expected_iv);
+    break;
+  }
+  case SC_CHACHA20:
+    /* OpenSSL's IV is a 64-bit little-endian block counter and an 8-byte
+     * nonce; mbedTLS takes a 32-bit counter and a 12-byte nonce, so the
+     * stream restarts each time the low counter word wraps. */
     memcpy(c->block, iv_bytes->data, 16);
+    rc = mbedtls_chacha20_setkey(&c->chacha, key_bytes->data);
+    if (rc == 0) {
+      uint32_t low = (uint32_t)c->block[0] | (uint32_t)c->block[1] << 8 |
+                     (uint32_t)c->block[2] << 16 | (uint32_t)c->block[3] << 24;
+      c->chacha_left = ((uint64_t)1 << 32) - low;
+      c->chacha_left *= 64;
+      rc = mbedtls_chacha20_starts(&c->chacha, c->block + 4, low);
+    }
     break;
   case SC_CTR:
     rc = mbedtls_aes_setkey_enc(&c->aes, key_bytes->data, bits);
@@ -635,39 +757,123 @@ done:
 
 /* ── the cipher transforms ────────────────────────────────────────────── */
 
-/* Raw CBC over whole blocks. */
+/* Raw CBC or ECB over whole blocks. */
 static bool sc_cbc_blocks(ScCipher *c, const unsigned char *in, size_t len, unsigned char *out) {
+  if (c->mode == SC_ECB) {
+    for (size_t off = 0; off < len; off += c->bs) {
+      int rc = c->des ? mbedtls_des3_crypt_ecb(&c->des3, in + off, out + off)
+                      : mbedtls_aes_crypt_ecb(&c->aes, c->decrypt ? MBEDTLS_AES_DECRYPT : MBEDTLS_AES_ENCRYPT,
+                                              in + off, out + off);
+      if (rc != 0) return false;
+    }
+    return true;
+  }
+  if (c->des)
+    return mbedtls_des3_crypt_cbc(&c->des3, c->decrypt ? MBEDTLS_DES_DECRYPT : MBEDTLS_DES_ENCRYPT, len, c->block,
+                                  in, out) == 0;
   return mbedtls_aes_crypt_cbc(&c->aes, c->decrypt ? MBEDTLS_AES_DECRYPT : MBEDTLS_AES_ENCRYPT, len, c->block, in,
                                out) == 0;
 }
 
-/* OpenSSL's ossl_cipher_generic_block_update for CBC: complete blocks
- * are processed, the remainder is buffered, and a decryption that ends on
- * a block boundary holds the last block back for padding removal. Returns
- * the output length, or -1 when the backend fails; out has room for
- * len + 16 bytes. */
+/* One forward block of the feedback modes' cipher. */
+static bool sc_forward(ScCipher *c, const unsigned char *in, unsigned char *out) {
+  return (c->des ? mbedtls_des3_crypt_ecb(&c->des3, in, out)
+                 : mbedtls_aes_crypt_ecb(&c->aes, MBEDTLS_AES_ENCRYPT, in, out)) == 0;
+}
+
+/* CFB (full-block feedback), CFB8, CFB1 and OFB, as OpenSSL's
+ * CRYPTO_cfb128_encrypt, CRYPTO_cfb128_8_encrypt, CRYPTO_cfb128_1_encrypt
+ * and CRYPTO_ofb128_encrypt: CFB and OFB keep their keystream offset across
+ * updates; CFB1 feeds back one bit at a time, most significant first. */
+static bool sc_feedback(ScCipher *c, const unsigned char *in, size_t len, unsigned char *out) {
+  unsigned char stream[16];
+  size_t bs = c->bs;
+  for (size_t i = 0; i < len; i++) {
+    switch (c->mode) {
+    case SC_CFB:
+    case SC_OFB:
+      if (c->bufsz == 0 && !sc_forward(c, c->block, c->block)) return false;
+      out[i] = (unsigned char)(in[i] ^ c->block[c->bufsz]);
+      if (c->mode == SC_CFB) c->block[c->bufsz] = c->decrypt ? in[i] : out[i];
+      c->bufsz = (c->bufsz + 1) % bs;
+      break;
+    case SC_CFB8: {
+      if (!sc_forward(c, c->block, stream)) return false;
+      unsigned char byte = (unsigned char)(in[i] ^ stream[0]);
+      memmove(c->block, c->block + 1, bs - 1);
+      c->block[bs - 1] = c->decrypt ? in[i] : byte;
+      out[i] = byte;
+      break;
+    }
+    default: {
+      unsigned char result = 0;
+      for (int bit = 7; bit >= 0; bit--) {
+        if (!sc_forward(c, c->block, stream)) return false;
+        unsigned in_bit = (in[i] >> bit) & 1u;
+        unsigned out_bit = in_bit ^ (stream[0] >> 7);
+        unsigned feed = c->decrypt ? in_bit : out_bit;
+        for (size_t k = 0; k + 1 < bs; k++)
+          c->block[k] = (unsigned char)(c->block[k] << 1 | c->block[k + 1] >> 7);
+        c->block[bs - 1] = (unsigned char)(c->block[bs - 1] << 1 | feed);
+        result |= (unsigned char)(out_bit << bit);
+      }
+      out[i] = result;
+      break;
+    }
+    }
+  }
+  mbedtls_platform_zeroize(stream, sizeof stream);
+  return true;
+}
+
+/* chacha20 over len bytes: when the 64-bit counter's low word wraps, the
+ * high word steps (and wraps itself, as OpenSSL's does) and the stream
+ * restarts from block 0 of the next word. */
+static bool sc_chacha20_update(ScCipher *c, const unsigned char *in, size_t len, unsigned char *out) {
+  while (len > 0) {
+    size_t n = len < c->chacha_left ? len : (size_t)c->chacha_left;
+    if (mbedtls_chacha20_update(&c->chacha, n, in, out) != 0) return false;
+    in += n;
+    out += n;
+    len -= n;
+    c->chacha_left -= n;
+    if (c->chacha_left == 0) {
+      for (int k = 4; k < 8 && ++c->block[k] == 0; k++) {
+      }
+      memset(c->block, 0, 4);
+      c->chacha_left = (uint64_t)1 << 38;
+      if (mbedtls_chacha20_starts(&c->chacha, c->block + 4, 0) != 0) return false;
+    }
+  }
+  return true;
+}
+
+/* OpenSSL's ossl_cipher_generic_block_update for CBC and ECB: complete
+ * blocks are processed, the remainder is buffered, and a decryption that
+ * ends on a block boundary holds the last block back for padding removal.
+ * Returns the output length, or -1 when the backend fails; out has room
+ * for len + 16 bytes. */
 static long sc_cbc_update(ScCipher *c, const unsigned char *in, size_t inl, unsigned char *out) {
+  size_t bs = c->bs;
   size_t outl = 0;
   size_t nextblocks;
   if (c->bufsz != 0) {
-    size_t remain = 16 - c->bufsz;
+    size_t remain = bs - c->bufsz;
     if (inl < remain) remain = inl;
     memcpy(c->buf + c->bufsz, in, remain);
     in += remain;
     inl -= remain;
     c->bufsz += remain;
-    nextblocks = inl & ~(size_t)15;
-  } else {
-    nextblocks = inl & ~(size_t)15;
   }
-  if (c->bufsz == 16 && (!c->decrypt || inl > 0 || !c->pad)) {
-    if (!sc_cbc_blocks(c, c->buf, 16, out)) return -1;
+  nextblocks = inl - inl % bs;
+  if (c->bufsz == bs && (!c->decrypt || inl > 0 || !c->pad)) {
+    if (!sc_cbc_blocks(c, c->buf, bs, out)) return -1;
     c->bufsz = 0;
-    outl = 16;
-    out += 16;
+    outl = bs;
+    out += bs;
   }
   if (nextblocks > 0) {
-    if (c->decrypt && c->pad && nextblocks == inl) nextblocks -= 16;
+    if (c->decrypt && c->pad && nextblocks == inl) nextblocks -= bs;
     if (nextblocks > 0) {
       if (!sc_cbc_blocks(c, in, nextblocks, out)) return -1;
       outl += nextblocks;
@@ -682,33 +888,35 @@ static long sc_cbc_update(ScCipher *c, const unsigned char *in, size_t inl, unsi
   return (long)outl;
 }
 
-/* ossl_cipher_generic_block_final for CBC. Returns the output length, -1
- * after throwing OpenSSL's error, or -2 when the backend fails. */
+/* ossl_cipher_generic_block_final for CBC and ECB. Returns the output
+ * length, -1 after throwing OpenSSL's error, or -2 when the backend
+ * fails. */
 static long sc_cbc_final(ScCipher *c, unsigned char out[16]) {
+  size_t bs = c->bs;
   if (!c->decrypt) {
     if (c->pad) {
-      unsigned char fill = (unsigned char)(16 - c->bufsz);
-      for (size_t i = c->bufsz; i < 16; i++) c->buf[i] = fill;
+      unsigned char fill = (unsigned char)(bs - c->bufsz);
+      for (size_t i = c->bufsz; i < bs; i++) c->buf[i] = fill;
     } else if (c->bufsz == 0) {
       return 0;
-    } else if (c->bufsz != 16) {
+    } else if (c->bufsz != bs) {
       sc_throw_openssl("1C80006B", "wrong final block length", "ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH");
       return -1;
     }
-    if (!sc_cbc_blocks(c, c->buf, 16, out)) return -2;
+    if (!sc_cbc_blocks(c, c->buf, bs, out)) return -2;
     c->bufsz = 0;
-    return 16;
+    return (long)bs;
   }
-  if (c->bufsz != 16) {
+  if (c->bufsz != bs) {
     if (c->bufsz == 0 && !c->pad) return 0;
     sc_throw_openssl("1C80006B", "wrong final block length", "ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH");
     return -1;
   }
-  if (!sc_cbc_blocks(c, c->buf, 16, c->buf)) return -2;
-  size_t len = 16;
+  if (!sc_cbc_blocks(c, c->buf, bs, c->buf)) return -2;
+  size_t len = bs;
   if (c->pad) {
-    unsigned char fill = c->buf[15];
-    bool bad = fill == 0 || fill > 16;
+    unsigned char fill = c->buf[bs - 1];
+    bool bad = fill == 0 || fill > bs;
     for (size_t i = 0; !bad && i < fill; i++) bad = c->buf[--len] != fill;
     if (bad) {
       sc_throw_openssl("1C800064", "bad decrypt", "ERR_OSSL_BAD_DECRYPT");
@@ -769,7 +977,8 @@ static ScrBytes *sc_transform(ScCipher *c, const unsigned char *in, size_t len) 
   size_t produced = 0;
   bool ok = true;
   switch (c->mode) {
-  case SC_CBC: {
+  case SC_CBC:
+  case SC_ECB: {
     long n = sc_cbc_update(c, in, len, out->data);
     ok = n >= 0;
     produced = ok ? (size_t)n : 0;
@@ -784,6 +993,17 @@ static ScrBytes *sc_transform(ScCipher *c, const unsigned char *in, size_t len) 
     break;
   case SC_CHACHA:
     ok = len == 0 || sc_chacha_update(c, in, len, out->data);
+    produced = len;
+    break;
+  case SC_CFB:
+  case SC_CFB8:
+  case SC_CFB1:
+  case SC_OFB:
+    ok = sc_feedback(c, in, len, out->data);
+    produced = len;
+    break;
+  case SC_CHACHA20:
+    ok = len == 0 || sc_chacha20_update(c, in, len, out->data);
     produced = len;
     break;
   }
@@ -926,7 +1146,8 @@ static ScrBytes *sc_final_bytes(ScCipher *c) {
   out->len = 0;
   bool ok = true, backend = true;
   switch (c->mode) {
-  case SC_CBC: {
+  case SC_CBC:
+  case SC_ECB: {
     long produced = sc_cbc_final(c, out->data);
     if (produced == -1) {
       scr_bytes_release(out);
@@ -937,6 +1158,11 @@ static ScrBytes *sc_final_bytes(ScCipher *c) {
     break;
   }
   case SC_CTR:
+  case SC_CFB:
+  case SC_CFB8:
+  case SC_CFB1:
+  case SC_OFB:
+  case SC_CHACHA20:
     break;
   case SC_GCM: {
     unsigned char full[16];

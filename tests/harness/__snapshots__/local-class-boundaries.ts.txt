@@ -2,18 +2,11 @@ local-class-boundaries.ts:1:34 - error SC1090: function-local classes with priva
 
   1 | function privateBrand() { return class { #value = 1; has(other: object): boolean { return #value in other; } }; }
     |                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  2 | function selfName() { return class Local { copy() { return new Local(); } }; }
+  2 | class Base {}
 
-local-class-boundaries.ts:2:64 - error SC1090: named self references inside function-local classes are not supported yet
+local-class-boundaries.ts:4:29 - error SC1090: function-local classes with statics, decorators, or generic members are not supported yet
 
-  1 | function privateBrand() { return class { #value = 1; has(other: object): boolean { return #value in other; } }; }
-  2 | function selfName() { return class Local { copy() { return new Local(); } }; }
-    |                                                                ^~~~~
-  3 | class Base {}
-
-local-class-boundaries.ts:5:29 - error SC1090: function-local classes with statics, decorators, or generic members are not supported yet
-
-  4 | function derived() { return class extends Base {}; }
-  5 | function generic() { return class { read<T>(value: T): T { return value; } }; }
+  3 | function derived() { return class extends Base {}; }
+  4 | function generic() { return class { read<T>(value: T): T { return value; } }; }
     |                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  6 | privateBrand();
+  5 | privateBrand();

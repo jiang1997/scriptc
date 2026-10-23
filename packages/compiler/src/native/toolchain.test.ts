@@ -99,11 +99,11 @@ test("native toolchain assets resolve from the physical manifest through package
     const direct = loadNativeToolchain(path);
     const viaLink = loadNativeToolchain(join(linked, "bin", "scriptc.exe.json"));
     expect(viaLink).toEqual(direct);
-    expect(viaLink.ts7Executable).toBe(join(assets, "typescript/lib/tsc.exe"));
+    expect(viaLink.ts7Executable).toBe(join(assets, "tsc-ts/lib/tsc-ts.exe"));
     expect(
-      loadNativeToolchain(join(linked, "bin", "scriptc.exe.json"), { SCRIPTC_CHECKER: "tsc-ts" })
+      loadNativeToolchain(join(linked, "bin", "scriptc.exe.json"), { SCRIPTC_CHECKER: "tsgo" })
         .ts7Executable,
-    ).toBe(join(assets, "tsc-ts/lib/tsc-ts.exe"));
+    ).toBe(join(assets, "typescript/lib/tsc.exe"));
     expect(viaLink.helperExecutable).toBe(join(assets, "llvm/bin/scriptc-llvm-codegen.exe"));
     expect(
       loadNativeToolchain(join(linked, "bin", "scriptc.exe.json"), {

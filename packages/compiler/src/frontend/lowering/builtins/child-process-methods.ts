@@ -1,4 +1,4 @@
-import { boolLit, strLit } from "../../../ir/build.js";
+import { boolLit, strLit, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import { requestGeneralStreamSurface } from "../general-streams.js";
 import { type Lowerer } from "../lowerer.js";
@@ -93,32 +93,47 @@ export function lowerChildMethodCall(
         '"exit", "close", "error", "message", and "disconnect" are the supported child events (as literals)',
       );
     }
-    if (!ts.isExpressionStatement(call.parent)) {
-      lowerer.unsupported(
-        "SC1090",
-        call,
-        `chaining child.${name}(...) (the result is void here — register each listener as its own statement)`,
-      );
-    }
-    const receiver = lowerer.lowerExpr(access.expression);
+    // `child.on(...)` returns the child: a chained call or a stored result
+    // reads the receiver, which evaluates once, before the listener.
+    let receiver = lowerer.lowerExpr(access.expression);
+    const chained = ts.isExpressionStatement(call.parent)
+      ? null
+      : {
+          local: lowerer.declareHiddenLocal("%childListenerTarget", receiver.type),
+          init: receiver,
+        };
+    if (chained) receiver = varRef(chained.local.id, chained.local.type, loc);
+    const registered = (registration: IrExpr): IrExpr =>
+      chained === null
+        ? registration
+        : {
+            kind: "seqExpr",
+            stmts: [
+              { kind: "varDecl", localId: chained.local.id, init: chained.init, loc },
+              { kind: "exprStmt", expr: registration, loc },
+            ],
+            result: varRef(chained.local.id, chained.local.type, loc),
+            type: chained.local.type,
+            loc,
+          };
     const once: IrExpr = { kind: "boolLit", value: name === "once", type: BOOL, loc };
     if (event === "message") {
-      return {
+      return registered({
         kind: "libCall",
         fn: "child.onMessage",
         args: [receiver, ipcMessageListener(lowerer, call.arguments.nodes[1]!), once],
         type: VOID,
         loc,
-      };
+      });
     }
     if (event === "disconnect") {
-      return {
+      return registered({
         kind: "libCall",
         fn: "child.onDisconnect",
         args: [receiver, ipcDisconnectListener(lowerer, call.arguments.nodes[1]!), once],
         type: VOID,
         loc,
-      };
+      });
     }
     const listenerNode = stripTypeCasts(call.arguments.nodes[1]!);
     if (
@@ -163,7 +178,7 @@ export function lowerChildMethodCall(
           call.arguments.nodes[1]!,
         );
       }
-      return {
+      return registered({
         kind: "libCall",
         fn: "child.onDyn",
         args: [
@@ -173,7 +188,7 @@ export function lowerChildMethodCall(
         ],
         type: VOID,
         loc,
-      };
+      });
     }
     if (event === "spawn") {
       if (cb.type.kind !== "func" || cb.type.params.length !== 0 || cb.type.ret.kind !== "void") {
@@ -182,7 +197,13 @@ export function lowerChildMethodCall(
           call.arguments.nodes[1]!,
         );
       }
-      return { kind: "libCall", fn: "child.onSpawn", args: [receiver, cb], type: VOID, loc };
+      return registered({
+        kind: "libCall",
+        fn: "child.onSpawn",
+        args: [receiver, cb],
+        type: VOID,
+        loc,
+      });
     }
     if (cb.type.kind !== "func" || cb.type.params.length > (event === "error" ? 1 : 2)) {
       lowerer.unsupported(
@@ -243,13 +264,13 @@ export function lowerChildMethodCall(
           `${event} listeners whose signal parameter is not 'Signals | null' (got '${lowerer.fmt(sigParam!)}')`,
         );
       }
-      return {
+      return registered({
         kind: "libCall",
         fn: event === "close" ? "child.onClose" : "child.onExit",
         args: [receiver, cb],
         type: VOID,
         loc,
-      };
+      });
     }
     if (param !== undefined && !(param.kind === "object" && param.className === "%Error")) {
       lowerer.unsupported(
@@ -258,7 +279,13 @@ export function lowerChildMethodCall(
         `error listeners whose parameter is not 'Error' (got '${lowerer.fmt(param)}')`,
       );
     }
-    return { kind: "libCall", fn: "child.onError", args: [receiver, cb], type: VOID, loc };
+    return registered({
+      kind: "libCall",
+      fn: "child.onError",
+      args: [receiver, cb],
+      type: VOID,
+      loc,
+    });
   }
   // child.kill(signal?) — Node's semantics exactly: the name resolves
   // through Node's signal table (unknown names throw the ERR_UNKNOWN_SIGNAL

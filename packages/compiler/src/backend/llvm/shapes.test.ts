@@ -6,8 +6,9 @@ import {
   emitRecordShapes,
   inlineRcDecls,
   INLINE_DYN_RELEASES_PER_FUNCTION,
+  INLINE_STR_RELEASES_PER_FUNCTION,
   inlineRcOption,
-  limitInlineDynReleases,
+  limitInlineReleases,
   releaseSym,
   retainSym,
   type ShapeHost,
@@ -132,10 +133,10 @@ describe("LLVM runtime RC symbols", () => {
     ]);
   });
 
-  test("release builds inline only string retains and dyn retains and releases", () => {
+  test("release builds inline only string and dyn retains and releases and Map retains", () => {
     const { host } = declarationHost(64, "release");
     expect(retainSym(host, { kind: "string" })).toBe("@sc_rc_retain_str");
-    expect(releaseSym(host, { kind: "string" })).toBe("@scr_str_release");
+    expect(releaseSym(host, { kind: "string" })).toBe("@sc_rc_release_str");
     expect(retainSym(host, { kind: "dyn" })).toBe("@sc_rc_retain_dyn");
     expect(releaseSym(host, { kind: "dyn" })).toBe("@sc_rc_release_dyn");
     expect(releaseSym(host, { kind: "union", unionId: "u0" } as never)).toBe("@scr_union_release");
@@ -251,12 +252,12 @@ describe("LLVM runtime RC symbols", () => {
   });
 });
 
-describe("inline dyn release budget", () => {
-  const body = (name: string, sites: number): string =>
+describe("inline release budgets", () => {
+  const body = (name: string, sites: number, family = "dyn"): string =>
     [
       `define internal void @${name}(ptr %v) #0 {`,
       "entry:",
-      ...Array.from({ length: sites }, () => "  call void @sc_rc_release_dyn(ptr %v)"),
+      ...Array.from({ length: sites }, () => `  call void @sc_rc_release_${family}(ptr %v)`),
       "  ret void",
       "}",
       "",
@@ -266,13 +267,29 @@ describe("inline dyn release budget", () => {
     const small = body("small", INLINE_DYN_RELEASES_PER_FUNCTION);
     const large = body("large", INLINE_DYN_RELEASES_PER_FUNCTION + 1);
     // main's lines are separate parts.
-    const limited = limitInlineDynReleases([`; header\n${small}`, ...large.split("\n")]).join("\n");
+    const limited = limitInlineReleases([`; header\n${small}`, ...large.split("\n")], "speed").join(
+      "\n",
+    );
     expect(limited.startsWith("; header\n")).toBe(true);
     expect(limited).toContain(small);
     const out = limited.slice(limited.indexOf("@large("));
     expect(out).not.toContain("@sc_rc_release_dyn(");
     expect(out.split("call void @scr_dyn_release(ptr %v)").length - 1).toBe(
       INLINE_DYN_RELEASES_PER_FUNCTION + 1,
+    );
+  });
+
+  test("a function over the string budget calls the runtime string release at every site", () => {
+    const small = body("small", INLINE_STR_RELEASES_PER_FUNCTION, "str");
+    const large = body("large", INLINE_STR_RELEASES_PER_FUNCTION + 1, "str");
+    const limited = limitInlineReleases([small, large], "release").join("\n");
+    expect(limited).toContain(small);
+    // Speed emission keeps every inline string release.
+    expect(limitInlineReleases([small, large], "speed").join("\n")).toBe([small, large].join("\n"));
+    const out = limited.slice(limited.indexOf("@large("));
+    expect(out).not.toContain("@sc_rc_release_str(");
+    expect(out.split("call void @scr_str_release(ptr %v)").length - 1).toBe(
+      INLINE_STR_RELEASES_PER_FUNCTION + 1,
     );
   });
 });

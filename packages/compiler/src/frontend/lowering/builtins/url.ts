@@ -195,7 +195,30 @@ export function lowerSearchParamsNew(
     );
   }
   const arg = args[0];
-  if (arg === undefined || (ts.isIdentifier(arg) && arg.text === "undefined")) {
+  if (arg === undefined) {
+    return { kind: "libCall", fn: "sp.new", args: [], type: SEARCH_PARAMS_T, loc };
+  }
+  return lowerSearchParamsInit(lowerer, arg, loc);
+}
+
+/** The URLSearchParams built from one init expression. A conditional
+ * init (`new URLSearchParams(c ? { a: "1" } : {})`) evaluates its
+ * condition first and builds from the arm it selects, so each arm may be
+ * any supported init shape. */
+function lowerSearchParamsInit(lowerer: Lowerer, arg: ts.Expression, loc: SrcLoc): IrExpr {
+  let inner = arg;
+  while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+  if (ts.isConditionalExpression(inner)) {
+    return {
+      kind: "ternary",
+      cond: lowerer.lowerCondition(inner.condition),
+      then: lowerSearchParamsInit(lowerer, inner.whenTrue, loc),
+      else_: lowerSearchParamsInit(lowerer, inner.whenFalse, loc),
+      type: SEARCH_PARAMS_T,
+      loc,
+    };
+  }
+  if (ts.isIdentifier(arg) && arg.text === "undefined") {
     return { kind: "libCall", fn: "sp.new", args: [], type: SEARCH_PARAMS_T, loc };
   }
   // The object-literal init: `{ a: "1", b: "2" }` appends pairs in

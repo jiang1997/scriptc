@@ -55,6 +55,7 @@ static ScrArr *make_f64s(const double *values, size_t n) {
   a->filled = (uint32_t)n;
   a->elem = SCR_ELEM_F64;
   /* Values, then one state byte per slot (scr_arr_states_end). */
+  a->spare = SCR_ARR_STATES;
   a->data = calloc(n ? n : 1, sizeof(uint64_t) + 1);
   for (size_t i = 0; i < n; i++) memcpy(&a->data[i], &values[i], sizeof(double));
   memset(scr_arr_state_run(a, 0, n), SCR_ARR_VALUE, n);
@@ -170,6 +171,7 @@ int main(void) {
   assert(scr_itable_size(lists) == 4);
   ScrArr *big = make_f64s(NULL, 0);
   big->len = big->cap = big->filled = 100;
+  big->spare = 0; /* values without states */
   free(big->data);
   big->data = calloc(100, sizeof(uint64_t));
   for (unsigned i = 0; i < 100; i++) memcpy(&big->data[i], &(double){i}, sizeof(double));

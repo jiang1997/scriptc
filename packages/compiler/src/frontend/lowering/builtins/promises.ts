@@ -9,6 +9,7 @@ import { isJsSourceFile, locOf } from "../../program.js";
 import {
   BOOL,
   DYN,
+  F64,
   type IrExpr,
   type IrFunction,
   type IrStmt,
@@ -376,8 +377,14 @@ export function lowerPromiseStaticCall(
       );
     }
     const entries = lowerer.lowerExpr(argNode);
-    if (isJsSourceFile(ts.getSourceFileOfNode(call)) && entries.type.kind === "dyn")
-      return checkedPromiseAll(lowerer, entries, loc);
+    if (entries.type.kind === "dyn") return checkedPromiseAll(lowerer, entries, loc);
+    // An 'any'-typed argument that holds a typed value (`const xs: any =
+    // []`): the combinator reads it as the runtime value it is.
+    if (
+      (lowerer.typeOf(argNode).flags & ts.TypeFlags.Any) !== 0 &&
+      lowerer.dynConvertible(entries.type)
+    )
+      return checkedPromiseAll(lowerer, lowerer.coerceToExpected(entries, DYN), loc);
 
     // loadPlugin(p)))` — the loadPlugins shape, where the checker
     // spells `any[]`): the ENGINE's own Promise.all runs over the
@@ -844,4 +851,90 @@ function lowerTypedSettledCombinator(
     );
   }
   return { kind: "intrinsic", name: "promise.allSettled", args: [entries], type: resultT, loc };
+}
+
+/** `const pair = await Promise.all([p, q])` where every entry is the same
+ * Promise<T> and the binding's type is the checker's tuple `[T, T]`: the
+ * uniform entries settle through one runtime combinator into a T[] (the
+ * same combinator and turn as the array form), and the binding receives
+ * the tuple of its elements. Null for every other await. */
+export function lowerAwaitedUniformPromiseAll(
+  lowerer: Lowerer,
+  expr: ts.AwaitExpression,
+): IrExpr | null {
+  let operand: ts.Expression = expr.expression;
+  while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
+  if (
+    !ts.isCallExpression(operand) ||
+    operand.questionDotToken ||
+    !ts.isPropertyAccessExpression(operand.expression) ||
+    operand.arguments.nodes.length !== 1 ||
+    isJsSourceFile(ts.getSourceFileOfNode(expr))
+  )
+    return null;
+  const argNode = operand.arguments.nodes[0]!;
+  if (
+    !ts.isArrayLiteralExpression(argNode) ||
+    argNode.elements.nodes.length === 0 ||
+    argNode.elements.nodes.some(ts.isSpreadElement)
+  )
+    return null;
+  let user: ts.Node = expr;
+  while (ts.isParenthesizedExpression(user.parent)) user = user.parent;
+  const decl = user.parent;
+  if (!ts.isVariableDeclaration(decl) || decl.initializer !== user || !ts.isIdentifier(decl.name))
+    return null;
+  if (lowerer.stdlibGlobalMember(operand.expression, "Promise") !== "all") return null;
+  const tuple = lowerer.mapTypeOf(lowerer.typeOf(decl.name));
+  if (tuple?.kind !== "record") return null;
+  const shape = lowerer.shapes.get(tuple.shapeId);
+  if (!shape?.tuple || shape.fields.length !== argNode.elements.nodes.length) return null;
+  const elems = argNode.elements.nodes.map((el) => lowerer.lowerExpr(el));
+  const first = elems[0]!.type;
+  if (
+    first.kind !== "promise" ||
+    first.inner.kind === "void" ||
+    !elems.every((e) => typeEquals(e.type, first)) ||
+    !shape.fields.every((f) => typeEquals(f.type, first.inner))
+  )
+    return null;
+  const loc = locOf(expr);
+  const values = arrayOf(first.inner);
+  const local = lowerer.declareHiddenLocal("%allValues", values);
+  const all: IrExpr = {
+    kind: "intrinsic",
+    name: "promise.all",
+    args: [{ kind: "arrayLit", elems, type: arrayOf(first), loc }],
+    type: { kind: "promise", inner: values },
+    loc,
+  };
+  return {
+    kind: "seqExpr",
+    stmts: [
+      {
+        kind: "varDecl",
+        localId: local.id,
+        init: { kind: "awaitExpr", value: all, type: values, loc },
+        loc,
+      },
+    ],
+    // Shape fields are sorted by name; a tuple field's name is its position.
+    result: {
+      kind: "recordLit",
+      fields: shape.fields.map((f) => ({
+        name: f.name,
+        value: {
+          kind: "arrayGet",
+          arr: varRef(local.id, values, loc),
+          index: { kind: "numLit", value: Number(f.name), type: F64, loc },
+          type: f.type,
+          loc,
+        },
+      })),
+      type: tuple,
+      loc,
+    },
+    type: tuple,
+    loc,
+  };
 }

@@ -692,7 +692,7 @@ static ScrDyn *scr_regex_groups_of(const ScrArr *a, uint8_t *bc) {
   for (int k = 1; k < capture_count; k++) {
     size_t length = strlen(name);
     bool matched = (size_t)k < a->len && (size_t)k < a->cap &&
-                   *scr_arr_state_ptr(a, (size_t)k) == SCR_ARR_VALUE;
+                   scr_arr_dense_state(a, (size_t)k) == SCR_ARR_VALUE;
     /* ES2025 duplicates sit in distinct alternatives: at most one
      * participates, and it wins over an earlier undefined. */
     if (length && (matched || !scr_dyn_obj_get(groups, name, length)))
@@ -845,7 +845,7 @@ static ScrArr *scr_regex_exec_core(ScrStr *s, ScrRegex *re, uint64_t mask, bool 
   if (rc == 1) {
     int count = lre_get_capture_count(bc);
     bool spans = lazy != 0 && !input.wide && (count >= 64 || ((mask | lazy) >> count) == 0);
-    out = scr_arr_new_inline(SCR_ELEM_STR, (size_t)count + spans);
+    out = scr_arr_new_inline(SCR_ELEM_STR, (size_t)count + spans, true);
     /* A fresh dense array: every slot is written directly, then the
      * hole-free prefix is the run of materialized captures from 0. Its
      * storage pointers are fixed (the inline block never moves here), so
@@ -905,14 +905,15 @@ static bool scr_regex_group_bytes(const ScrArr *m, double k, const char **p, siz
   /* Array lengths stay below 2^53, so signed conversions are exact. */
   if (!(k >= 0 && k < (double)(int64_t)m->len)) return false;
   size_t i = (size_t)(int64_t)k;
-  if (*scr_arr_state_ptr(m, i) == SCR_ARR_VALUE) {
+  uint8_t state = scr_arr_dense_state(m, i);
+  if (state == SCR_ARR_VALUE) {
     const ScrStr *str = (const ScrStr *)(uintptr_t)m->data[i];
     *p = str->data;
     *n = str->len;
     return true;
   }
   uint64_t span = m->data[i];
-  if (*scr_arr_state_ptr(m, i) != SCR_ARR_UNDEFINED || span == SCR_RE_NO_SPAN) return false;
+  if (state != SCR_ARR_UNDEFINED || span == SCR_RE_NO_SPAN) return false;
   const ScrStr *subject = (const ScrStr *)(uintptr_t)m->data[m->len - 1];
   *p = subject->data + (span >> 32);
   *n = (size_t)((span & UINT32_MAX) - (span >> 32));
@@ -1043,10 +1044,13 @@ static ScrArr *scr_regex_match_all_core(ScrStr *s, ScrRegex *re, ScrArr *indices
     int start = scr_capture_index(&input, capture[0]);
     int end = scr_capture_index(&input, capture[1]);
     /* One allocation per row, like an exec result: every slot is written
-     * directly, then the hole-free prefix is the run of captures from 0. */
-    ScrArr *row = scr_arr_new_inline(SCR_ELEM_STR, (size_t)capture_count);
+     * directly, then the hole-free prefix is the run of captures from 0.
+     * A row needs states only for a capture that did not participate. */
+    bool all = true;
+    for (int k = 0; k < capture_count; k++) all &= capture[2 * k] != NULL && capture[2 * k + 1] != NULL;
+    ScrArr *row = scr_arr_new_inline(SCR_ELEM_STR, (size_t)capture_count, !all);
     uint64_t *data = row->data;
-    uint8_t *states = scr_arr_states_end_w(row, 8);
+    uint8_t *states = all ? NULL : scr_arr_states_end_w(row, 8);
     for (int k = 0; k < capture_count; k++) {
       const uint8_t *cs = capture[2 * k], *ce = capture[2 * k + 1];
       if (cs == NULL || ce == NULL) {
@@ -1056,11 +1060,11 @@ static ScrArr *scr_regex_match_all_core(ScrStr *s, ScrRegex *re, ScrArr *indices
         ScrStr *text =
             scr_regex_span(&input, scr_capture_index(&input, cs), scr_capture_index(&input, ce));
         data[k] = (uint64_t)(uintptr_t)text;
-        *scr_arr_state_in(states, (size_t)k) = SCR_ARR_VALUE;
+        if (states) *scr_arr_state_in(states, (size_t)k) = SCR_ARR_VALUE;
       }
     }
     size_t filled = 0;
-    while (filled < (size_t)capture_count && *scr_arr_state_in(states, filled) == SCR_ARR_VALUE)
+    while (filled < (size_t)capture_count && (!states || *scr_arr_state_in(states, filled) == SCR_ARR_VALUE))
       filled++;
     row->filled = (uint32_t)filled;
     row->len = (size_t)capture_count;
@@ -2795,7 +2799,7 @@ static ScrDyn *scr_native_regex_invoke(void *ptr, ScrDyn *self, const char *meth
     if (!row) return scr_exc_pending() ? NULL : scr_dyn_new_null();
     ScrDyn *match = scr_dyn_new_arr();
     for (size_t k = 0; k < row->len; k++)
-      scr_dyn_arr_push(match, *scr_arr_state_ptr(row, k) == SCR_ARR_VALUE
+      scr_dyn_arr_push(match, scr_arr_dense_state(row, k) == SCR_ARR_VALUE
                                   ? scr_dyn_new_str((ScrStr *)(uintptr_t)row->data[k])
                                   : scr_dyn_retain(scr_dyn_undefined()));
     scr_arr_copy_metadata(row, match);

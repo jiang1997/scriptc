@@ -316,6 +316,55 @@ test.each([32, 64] as const)(
   },
 );
 
+test("arrays without state bytes skip the state stores", () => {
+  const read: IrExpr = { kind: "arrayGet", arr: ref("s", words), index, type: STRING, loc };
+  const write: IrStmt = {
+    kind: "arraySet",
+    arr: ref("s", words),
+    index,
+    value: { kind: "strLit", value: "x", type: STRING, loc },
+    loc,
+  };
+  const push: IrStmt = {
+    kind: "exprStmt",
+    expr: {
+      kind: "arrIntrinsic",
+      method: "push",
+      receiver: ref("a", nums),
+      args: [{ kind: "numLit", value: 2.5, type: F64, loc }],
+      type: F64,
+      loc,
+    },
+    loc,
+  };
+  const llvm = emitLlvmModule(
+    module("plain", STRING, [push, write, { kind: "return", value: read, loc }]),
+  );
+  const fn = body(llvm, "plain");
+  // SCR_ARR_STATES (16) in `spare`, field 5.
+  const flag = String.raw`getelementptr inbounds %ScrArr, ptr %t\d+, i32 0, i32 5\n  %t\d+ = load i16, ptr %t\d+, !tbaa !\d+\n  %t\d+ = and i16 %t\d+, 16\n  %t\d+ = icmp ne i16 %t\d+, 0\n`;
+  // A push marks the state only when the array has states.
+  expect(fn).toMatch(
+    new RegExp(
+      `${flag}  br i1 %t\\d+, label %arr\\.push\\.state\\d+, label %arr\\.push\\.marked\\d+\\narr\\.push\\.state\\d+:\\n  store i8 1, ptr `,
+    ),
+  );
+  // Above the prefix, an array without states has no elements (its prefix
+  // is its length): a store there appends at the length and replaces no
+  // value.
+  expect(fn).toMatch(
+    new RegExp(
+      `${flag}  br i1 %t\\d+, label %arr\\.set\\.states\\d+, label %arr\\.set\\.plain\\d+`,
+    ),
+  );
+  expect(fn).toMatch(
+    /^arr\.set\.plain\d+:\n  %t\d+ = icmp eq i64 .*\n  br i1 %t\d+, label %arr\.set\.values\d+, label %arr\.set\.slow\d+$/m,
+  );
+  expect(fn).toMatch(/phi i1 \[ %t\d+, %arr\.set\.states\d+ \], \[ false, %arr\.set\.values\d+ \]/);
+  // Reads test no flag: they reach the state check only above the prefix.
+  expect(fn).not.toMatch(/label %arr\.get\.state\d+/);
+});
+
 test("state and presence queries answer dense slots inline", () => {
   const state: IrExpr = { kind: "arrayState", arr: ref("b", flags), index, type: F64, loc };
   const has: IrExpr = { kind: "arrayHas", arr: ref("s", words), index, type: BOOL, loc };

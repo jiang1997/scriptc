@@ -446,6 +446,44 @@ static void test_ref_elements(void) {
 #endif
 }
 
+/* Elements whose release does nothing (SCR_ARR_OPS_RELEASE_NOTHING): the
+ * last release of an array frees its storage without calling the element
+ * release. An array with out-of-line storage keeps the full teardown. */
+static int nothing_releases = 0;
+static void *nothing_retain(void *p) { return p; }
+static void nothing_release(void *p) {
+  (void)p;
+  nothing_releases++;
+}
+static ScrArrOps nothing_ops = { &nothing_retain, &nothing_release, NULL, 0,
+                                 SCR_ARR_OPS_RELEASE_NOTHING };
+
+static void test_release_nothing_ops(void) {
+#ifdef SCR_RC_AUDIT
+  long arrays0 = scr_arr_live_count();
+#endif
+  static MockRec kept[3];
+  ScrArr *a = scr_arr_new_ops(&nothing_ops, 0);
+  for (int i = 0; i < 3; i++) scr_arr_push_ref(a, &kept[i]);
+  ScrArr *shared = scr_arr_retain(a);
+  scr_arr_release(shared);
+  check_f64(scr_arr_len(a), 3, "release-nothing: a shared release keeps the array");
+  scr_arr_release(a);
+  check(nothing_releases == 0, "release-nothing: teardown calls no element release");
+  ScrArr *sparse = scr_arr_new_ops(&nothing_ops, 0);
+  scr_arr_push_ref(sparse, &kept[0]);
+  scr_arr_set_ref(sparse, 4000000000.0, &kept[1]); /* out-of-line sparse slot */
+  check(scr_arr_ext_of(sparse) != NULL, "release-nothing: a far index makes an ext");
+  scr_arr_release(sparse);
+  check(nothing_releases == 2, "release-nothing: an array with an ext keeps the full teardown");
+  ScrArr *nums = scr_arr_new(SCR_ELEM_F64, 0);
+  scr_arr_push_f64(nums, 1);
+  scr_arr_release(nums);
+#ifdef SCR_RC_AUDIT
+  check(scr_arr_live_count() == arrays0, "release-nothing: no arrays leaked");
+#endif
+}
+
 /* Element ops past the registry's capacity: every descriptor still finds its
  * own retain and release, and the first ones keep their registry ids. */
 static void test_ops_overflow(void) {
@@ -1365,11 +1403,13 @@ static void test_exact_construction(void) {
 }
 
 /* The hole-free prefix bound never covers a non-value state, and the
- * operations that keep an array hole-free keep the bound at its length. */
+ * operations that keep an array hole-free keep the bound at its length. An
+ * array without states keeps its elements in dense storage. */
 static bool filled_ok(const ScrArr *a) {
   if (a->filled > a->len || a->filled > a->cap) return false;
+  if (!scr_arr_has_states(a) && (a->len > a->cap || a->filled != a->len)) return false;
   for (size_t i = 0; i < a->filled; i++)
-    if (*scr_arr_state_ptr(a, i) != SCR_ARR_VALUE) return false;
+    if (scr_arr_dense_state(a, i) != SCR_ARR_VALUE) return false;
   return true;
 }
 
@@ -1444,7 +1484,7 @@ static void test_filled_prefix(void) {
   scr_arr_release(scr_arr_sort_primitive(b, false));
   check(filled_ok(b), "sorting moves holes past the bound");
   for (size_t i = 0; i < b->len; i++) {
-    if (i < b->cap && *scr_arr_state_ptr(b, i) != SCR_ARR_VALUE) break;
+    if (i < b->cap && scr_arr_dense_state(b, i) != SCR_ARR_VALUE) break;
     check(i < b->filled, "sorted values form the bound");
   }
   while (scr_arr_len(b) > 0) {
@@ -1464,11 +1504,13 @@ static void test_filled_prefix(void) {
 }
 
 /* Boolean arrays store one byte per dense element, followed by the states in
- * the same allocation. Growth moves the states to the end of the larger area,
- * densifying absorbs sparse entries into bytes, and every moving and copying
- * operation keeps values, holes and present undefined in place. */
+ * the same allocation once they have states. Growth moves the states to the
+ * end of the larger area, densifying absorbs sparse entries into bytes, and
+ * every moving and copying operation keeps values, holes and present
+ * undefined in place. */
 static bool bool_layout_ok(const ScrArr *a) {
-  return a->cap == 0 || scr_arr_states_end(a) == (const uint8_t *)a->data + 2 * (size_t)a->cap;
+  return a->cap == 0 || !scr_arr_has_states(a) ||
+         scr_arr_states_end(a) == (const uint8_t *)a->data + 2 * (size_t)a->cap;
 }
 
 static bool bool_states(const ScrArr *a, const char *want) {
@@ -1572,6 +1614,102 @@ static bool inline_slots(const ScrArr *a) {
   return a->data == (const uint64_t *)((const char *)a + ((sizeof(ScrArr) + 7) & ~(size_t)7));
 }
 
+/* Int32 slots: 4-byte values, then the state bytes when the array has them. */
+static bool i32_layout_ok(const ScrArr *a) {
+  return a->elem == SCR_ELEM_I32 && scr_arr_slot_width(a) == sizeof(int32_t);
+}
+
+/* SCR_ELEM_I32: 4-byte int32 slots behind the double-valued entry points. */
+static void test_i32_slots(void) {
+  ScrArr *a = scr_arr_new_small(SCR_ELEM_I32);
+  for (int i = 0; i < 1000; i++) scr_arr_push_f64(a, (double)(i * 7 - 3000));
+  check(i32_layout_ok(a) && !scr_arr_has_states(a) && a->filled == 1000,
+        "int32 pushes grow four-byte storage without states");
+  bool values_ok = true;
+  for (int i = 0; i < 1000; i++) {
+    values_ok &= ((const int32_t *)a->data)[i] == i * 7 - 3000;
+    values_ok &= scr_arr_get_f64(a, i) == (double)(i * 7 - 3000);
+    values_ok &= scr_arr_get_number(a, i) == (double)(i * 7 - 3000);
+  }
+  check(values_ok, "int32 values are stored as 4-byte integers and read as doubles");
+  scr_arr_set_f64(a, 10, 2147483647);
+  scr_arr_set_f64(a, 11, -2147483648.0);
+  check(scr_arr_get_f64(a, 10) == 2147483647 && scr_arr_get_f64(a, 11) == -2147483648.0,
+        "int32 extremes round-trip");
+  check(scr_arr_pop_f64(a) == 999 * 7 - 3000 && scr_arr_len(a) == 999, "pop reads the last int32");
+  scr_arr_set_len(a, 5);
+  scr_arr_set_len(a, 8);
+  check(i32_layout_ok(a) && scr_arr_has_states(a) && scr_arr_state(a, 6) == SCR_ARR_HOLE &&
+            isnan(scr_arr_get_number(a, 6)) && scr_arr_get_f64(a, 4) == 4 * 7 - 3000,
+        "int32 truncation clears slots and extension adds holes");
+  scr_arr_set_f64(a, 20, 5);
+  check(scr_arr_len(a) == 21 && scr_arr_state(a, 15) == SCR_ARR_HOLE && scr_arr_get_f64(a, 20) == 5,
+        "an int32 store past the length leaves holes");
+  scr_arr_release(scr_arr_fill_f64(a, -9, 0, 21));
+  bool filled_ok = a->filled == 21;
+  for (int i = 0; i < 21; i++) filled_ok &= scr_arr_get_f64(a, i) == -9;
+  check(filled_ok, "int32 fill writes every slot");
+  scr_arr_release(a);
+
+  ScrArr *s = scr_arr_new(SCR_ELEM_I32, 0);
+  scr_arr_set_f64(s, 0, 1);
+  scr_arr_set_f64(s, 3000000, 3);
+  scr_arr_set_f64(s, 2000000, -2);
+  check(arr_sparse_len(s) == 2 && scr_arr_get_f64(s, 2000000) == -2 && scr_arr_get_f64(s, 3000000) == 3,
+        "int32 sparse entries keep double slots");
+  scr_arr_set_len(s, 2000001);
+  scr_arr_release(scr_arr_fill_f64(s, 4, 1, 2000000));
+  check(arr_sparse_len(s) == 0 && i32_layout_ok(s) && scr_arr_get_f64(s, 2000000) == -2 &&
+            scr_arr_get_f64(s, 1999999) == 4 && scr_arr_get_f64(s, 0) == 1,
+        "densifying absorbs sparse entries into int32 slots");
+  scr_arr_release(s);
+
+  ScrArr *k = scr_arr_new(SCR_ELEM_I32, 6);
+  for (int i = 0; i < 6; i++) scr_arr_push_f64(k, i);
+  scr_arr_push_f64(k, 6);
+  check(i32_layout_ok(k) && scr_arr_get_f64(k, 6) == 6 && scr_arr_get_f64(k, 0) == 0,
+        "a known-count int32 array grows out of its block");
+  scr_arr_release(k);
+
+  /* Widening: in place, to 8-byte double slots, keeping states. */
+  ScrArr *w = scr_arr_new(SCR_ELEM_I32, 3);
+  for (int i = 0; i < 3; i++) scr_arr_push_f64(w, i - 1);
+  check(inline_slots(w), "a three-element int32 construction keeps inline slots");
+  scr_arr_widen_i32(w);
+  check(w->elem == SCR_ELEM_F64 && !inline_slots(w) && scr_arr_len(w) == 3 && w->filled == 3 &&
+            scr_arr_get_f64(w, 0) == -1 && scr_arr_get_f64(w, 2) == 1,
+        "widening moves inline int32 slots out as doubles");
+  scr_arr_set_f64(w, 1, 2.5);
+  check(scr_arr_get_f64(w, 1) == 2.5, "a widened array stores fractions");
+  scr_arr_widen_i32(w);
+  check(w->elem == SCR_ELEM_F64 && scr_arr_get_f64(w, 1) == 2.5, "widening twice is a no-op");
+  scr_arr_release(w);
+
+  ScrArr *h = scr_arr_new_small(SCR_ELEM_I32);
+  for (int i = 0; i < 100; i++) scr_arr_push_f64(h, i * 3);
+  scr_arr_set_len(h, 120);
+  scr_arr_set_undefined(h, 5);
+  scr_arr_set_f64(h, 4000000, -7);
+  size_t cap = h->cap;
+  scr_arr_widen_i32(h);
+  bool widened = h->elem == SCR_ELEM_F64 && h->cap == cap && scr_arr_len(h) == 4000001 &&
+                 scr_arr_states_end(h) == (const uint8_t *)h->data + 9 * (size_t)h->cap;
+  for (int i = 0; i < 100; i++)
+    if (i != 5) widened &= scr_arr_get_f64(h, i) == i * 3;
+  check(widened && scr_arr_state(h, 5) == SCR_ARR_UNDEFINED && scr_arr_state(h, 110) == SCR_ARR_HOLE &&
+            scr_arr_get_f64(h, 4000000) == -7 && arr_sparse_len(h) == 1,
+        "widening keeps values, present undefined, holes and sparse entries");
+  scr_arr_push_f64(h, 0.5);
+  check(scr_arr_get_f64(h, 4000001) == 0.5, "a widened array keeps growing as doubles");
+  scr_arr_release(h);
+
+  ScrArr *e = scr_arr_new_small(SCR_ELEM_I32);
+  scr_arr_widen_i32(e);
+  scr_arr_push_f64(e, -0.0);
+  check(e->elem == SCR_ELEM_F64 && signbit(scr_arr_get_f64(e, 0)), "an empty int32 array widens too");
+  scr_arr_release(e);
+}
+
 static void test_inline_slots(void) {
 #ifdef SCR_RC_AUDIT
   long strings0 = scr_str_live_count();
@@ -1584,7 +1722,7 @@ static void test_inline_slots(void) {
    * block; growth past them moves them out like any inline array. */
   ScrArr *known = scr_arr_new(SCR_ELEM_F64, 4);
   check(inline_slots(known) && known->cap >= 4 && known->len == 0 && !scr_arr_has(known, 0) &&
-            scr_arr_states_end(known) == (uint8_t *)(known->data + known->cap) + known->cap,
+            !scr_arr_has_states(known),
         "a known-count construction places its slots in the array block");
   size_t known_cap = known->cap;
   for (size_t i = 0; i <= known_cap; i++) scr_arr_push_f64(known, (double)i);
@@ -1605,26 +1743,25 @@ static void test_inline_slots(void) {
         "known-count boolean constructions are inline too");
   scr_arr_release(known_flags);
   ScrArr *a = scr_arr_new_small(SCR_ELEM_F64);
-  check(inline_slots(a) && a->cap >= 4 && a->len == 0 &&
-            scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
-        "small construction places slots and states in the array block");
+  check(inline_slots(a) && a->cap >= 4 && a->len == 0 && !scr_arr_has_states(a),
+        "small construction places its slots in the array block, without states");
   size_t inline_cap = a->cap;
   for (size_t i = 0; i < inline_cap; i++) scr_arr_push_f64(a, (double)i);
   check(inline_slots(a) && a->filled == inline_cap, "appends within the inline capacity stay inline");
   scr_arr_push_f64(a, 100);
   check(!inline_slots(a) && a->cap > inline_cap && scr_arr_get_f64(a, 0) == 0 &&
             scr_arr_get_f64(a, (double)inline_cap - 1) == (double)inline_cap - 1 &&
-            scr_arr_get_f64(a, (double)inline_cap) == 100 &&
-            scr_arr_states_end(a) == (uint8_t *)(a->data + a->cap) + a->cap,
+            scr_arr_get_f64(a, (double)inline_cap) == 100 && !scr_arr_has_states(a),
         "growth moves inline slots to their own allocation");
   scr_arr_release(a);
 
   ScrArr *flags = scr_arr_new_small(SCR_ELEM_BOOL);
-  check(inline_slots(flags) && scr_arr_states_end(flags) == (uint8_t *)flags->data + 2 * (size_t)flags->cap,
+  check(inline_slots(flags) && flags->cap >= 4 && !scr_arr_has_states(flags),
         "boolean inline slots are one byte each");
   scr_arr_push_bool(flags, true);
   scr_arr_set_bool(flags, 3, true);
-  check(scr_arr_get_bool(flags, 0) && !scr_arr_has(flags, 1) && scr_arr_get_bool(flags, 3),
+  check(scr_arr_get_bool(flags, 0) && !scr_arr_has(flags, 1) && scr_arr_get_bool(flags, 3) &&
+            scr_arr_has_states(flags) && bool_layout_ok(flags),
         "boolean inline slots keep holes");
   scr_arr_release(flags);
 
@@ -2107,8 +2244,8 @@ static void test_head_room(void) {
   check_f64(scr_arr_shift_f64(q), 0, "shift answers the first element");
   check(q->data == block + 1 && q->cap == cap - 1 && q->len == 63,
         "shift advances the storage instead of moving the tail");
-  check(scr_arr_states_end(q) == (uint8_t *)(block + cap) + cap - 1 && head_room(q) && q->data[-1] == 1,
-        "the remaining states stay at the end of the allocation");
+  check(!scr_arr_has_states(q) && head_room(q) && q->data[-1] == 1,
+        "shift records the vacated slot in front of the data");
   check(q->filled == 63, "shift keeps the hole-free prefix");
   for (int i = 1; i < 40; i++) scr_arr_shift_f64(q);
   check(q->data == block + 40 && q->len == 24 && scr_arr_get_f64(q, 0) == 40 &&
@@ -2223,6 +2360,159 @@ static void test_head_room(void) {
 #endif
 }
 
+/* SCR_ARR_STATES (scr_array.h): an array starts without state bytes and
+ * keeps none while every index below its length is a present value. A
+ * hole, a present undefined or a length past the elements gives it states,
+ * with the elements in place. */
+static ScrStr *str_of(const char *text) { return scr_str_new(text, strlen(text)); }
+
+static bool strs_are(ScrArr *a, const char *want) {
+  /* want: one character per element, '_' a hole, 'u' undefined. */
+  if (scr_arr_len(a) != (double)strlen(want)) return false;
+  for (size_t i = 0; want[i]; i++) {
+    double state = scr_arr_state(a, (double)i);
+    if (want[i] == '_') {
+      if (state != SCR_ARR_HOLE) return false;
+    } else if (want[i] == 'u') {
+      if (state != SCR_ARR_UNDEFINED) return false;
+    } else {
+      if (state != SCR_ARR_VALUE) return false;
+      ScrStr *got = scr_arr_get_ref(a, (double)i);
+      bool same = got->len == 1 && got->data[0] == want[i];
+      scr_str_release(got);
+      if (!same) return false;
+    }
+  }
+  return filled_ok(a);
+}
+
+static ScrArr *strs_of(const char *text, bool small) {
+  ScrArr *a = small ? scr_arr_new_small(SCR_ELEM_STR) : scr_arr_new(SCR_ELEM_STR, 0);
+  for (size_t i = 0; text[i]; i++) scr_arr_push_ref(a, scr_str_new(text + i, 1));
+  return a;
+}
+
+static void test_states_on_demand(void) {
+#ifdef SCR_RC_AUDIT
+  long strings0 = scr_str_live_count();
+  long arrays0 = scr_arr_live_count();
+#endif
+  ScrArr *a = strs_of("abcdef", false);
+  scr_arr_set_ref(a, 1, str_of("B"));
+  scr_arr_set_ref(a, 6, str_of("g"));
+  scr_str_release(scr_arr_pop_ref(a));
+  scr_arr_set_len(a, 5);
+  check(!scr_arr_has_states(a) && a->filled == 5 && strs_are(a, "aBcde"),
+        "pushes, writes below the length, appends, pops and truncation keep no states");
+  scr_arr_set_undefined(a, 2);
+  check(scr_arr_has_states(a) && strs_are(a, "aBude"), "a present undefined gives the array states");
+  scr_arr_release(a);
+
+  ScrArr *gap = strs_of("ab", true);
+  scr_arr_set_ref(gap, 3, str_of("d"));
+  check(scr_arr_has_states(gap) && strs_are(gap, "ab_d"), "a write past the length leaves holes");
+  scr_arr_release(gap);
+
+  ScrArr *longer = strs_of("abc", true);
+  scr_arr_set_len(longer, 5);
+  check(scr_arr_has_states(longer) && strs_are(longer, "abc__"), "a longer length adds holes");
+  scr_arr_release(longer);
+
+  /* `new Array(n)` and a length set on an empty small array: the inline
+   * slots give way to one allocation holding the slots and their states. */
+  ScrArr *sized = scr_arr_new_small(SCR_ELEM_STR);
+  scr_arr_set_len(sized, 6);
+  scr_arr_set_ref(sized, 4, str_of("e"));
+  check(scr_arr_has_states(sized) && !(sized->spare & SCR_ARR_INLINE_SLOTS) && sized->cap == 6 &&
+            strs_are(sized, "____e_") && filled_ok(sized),
+        "a length set on an empty inline array reserves that many slots with states");
+  scr_arr_release(sized);
+
+  ScrArr *deleted = strs_of("abcd", false);
+  scr_arr_delete(deleted, 1);
+  check(scr_arr_has_states(deleted) && strs_are(deleted, "a_cd"), "delete leaves a hole");
+  scr_arr_release(deleted);
+
+  /* Conversion keeps out-of-line storage and head room's elements. */
+  ScrArr *props = strs_of("abc", true);
+  scr_arr_set_ref(props, -1, str_of("p"));
+  scr_arr_set_undefined(props, 3);
+  ScrStr *prop = scr_arr_get_ref(props, -1);
+  check(scr_arr_has_states(props) && strs_are(props, "abcu") && prop->data[0] == 'p',
+        "states keep a noncanonical property");
+  scr_str_release(prop);
+  scr_arr_release(props);
+  ScrArr *q = strs_of("abcdefghijklmnopqrst", false);
+  for (int i = 0; i < 3; i++) scr_str_release(scr_arr_shift_ref(q));
+  check(!scr_arr_has_states(q) && head_room(q), "shift keeps no states");
+  scr_arr_set_undefined(q, 1);
+  check(scr_arr_has_states(q) && !head_room(q) && strs_are(q, "dufghijklmnopqrst"),
+        "states move the elements of head room to the front");
+  scr_arr_release(q);
+
+  /* Copies keep no states for values, and states for holes. */
+  ScrArr *src = strs_of("abcde", false);
+  ScrArr *part = scr_arr_slice(src, 1, 4);
+  ScrArr *joined = scr_arr_slice(src, 0, INFINITY);
+  scr_arr_concat_copy(joined, src);
+  ScrArr *spliced = scr_arr_splice(joined, 2, 3);
+  ScrArr *reversed = scr_arr_to_reversed(src);
+  scr_arr_release(scr_arr_reverse(src));
+  scr_arr_release(scr_arr_sort_primitive(src, false));
+  check(!scr_arr_has_states(part) && strs_are(part, "bcd"), "a slice of values keeps no states");
+  check(!scr_arr_has_states(joined) && strs_are(joined, "ababcde"),
+        "concat and splice of values keep no states");
+  check(!scr_arr_has_states(spliced) && strs_are(spliced, "cde"), "removed values keep no states");
+  check(!scr_arr_has_states(reversed) && strs_are(reversed, "edcba"), "toReversed of values keeps no states");
+  check(!scr_arr_has_states(src) && strs_are(src, "abcde"), "reverse and sort of values keep no states");
+  scr_arr_release(src);
+  scr_arr_release(part);
+  scr_arr_release(joined);
+  scr_arr_release(spliced);
+  scr_arr_release(reversed);
+  ScrArr *holey = strs_of("ab", false);
+  scr_arr_set_ref(holey, 3, str_of("d"));
+  ScrArr *spread = strs_of("x", true);
+  scr_arr_push_spread(spread, holey);
+  ScrArr *concat = strs_of("x", true);
+  scr_arr_concat_copy(concat, holey);
+  ScrArr *values = scr_arr_slice(holey, 0, 2);
+  ScrArr *front = strs_of("yz", false);
+  scr_arr_unshift_spread(front, holey);
+  check(scr_arr_has_states(spread) && strs_are(spread, "xabud") && scr_arr_has_states(concat) &&
+            strs_are(concat, "xab_d") && !scr_arr_has_states(values) && strs_are(values, "ab") &&
+            scr_arr_has_states(front) && strs_are(front, "abudyz"),
+        "copies of holes keep holes or present undefined");
+  scr_arr_release(holey);
+  scr_arr_release(spread);
+  scr_arr_release(concat);
+  scr_arr_release(values);
+  scr_arr_release(front);
+
+  /* Numbers and booleans take the same paths without references. */
+  ScrArr *nums = scr_arr_new(SCR_ELEM_F64, 3);
+  for (int i = 0; i < 40; i++) scr_arr_push_f64(nums, i);
+  scr_arr_release(scr_arr_fill_f64(nums, 7, 30, INFINITY));
+  check(!scr_arr_has_states(nums) && scr_arr_get_number(nums, 39) == 7 && scr_arr_get_number(nums, 40) != 0,
+        "number fills keep no states");
+  scr_arr_release(scr_arr_fill_undefined(nums, 0, 1));
+  check(scr_arr_has_states(nums) && scr_arr_state(nums, 0) == SCR_ARR_UNDEFINED &&
+            scr_arr_get_number(nums, 1) == 1 && scr_arr_get_number(nums, 39) == 7 && filled_ok(nums),
+        "an undefined fill gives a number array states");
+  scr_arr_release(nums);
+  ScrArr *bits = scr_arr_new_small(SCR_ELEM_BOOL);
+  for (int i = 0; i < 6; i++) scr_arr_push_bool(bits, i % 2 == 0);
+  scr_arr_set_undefined(bits, 6);
+  check(scr_arr_has_states(bits) && bool_layout_ok(bits) && scr_arr_get_bool(bits, 4) &&
+            !scr_arr_get_bool(bits, 5) && scr_arr_state(bits, 6) == SCR_ARR_UNDEFINED,
+        "boolean arrays get one state byte per element");
+  scr_arr_release(bits);
+#ifdef SCR_RC_AUDIT
+  check(scr_str_live_count() == strings0, "states on demand: no strings leaked");
+  check(scr_arr_live_count() == arrays0, "states on demand: no arrays leaked");
+#endif
+}
+
 int main(int argc, char **argv) {
   if (argc > 1) {
     ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
@@ -2263,6 +2553,7 @@ int main(int argc, char **argv) {
   test_nested_rc();
   test_index_of_includes();
   test_ref_elements();
+  test_release_nothing_ops();
   test_ref_known_count_cycle(&mock_cyc_ops);
   test_ops_overflow();
   test_ref_known_count_cycle(&mock_cyc_ops_late);
@@ -2277,8 +2568,10 @@ int main(int argc, char **argv) {
   test_splice_drop();
   test_filled_prefix();
   test_bool_bytes();
+  test_i32_slots();
   test_inline_slots();
   test_head_room();
+  test_states_on_demand();
 
   fprintf(stderr, "%ld/%ld cases passed\n", total - failed, total);
   return failed == 0 ? 0 : 1;

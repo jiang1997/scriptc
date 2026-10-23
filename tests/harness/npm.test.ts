@@ -102,7 +102,7 @@ const KNOWN: Record<string, Known> = {
   "package-imports": { build: "SC2013" },
   "promise-bridge": { build: "SC1090" },
   "self-name": { build: "SC2013" },
-  "stream-shims": { run: "SC1090" },
+  "stream-shims": { run: "SC2020" },
   "util-shims": { run: "SC2020" },
   "web-streams": { run: "SC1090" },
   "workspace-copied": { build: "SC2013" },
@@ -112,9 +112,15 @@ const KNOWN: Record<string, Known> = {
 const cases = shardSelect(npmCases(fixturesRoot), (c) => c.name);
 
 /** Per-case timeouts past the default 120 s: the undici cases compile the
- * built-in undici implementation's module graph, which a sanitized build
- * on a CI runner takes minutes to compile. */
-const TIMEOUTS: Record<string, number> = { undici5: 600_000, undici7: 600_000 };
+ * built-in undici implementation's module graph, and zod3 and zod3-infer
+ * compile zod 3's 3,700-line types module. A sanitized build of either
+ * takes minutes on a CI runner. */
+const TIMEOUTS: Record<string, number> = {
+  undici5: 600_000,
+  undici7: 600_000,
+  zod3: 600_000,
+  "zod3-infer": 600_000,
+};
 
 interface RunResult {
   stdout: Buffer;

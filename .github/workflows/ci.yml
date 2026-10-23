@@ -364,6 +364,20 @@ jobs:
           target: wasm32-wasi
           helper: "false"
       - run: pnpm build
+      # The sanitized seed compiles the compiler's 700 MB module with one clang
+      # process under AddressSanitizer. It peaks near 14 GB while the Node
+      # process that emitted the module still holds about 6 GB. Together they
+      # exceed the runner's 16 GB of memory, so back them with swap.
+      - name: Enlarge swap for the sanitized seed
+        if: matrix.flavor == 'san'
+        run: |
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 24G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
       - name: Prepare bootstrap seed
         run: node scripts/bootstrap-seed.mjs
         env:
@@ -759,17 +773,22 @@ jobs:
         run: >-
           pnpm exec vitest run tests/harness/worktree-files.test.ts
           --testNamePattern "workspace reset keeps Linux Sandbox paths POSIX"
+      # The Node host checks with tsc-ts, the default, over the named pipe it
+      # serves on Windows, and with tsgo.
       - name: Windows scriptc run smoke
         shell: pwsh
         run: |
           zig version
-          $output = & node packages/cli/dist/main.js run tests/corpus/001-hello.ts --backend llvm
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          $actual = ($output -join "`n").Trim()
-          if ($actual -ne "hello world") {
-            throw "unexpected scriptc output: $actual"
+          foreach ($checker in @("tsc-ts", "tsgo")) {
+            $env:SCRIPTC_CHECKER = $checker
+            $output = & node packages/cli/dist/main.js run tests/corpus/001-hello.ts --backend llvm
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            $actual = ($output -join "`n").Trim()
+            if ($actual -ne "hello world") {
+              throw "unexpected scriptc output with ${checker}: $actual"
+            }
           }
       - name: Windows PE subsystem selection
         env:

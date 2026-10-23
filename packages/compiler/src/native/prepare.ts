@@ -7,7 +7,11 @@ import type {
   CompileLibraryOptions,
   CompileRequestOptions,
 } from "../compile-types.js";
-import { emitLlvmModule, lowRegionTarget } from "../backend/llvm/emitter.js";
+import {
+  emitLlvmModuleParts,
+  type ForkPrimitives,
+  lowRegionTarget,
+} from "../backend/llvm/emitter.js";
 import { inlineRcOption } from "../backend/llvm/shapes.js";
 import { executableLinkFeatures } from "../backend/executable-features.js";
 import type { NativeLinkFeatures } from "../backend/native-link-info-core.js";
@@ -16,6 +20,7 @@ import type { FfiProfile } from "../ffi/ffi-manifest.js";
 import type { FrontendFactory } from "../frontend/pipeline.js";
 import {
   FrontendInputTracker,
+  frontendInputsSemanticallyMatch,
   frontendInputsStillMatch,
   validFrontendInputSnapshot,
   type FrontendInputSnapshot,
@@ -23,18 +28,23 @@ import {
   trackedReadFile,
 } from "../frontend/input-tracker.js";
 import { provenanceSources } from "../frontend/provenance-registry.js";
+import { processFork } from "../frontend/process-fork.js";
+import { tokenEquivalentSource } from "../frontend/token-equivalence.js";
+import { llvmBytes, wtf8Bytes } from "../backend/literals.js";
 import { prepareLibrary } from "../library/prepare.js";
 import type { LibraryProfile } from "../library/library-profile.js";
 import type { IrModule } from "../ir/ir.js";
 import { deserializeModuleBytes, serializeModuleParts } from "../ir/serialize.js";
 import { contentDigest, NATIVE_STRING_BYTES, type NativeCache } from "./cache.js";
-import { batchTextParts } from "./text-file.js";
+import { batchTextParts, joinedParts, textSlices } from "./text-file.js";
 import type { NativeToolchain } from "./toolchain.js";
 import { nativeFileIdentity } from "./file-identity.js";
 
 export interface NativeExecutableInput {
   ok: true;
-  llvm: string;
+  /** The module's LLVM text as parts that concatenate to it
+   * (emitLlvmModuleParts), never joined: a large program's is 150 MB. */
+  llvm: readonly string[];
   /** Compact serialized IR as bounded parts (`batchTextParts`): compiler-scale
    * modules exceed one native string. */
   ir: string[] | null;
@@ -57,51 +67,125 @@ interface FrontendCacheEntry {
   ir: string[] | null;
 }
 
-function frontendCacheParts(probes: FrontendInputSnapshot, input: NativeExecutableInput): string[] {
+/** The entry's JSON text, generated as it is written. The LLVM text is
+ * escaped in slices (`textSlices`), the same JSON string as escaping it
+ * whole, so a large module is never copied whole. */
+function* frontendCacheParts(
+  probes: FrontendInputSnapshot,
+  input: NativeExecutableInput,
+): Generator<string> {
   const metadata = JSON.stringify({
     schema: "scriptc.native-frontend.v3",
     probes,
     input: { ...input, llvm: "", ir: null },
   });
-  const parts = [metadata.slice(0, metadata.length - 1) + ',"llvm":', JSON.stringify(input.llvm)];
-  if (input.ir === null) parts.push(',"ir":null}');
+  yield metadata.slice(0, metadata.length - 1) + ',"llvm":"';
+  for (const part of joinedParts(input.llvm))
+    for (const slice of textSlices(part)) yield JSON.stringify(slice).slice(1, -1);
+  yield '"';
+  if (input.ir === null) yield ',"ir":null}';
   else {
-    parts.push(',"ir":[');
+    yield ',"ir":[';
     for (let index = 0; index < input.ir.length; index++) {
-      if (index > 0) parts.push(",");
-      parts.push(JSON.stringify(input.ir[index]!));
+      if (index > 0) yield ",";
+      yield JSON.stringify(input.ir[index]!);
     }
-    parts.push("]}");
+    yield "]}";
   }
-  return parts;
+}
+
+/** The parts while their total length stays within `limit`; past it, a
+ * throw abandons the write. */
+function* boundedParts(parts: Generator<string>, limit: number): Generator<string> {
+  let length = 0;
+  for (const part of parts) {
+    length += part.length;
+    if (length > limit) throw new Error("frontend cache entry exceeds one native string");
+    yield part;
+  }
 }
 
 /** Publish an entry only when a native reader can decode it as one string;
- * UTF-16 length never exceeds the UTF-8 byte length. */
+ * UTF-16 length never exceeds the UTF-8 byte length. A longer entry
+ * abandons its write, which writeParts discards. */
 function publishFrontendCache(
   cache: NativeCache,
   key: string,
   probes: FrontendInputSnapshot,
   input: NativeExecutableInput,
 ): void {
-  const parts = frontendCacheParts(probes, input);
-  let length = 0;
-  for (const part of parts) length += part.length;
-  if (length <= NATIVE_STRING_BYTES) cache.writeParts("frontend", key, parts);
+  cache.writeParts(
+    "frontend",
+    key,
+    boundedParts(frontendCacheParts(probes, input), NATIVE_STRING_BYTES),
+  );
 }
 
+/** The cached input when every frontend input still matches, else the
+ * entry the inputs no longer match, for reuse after equivalent edits. */
 function readFrontendCache(
   cache: NativeCache,
   key: string,
   exclusions: FrontendInputExclusions,
-): NativeExecutableInput | null {
+): { input: NativeExecutableInput } | { stale: FrontendCacheEntry } | null {
   // The entry is decoded as one string; larger entries are misses.
   const bytes = cache.read("frontend", key, NATIVE_STRING_BYTES);
   if (bytes === null) return null;
   const cached: unknown = JSON.parse(bytes.toString("utf8"));
-  if (!validCachedInput(cached) || !frontendInputsStillMatch(cached.probes, exclusions))
+  if (!validCachedInput(cached)) return null;
+  if (!frontendInputsStillMatch(cached.probes, exclusions)) return { stale: cached };
+  return { input: { ...cached.input, llvm: [cached.llvm], ir: cached.ir } };
+}
+
+/** The stale entry's input when every changed source is token-equivalent to
+ * the text the entry was built from (edits to whitespace and to comments
+ * that cannot affect compilation; see token-equivalence.ts). Equivalent
+ * sources lower to the same IR apart from source locations, which only dev
+ * builds' debug information and the serialized IR carry. Diagnostics carry
+ * locations too, so an entry that reported warnings is rebuilt. A changed
+ * source whose raw text or line positions the frontend read (call-site text
+ * in messages, comptime callbacks, test locations) is rebuilt as well:
+ * frontendInputsSemanticallyMatch refuses its `text` probe. */
+function equivalentFrontendInput(
+  stale: FrontendCacheEntry,
+  options: CompileRequestOptions,
+  exclusions: FrontendInputExclusions,
+): { input: NativeExecutableInput; probes: FrontendInputSnapshot } | null {
+  if (
+    options.optimization === "dev" ||
+    options.sanitize === true ||
+    options.emitIr === true ||
+    stale.ir !== null ||
+    (stale.input.warnings?.length ?? 0) > 0
+  )
     return null;
-  return { ...cached.input, llvm: cached.llvm, ir: cached.ir };
+  const match = frontendInputsSemanticallyMatch(
+    stale.probes,
+    new Map(stale.input.sources),
+    tokenEquivalentSource,
+    exclusions,
+  );
+  if (match === null || match.changed.length === 0) return null;
+  // Runtime fences and unsupported-construct messages name their source as
+  // `[<code> at <file>:<line>]`, and an equivalent edit can move the line.
+  if (
+    match.changed.some(({ path }) =>
+      stale.llvm.includes(` at ${llvmBytes(wtf8Bytes(path), false)}:`),
+    )
+  )
+    return null;
+  return {
+    input: {
+      ...stale.input,
+      llvm: [stale.llvm],
+      ir: null,
+      sources: stale.input.sources.map(([path, text]) => [
+        path,
+        match.currentSources.get(path) ?? text,
+      ]),
+    },
+    probes: match.snapshot,
+  };
 }
 
 function implementationIdentity(toolchain: NativeToolchain): string {
@@ -264,10 +348,19 @@ export function prepareNativeExecutable(
             .sort(([a], [b]) => a.localeCompare(b)),
         }),
       );
-      const input = readFrontendCache(cache, key, exclusions);
-      if (input !== null) {
+      const cached = readFrontendCache(cache, key, exclusions);
+      if (cached !== null && "input" in cached) {
         timing("frontend-cache-hit");
-        return input;
+        return cached.input;
+      }
+      const equivalent =
+        cached === null || outputKind === "ir"
+          ? null
+          : equivalentFrontendInput(cached.stale, options, exclusions);
+      if (equivalent !== null) {
+        publishFrontendCache(cache, key, equivalent.probes, equivalent.input);
+        timing("frontend-cache-equivalent");
+        return equivalent.input;
       }
     } catch {
       key = null;
@@ -290,14 +383,16 @@ export function prepareNativeExecutable(
   timing("ir-serialize");
   const llvm =
     outputKind === "ir"
-      ? ""
-      : emitLlvmModule(prepared.mod, {
+      ? []
+      : emitLlvmModuleParts(prepared.mod, {
           targetTriple: toolchain.target.llvmTriple,
           pointerBits: toolchain.target.pointerBits,
           wasi: toolchain.target.platform === "wasi",
           runtimeAbiMarker: outputKind === "obj" || outputKind === "exe",
           objectAudit: options.sanitize === true,
           lowRegion: lowRegionTarget(toolchain.target.platform, options.sanitize === true),
+          functionWorkers: emitWorkers(),
+          forkPrimitives: emitForkPrimitives(),
           ...inlineRcOption(options.optimization, options.sanitize === true),
           ...(options.detachedExit === true && outputKind === "exe" ? { detachedExit: true } : {}),
           ...(options.optimization === "dev" && !options.strip
@@ -377,10 +472,10 @@ export function prepareNativeLibrary(
             .sort(([a], [b]) => a.localeCompare(b)),
         }),
       );
-      const input = readFrontendCache(cache, key, exclusions);
-      if (input !== null) {
+      const cached = readFrontendCache(cache, key, exclusions);
+      if (cached !== null && "input" in cached) {
         timing("frontend-cache-hit");
-        return input;
+        return cached.input;
       }
     } catch {
       key = null;
@@ -405,7 +500,7 @@ export function prepareNativeLibrary(
     );
   });
   if (!prepared.ok) return prepared;
-  const llvm = emitLlvmModule(prepared.mod, {
+  const llvm = emitLlvmModuleParts(prepared.mod, {
     targetTriple: toolchain.target.llvmTriple,
     pointerBits: toolchain.target.pointerBits,
     wasi: toolchain.target.platform === "wasi",
@@ -433,4 +528,23 @@ export function prepareNativeLibrary(
   }
   timing("frontend-cache-publish");
   return input;
+}
+
+/** Worker processes that emit function bodies at a time
+ * (SCRIPTC_EMIT_WORKERS; 0 or 1 emits in this process). */
+function emitWorkers(): number {
+  const value = Number(process.env["SCRIPTC_EMIT_WORKERS"] ?? "4");
+  return Number.isFinite(value) && value > 1 ? Math.floor(value) : 1;
+}
+
+/** The process primitives emission workers fork with, unless the host
+ * cannot fork or this process is a worker itself. */
+function emitForkPrimitives(): ForkPrimitives | undefined {
+  const primitives = processFork.primitives;
+  if (primitives === null || processFork.worker) return undefined;
+  return {
+    fork: () => primitives.fork(),
+    exit: (code) => primitives.exit(code),
+    wait: (pid) => primitives.wait(pid),
+  };
 }

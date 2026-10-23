@@ -45,6 +45,7 @@ import type { IrExpr, IrFunction, IrRecordShape, IrStmt, IrType } from "../../ir
 import { shapeHasAccessorSlots, typeEquals, UNDEFINED_T } from "../../ir/ir.js";
 import { everyExprChild, everyStmtChild, everyTypeChild } from "../../ir/traverse.js";
 import type { Lowerer } from "./lowerer.js";
+import { ALWAYS_THROW_LIB_FNS } from "../../ir/builtin-effects.js";
 
 /** One property of an object literal, in source order. */
 export type KeyOrderSegment =
@@ -312,7 +313,11 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
         // Runtime surfaces (console, util.format, workers) that take a
         // record may walk its keys; runtime builders make new records.
         for (const arg of e.args) observedRoots.push(arg.type);
-        producedBy(e.type, true);
+        // An always-throwing call stands in for a value (`error.nodeThrow`
+        // in a narrowing ternary) and never produces one. Other calls
+        // whose signature result is VOID are typed by their use site and
+        // build the record at run time (`server.address()`).
+        if (!ALWAYS_THROW_LIB_FNS.has(e.fn)) producedBy(e.type, true);
         return;
       case "intrinsic":
         // Intrinsics hand back values built elsewhere, except allSettled's

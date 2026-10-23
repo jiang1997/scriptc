@@ -108,6 +108,14 @@ ScrDyn *scr_crypto_ecdh_convert_key(ScrDyn *key, ScrDyn *curve, ScrDyn *in_enc, 
  * Node's error pending. */
 ScrDyn *scr_crypto_dh_new(ScrDyn *size_or_key, ScrDyn *key_encoding, ScrDyn *generator, ScrDyn *generator_encoding);
 ScrDyn *scr_crypto_dh_group_new(ScrDyn *name);
+/* crypto.checkPrimeSync, checkPrime, generatePrimeSync and generatePrime
+ * (scr_dh.c): checked-dynamic arguments, borrowed; the sync forms answer
+ * +1 or NULL with the error pending. The callbacks receive undefined as
+ * the error, as Node passes it, or null when `null_error`. */
+ScrDyn *scr_crypto_check_prime_sync(ScrDyn *candidate, ScrDyn *options);
+void scr_crypto_check_prime_async(ScrDyn *candidate, ScrDyn *options, ScrDyn *callback, bool null_error);
+ScrDyn *scr_crypto_generate_prime_sync(ScrDyn *size, ScrDyn *options);
+void scr_crypto_generate_prime_async(ScrDyn *size, ScrDyn *options, ScrDyn *callback, bool null_error);
 ScrBytes *scr_crypto_pbkdf2(ScrBytes *password, ScrBytes *salt,
                             double iterations, double keylen, ScrStr *digest);
 ScrBytes *scr_crypto_pbkdf2_job(ScrBytes *password, ScrBytes *salt, double iterations,

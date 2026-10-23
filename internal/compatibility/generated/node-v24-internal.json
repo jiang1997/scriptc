@@ -19331,6 +19331,10 @@
           "tests/corpus/7084-crypto-key-pairs.cjs",
           "tests/corpus/7122-webcrypto-node-crypto.ts",
           "tests/corpus/7123-webcrypto-node-crypto.cjs",
+          "tests/corpus/7150-cipher-legacy-modes.ts",
+          "tests/corpus/7151-cipher-legacy-errors.cjs",
+          "tests/corpus/7152-crypto-prime.ts",
+          "tests/corpus/7153-crypto-prime-errors.cjs",
           "tests/corpus/node24-crypto-kdf-errors.ts",
           "tests/corpus/node24-crypto-kdf-options.ts",
           "tests/corpus/node24-crypto-kdf.ts",
@@ -19661,8 +19665,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.checkPrime",
+        "tests": [
+          "tests/corpus/7152-crypto-prime.ts",
+          "tests/corpus/7153-crypto-prime-errors.cjs"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -19684,8 +19692,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.checkPrimeSync",
+        "tests": [
+          "tests/corpus/7152-crypto-prime.ts",
+          "tests/corpus/7153-crypto-prime-errors.cjs"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -19710,6 +19722,8 @@
         "status": "partial",
         "evidence": "surface-manifest:node-builtin.crypto.createCipheriv",
         "tests": [
+          "tests/corpus/7150-cipher-legacy-modes.ts",
+          "tests/corpus/7151-cipher-legacy-errors.cjs",
           "tests/corpus/5250-cipher-aes-gcm.ts",
           "tests/corpus/5251-cipher-aes-cbc.ts",
           "tests/corpus/5252-cipher-aes-ctr.ts",
@@ -19749,6 +19763,8 @@
         "status": "partial",
         "evidence": "surface-manifest:node-builtin.crypto.createDecipheriv",
         "tests": [
+          "tests/corpus/7150-cipher-legacy-modes.ts",
+          "tests/corpus/7151-cipher-legacy-errors.cjs",
           "tests/corpus/5250-cipher-aes-gcm.ts",
           "tests/corpus/5251-cipher-aes-cbc.ts",
           "tests/corpus/5252-cipher-aes-ctr.ts",
@@ -20367,8 +20383,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.generatePrime",
+        "tests": [
+          "tests/corpus/7152-crypto-prime.ts",
+          "tests/corpus/7153-crypto-prime-errors.cjs"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -20390,8 +20410,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:crypto"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.generatePrimeSync",
+        "tests": [
+          "tests/corpus/7152-crypto-prime.ts",
+          "tests/corpus/7153-crypto-prime-errors.cjs"
+        ]
       },
       "anchorSource": "exact"
     },

@@ -13,6 +13,7 @@ import {
   requestHandler,
 } from "./lib-abi.js";
 import { FN_ATTRS } from "./shapes.js";
+import { registerReplay } from "./emit-journal.js";
 
 /** The runtime owns the answer closure; its arguments arrive owned from the caller. */
 function sniAnswer(host: LlvmEmitterContext, type: IrType): string {
@@ -22,6 +23,7 @@ function sniAnswer(host: LlvmEmitterContext, type: IrType): string {
   if (previous !== undefined) return previous;
   const symbol = `sc_sni_answer_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, symbol);
+  host.journal?.allocated(symbol, "sniAnswer", [type]);
   const params = ["ptr %self"],
     body: string[] = [];
   let hasError = "false",
@@ -82,6 +84,7 @@ function sniAnswer(host: LlvmEmitterContext, type: IrType): string {
     "}",
     "",
   );
+  host.journal?.built();
   return symbol;
 }
 
@@ -318,3 +321,5 @@ export function emitHttp2LibCall(host: LlvmEmitterContext, e: LibCallExpr): LlVa
   const handler = thunk === null ? [a[1]!] : callbackAdapter(host, cb, thunk, params);
   return finishRuntimeCall(host, e, runtime, [a[0]!, ...handler, ...a.slice(2)]);
 }
+
+registerReplay("sniAnswer", (host, args) => sniAnswer(host, args[0] as IrType));

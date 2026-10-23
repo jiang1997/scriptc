@@ -11,6 +11,7 @@ Application-shaped workloads for measuring the speed of compiled executables. Ea
 | `channel-messages` | cpu | 200,000 MessageChannel messages in one thread, half numbers and half small objects, all posted before the port delivers any |
 | `csv-numbers` | cpu | `split`, `Number`, `parseInt`, `toFixed` |
 | `cyclic-graphs` | cpu | object graphs with back references built and dropped: trees with parent and sibling links, rings of records sharing a long-lived registry, closures capturing their owner |
+| `dictionary-walks` | cpu | `Record<string, number>` dictionaries walked with for-in and `Object.keys`/`values`/`entries` while entries are added, updated and deleted |
 | `functional-pipeline` | cpu | `filter`/`map`/`reduce`/`flatMap` chains, closures, small records |
 | `intern-table`, `intern-table-map`, `intern-table-1`, `intern-table-map-1` | cpu | worker threads interning the same type-like objects under string keys and records under number keys, then hits and misses: one shared `InternTable` per kind of key, or a module-level `Map` per thread (the `-map` entries), with 8 threads or 1 (the `-1` entries); under Node.js every thread has its own tables |
 | `json-records` | cpu | `JSON.stringify`, typed `JSON.parse`, Map aggregation |

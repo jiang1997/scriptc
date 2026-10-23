@@ -1,6 +1,6 @@
 import type { IrExpr, IrType } from "../../ir/ir.js";
 import type { IntegerRange } from "../../ir/integer-ranges.js";
-import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
+import type { LlValue, LlvmEmitterContext, WideInteger } from "./expr-context.js";
 
 export type LlInteger = NonNullable<LlValue["integer"]>;
 
@@ -49,6 +49,89 @@ export function exactInteger(
   const name = host.B.tmp();
   host.B.line(`${name} = fptosi double ${value.name} to i64`);
   return { name, type: "i64", signed: true, range };
+}
+
+/** Doubles hold every integer of smaller magnitude exactly. */
+const EXACT_DOUBLES = 2 ** 53;
+/** Wide views stay within this magnitude: a product of two int32s reaches
+ * 2^62, one exact term of at most 2^53 may be added to it, and no i64
+ * result wraps. */
+const WIDE_BOUND = 2 ** 62 + 2 ** 53;
+/** Array and string indexes are below 2^32 - 1: a wide view exact below
+ * this many is exact at every index a length can admit. */
+const INDEX_LIMIT = 2 ** 32;
+
+function magnitude(range: IntegerRange): number {
+  return Math.max(Math.abs(range.min), Math.abs(range.max));
+}
+
+/** The wide view of `l op r` for `+`, `-` and `*` when the exact operands
+ * have no proven result range (their product or sum may pass 2^53).
+ *
+ * - A product of two exact integers equals its double whenever its
+ *   magnitude is below 2^53: the double product of integers is exact there.
+ * - A sum or difference of two exact integers likewise.
+ * - A sum or difference of a wide view (exact below T) and an exact integer
+ *   of magnitude at most B equals its double below min(T - B, 2^53): the
+ *   view's magnitude is then below T, so its double is exact, and the
+ *   double sum of two exact integers below 2^53 is exact.
+ *
+ * Every i64 result stays within 2^62 + 2^53 in magnitude, so none wraps. A view
+ * exact below fewer than 2^32 helps no index and is not kept. */
+export function wideArithmetic(
+  host: LlvmEmitterContext,
+  op: string,
+  l: LlValue,
+  li: LlInteger | null,
+  r: LlValue,
+  ri: LlInteger | null,
+): WideInteger | null {
+  if (op !== "+" && op !== "-" && op !== "*") return null;
+  const view = (value: LlValue, integer: LlInteger | null): WideInteger | null =>
+    integer
+      ? { name: "", below: Infinity, bound: magnitude(integer.range) }
+      : (value.wideInteger ?? null);
+  const lv = view(l, li),
+    rv = view(r, ri);
+  if (!lv || !rv) return null;
+  let below: number, bound: number;
+  if (op === "*") {
+    if (lv.below !== Infinity || rv.below !== Infinity) return null;
+    below = EXACT_DOUBLES;
+    bound = lv.bound * rv.bound;
+  } else if (lv.below === Infinity && rv.below === Infinity) {
+    below = EXACT_DOUBLES;
+    bound = lv.bound + rv.bound;
+  } else if (lv.below === Infinity || rv.below === Infinity) {
+    const [exact, wide] = lv.below === Infinity ? [lv, rv] : [rv, lv];
+    below = Math.min(wide.below - exact.bound, EXACT_DOUBLES);
+    bound = exact.bound + wide.bound;
+  } else return null;
+  if (!(bound <= WIDE_BOUND) || below < INDEX_LIMIT) return null;
+  const operand = (value: LlValue, integer: LlInteger | null): string =>
+    integer ? widenInteger(host, integer) : value.wideInteger!.name;
+  const left = operand(l, li),
+    right = operand(r, ri);
+  const name = host.B.tmp();
+  host.B.line(
+    `${name} = ${op === "+" ? "add" : op === "-" ? "sub" : "mul"} nsw i64 ${left}, ${right}`,
+  );
+  return { name, below, bound };
+}
+
+/** An i64 index for a consumer that compares it, unsigned, with a length or
+ * capacity below 2^32 and takes the double's path otherwise: the exact
+ * integer of `value`, or its wide view, which equals the double at every
+ * such index. Null when the index needs the double round trip. */
+export function indexInteger(
+  host: LlvmEmitterContext,
+  value: LlValue,
+  expr?: IrExpr,
+): string | null {
+  const integer = exactInteger(host, value, expr);
+  if (integer) return widenInteger(host, integer);
+  const wide = value.wideInteger;
+  return wide && wide.below >= INDEX_LIMIT ? wide.name : null;
 }
 
 export function widenInteger(host: LlvmEmitterContext, value: LlInteger): string {

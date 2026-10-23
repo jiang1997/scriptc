@@ -4323,14 +4323,32 @@ static void scr_http_client_end_raw(ScrHttpClientReq *c, const char *data, size_
   }
   if (!c->head_sent) {
     /* whole body known NOW: Content-Length framing (or none — the head
-     * serializer's empty-body method split) */
+     * serializer's empty-body method split). Head and body go out as one
+     * write, as Node sends them: on a connected (reused) socket two writes
+     * would be two segments, and the server could answer before the body
+     * arrives. */
+    c->hold_head = true;
     scr_http_client_send_head(c, (long long)len);
+    c->hold_head = false;
     if (scr_exc_pending()) return;
     if (c->chunked) {
       scr_http_client_write_raw(c, data, len);
       if (c->sock) scr_http_send_chunk_end(c->sock, &c->trailers);
-    } else if (c->sock && len > 0) {
-      scr_net_sock_write_native(c->sock, data, len);
+    } else if (c->held_head != NULL) {
+      char *head = c->held_head;
+      size_t head_len = c->held_head_len;
+      c->held_head = NULL;
+      c->held_head_len = c->held_head_cap = 0;
+      if (c->sock) {
+        if (len > 0) {
+          char *joined = realloc(head, head_len + len);
+          if (!joined) scr_http_oom();
+          head = joined;
+          memcpy(head + head_len, data, len);
+        }
+        scr_net_sock_write_native(c->sock, head, head_len + len);
+      }
+      free(head);
     }
   } else {
     scr_http_client_write_raw(c, data, len);

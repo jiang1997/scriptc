@@ -54,6 +54,8 @@ const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   ["crypto.ecdh", "crypto.createECDH and ECDH.convertKey"],
   ["crypto.dhNew", "crypto.createDiffieHellman"],
   ["crypto.dhGroupNew", "crypto.getDiffieHellman and createDiffieHellmanGroup"],
+  ["crypto.checkPrime", "crypto.checkPrime and checkPrimeSync"],
+  ["crypto.generatePrime", "crypto.generatePrime and generatePrimeSync"],
   ["crypto.createPrivateKey", "asymmetric KeyObjects, generateKeyPair, sign and verify"],
   ["crypto.createPublicKey", "asymmetric KeyObjects, generateKeyPair, sign and verify"],
   ["crypto.createSign", "asymmetric KeyObjects, generateKeyPair, sign and verify"],

@@ -24,6 +24,7 @@ import {
   isSupportedMapKey,
   isSupportedMapValue,
   isSupportedSetElem,
+  iterableArmsElem,
   isUnitType,
   mapOf,
   NULL_T,
@@ -1844,10 +1845,16 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // TypeScript's intrinsic globalThis symbol has no declaration. A stored
   // reference needs native object identity, including var's undefined state.
   const intrinsic = type.getSymbol();
+  const isIntrinsicGlobal = (symbol: ts.Symbol | undefined): boolean =>
+    symbol !== undefined &&
+    ts.symbolName(symbol) === "globalThis" &&
+    symbol.declarations.length === 0;
+  if (isIntrinsicGlobal(intrinsic)) return DYN;
+  // `typeof globalThis & { key?: T }` (the global-singleton spelling) is the
+  // same global object with declared extra members.
   if (
-    intrinsic !== undefined &&
-    ts.symbolName(intrinsic) === "globalThis" &&
-    intrinsic.declarations.length === 0
+    type.isIntersectionType() &&
+    ts.constituentTypes(type).some((part) => isIntrinsicGlobal(part.getSymbol()))
   )
     return DYN;
   if (ctx.jsDynamicDeclaration !== undefined && intrinsic !== undefined) {
@@ -2361,6 +2368,27 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     const args = checker.getTypeArguments(ref);
     if (args.length === 0) return arrayOf(unitOnlyUnion(unions));
     if (tupleShape?.elementFlags === undefined) return null;
+    // A leading-required tuple ending in a rest element whose positions
+    // all share one type (`[string, ...string[]]`, the non-empty list)
+    // is an array of that type: every read, write and method behaves as
+    // the array's, and tsc already proves the required positions exist.
+    const flags = tupleShape.elementFlags;
+    if (
+      flags.length >= 2 &&
+      (flags[flags.length - 1]! & ts.ElementFlags.Rest) !== 0 &&
+      flags.slice(0, -1).every((f) => (f & ts.ElementFlags.Required) !== 0)
+    ) {
+      const elems = args.map((a) => mapType(a, ctx));
+      const first = elems[0];
+      if (
+        first &&
+        first.kind !== "void" &&
+        isSupportedArrayElem(first) &&
+        elems.every((e) => e !== null && typeEquals(e, first))
+      )
+        return arrayOf(first);
+      return null;
+    }
     // Optional/rest elements have no fixed native tuple layout.
     if (tupleShape.elementFlags.some((f) => !(f & ts.ElementFlags.Required))) {
       return null;
@@ -3155,6 +3183,8 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // Native WeakMap keeps reference identities in checked-dynamic storage.
   // The runtime rejects reference kinds without a weak lifetime contract.
   if (isStdlibInterface("WeakMap") || isStdlibInterface("WeakSet")) return DYN;
+  // FinalizationRegistry is a native handle with register and unregister.
+  if (isStdlibInterface("FinalizationRegistry")) return DYN;
   // Set<T>: Map's sibling — same provenance rule and key domain.
   // Anything else stays unmapped;
   // the `new Set` lowering names the offending element type specifically.
@@ -3934,6 +3964,14 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       ...(isStdlibInterface("AsyncGenerator") ? { async: true as const } : {}),
       ...channels,
     };
+  }
+  // Iterable<T>: the iterable union (iterableUnionType) — the source value
+  // itself in its own arm, so an array stays the same multi-pass object and
+  // a generator stays single-pass.
+  if (isStdlibInterface("Iterable")) {
+    const arg = checker.getTypeArguments(widened as ts.TypeReference)[0];
+    const elem = arg ? mapType(arg, ctx) : null;
+    return elem ? iterableUnionType(elem, ctx.shapes, unions) : null;
   }
   // IteratorResult<T, TReturn> — the checker's type of `g.next()` (an
   // alias for IteratorYieldResult<T> | IteratorReturnResult<TReturn>):
@@ -4991,7 +5029,9 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
             a.kind === "union" ||
             a.kind === "date" ||
             a.kind === "dyn" ||
-            a.kind === "generator",
+            // A generator arm only comes from an Iterable<T> (an optional
+            // one keeps its unit arms beside the iterable union's).
+            (a.kind === "generator" && iterableArmsElem(arms) === null),
         ) ||
         !maybePromiseUnionOk(parts, arms, ctx)
       ) {
@@ -5846,6 +5886,60 @@ function constAssertedEmptyArrayProp(p: ts.Symbol): boolean {
   return underConstAssertion(d);
 }
 
+/** A TypeScript property assignment `name: []` whose type is `never[]`. */
+function emptyNeverArrayProp(p: ts.Symbol, fieldTs: ts.Type, checker: ts.TypeChecker): boolean {
+  const d = p.valueDeclaration;
+  if (d === undefined || !ts.isPropertyAssignment(d)) return false;
+  if (isJsSourceFile(ts.getSourceFileOfNode(d))) return false;
+  if (!ts.isArrayLiteralExpression(d.initializer) || d.initializer.elements.nodes.length > 0)
+    return false;
+  return (
+    checker.isArrayType(fieldTs) &&
+    (checker.getTypeArguments(fieldTs as ts.TypeReference)[0]!.flags & ts.TypeFlags.Never) !== 0
+  );
+}
+
+/** A JavaScript object literal's property typed `never[]` (`{ issues: [] }`).
+ * Nothing checks a JavaScript file's later writes, which can push any value
+ * onto it (`ctx.common.issues.push(issue)`), so it holds the checked-dynamic
+ * array rather than never's f64 element array. */
+function jsNeverArrayProp(p: ts.Symbol, fieldTs: ts.Type, checker: ts.TypeChecker): boolean {
+  return (
+    jsObjectLiteralProperty(p) &&
+    checker.isArrayType(fieldTs) &&
+    (checker.getTypeArguments(fieldTs as ts.TypeReference)[0]!.flags & ts.TypeFlags.Never) !== 0
+  );
+}
+
+/** A JavaScript object literal's property (`{ lastComponent: undefined }`,
+ * `{ user: null }`). Nothing checks a JavaScript file's later writes, which
+ * can store any value in it (`path.lastComponent = { ... }`), so a
+ * property whose only initializer is a unit holds the checked-dynamic value
+ * rather than the unit-only union. */
+function isUnitOnlyIr(t: IrType, ctx: TypeMapperCtx): boolean {
+  if (t.kind !== "union") return false;
+  const def = ctx.unions.get(t.unionId);
+  return def !== undefined && def.arms.every((arm) => isUnitType(arm));
+}
+
+/** A property a JavaScript object literal declares. The checker also adds
+ * each missing property, optional and `undefined`, to every literal of a
+ * union of literals (`{ _tag, value } | { _tag, error }` gains
+ * `error?: undefined` and `value?: undefined`); those keep their unit-only
+ * type, so a literal still converts to the one arm whose properties it
+ * has. */
+function jsObjectLiteralProperty(p: ts.Symbol): boolean {
+  const d = p.valueDeclaration;
+  // `__proto__: null` sets the literal's prototype; it declares no property.
+  return (
+    d !== undefined &&
+    (ts.isPropertyAssignment(d) || ts.isShorthandPropertyAssignment(d)) &&
+    ts.symbolName(p) !== "__proto__" &&
+    (p.flags & ts.SymbolFlags.Optional) === 0 &&
+    isJsSourceFile(ts.getSourceFileOfNode(d))
+  );
+}
+
 function mapGenericAwaitedAlias(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const { resolveTypeParam } = ctx;
   if (!resolveTypeParam) return null;
@@ -6395,6 +6489,46 @@ function mapGenericUtilityAlias(widened: ts.Type, ctx: TypeMapperCtx): IrType | 
  * that could inhabit the extra arm. */
 export function unitOnlyUnion(unions: UnionRegistry): IrType {
   const arms = [NULL_T, UNDEFINED_T];
+  arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
+  return { kind: "union", unionId: unions.intern(arms) };
+}
+
+/** `Iterable<T>`: a union whose arms are the sources that keep their own
+ * representation — `T[]`, a `Set<T>`, a `Map<K, V>` (T the `[K, V]`
+ * tuple), a string (T string) — and a generator over T, which also holds
+ * every other iterator (Map/Set and array iterators adapt into one). The
+ * generator arm marks the union as iterable (iterableArmsElem): no other
+ * union has one. Null when T has no array or generator form. */
+export function iterableUnionType(
+  elem: IrType,
+  shapes: ShapeRegistry,
+  unions: UnionRegistry,
+): IrType | null {
+  if (elem.kind === "void" || elem.kind === "generator" || !isSupportedArrayElem(elem)) return null;
+  if (!genResultRecord(elem, VOID, shapes, unions)) return null;
+  const arms: IrType[] = [
+    { kind: "array", elem },
+    { kind: "generator", yieldT: elem, retT: VOID, nextT: UNDEFINED_T },
+  ];
+  const elemArms = elem.kind === "union" ? unions.get(elem.unionId)?.arms : undefined;
+  if (isSupportedSetElem(elem, elemArms)) arms.push({ kind: "set", elem });
+  if (elem.kind === "string") arms.push(STRING);
+  if (elem.kind === "record") {
+    const shape = shapes.get(elem.shapeId);
+    const [k, v] = shape?.fields ?? [];
+    if (
+      shape?.tuple &&
+      shape.fields.length === 2 &&
+      k?.name === "0" &&
+      v?.name === "1" &&
+      isSupportedMapKey(
+        k.type,
+        k.type.kind === "union" ? unions.get(k.type.unionId)?.arms : undefined,
+      ) &&
+      isSupportedMapValue(v.type)
+    )
+      arms.push({ kind: "map", key: k.type, value: v.type });
+  }
   arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
   return { kind: "union", unionId: unions.intern(arms) };
 }
@@ -7615,6 +7749,22 @@ function wideningAddedProperties(
   return added;
 }
 
+/** Whether `type` is an interface one of whose `extends` clauses names a
+ * type the checker answers `any` (or an error type) for. */
+function interfaceExtendsAny(type: ts.Type, checker: ts.TypeChecker): boolean {
+  const symbol = type.getSymbol();
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Interface) === 0) return false;
+  for (const decl of symbol.declarations) {
+    if (!ts.isInterfaceDeclaration(decl)) continue;
+    for (const clause of decl.heritageClauses?.nodes ?? []) {
+      for (const base of clause.types.nodes) {
+        if ((checker.getTypeAtLocation(base).flags & ts.TypeFlags.Any) !== 0) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function mapRecordTypeInner(
   widened: ts.Type,
   ctx: TypeMapperCtx,
@@ -7630,6 +7780,13 @@ function mapRecordTypeInner(
   // names the construct.
   const widenedSym = widened.getSymbol();
   if (widenedSym !== undefined && (widenedSym.flags & ts.SymbolFlags.Enum) !== 0) return null;
+  // An interface extending a type the checker answers `any` for (in the
+  // compiled world, a package type computed from members only its .d.ts
+  // declares, such as `interface P extends z.infer<typeof S>`) has members
+  // the checker cannot list: its own declared fields are not the whole
+  // object. The value is checked-dynamic, never a record of the declared
+  // fields alone.
+  if (interfaceExtendsAny(widened, checker)) return DYN;
   // An index signature maps to a hybrid shape: declared fields keep
   // struct slots, undeclared keys ride the shape's overflow map, valued
   // uniformly by the signature's value type (`unknown` → dyn — a model-pricing table's
@@ -7903,6 +8060,14 @@ function mapRecordTypeInner(
       ) {
         pt = arrayOf(unitOnlyUnion(ctx.unions));
       }
+      // A TypeScript property initialized with an empty literal and typed
+      // `never[]` (`const out = { files: [] }`) holds no element, so it maps
+      // like the empty tuple: the unit-only element array, which a
+      // destination's typed array field (`files: string[]`) receives through
+      // the checked empty-array lift. never's f64 element would make it a
+      // `number[]` field.
+      if (pt?.kind === "array" && emptyNeverArrayProp(p, fieldTs, checker))
+        pt = arrayOf(unitOnlyUnion(ctx.unions));
       if (pt === null && (fieldTs.flags & ts.TypeFlags.Any) !== 0) pt = DYN;
       // An `any[]` field (`list: any[]` in an SDK's message type, also
       // optional or nullable) is the checked-dynamic array, exactly as
@@ -7926,6 +8091,8 @@ function mapRecordTypeInner(
       // omits the undefined arm exactly like an omitted optional.
       if (pt?.kind === "void" && isUnitOnlyTsType(fieldTs, ctx.resolveTypeParam))
         pt = unitOnlyUnion(ctx.unions);
+      if (pt !== null && isUnitOnlyIr(pt, ctx) && jsObjectLiteralProperty(p)) pt = DYN;
+      if (pt?.kind === "array" && jsNeverArrayProp(p, fieldTs, checker)) pt = DYN;
       // dyn FIELDS map now (`{ v: unknown }`, `[string, unknown]` tuples):
       // the slot carries a dyn value exactly like an `unknown`-valued
       // overflow entry — same RC adapters, same dynFrom conversion on the

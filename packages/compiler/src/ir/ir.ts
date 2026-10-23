@@ -730,6 +730,32 @@ function isCollectionValueKey(t: IrType): boolean {
   );
 }
 
+/** The element type of an ITERABLE union (`Iterable<T>`,
+ * iterableUnionType): its one generator arm — a synchronous generator over
+ * T that returns nothing and takes no `.next()` values — beside source arms
+ * (T[], Set<T>, a Map of [K, V] entries, a string), and the undefined and
+ * null arms of an optional Iterable. A generator arm is legal only in such
+ * a union. Null for every other union. */
+export function iterableArmsElem(arms: readonly IrType[]): IrType | null {
+  let elem: IrType | null = null;
+  for (const arm of arms) {
+    if (arm.kind !== "generator") continue;
+    if (elem !== null || arm.async || arm.retT.kind !== "void" || arm.nextT.kind !== "undefinedT")
+      return null;
+    elem = arm.yieldT;
+  }
+  if (elem === null) return null;
+  for (const arm of arms) {
+    if (arm.kind === "generator" || arm.kind === "undefinedT" || arm.kind === "nullT") continue;
+    if (arm.kind === "array" || arm.kind === "set") {
+      if (!typeEquals(arm.elem, elem)) return null;
+    } else if (arm.kind === "string") {
+      if (elem.kind !== "string") return null;
+    } else if (arm.kind !== "map") return null;
+  }
+  return elem;
+}
+
 /** Set elements and Map keys share storage, equality and ownership rules. */
 export function isSupportedSetElem(t: IrType, unionArms?: IrType[]): boolean {
   return isSupportedMapKey(t, unionArms);
@@ -1047,6 +1073,12 @@ export interface IrModule {
    * write in the program (ir/contract-check.ts). Backends may rely on them
    * unconditionally. Absent when the program writes no contract. */
   contracts?: IrContracts;
+  /** Local number arrays (`function\0local`) the backend may store as
+   * int32 slots, proposed by ir/int32-arrays.ts after their element-reader
+   * calls were inlined; the int32 slot analysis keeps the ones whose every
+   * stored element it proves an int32, and those whose stores are exact
+   * integers with checked stores. Absent when there is none. */
+  int32ArrayCandidates?: string[];
   /** The WebAssembly modules translated into this program (wasm/
    * translate.ts), present exactly when the program uses the WebAssembly
    * API (possibly empty). The backend appends each module's translation
@@ -1943,8 +1975,18 @@ export type IrStmt =
    * RangeError from the runtime. `pop` marks the stores that implement
    * `pop()`: a frozen (published) array fails with pop's TypeError rather
    * than the length assignment's, and pop's `length = 0` store on an empty
-   * array is dropped unless the array may be frozen. */
-  | { kind: "arraySetLength"; arr: IrExpr; length: IrExpr; loc: SrcLoc; pop?: boolean }
+   * array is dropped unless the array may be frozen. `reserve` marks a
+   * capacity hint instead: dense storage for `length` elements of a fresh
+   * array that statements fill next, with no change to its length and no
+   * observable effect. */
+  | {
+      kind: "arraySetLength";
+      arr: IrExpr;
+      length: IrExpr;
+      loc: SrcLoc;
+      pop?: boolean;
+      reserve?: boolean;
+    }
   /** Write an explicit present `undefined` state without shrinking length. */
   | { kind: "arraySetUndefined"; arr: IrExpr; index: IrExpr; loc: SrcLoc }
   /** Delete an indexed/property slot without changing Array.length. */
@@ -2058,8 +2100,9 @@ export type IrStmt =
    * and whose `code` carries the SC diagnostic code; unwinds exactly like
    * `throw`.
    * TypeScript sources produce it only as the tsc-unreachable fallthrough
-   * trap (appendImplicitUndefinedReturn's SC9002) — their construct fences
-   * stay compile errors. */
+   * trap (appendImplicitUndefinedReturn's SC9002) and for a typed-array
+   * store through an element index that is undefined at run time
+   * (undefined-index.ts); their construct fences stay compile errors. */
   | { kind: "runtimeFence"; code: string; message: string; loc: SrcLoc }
   /** Rethrow of a catch binding (`throw e` where e is the binding):
    * re-raises the SAVED exception exactly — kind and payload preserved,

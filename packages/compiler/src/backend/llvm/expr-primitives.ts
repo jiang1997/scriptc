@@ -1,13 +1,14 @@
 /* Focused LLVM expression emission extracted from emitter.ts. */
 import { InternalCompilerError } from "../../errors.js";
 import { matchStringSelfConcat, undefinedArmTag } from "../../ir/analysis.js";
-import { F64, isRefCounted, type IrExpr, type IrType } from "../../ir/ir.js";
+import { isRefCounted, type IrExpr, type IrStrCmpOp, type IrType } from "../../ir/ir.js";
 import { mangleRecordClone, mangleRecordNew } from "../mangle.js";
 import { arrNewCall, elemAccess } from "./shapes.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import type { LlvmEmitterContext, ExprOf, LlValue } from "./expr-context.js";
 
 import { BYTES_ELEM_NUM, closureIdentityEqual, f64Lit } from "./common.js";
+import { CHECKED_INT32_MIN_LENGTH } from "../../ir/int32-arrays.js";
 import { emitStringInputs } from "./string-lifetimes.js";
 import { emitStringParts, numberPart, stringParts } from "./string-construction.js";
 import { emitBorrowedInputs } from "./borrowed-inputs.js";
@@ -16,23 +17,33 @@ import {
   int32Number,
   integerNumber,
   narrowInteger,
+  wideArithmetic,
   widenInteger,
 } from "./integer-values.js";
 import {
   bitwiseIdentityOperand,
+  INT32_RANGE,
   integerArithmeticRange,
   isBitwiseOp,
   withinInt32,
   withinUint32,
 } from "../../ir/integer-ranges.js";
-import { emitArrayValues } from "./expr-containers.js";
+import { charAtUnitRead, emitArrayValues } from "./expr-containers.js";
 import {
   constantDivisor,
   emitCheckedRemainder,
   emitPowerOfTwoRemainder,
   emitSignedIntegerRemainder,
 } from "./integer-remainder.js";
-import { emitDenseArrayGet, emitDenseArrayState, slotWidth } from "./dense-array-access.js";
+import {
+  denseSlotWidth,
+  emitDenseArrayRead,
+  emitDenseArrayState,
+  runtimeAccess,
+  SCR_ELEM_I32,
+  slotWidth,
+  type ArrayAccess,
+} from "./dense-array-access.js";
 import { emitWrappingSum, markWrappingOperands } from "./wrapping-sums.js";
 
 export function emitLiteralExpr(
@@ -337,7 +348,14 @@ export function emitOperatorExpr(
         if (arith[e.op] !== undefined) {
           B.line(`${t} = ${arith[e.op]} double ${l.name}, ${r.name}`);
           const uint32 = emitWrappingSum(host, e, l, r, li, ri);
-          if (uint32 !== undefined) return { name: t, type: e.type, uint32 };
+          // The exact integer beside the double, for index consumers.
+          const wideInteger = wideArithmetic(host, e.op, l, li, r, ri);
+          if (uint32 !== undefined || wideInteger) {
+            const value: LlValue = { name: t, type: e.type };
+            if (uint32 !== undefined) value.uint32 = uint32;
+            if (wideInteger) value.wideInteger = wideInteger;
+            return value;
+          }
         } else B.line(`${t} = fcmp ${cmp[e.op]} double ${l.name}, ${r.name}`);
       } else if (bit[e.op] !== undefined) {
         if (e.left.type.kind !== "f64" || e.right.type.kind !== "f64") {
@@ -563,14 +581,16 @@ export function regexLiteralTemplate(
     };
     host.regexInstances.set(key, re);
   }
+  host.journal?.entry("regex", key, re);
   return `@${re.sym}`;
 }
 
-/** A string equality between `s.charAt(i)` and a literal of exactly one
- * UTF-16 code unit: the charAt call and the unit. */
+/** A string equality or comparison between `s.charAt(i)` and a literal of
+ * exactly one UTF-16 code unit: the charAt call, the unit, and whether the
+ * charAt is the left operand. */
 function charAtUnitTest(
-  e: ExprOf<"strEq">,
-): { charAt: ExprOf<"strIntrinsic">; code: number } | null {
+  e: ExprOf<"strEq" | "strCmp">,
+): { charAt: ExprOf<"strIntrinsic">; code: number; left: boolean } | null {
   let text: string;
   let other: IrExpr;
   if (e.right.kind === "strLit") {
@@ -585,7 +605,17 @@ function charAtUnitTest(
   if (text.length !== 1) return null;
   if (other.kind !== "strIntrinsic" || other.method !== "charAt" || other.args.length !== 1)
     return null;
-  return { charAt: other, code: text.charCodeAt(0) };
+  return { charAt: other, code: text.charCodeAt(0), left: other === e.left };
+}
+
+/** The fcmp predicate of `s.charAt(i) op "c"` on the code unit (or of
+ * `"c" op s.charAt(i)` when `charAtLeft` is false). A one-unit string
+ * compares as its unit; an index out of range reads "", which is below
+ * every one-unit literal, and its unit read is NaN, which the unordered
+ * predicates count as below. */
+function charAtUnitPredicate(op: IrStrCmpOp, charAtLeft: boolean): string {
+  const flipped = charAtLeft ? op : ({ "<": ">", "<=": ">=", ">": "<", ">=": "<=" } as const)[op];
+  return { "<": "ult", "<=": "ule", ">": "ogt", ">=": "oge" }[flipped];
 }
 
 export function emitStringExpr(
@@ -636,14 +666,7 @@ export function emitStringExpr(
       // equals no unit, as "" equals no one-unit literal.
       const unit = charAtUnitTest(e);
       if (unit !== null) {
-        const code = host.emitExpr({
-          kind: "strIntrinsic",
-          method: "charCodeAt",
-          receiver: unit.charAt.receiver,
-          args: unit.charAt.args,
-          type: F64,
-          loc: unit.charAt.loc,
-        });
+        const code = host.emitExpr(charAtUnitRead(host, unit.charAt));
         const t = B.tmp();
         B.line(
           `${t} = fcmp ${e.negated ? "une" : "oeq"} double ${code.name}, ${f64Lit(unit.code)}`,
@@ -673,6 +696,17 @@ export function emitStringExpr(
       return { name: t, type: e.type };
     }
     case "strCmp": {
+      // `s.charAt(i) < "c"` (and `s[i]`) for a one-unit literal compares
+      // the code unit, as the equality above does.
+      const unit = charAtUnitTest(e);
+      if (unit !== null) {
+        const code = host.emitExpr(charAtUnitRead(host, unit.charAt));
+        const t = B.tmp();
+        B.line(
+          `${t} = fcmp ${charAtUnitPredicate(e.op, unit.left)} double ${code.name}, ${f64Lit(unit.code)}`,
+        );
+        return { name: t, type: e.type };
+      }
       const [l, r] = emitStringInputs(host, [e.left, e.right]);
       const fn = "scr_str_cmp_u16";
       host.declare(`declare i32 @${fn}(ptr, ptr)`);
@@ -823,6 +857,7 @@ export function emitStringExpr(
         };
         host.templateStringsInstances.set(e.key, inst);
       }
+      host.journal?.entry("templateStrings", e.key, inst);
       return host.own({ name: host.retainFrame(`@${inst.sym}`, e.type), type: e.type });
     }
     case "regexIntrinsic":
@@ -869,9 +904,46 @@ export function emitContainerExpr(
       // the plain elements up to the next one (scr_arr_reserve_spread).
       const firstSpread = e.elems.findIndex((_, i) => spreadSet.has(i));
       const capacity = small ? 0 : (e.capacity ?? (firstSpread < 0 ? e.elems.length : firstSpread));
-      B.line(`${arr} = ${arrNewCall(host.shapeHost, elem, String(capacity), small)}`);
+      // An int32 array's allocation (ir/int32-arrays.ts) constructs
+      // SCR_ELEM_I32 storage; its elements are proven int32s. The empty
+      // temporary of a fill that allocates an int32 array with checked
+      // stores takes SCR_ELEM_I32 storage when the fill's length (which
+      // evaluates without effects) is at least CHECKED_INT32_MIN_LENGTH, and
+      // SCR_ELEM_F64 storage otherwise.
+      const fillLength = host.checkedAllocations.get(e);
+      if (fillLength !== undefined && e.elems.length === 0) {
+        const length = host.emitExpr(fillLength);
+        const long = B.tmp(),
+          kind = B.tmp();
+        B.line(`${long} = fcmp oge double ${length.name}, ${f64Lit(CHECKED_INT32_MIN_LENGTH)}`);
+        B.line(`${kind} = select i1 ${long}, i32 ${SCR_ELEM_I32}, i32 0`);
+        host.declare(
+          small
+            ? `declare ptr @scr_arr_new_small(i32)`
+            : `declare ptr @scr_arr_new(i32, ${host.sizeType})`,
+        );
+        B.line(
+          small
+            ? `${arr} = call ptr @scr_arr_new_small(i32 ${kind})`
+            : `${arr} = call ptr @scr_arr_new(i32 ${kind}, ${host.sizeType} ${capacity})`,
+        );
+        return host.own({ name: arr, type: e.type });
+      }
+      const int32 = host.int32Allocations.has(e);
+      if (int32) {
+        host.declare(
+          small
+            ? `declare ptr @scr_arr_new_small(i32)`
+            : `declare ptr @scr_arr_new(i32, ${host.sizeType})`,
+        );
+        B.line(
+          small
+            ? `${arr} = call ptr @scr_arr_new_small(i32 ${SCR_ELEM_I32})`
+            : `${arr} = call ptr @scr_arr_new(i32 ${SCR_ELEM_I32}, ${host.sizeType} ${capacity})`,
+        );
+      } else B.line(`${arr} = ${arrNewCall(host.shapeHost, elem, String(capacity), small)}`);
       const out = host.own({ name: arr, type: e.type });
-      const acc = elemAccess(elem);
+      const acc: ArrayAccess = int32 ? "i32" : elemAccess(elem);
       let pending: LlValue[] = [];
       let buffer: string | undefined;
       const flush = (): void => {
@@ -879,7 +951,7 @@ export function emitContainerExpr(
           buffer = B.tmp();
           B.entryAllocas.push(`${buffer} = alloca [${Math.min(e.elems.length, 64)} x i64]`);
         }
-        if (pending.length > 0) emitArrayValues(host, arr, acc, pending, false, buffer);
+        if (pending.length > 0) emitArrayValues(host, arr, acc, elem, pending, false, buffer);
         pending = [];
       };
       e.elems.forEach((el, i) => {
@@ -892,7 +964,8 @@ export function emitContainerExpr(
           B.line(
             `call void @scr_arr_reserve_spread(ptr ${arr}, ptr ${v.name}, ${host.sizeType} ${plain})`,
           );
-          host.emitArrayCopyLoop(arr, v.name, acc);
+          // A literal with spreads is never an int32 allocation.
+          host.emitArrayCopyLoop(arr, v.name, runtimeAccess(acc));
           return;
         }
         pending.push(host.emitExpr(el));
@@ -924,7 +997,7 @@ export function emitContainerExpr(
       }
       const bound = B.tmp();
       B.line(`${bound} = fsub double ${n.name}, ${f64Lit(1)}`);
-      B.countedLoop(bound, () => host.arrPush(arr, acc, fill), "ole");
+      B.countedLoop(bound, () => host.arrPush(arr, acc, fill, elem), "ole");
       return out;
     }
     case "arrayGet": {
@@ -937,33 +1010,65 @@ export function emitContainerExpr(
       // Ref-element reads return +1 (the inline dense path retains like
       // the runtime getter); own registers the owned temp in the frame.
       const elem = e.arr.type.elem;
-      const acc = elemAccess(elem);
-      const t = emitDenseArrayGet(
+      if (host.checkedInt32Array(e.arr)) {
+        const proven = host.provenDenseIndex(e.arr, e.index);
+        const value = host.emitByElementKind(
+          arr.name,
+          "double",
+          (kind) =>
+            emitDenseArrayRead(
+              host,
+              arr.name,
+              idx,
+              e.index,
+              kind,
+              elem,
+              "scr_arr_get_f64",
+              true,
+              proven,
+            ).value,
+        )!;
+        return { name: value, type: e.type };
+      }
+      const acc = host.arrayAccess(e.arr, elem);
+      const read = emitDenseArrayRead(
         host,
         arr.name,
         idx,
         e.index,
         acc,
         elem,
-        `scr_arr_get_${acc}`,
+        `scr_arr_get_${runtimeAccess(acc)}`,
         true,
         host.provenDenseIndex(e.arr, e.index),
       );
-      return host.own({ name: t, type: e.type });
+      if (read.int32 !== null)
+        // An int32 array's element: its i32 is exact for index consumers.
+        return {
+          name: read.value,
+          type: e.type,
+          uint32: read.int32,
+          integer: { name: read.int32, type: "i32", signed: true, range: INT32_RANGE },
+        };
+      return host.own({ name: read.value, type: e.type });
     }
     case "arrayHas": {
       const arr = host.emitStableReceiver(e.arr, [e.index]);
       const idx = host.emitExpr(e.index);
       if (e.arr.type.kind !== "array")
         throw new InternalCompilerError("llvm emitter bug: arrayHas on non-array");
-      const t = emitDenseArrayState(
-        host,
-        arr.name,
-        idx,
-        e.index,
-        "has",
-        slotWidth(elemAccess(e.arr.type.elem)),
-      );
+      const t = host.checkedInt32Array(e.arr)
+        ? host.emitByElementKind(arr.name, "i1", (kind) =>
+            emitDenseArrayState(host, arr.name, idx, e.index, "has", slotWidth(kind)),
+          )!
+        : emitDenseArrayState(
+            host,
+            arr.name,
+            idx,
+            e.index,
+            "has",
+            host.int32Array(e.arr) ? slotWidth("i32") : denseSlotWidth(host, e.arr.type.elem),
+          );
       return { name: t, type: e.type };
     }
     case "arrayState": {
@@ -971,14 +1076,18 @@ export function emitContainerExpr(
       const idx = host.emitExpr(e.index);
       if (e.arr.type.kind !== "array")
         throw new InternalCompilerError("llvm emitter bug: arrayState on non-array");
-      const t = emitDenseArrayState(
-        host,
-        arr.name,
-        idx,
-        e.index,
-        "state",
-        slotWidth(elemAccess(e.arr.type.elem)),
-      );
+      const t = host.checkedInt32Array(e.arr)
+        ? host.emitByElementKind(arr.name, "double", (kind) =>
+            emitDenseArrayState(host, arr.name, idx, e.index, "state", slotWidth(kind)),
+          )!
+        : emitDenseArrayState(
+            host,
+            arr.name,
+            idx,
+            e.index,
+            "state",
+            host.int32Array(e.arr) ? slotWidth("i32") : denseSlotWidth(host, e.arr.type.elem),
+          );
       return { name: t, type: e.type };
     }
     case "arrIntrinsic":

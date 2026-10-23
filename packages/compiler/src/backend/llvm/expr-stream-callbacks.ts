@@ -4,6 +4,7 @@ import { type IrType, isRefCounted, typeKey } from "../../ir/ir.js";
 import { FN_ATTRS, releaseSym, retainSym, traceArg } from "./shapes.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 import { unionPeekLines, unionTagLines } from "./union-repr.js";
+import { registerReplay } from "./emit-journal.js";
 
 export function streamDataAdapter(
   host: LlvmEmitterContext,
@@ -14,6 +15,7 @@ export function streamDataAdapter(
   if (sym) return sym;
   sym = `sc_ee_dad_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "streamDataAdapter", [cbT]);
   const p = cbT.params[0];
   if (cbT.params.length > 1) {
     throw new InternalCompilerError(
@@ -207,12 +209,13 @@ export function streamDataAdapter(
     d.push(`}`, ``);
   }
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
 export function streamDoneFnFor(
   host: LlvmEmitterContext,
-  kind: "w" | "f" | "d" | "t" | "l",
+  kind: "w" | "f" | "d" | "t" | "l" | "c",
   doneT: IrType & { kind: "func" },
 ): string {
   const key = `sd:${kind}:${typeKey(doneT)}`;
@@ -220,6 +223,7 @@ export function streamDoneFnFor(
   if (sym) return sym;
   sym = `sc_sd_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "streamDoneFnFor", [kind, doneT]);
   const errT = doneT.params[0];
   let errTag = -1;
   if (errT !== undefined) {
@@ -256,19 +260,21 @@ export function streamDoneFnFor(
     }
   }
   const entry =
-    kind === "w"
-      ? "scr_stream_write_done"
-      : kind === "f"
-        ? "scr_stream_final_done"
-        : kind === "d"
-          ? "scr_stream_destroy_done"
-          : kind === "t"
-            ? valueData
-              ? "scr_stream_transform_done_value"
-              : "scr_stream_transform_done"
-            : valueData
-              ? "scr_stream_flush_done_value"
-              : "scr_stream_flush_done";
+    kind === "c"
+      ? "scr_stream_construct_done"
+      : kind === "w"
+        ? "scr_stream_write_done"
+        : kind === "f"
+          ? "scr_stream_final_done"
+          : kind === "d"
+            ? "scr_stream_destroy_done"
+            : kind === "t"
+              ? valueData
+                ? "scr_stream_transform_done_value"
+                : "scr_stream_transform_done"
+              : valueData
+                ? "scr_stream_flush_done_value"
+                : "scr_stream_flush_done";
   const twoSlot = (kind === "t" || kind === "l") && !valueData;
   host.declare(
     `declare void @${entry}(ptr, ptr${twoSlot ? ", ptr, ptr" : valueData ? ", ptr" : ""})`,
@@ -347,6 +353,7 @@ export function streamDoneFnFor(
     d.push(`  call void ${releaseSym(host.shapeHost, dataT)}(ptr %d)`);
   d.push(`  ret void`, `}`, ``);
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -360,6 +367,7 @@ export function fsRenameThunkFor(host: LlvmEmitterContext, cbT: IrType & { kind:
   if (sym) return sym;
   sym = `sc_fsren_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "fsRenameThunkFor", [cbT]);
   const param = cbT.params[0]!;
   const d: string[] = [
     `define internal void @${sym}(ptr %cb, ptr %err) ${FN_ATTRS} { ; fs.rename callback ${typeKey(cbT)}`,
@@ -415,6 +423,7 @@ export function fsRenameThunkFor(host: LlvmEmitterContext, cbT: IrType & { kind:
     ``,
   );
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -447,6 +456,7 @@ export function cryptoIntThunkFor(
   if (sym) return sym;
   sym = `sc_cryptoint_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "cryptoIntThunkFor", [cbT]);
   const d: string[] = [
     `define internal void @${sym}(ptr %cb, double %value) ${FN_ATTRS} { ; randomInt callback ${typeKey(cbT)}`,
     `entry:`,
@@ -489,6 +499,7 @@ export function cryptoIntThunkFor(
     ``,
   );
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
@@ -507,6 +518,7 @@ export function zlibBytesThunkFor(
   if (sym) return sym;
   sym = `sc_${family}bytes_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "zlibBytesThunkFor", [cbT, arrayBuffer, family, valueMode]);
   const d: string[] = [
     `define internal void @${sym}(ptr %cb, ptr %err, ptr %value) ${FN_ATTRS} { ; zlib bytes callback ${typeKey(cbT)}`,
     `entry:`,
@@ -618,12 +630,13 @@ export function zlibBytesThunkFor(
     ``,
   );
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
 
 export function streamCbThunkFor(
   host: LlvmEmitterContext,
-  kind: "r" | "w" | "f" | "d" | "t" | "l" | "e",
+  kind: "r" | "w" | "f" | "d" | "t" | "l" | "e" | "c" | "v",
   cbT: IrType,
 ): string {
   if (cbT.kind !== "func")
@@ -633,14 +646,17 @@ export function streamCbThunkFor(
   if (sym) return sym;
   sym = `sc_scb_${host.resolveThunks.size}`;
   host.resolveThunks.set(key, sym);
+  host.journal?.allocated(sym, "streamCbThunkFor", [kind, cbT]);
   const runtimeParams =
     kind === "r"
       ? ["ptr %s", "double %size"]
       : kind === "w" || kind === "t"
         ? ["ptr %s", "ptr %chunk"]
-        : kind === "d" || kind === "e"
-          ? ["ptr %s", "ptr %err"]
-          : ["ptr %s"];
+        : kind === "v"
+          ? ["ptr %s", "ptr %chunks"]
+          : kind === "d" || kind === "e"
+            ? ["ptr %s", "ptr %err"]
+            : ["ptr %s"];
   const declared = cbT.params;
   const hasThis = declared[0] !== undefined && declared[0].kind === "object";
   if (declared.length === 0) {
@@ -649,7 +665,9 @@ export function streamCbThunkFor(
     );
   }
   const off = hasThis ? 1 : 0;
-  const full = (kind === "r" ? 1 : kind === "w" || kind === "t" ? 3 : kind === "d" ? 2 : 1) + off;
+  const full =
+    (kind === "r" ? 1 : kind === "w" || kind === "t" ? 3 : kind === "d" || kind === "v" ? 2 : 1) +
+    off;
   if (declared.length > full) {
     throw new InternalCompilerError(
       `llvm emitter bug: stream '${kind}' callback declares ${declared.length} params (frontend must fence)`,
@@ -697,6 +715,31 @@ export function streamCbThunkFor(
       }
       continue;
     }
+    if (kind === "v" && pos === 0) {
+      // writev's chunks: the batch array (borrowed from the runtime), as
+      // a dyn value or converted to the declared type
+      if (p.kind === "dyn") {
+        host.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
+        d.push(`  %vc${i} = call ptr @scr_dyn_retain_v(ptr %chunks)`);
+        passed.push(`ptr %vc${i}`);
+      } else {
+        const helper = host.dyn.dynCheckHelper(p, false);
+        const ty = host.llType(p);
+        host.declare(`declare zeroext i1 @scr_exc_pending()`);
+        if (hasThis) host.declare(`declare void @scr_stream_release_v(ptr)`);
+        d.push(
+          `  %vt${i} = call ${ty === "i1" ? "zeroext i1" : ty} @${helper}(ptr %chunks, ptr null)`,
+          `  %vtbad${i} = call zeroext i1 @scr_exc_pending()`,
+          `  br i1 %vtbad${i}, label %vtfail${i}, label %vtok${i}`,
+          `vtfail${i}:`,
+          ...(hasThis ? [`  call void @scr_stream_release_v(ptr %sr)`] : []),
+          `  ret void`,
+          `vtok${i}:`,
+        );
+        passed.push(`${ty} %vt${i}`);
+      }
+      continue;
+    }
     const isChunkPos = (kind === "w" || kind === "t") && pos === 0;
     const isEncPos = (kind === "w" || kind === "t") && pos === 1;
     const isErrPos = (kind === "d" || kind === "e") && pos === 0;
@@ -705,7 +748,7 @@ export function streamCbThunkFor(
         ? false
         : kind === "w" || kind === "t"
           ? pos === 2
-          : kind === "f" || kind === "l"
+          : kind === "f" || kind === "l" || kind === "c"
             ? pos === 0
             : pos === 1;
     if (p.kind === "dyn") {
@@ -751,7 +794,7 @@ export function streamCbThunkFor(
         d.push(`  br label %ego${i}`, `ego${i}:`, `  %edv${i} = load ptr, ptr %edslot${i}`);
         passed.push(`ptr %edv${i}`);
       } else if (isDonePos) {
-        const glue = `scr_stream_done_dyn_${kind}`;
+        const glue = `scr_stream_done_dyn_${kind === "v" ? "w" : kind}`;
         host.declare(`declare ptr @${glue}(ptr, ptr, ${host.sizeType})`);
         host.declare(`declare ptr @scr_dyn_new_func(ptr, ptr, i32, ptr, ptr)`);
         const clo = doneClosure(`@${glue}`, `dd${i}`);
@@ -872,7 +915,8 @@ export function streamCbThunkFor(
       );
       passed.push(`ptr %euv${i}`);
     } else if (isDonePos) {
-      const doneKind = kind as "w" | "f" | "d" | "t" | "l"; // "e" has no done position
+      // "e" has no done position; writev completes as a write
+      const doneKind = (kind === "v" ? "w" : kind) as "w" | "f" | "d" | "t" | "l" | "c";
       if (p.kind !== "func")
         throw new InternalCompilerError("llvm emitter bug: stream done callback not a func");
       const doneFn = host.streamDoneFnFor(doneKind, p);
@@ -901,5 +945,35 @@ export function streamCbThunkFor(
   }
   d.push(`  ret void`, `}`, ``);
   host.resolveThunkDefs.push(...d);
+  host.journal?.built();
   return sym;
 }
+
+registerReplay("streamDataAdapter", (host, args) =>
+  streamDataAdapter(host, args[0] as IrType & { kind: "func" }),
+);
+registerReplay("streamDoneFnFor", (host, args) =>
+  streamDoneFnFor(
+    host,
+    args[0] as "w" | "f" | "d" | "t" | "l",
+    args[1] as IrType & { kind: "func" },
+  ),
+);
+registerReplay("fsRenameThunkFor", (host, args) =>
+  fsRenameThunkFor(host, args[0] as IrType & { kind: "func" }),
+);
+registerReplay("cryptoIntThunkFor", (host, args) =>
+  cryptoIntThunkFor(host, args[0] as IrType & { kind: "func" }),
+);
+registerReplay("zlibBytesThunkFor", (host, args) =>
+  zlibBytesThunkFor(
+    host,
+    args[0] as IrType & { kind: "func" },
+    args[1] as boolean,
+    args[2] as string,
+    args[3] as BytesThunkValue,
+  ),
+);
+registerReplay("streamCbThunkFor", (host, args) =>
+  streamCbThunkFor(host, args[0] as "r" | "w" | "f" | "d" | "t" | "l" | "e", args[1] as IrType),
+);

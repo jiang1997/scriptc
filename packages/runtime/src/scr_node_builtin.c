@@ -90,6 +90,10 @@ static SCR_TL ScrDyn *scr_global_own;
  * live on the box (string-keyed ones in scr_global_own), so every spelling
  * of the global object answers this box. */
 static SCR_TL ScrDyn *scr_global_box;
+/* The compiler's immortal name table (one per program) whose names
+ * scr_global_known holds; cleared with the tables, so a library re-init
+ * registers the names again. */
+static SCR_TL const ScrArr *scr_global_registered;
 static SCR_TL bool scr_global_cleanup_registered;
 static SCR_TL ScrDyn *(*scr_global_console_get)(void);
 static SCR_TL ScrDyn *(*scr_global_fetch_get)(void);
@@ -190,6 +194,7 @@ static void scr_global_cleanup(void) {
   scr_dyn_release(scr_global_own);
   scr_global_known = NULL;
   scr_global_own = NULL;
+  scr_global_registered = NULL;
 }
 
 static void *scr_global_retain(void *handle) { return handle; }
@@ -246,8 +251,12 @@ ScrDyn *scr_global_object(void) {
 }
 
 ScrDyn *scr_global_native_init(ScrArr *known, ScrDyn *(*console_get)(void)) {
+  /* The compiler passes one immortal name table per program: once it is
+   * registered, later reads of the global object only take a reference. */
+  if (known == scr_global_registered && scr_global_box) return scr_dyn_retain(scr_global_box);
   ScrDyn *global = scr_global_object();
   scr_global_console_get = console_get;
+  if (known->rc == SIZE_MAX) scr_global_registered = known;
   for (size_t i = 0; i < known->len; i++) {
     ScrStr *key = (ScrStr *)scr_arr_get_ref(known, (double)i);
     if (!scr_dyn_obj_get(scr_global_known, key->data, key->len))

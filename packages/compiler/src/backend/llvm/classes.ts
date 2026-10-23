@@ -703,11 +703,13 @@ export function classFieldTypes(host: ShapeHost, cls: IrClassDef, int32?: Int32S
 
 /** Gives the classes `compact` admits (whole hierarchies: the test is the
  * root's) the 32-bit header and packed fields. A class keeps its base's
- * field offsets, and places each of its own fields, widest first, at the
- * first offset after the header that fits it: in a hole another field's
- * alignment left, in the base's tail padding, or at the end. So 32-bit and
- * smaller fields share 8-byte words. The struct lists the header and the
- * fields by offset, which LLVM's layout of the type reproduces (checked). */
+ * field offsets, and places each of its own fields at the first offset
+ * after the header that fits it: in a hole another field's alignment left,
+ * in the base's tail padding, or at the end. Scalars narrower than 8 bytes
+ * (flags, ids, counts) go first, widest first, so they share the header's
+ * cache line; then the other fields, widest first. So 32-bit and smaller
+ * fields share 8-byte words. The struct lists the header and the fields by
+ * offset, which LLVM's layout of the type reproduces (checked). */
 export function assignCompactLayouts(
   metaMap: ReadonlyMap<string, LlClassMeta>,
   compact: (root: LlClassMeta) => boolean,
@@ -751,10 +753,12 @@ export function assignCompactLayouts(
         );
       return COMPACT_REF;
     });
+    const smallScalar = (f: { type: string; field: number; size: number }): number =>
+      f.size < 8 && f.type !== "ptr" && !compressed[f.field] ? 0 : 1;
     const own = types
       .map((type, field) => ({ type, field, ...fieldStorage(type) }))
       .slice(baseCount)
-      .sort((a, b) => b.size - a.size || a.field - b.field);
+      .sort((a, b) => smallScalar(a) - smallScalar(b) || b.size - a.size || a.field - b.field);
     for (const f of own) {
       const sorted = [...elems].sort((a, b) => a.offset - b.offset);
       let at = -1;
@@ -860,9 +864,9 @@ export function emitClassShapes(
   nullable?: NullableRefFields,
   int32?: Int32Slots,
 ): { typeDefs: string[]; defs: string[] } {
-  // Whether compact instances live in the program-lifetime region (any
-  // field holds a 32-bit reference to one; emitter.ts assignCompactLayouts).
-  const regionRefs = [...metaMap.values()].some((m) => m.compressed.some(Boolean));
+  // Whether compact instances live in the program-lifetime region, where
+  // fields and arrays can refer to them in 32 bits (LlEmitter.compactRegion).
+  const regionRefs = host.compactRegion?.() === true;
   const typeDefs: string[] = [];
   const defs: string[] = [];
   const emitted = (mod.classes ?? []).filter((c) => !c.runtime);

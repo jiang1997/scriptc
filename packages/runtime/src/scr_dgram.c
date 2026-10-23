@@ -2158,3 +2158,73 @@ void scr_dgram_send_chk(ScrDgramSocket *s, const ScrDyn *buffer, const ScrDyn *a
  * it removes a 'message' listener. Defined last so the functions above
  * keep their emission order. */
 void scr_dgram_rearm(ScrDgramSocket *s) { scr_dgram_update_read(s); }
+
+/* ── Unix datagram sockets for the hot-shots package shim ──────────────
+ * The unix-dgram addon's surface, which hot-shots' uds transport uses: a
+ * non-blocking AF_UNIX datagram socket connected to a path. Each call
+ * answers its result (fd, 0) or a negative errno, as the addon's binding
+ * does; send answers 1 when the socket would block (the addon's
+ * "congestion"). Defined after the functions above so their emission
+ * order is unchanged. */
+#ifndef _WIN32
+#include <sys/un.h>
+#endif
+
+double scr_dgram_unix_socket(void) {
+#ifdef _WIN32
+  return -(double)ENOSYS;
+#else
+  int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+  if (fd < 0) return -(double)errno;
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags >= 0) (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+  return (double)fd;
+#endif
+}
+
+double scr_dgram_unix_connect(double fd, ScrStr *path) {
+#ifdef _WIN32
+  (void)fd;
+  (void)path;
+  return -(double)ENOSYS;
+#else
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sun_family = AF_UNIX;
+  char *owned;
+  const char *bytes = scr_str_utf8(path, &owned);
+  size_t n = strlen(bytes);
+  if (n > sizeof addr.sun_path - 1) n = sizeof addr.sun_path - 1;
+  memcpy(addr.sun_path, bytes, n);
+  scr_str_utf8_end(owned);
+  if (connect((int)fd, (struct sockaddr *)&addr, sizeof addr) != 0) return -(double)errno;
+  return 0;
+#endif
+}
+
+double scr_dgram_unix_send(double fd, ScrBytes *data) {
+#ifdef _WIN32
+  (void)fd;
+  (void)data;
+  return -(double)ENOSYS;
+#else
+  SCR_BYTES_SNAPSHOT(data);
+  ssize_t sent;
+  do {
+    sent = send((int)fd, data->data, data->len, 0);
+  } while (sent < 0 && errno == EINTR);
+  if (sent >= 0) return 0;
+  if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+  return -(double)errno;
+#endif
+}
+
+double scr_dgram_unix_close(double fd) {
+#ifdef _WIN32
+  (void)fd;
+  return -(double)ENOSYS;
+#else
+  return close((int)fd) != 0 ? -(double)errno : 0;
+#endif
+}

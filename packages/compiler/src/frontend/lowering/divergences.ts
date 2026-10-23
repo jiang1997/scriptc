@@ -464,8 +464,11 @@ function identityUse(root: ts.Node, name: string, from = -1): IdentityUse | null
       cur = cur.expression;
     return cur;
   };
+  // The text appears only in warnings. A build that reported warnings is
+  // not reused after a source edit, so the read is not recorded as a source
+  // text dependency (ts.getTextOfNode would record it).
   const textOf = (node: ts.Node): string => {
-    const text = ts.getTextOfNode(node);
+    const text = ts.getSourceFileOfNode(node).text.slice(ts.tokenStartOfNode(node), node.end);
     return text.length > 60 ? `${text.slice(0, 57)}...` : text;
   };
   const visit = (node: ts.Node): "skip" | "stop" | undefined => {

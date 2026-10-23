@@ -1105,9 +1105,9 @@ char **scr_child_argv(ScrStr *cmd, ScrArr *args) {
 
 static ScrSpawnRes *scr_spawn_sync_core(ScrStr *cmd, ScrArr *args, double timeout_ms,
                                         int killsig, int in_mode, int out_mode,
-                                        int err_mode) {
+                                        int err_mode, ScrArr *env_pairs) {
   ScrWinSyncRes w;
-  scr_win_run_sync(cmd, args, NULL, in_mode, out_mode, err_mode, NULL, NULL,
+  scr_win_run_sync(cmd, args, NULL, in_mode, out_mode, err_mode, NULL, env_pairs,
                    timeout_ms, &w);
   if (w.spawn_errname != NULL) {
     free(w.out.data);
@@ -1136,19 +1136,26 @@ static ScrSpawnRes *scr_spawn_sync_core(ScrStr *cmd, ScrArr *args, double timeou
 }
 
 ScrSpawnRes *scr_spawn_sync(ScrStr *cmd, ScrArr *args) {
-  return scr_spawn_sync_core(cmd, args, 0, SIGTERM, 0, 0, 0);
+  return scr_spawn_sync_core(cmd, args, 0, SIGTERM, 0, 0, 0, NULL);
 }
 
 ScrSpawnRes *scr_spawn_sync_opts(ScrStr *cmd, ScrArr *args, double timeout_ms,
                                  ScrStr *killsignal, double in_mode,
                                  double out_mode, double err_mode) {
+  return scr_spawn_sync_env(cmd, args, timeout_ms, killsignal, in_mode, out_mode, err_mode,
+                            NULL);
+}
+
+ScrSpawnRes *scr_spawn_sync_env(ScrStr *cmd, ScrArr *args, double timeout_ms,
+                                ScrStr *killsignal, double in_mode, double out_mode,
+                                double err_mode, ScrArr *env_pairs) {
   int killsig = SIGTERM;
   if (killsignal->len > 0) {
     int resolved = scr_signal_from_name(killsignal);
     if (resolved > 0) killsig = resolved;
   }
   return scr_spawn_sync_core(cmd, args, timeout_ms, killsig, (int)in_mode,
-                             (int)out_mode, (int)err_mode);
+                             (int)out_mode, (int)err_mode, env_pairs);
 }
 
 ScrSpawnRes *scr_spawn_sync_stdio_str(ScrStr *cmd, ScrArr *args, double timeout_ms,
@@ -3101,9 +3108,61 @@ static ScrSpawnRes *scr_spawn_res_new(bool has_status, double status,
  * documented divergence). timeout_ms > 0 sends `killsig` at the deadline
  * and the result carries error: ETIMEDOUT + the signal — never a throw,
  * Node's spawnSync shape. */
+static char **scr_exec_envp(ScrArr *pairs);
+static void scr_exec_envp_free(char **envp);
+
+/* posix_spawnp for the child_process spawns. Without `envp` the command
+ * resolves on this process's PATH over `environ`. With `envp` (a
+ * replacement environment) it resolves the way Node's libuv runs execvp
+ * in the child: a name with a '/' runs as given; otherwise each entry of
+ * the replacement's PATH (an empty entry is the current directory), or of
+ * the default path when the replacement has no PATH, is tried in order,
+ * and a candidate whose exec fails with ENOENT, ENOTDIR or EACCES (a
+ * missing file, or a script whose interpreter is missing) moves on to the
+ * next entry. The last such failure is EACCES if any candidate was denied,
+ * else ENOENT. Relative entries are resolved by the child, which starts in
+ * `cwd`. Returns posix_spawn's error number. */
+static int scr_spawn_command(pid_t *pid, const char *file, const posix_spawn_file_actions_t *fa,
+                             const posix_spawnattr_t *attr, char *const *argv,
+                             char *const *envp, const char *cwd) {
+  (void)cwd; /* the file actions change into it before the exec */
+  if (envp == NULL) return posix_spawnp(pid, file, fa, attr, argv, environ);
+  if (strchr(file, '/')) return posix_spawn(pid, file, fa, attr, argv, envp);
+  const char *path = "/usr/bin:/bin";
+  for (char *const *e = envp; *e; e++) {
+    if (strncmp(*e, "PATH=", 5) == 0) {
+      path = *e + 5;
+      break;
+    }
+  }
+  size_t file_len = strlen(file);
+  bool denied = false;
+  for (const char *dir = path;;) {
+    const char *end = strchr(dir, ':');
+    size_t dir_len = end ? (size_t)(end - dir) : strlen(dir);
+    const char *prefix = dir_len ? dir : ".";
+    size_t prefix_len = dir_len ? dir_len : 1;
+    char *candidate = malloc(prefix_len + 1 + file_len + 1);
+    if (!candidate) scr_child_oom();
+    memcpy(candidate, prefix, prefix_len);
+    candidate[prefix_len] = '/';
+    memcpy(candidate + prefix_len + 1, file, file_len + 1);
+    int err = posix_spawn(pid, candidate, fa, attr, argv, envp);
+    free(candidate);
+    if (err == EACCES) denied = true;
+    else if (err != ENOENT && err != ENOTDIR) return err;
+    if (!end) break;
+    dir = end + 1;
+  }
+  return denied ? EACCES : ENOENT;
+}
+
+/* env_pairs: NULL inherits the parent's environment; else [k,v,...]
+ * replaces it, as Node's `env` option does, and the command is looked up
+ * on the replacement's PATH (scr_spawn_command). */
 static ScrSpawnRes *scr_spawn_sync_core(ScrStr *cmd, ScrArr *args, double timeout_ms,
                                          int killsig, int in_mode, int out_mode,
-                                         int err_mode) {
+                                         int err_mode, ScrArr *env_pairs) {
   if (out_mode == 2 || err_mode == 2) {
     /* Inherited output fds: flush the parent's buffers first so earlier
      * logs precede the child's writes (Node's practical ordering). */
@@ -3138,10 +3197,12 @@ static ScrSpawnRes *scr_spawn_sync_core(ScrStr *cmd, ScrArr *args, double timeou
   }
 
   char **argv = scr_child_argv(cmd, args);
+  char **envp = env_pairs != NULL ? scr_exec_envp(env_pairs) : NULL;
   pid_t pid = -1;
-  int spawn_err = posix_spawnp(&pid, cmd->data, &fa, NULL, argv, environ);
+  int spawn_err = scr_spawn_command(&pid, cmd->data, &fa, NULL, argv, envp, NULL);
   posix_spawn_file_actions_destroy(&fa);
   free(argv);
+  scr_exec_envp_free(envp);
   if (cap_out) close(outfd[1]);
   if (cap_err) close(errfd[1]);
 
@@ -3242,7 +3303,7 @@ static ScrSpawnRes *scr_spawn_sync_core(ScrStr *cmd, ScrArr *args, double timeou
 }
 
 ScrSpawnRes *scr_spawn_sync(ScrStr *cmd, ScrArr *args) {
-  return scr_spawn_sync_core(cmd, args, 0, SIGTERM, 0, 0, 0);
+  return scr_spawn_sync_core(cmd, args, 0, SIGTERM, 0, 0, 0, NULL);
 }
 
 /* The options entry (cp.spawnSyncOpts): killSignal as a NAME ("" = the
@@ -3252,13 +3313,20 @@ ScrSpawnRes *scr_spawn_sync(ScrStr *cmd, ScrArr *args) {
 ScrSpawnRes *scr_spawn_sync_opts(ScrStr *cmd, ScrArr *args, double timeout_ms,
                                   ScrStr *killsignal, double in_mode,
                                   double out_mode, double err_mode) {
+  return scr_spawn_sync_env(cmd, args, timeout_ms, killsignal, in_mode, out_mode, err_mode,
+                            NULL);
+}
+
+ScrSpawnRes *scr_spawn_sync_env(ScrStr *cmd, ScrArr *args, double timeout_ms,
+                                ScrStr *killsignal, double in_mode, double out_mode,
+                                double err_mode, ScrArr *env_pairs) {
   int killsig = SIGTERM;
   if (killsignal->len > 0) {
     int resolved = scr_signal_from_name(killsignal);
     if (resolved > 0) killsig = resolved;
   }
   return scr_spawn_sync_core(cmd, args, timeout_ms, killsig, (int)in_mode,
-                              (int)out_mode, (int)err_mode);
+                             (int)out_mode, (int)err_mode, env_pairs);
 }
 
 /* The runtime-string stdio entry (cp.spawnSyncStdioStr): the compiler
@@ -3478,8 +3546,8 @@ ScrStr *scr_exec_sync_core(ScrStr *cmd, ScrArr *args, const ScrExecOpts *o) {
   char **argv = scr_child_argv(cmd, args);
   char **envp = o->env_pairs != NULL ? scr_exec_envp(o->env_pairs) : NULL;
   pid_t pid = -1;
-  int spawn_err = posix_spawnp(&pid, cmd->data, &fa, NULL, argv,
-                               envp != NULL ? envp : environ);
+  int spawn_err = scr_spawn_command(&pid, cmd->data, &fa, NULL, argv, envp,
+                                    o->cwd != NULL ? o->cwd->data : NULL);
   posix_spawn_file_actions_destroy(&fa);
   free(argv);
   scr_exec_envp_free(envp);
@@ -5037,8 +5105,8 @@ ScrChild *scr_spawn_opts(ScrStr *cmd, ScrArr *args, double in_mode,
   char **envp = has_env && env_pairs != NULL ? scr_exec_envp(env_pairs) : NULL;
   pid_t pid = -1;
   const char *file = shell ? "/bin/sh" : cmd->data;
-  int spawn_err = posix_spawnp(&pid, file, &fa, &at, argv,
-                               envp != NULL ? envp : environ);
+  int spawn_err = scr_spawn_command(&pid, file, &fa, &at, argv, envp,
+                                    cwd != NULL && cwd->len > 0 ? cwd->data : NULL);
   posix_spawnattr_destroy(&at);
   posix_spawn_file_actions_destroy(&fa);
   if (!shell) free(argv);

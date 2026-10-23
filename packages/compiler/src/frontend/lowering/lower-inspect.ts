@@ -1918,13 +1918,21 @@ function inspectHelper(lowerer: Lowerer, t: IrType, loc: SrcLoc): string {
 
   // A closed record that kept the undeclared properties of its checked
   // source renders through its live checked view, which holds them in the
-  // source's own-key order beside the current field values.
+  // source's own-key order beside the current field values. An array with
+  // properties besides its elements does too: the view lists them after
+  // the elements.
   let prependSourceGate: (() => void) | null = null;
-  if (t.kind === "record" && recordMayKeepSource(lowerer, t)) {
+  const sourceTest: IrExpr | null =
+    t.kind === "record" && recordMayKeepSource(lowerer, t)
+      ? recordSourceTest(v(), loc)
+      : t.kind === "array" && lowerer.dynConvertible(t)
+        ? { kind: "libCall", fn: "array.hasProperties", args: [v()], type: BOOL, loc }
+        : null;
+  if (sourceTest !== null) {
     prependSourceGate = (): void => {
       body.unshift({
         kind: "if",
-        cond: recordSourceTest(v(), loc),
+        cond: sourceTest,
         then: [
           ret({
             kind: "libCall",
