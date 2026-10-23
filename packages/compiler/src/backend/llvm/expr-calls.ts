@@ -44,6 +44,7 @@ import { LlvmUnsupportedError } from "./unsupported.js";
 import type { LlvmEmitterContext, ExprOf, LlValue } from "./expr-context.js";
 import { f64Lit, ffiNativeTypeLl, ffiNativeParamLl, ffiNativeReturnLl } from "./common.js";
 import { canStackUnion, emitStackUnion } from "./stack-unions.js";
+import { emitStackRecordKeyGet, scalarRecordKeyGet } from "./expr-records.js";
 import { emitCallArrayRead } from "./local-array-reads.js";
 import { emitScalarOptional, isScalarOptionalSource } from "./local-union-storage.js";
 import { emitStackMapRead } from "./map-read-lifetimes.js";
@@ -166,6 +167,9 @@ export function emitCallExpr(
               return { name: host.emitOwnedNullableStack(a).box, type: a.type };
             // An inline union field read copies its tag and bits.
             if (host.inlineFieldGet(a)) return host.emitReadReceiver(a);
+            // A scalar keyed record read writes its tag and bits.
+            if (a.kind === "recordKeyGet" && scalarRecordKeyGet(host, a))
+              return { name: emitStackRecordKeyGet(host, a), type: a.type };
           }
           if (inputs[index]) return host.emitReadReceiver(a);
         }

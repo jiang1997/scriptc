@@ -46,6 +46,10 @@ import {
   trackedRealpath,
 } from "../input-tracker.js";
 import { packageShimDeclarationText } from "../package-shims.js";
+import { ambientDtsPath, fallbackDtsPath, overridesDtsPath } from "../dts-paths.js";
+import { reusedLibDiagnostics } from "./lib-diagnostics.js";
+import { ts7Diagnostic } from "./diagnostic.js";
+import type { Ts7DiagnosticData } from "./session-schema.generated.js";
 
 /** The compiler options our createProgram accepts: TS7's CompilerOptions
  * shape (numeric enums for target/module/moduleResolution — the enums module
@@ -393,6 +397,22 @@ export class Ts7Program {
     return this.project.program.getSourceFileMetadata(resolve(fileName));
   }
 
+  /** The semantic and global diagnostics with the stored diagnostics of the
+   * declaration files scriptc supplies (lib-diagnostics.ts), or null. */
+  reusedLibDiagnostics(): { semantic: Ts7DiagnosticData[]; global: Ts7DiagnosticData[] } | null {
+    this.snapshot.ensureActive();
+    const program = this.project.program;
+    const declarations = new Set([ambientDtsPath(), overridesDtsPath(), fallbackDtsPath()]);
+    return reusedLibDiagnostics(
+      program,
+      this.getSourceFileNames(),
+      (name) =>
+        declarations.has(tsgoPath(name)) ||
+        program.getSourceFileMetadataByPath(name)?.isDefaultLibrary === true,
+      (name) => this.getSourceFile(name),
+    );
+  }
+
   isSourceFileDefaultLibrary(file: SourceFile): boolean {
     return this.project.program.isSourceFileDefaultLibrary(file);
   }
@@ -423,9 +443,20 @@ export class Ts7Program {
  * package dropped the aggregate). Order mirrors 5.9.3: config, options/
  * program, global, syntactic, semantic. */
 export function getPreEmitDiagnostics(program: Ts7Program): readonly Diagnostic[] {
+  const config = program.getConfigFileParsingDiagnostics();
+  const options = program.getProgramDiagnostics();
+  const reused = program.reusedLibDiagnostics();
+  if (reused !== null)
+    return [
+      ...config,
+      ...options,
+      ...reused.global.map(ts7Diagnostic),
+      ...program.getSyntacticDiagnostics(),
+      ...reused.semantic.map(ts7Diagnostic),
+    ];
   return [
-    ...program.getConfigFileParsingDiagnostics(),
-    ...program.getProgramDiagnostics(),
+    ...config,
+    ...options,
     ...program.getGlobalDiagnostics(),
     ...program.getSyntacticDiagnostics(),
     ...program.getSemanticDiagnostics(),

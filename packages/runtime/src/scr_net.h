@@ -36,6 +36,10 @@ typedef struct {
 } ScrNetLs;
 
 void scr_net_ls_add(ScrNetLs *l, ScrClosure *cb, void *fn, bool once);
+/* The AsyncLocalStorage context a socket's events run in from now on
+ * (borrowed; scr_net.c keeps the creation context otherwise). */
+struct ScrAlsCtx;
+void scr_net_sock_set_context(ScrNetSocket *s, struct ScrAlsCtx *ctx);
 ScrNetOnce *scr_net_once_new(void); /* +1 */
 ScrNetOnce *scr_net_once_retain(ScrNetOnce *once); /* +1 */
 void scr_net_once_release(ScrNetOnce *once);

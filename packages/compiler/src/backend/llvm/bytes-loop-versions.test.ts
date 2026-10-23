@@ -11,7 +11,7 @@ import {
   type IrType,
 } from "../../ir/ir.js";
 import { analyzeIntegerRanges } from "../../ir/integer-ranges.js";
-import { matchIntegerCountedForLoop } from "../../ir/integer-loops.js";
+import { matchIntegerCountedForLoop, matchIntegerPairedForLoop } from "../../ir/integer-loops.js";
 import { findInitializedByteLoopBindings } from "./byte-windows.js";
 import { matchBytesLoopVersion, type BytesLoopVersion } from "./bytes-loop-versions.js";
 import { emitLlvmModule } from "./emitter.js";
@@ -249,6 +249,11 @@ test("emitted loops version the body and tag typed-array memory", () => {
   const elements = /store double [^\n]*!tbaa !(\d+)/.exec(body)![1];
   const header = /load ptr, ptr [^\n]*!tbaa !(\d+)/.exec(body)![1];
   expect(elements).not.toBe(header);
+  // Header loads are invariant for the view's lifetime; element accesses
+  // are not.
+  expect(body).toMatch(/load ptr, ptr [^\n]*, !tbaa !\d+, !invariant\.load !\{\}$/m);
+  expect(body).toMatch(/load i64, ptr [^\n]*, !tbaa !\d+, !invariant\.load !\{\}$/m);
+  expect(body).not.toMatch(/(load double|store double)[^\n]*invariant\.load/);
 });
 
 test("loops to a typed array's length version the other typed arrays they index", () => {
@@ -617,4 +622,79 @@ test("while loop counters below a string's length version its reads", () => {
   expect(version.receivers.map((r) => r.string)).toEqual([true]);
   expect(version.bounded.map((c) => c.slack)).toEqual([0]);
   expect(version.fixed).toEqual([]);
+});
+
+test("a two-counter loop versions the typed arrays it indexes at either counter", () => {
+  // for (let i = 0, j = k; i < j; i++, j--) { const t = out[i]; out[i] = out[j]; out[j] = t; }
+  const loop: IrStmt & { kind: "for" } = {
+    kind: "for",
+    init: {
+      kind: "block",
+      body: [
+        { kind: "varDecl", localId: "i", init: num(0), loc },
+        { kind: "varDecl", localId: "j", init: ref("k"), loc },
+      ],
+      loc,
+    },
+    cond: { kind: "bin", op: "<", left: ref("i"), right: ref("j"), type: BOOL, loc },
+    update: {
+      kind: "block",
+      body: [
+        { kind: "assign", localId: "i", value: bin("+", ref("i"), num(1)), loc },
+        { kind: "assign", localId: "j", value: bin("-", ref("j"), num(1)), loc },
+      ],
+      loc,
+    },
+    body: [
+      { kind: "varDecl", localId: "t", init: get(ref("out", f64s), ref("i")), loc },
+      set(ref("out", f64s), ref("i"), get(ref("out", f64s), ref("j"))),
+      set(ref("out", f64s), ref("j"), ref("t")),
+      // Another index stays checked.
+      set(ref("src", f64s), bin("+", ref("i"), num(1)), num(0)),
+    ],
+    loc,
+  };
+  const kernel = fn([loop], [local("t", F64)]);
+  const ranges = analyzeIntegerRanges(kernel);
+  const locals = new Map(kernel.locals.map((l) => [l.id, l]));
+  const paired = matchIntegerPairedForLoop(loop, locals, ranges)!;
+  expect(paired).not.toBeNull();
+  const version = matchBytesLoopVersion(
+    loop,
+    null,
+    {
+      locals,
+      invariantGlobals: new Set(),
+      captured: new Set(),
+      ranges,
+      initialized: findInitializedByteLoopBindings(kernel).get(loop) ?? new Set(),
+      proven: new Set(),
+      workers: false,
+      owned: new Set(),
+      scalarStrings: new Set(),
+    },
+    paired,
+  )!;
+  expect(version.paired?.loop).toBe(paired);
+  expect(version.paired?.receivers.map((r) => version.receivers[r]!.ref)).toEqual([
+    ref("out", f64s),
+  ]);
+  expect(version.bounds.size).toBe(4);
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      kernel,
+    ],
+  };
+  const body = /^define internal [^\n]*@sc_bf_kernel[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  const guard = body.slice(0, body.search(/^bytes\.version\.(fast|slow)\d+:$/m));
+  expect(guard).toMatch(/icmp sge i64 %\S+, 0/);
+  expect(guard).toMatch(/icmp slt i64 %\S+, %\S+/);
+  const fast = /^bytes\.version\.fast\d+:$[^]*?^bytes\.version\.done\d+:$/m.exec(body)![0];
+  // The fast copy keeps only the `src[i + 1]` check, and no second guard.
+  expect(fast.match(/bytes\.index\.invalid\d+:/g)).toHaveLength(1);
+  expect(fast).not.toContain("counted.fast");
 });

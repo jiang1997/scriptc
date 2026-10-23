@@ -797,7 +797,33 @@ export function emitLocalArrayRead(
       );
       return null;
     });
-  else if (inline)
+  else if (
+    inline &&
+    loopIndex !== null &&
+    read.element.kind === "f64" &&
+    host.provenDenseIndex(read.array, read.index)
+  ) {
+    // In a dense array loop's fast copy, the entry test proved the counter
+    // below the array's hole-free prefix: the slot holds a present value,
+    // and the read has no missing arm.
+    const dataPtr = B.tmp(),
+      data = B.tmp(),
+      valuePtr = B.tmp(),
+      value = B.tmp(),
+      width = int32 ? "i32" : "i64";
+    B.line(
+      `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
+    );
+    host.markMemoryPointer(dataPtr, "array:header");
+    B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
+    B.line(
+      `${valuePtr} = getelementptr inbounds ${width}, ptr ${data}, ${host.sizeType} ${loopIndex}`,
+    );
+    host.markMemoryPointer(valuePtr, "array:elements");
+    B.line(`${value} = load ${width}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
+    storeValue(value);
+    B.br(join);
+  } else if (inline)
     emitDenseReferenceArrayRead(
       host,
       array,

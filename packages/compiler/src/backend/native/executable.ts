@@ -302,6 +302,7 @@ const RUNTIME_UNITS: readonly RuntimeUnit[] = [
   unit((u) => u.opts.dgram, "scr_dgram.c"),
   unit((u) => u.opts.dgram && u.opts.dnsPromises, "scr_dns_promises.c"),
   unit((u) => u.opts.dgram && u.opts.dgramDyn, "scr_dgram_dyn.c"),
+  unit((u) => u.opts.textCodecDyn, "scr_text_codec_dyn.c"),
   unit((u) => u.opts.watch, "scr_watch.c"),
   unit((u) => u.opts.foreignFfi, "scr_ffi_queue.c"),
   unit((u) => u.opts.nodeTest, "scr_test.c"),

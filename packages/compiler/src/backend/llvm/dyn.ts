@@ -43,6 +43,8 @@ import {
   isDynTypedRefType,
   isRefCounted,
   isUnitType,
+  recordTextCodecClass,
+  textCodecRecordClass,
   typeKey,
 } from "../../ir/ir.js";
 import { dynDesc, streamTypedRefEligible } from "../../ir/analysis.js";
@@ -93,6 +95,17 @@ export const DYN_HANDLE_TAG_NUM: Record<string, number> = {
   cryptoHash: 52,
   cryptoHmac: 53,
 };
+
+/** The handle tags of TextEncoder and TextDecoder records boxed as dyn
+ * (scr_dyn.h; scr_text_codec_dyn.c boxes and unboxes them). */
+export const TEXT_CODEC_TAG_NUM: Record<"TextEncoder" | "TextDecoder", number> = {
+  TextDecoder: 76,
+  TextEncoder: 77,
+};
+
+/** The decoder record fields scr_text_decoder_to_dyn reads, in its
+ * parameter order. */
+const TEXT_DECODER_FIELDS = ["%TextDecoder", "%fatal", "%ignoreBOM", "%state"] as const;
 
 /** Handle kinds whose runtime unit boxes them through its own function,
  * which installs the tag's ops on first use (scr_crypto.h). Programs that
@@ -368,6 +381,36 @@ export class LlDyn {
   private recordBuilt(B: BlockBuilder, name: string, value: string): void {
     this.host.declare(`declare void @scr_dyn_build_add(ptr, ptr, ptr)`);
     B.line(`call void @scr_dyn_build_add(ptr %d, ptr @${name}, ptr ${value})`);
+  }
+
+  /** The order a dyn value tries a union's arms in: the canonical order,
+   * except that among the record arms, those with more required fields go
+   * first, then those with more fields. Records are width-tolerant, so an
+   * arm with fewer fields (`{}`, or one whose fields are all optional,
+   * matches every object) would otherwise take an object that a wider arm
+   * also matches and drop the fields only the wider arm has. */
+  private unionArmOrder(def: IrUnionDef): number[] {
+    const width = (i: number): [number, number] | null => {
+      const arm = def.arms[i]!;
+      if (arm.kind !== "record") return null;
+      const shape = this.host.recordsById.get(arm.shapeId);
+      if (!shape || shape.tuple) return null;
+      const required = shape.fields.filter(
+        (field) =>
+          field.type.kind !== "union" ||
+          !this.host.unionsById.get(field.type.unionId)?.arms.some((x) => x.kind === "undefinedT"),
+      ).length;
+      return [required, shape.fields.length];
+    };
+    const order = def.arms.map((_, i) => i);
+    const records = order.filter((i) => width(i) !== null);
+    const widest = [...records].sort((x, y) => {
+      const [rx, fx] = width(x)!;
+      const [ry, fy] = width(y)!;
+      return ry - rx || fy - fx || x - y;
+    });
+    records.forEach((slot, k) => (order[slot] = widest[k]!));
+    return order;
   }
 
   /** Branch to a variant only after its literal discriminator and complete
@@ -897,6 +940,21 @@ export class LlDyn {
     const name = `sc_dm_${this.dynMatchers.size}`;
     this.dynMatchers.set(matcherKey, name);
     this.host.journalAllocated?.(name, "dyn.dynMatchHelper", [t, preserveRefs]);
+    const codec = textCodecRecordClass(t, (id) => this.host.recordsById.get(id));
+    if (codec !== null) {
+      // A codec matches only its own handle box.
+      const B = new BlockBuilder();
+      const matched = this.handleTagMatches(B, TEXT_CODEC_TAG_NUM[codec]);
+      B.terminate(`ret i1 ${matched}`);
+      this.defs.push(
+        `define internal zeroext i1 @${name}(ptr %d) ${FN_ATTRS} { ; matches ${key}`,
+        B.render(),
+        `}`,
+        ``,
+      );
+      this.host.journalBuilt?.();
+      return name;
+    }
     const recursive = this.isRecursiveShape(t);
     const wrapped = recursive || this.holdsRecursiveShape(t);
     const B = new BlockBuilder();
@@ -1505,6 +1563,19 @@ export class LlDyn {
     return descriptor;
   }
 
+  /** `record.sourceSpread(built, value)`: the built record keeps value's
+   * kept-source order over its own declared names. */
+  emitRecordSourceSpread(B: BlockBuilder, built: string, value: string, shapeId: string): void {
+    const host = this.host;
+    const shape = host.recordsById.get(shapeId)!;
+    this.keepsRecordSources = true;
+    const names = this.recordNameTable(shapeId, shape);
+    host.declare(`declare void @scr_record_source_spread(ptr, ptr, ptr, ptr, ${host.sizeType})`);
+    B.line(
+      `call void @scr_record_source_spread(ptr ${built}, ptr ${value}, ptr ${names.names}, ptr ${names.lens}, ${host.sizeType} ${shape.fields.length})`,
+    );
+  }
+
   /** The declared-name tables scr_record_source_note scans: parallel
    * constant arrays of field-name bytes and byte lengths in declaration
    * order (the order the record serializes), interned per shape. Internal
@@ -1602,6 +1673,24 @@ export class LlDyn {
       const checked = B.tmp();
       B.line(
         `${checked} = call ptr @scr_dyn_class_check(ptr %d, ptr ${host.cstr(key)}, ptr %path)`,
+      );
+      B.terminate(`ret ptr ${checked}`);
+      this.defs.push(
+        `define internal ptr @${name}(ptr %d, ptr %path) ${FN_ATTRS} {`,
+        B.render(),
+        `}`,
+        ``,
+      );
+      this.host.journalBuilt?.();
+      return name;
+    }
+    const codec = textCodecRecordClass(t, (id) => host.recordsById.get(id));
+    if (codec !== null) {
+      // The record the codec's handle box holds (+1), or the path TypeError.
+      host.declare(`declare ptr @scr_text_codec_from_dyn(ptr, i1 zeroext, ptr, ptr)`);
+      const checked = B.tmp();
+      B.line(
+        `${checked} = call ptr @scr_text_codec_from_dyn(ptr %d, i1 ${codec === "TextDecoder"}, ptr %path, ptr ${want})`,
       );
       B.terminate(`ret ptr ${checked}`);
       this.defs.push(
@@ -2368,9 +2457,10 @@ export class LlDyn {
           throw new InternalCompilerError(
             `llvm emitter bug: dynCheck of unknown union ${t.unionId}`,
           );
-        // Arms in CANONICAL order, first FULL match wins. The matched
-        // arm's builder can no longer fail.
-        def.arms.forEach((arm, i) => {
+        // Arms in unionArmOrder, first FULL match wins. The matched arm's
+        // builder can no longer fail.
+        for (const i of this.unionArmOrder(def)) {
+          const arm = def.arms[i]!;
           const lHit = B.newLabel("dcu.h");
           const lNext = B.newLabel("dcu.n");
           this.unionArmMatch(B, def, i, lHit, lNext, preserveRefs);
@@ -2414,7 +2504,7 @@ export class LlDyn {
             B.terminate(`ret ptr ${u}`);
           }
           B.startBlock(lNext);
-        });
+        }
         if (preserveRefs) {
           B.line(
             `call void @scr_dyn_check_fail(ptr %path, ptr ${host.cstr("reference with its original layout")}, ptr %d)`,
@@ -2640,6 +2730,77 @@ export class LlDyn {
     return name;
   }
 
+  /** `i1`: %d is a handle box with tag `tag`. */
+  private handleTagMatches(B: BlockBuilder, tag: number): string {
+    const kd = this.kindOf(B, "%d");
+    const isHandle = B.tmp();
+    B.line(`${isHandle} = icmp eq i32 ${kd}, ${DYN_KIND.HANDLE}`);
+    const lHandle = B.newLabel("dm.handle");
+    const lDone = B.newLabel("dm.handle.done");
+    const entry = B.currentLabel();
+    B.condBr(isHandle, lHandle, lDone);
+    B.startBlock(lHandle);
+    const tagPtr = B.tmp();
+    const loaded = B.tmp();
+    B.line(
+      `${tagPtr} = getelementptr inbounds i8, ptr %d, i64 ${this.abiOffset(24, 20)} ; ->v.handle.tag`,
+    );
+    B.line(`${loaded} = load i32, ptr ${tagPtr}`);
+    const same = B.tmp();
+    B.line(`${same} = icmp eq i32 ${loaded}, ${tag}`);
+    B.br(lDone);
+    B.startBlock(lDone);
+    const matched = B.tmp();
+    B.line(`${matched} = phi i1 [ false, %${entry} ], [ ${same}, %${lHandle} ]`);
+    return matched;
+  }
+
+  /** A TextEncoder or TextDecoder record boxes as its handle (+1), which
+   * holds the record by reference. A decoder passes the byte offsets of the
+   * fields its boxed decode reads. */
+  private textCodecToDyn(
+    B: BlockBuilder,
+    t: IrType & { kind: "record" },
+    shape: IrRecordShape,
+    codec: "TextEncoder" | "TextDecoder",
+  ): void {
+    const host = this.host;
+    const rc = vAdapters(host, t);
+    const r = B.tmp();
+    if (codec === "TextEncoder") {
+      host.declare(`declare ptr @scr_text_encoder_to_dyn(ptr, ptr, ptr)`);
+      B.line(
+        `${r} = call ptr @scr_text_encoder_to_dyn(ptr %v, ptr ${rc.retain}, ptr ${rc.release})`,
+      );
+    } else {
+      const struct = mangleRecordStruct(t.shapeId);
+      const base = host.nullableUnions.fieldBase(t.shapeId);
+      const start = B.tmp();
+      B.line(`${start} = ptrtoint ptr %v to ${this.S}`);
+      const offsets = TEXT_DECODER_FIELDS.map((field) => {
+        const index = shape.fields.findIndex((f) => f.name === field);
+        if (index < 0)
+          throw new InternalCompilerError(`llvm emitter bug: TextDecoder record lacks ${field}`);
+        const p = B.tmp();
+        const at = B.tmp();
+        const offset = B.tmp();
+        B.line(
+          `${p} = getelementptr inbounds %${struct}, ptr %v, i64 0, i32 ${index + base} ; .${llvmCommentText(field)}`,
+        );
+        B.line(`${at} = ptrtoint ptr ${p} to ${this.S}`);
+        B.line(`${offset} = sub ${this.S} ${at}, ${start}`);
+        return `${this.S} ${offset}`;
+      });
+      host.declare(
+        `declare ptr @scr_text_decoder_to_dyn(ptr, ptr, ptr, ${this.S}, ${this.S}, ${this.S}, ${this.S})`,
+      );
+      B.line(
+        `${r} = call ptr @scr_text_decoder_to_dyn(ptr %v, ptr ${rc.retain}, ptr ${rc.release}, ${offsets.join(", ")})`,
+      );
+    }
+    B.terminate(`ret ptr ${r}`);
+  }
+
   /* ── toDynHelper (walkers.ts, ported) ─────────────────────────── */
 
   /** `sc_td_<n>(<T> v) -> ptr` — build a fresh dyn value from a
@@ -2815,6 +2976,11 @@ export class LlDyn {
         const shape = host.recordsById.get(t.shapeId);
         if (!shape)
           throw new InternalCompilerError(`llvm emitter bug: to-dyn of unknown shape ${t.shapeId}`);
+        const codec = recordTextCodecClass(shape);
+        if (codec !== null) {
+          this.textCodecToDyn(B, t, shape, codec);
+          break;
+        }
         const struct = mangleRecordStruct(t.shapeId);
         const base = host.nullableUnions.fieldBase(t.shapeId);
         const fieldIndex = new Map(shape.fields.map((f, i) => [f.name, i + base]));

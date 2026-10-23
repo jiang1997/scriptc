@@ -11,6 +11,7 @@
  * 'warning' listeners + Node's stderr report). */
 #include "scr_runtime.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,21 @@ static void scr_ad_oom(void) {
 
 static SCR_TL double scr_als_counter = 0;
 
+/* The constructor options of each store, indexed by id - 1: the default
+ * value getStore() answers where the store has no entry, and the name.
+ * NULL until a store with options exists. */
+typedef struct {
+  ScrDyn *default_value; /* NULL: no default */
+  ScrDyn *name;          /* NULL: "" */
+} ScrAlsOptions;
+static SCR_TL ScrAlsOptions *scr_als_options = NULL;
+static SCR_TL size_t scr_als_options_len = 0;
+
+static const ScrAlsOptions *scr_als_options_of(double id) {
+  size_t i = (size_t)id - 1;
+  return id >= 1 && i < scr_als_options_len ? &scr_als_options[i] : NULL;
+}
+
 /* Main-slot teardown (atexit, LIFO after scr_init's audit registration —
  * the dc-registry precedent): a top-level enterWith leaves a context in
  * the main slot at exit; release it before the RC audit counts. */
@@ -37,6 +53,13 @@ static void scr_als_teardown(void) {
   /* atexit runs on the main context — the active slot IS main's. */
   scr_als_ctx_release(*SCR_ALS_SLOT());
   *SCR_ALS_SLOT() = NULL;
+  for (size_t i = 0; i < scr_als_options_len; i++) {
+    scr_dyn_release(scr_als_options[i].default_value);
+    scr_dyn_release(scr_als_options[i].name);
+  }
+  free(scr_als_options);
+  scr_als_options = NULL;
+  scr_als_options_len = 0;
 }
 
 double scr_als_new(void) {
@@ -48,6 +71,89 @@ double scr_als_new(void) {
   return ++scr_als_counter;
 }
 
+/* options[key] as JavaScript reads it (+1, or NULL with the exception
+ * pending): inherited properties and getters included. A class instance
+ * reads its own fields through its snapshot; a member its class declares
+ * (a getter or a method) has no runtime view here and is refused. */
+static ScrDyn *scr_als_option(ScrDyn *options, const char *key, size_t key_len) {
+  ScrStr *name = scr_str_new(key, key_len);
+  if (options->kind == SCR_DYN_TYPED_REF && scr_dyn_typed_ref_class_has(options, name)) {
+    char message[160];
+    snprintf(message, sizeof message,
+             "AsyncLocalStorage options whose class declares '%s' are not supported yet", key);
+    scr_str_release(name);
+    scr_throw_error_msg(SCR_ERR_ERROR, message, strlen(message));
+    return NULL;
+  }
+  ScrDyn *key_value = scr_dyn_new_str(name);
+  scr_str_release(name);
+  ScrDyn *value = scr_dyn_reflect_get(options, key_value, options);
+  scr_dyn_release(key_value);
+  if (value == NULL && !scr_exc_pending()) value = scr_dyn_retain(scr_dyn_undefined());
+  return value;
+}
+
+/* new AsyncLocalStorage(options): Node validates that options is an
+ * object, then reads options.defaultValue once and options.name twice
+ * (whether it is defined, then its value), keeping String(name). NaN with
+ * the exception pending when options is not an object or a read throws. */
+double scr_als_new_options(const ScrDyn *options) {
+  if (options->kind == SCR_DYN_UNDEF) return scr_als_new();
+  if (options->kind != SCR_DYN_OBJ && options->kind != SCR_DYN_TYPED_REF && options->kind != SCR_DYN_PROXY) {
+    scr_dyn_arg_type_fail("options", "of type object", options);
+    return NAN;
+  }
+  ScrDyn *value = scr_als_option((ScrDyn *)options, "defaultValue", 12);
+  if (!value) return NAN;
+  ScrDyn *name = scr_als_option((ScrDyn *)options, "name", 4);
+  if (name && name->kind != SCR_DYN_UNDEF) {
+    scr_dyn_release(name);
+    name = scr_als_option((ScrDyn *)options, "name", 4);
+    if (name && name->kind == SCR_DYN_SYMBOL) {
+      static const char message[] = "Cannot convert a Symbol value to a string";
+      scr_dyn_release(name);
+      name = NULL;
+      scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+    } else if (name) {
+      ScrStr *text = scr_dyn_string_coerce_js(name);
+      scr_dyn_release(name);
+      name = text ? scr_dyn_new_str(text) : NULL;
+      scr_str_release(text);
+    }
+  } else {
+    scr_dyn_release(name);
+    name = scr_exc_pending() ? NULL : scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (!name) {
+    scr_dyn_release(value);
+    return NAN;
+  }
+  double id = scr_als_new();
+  size_t index = (size_t)id - 1;
+  if (index >= scr_als_options_len) {
+    size_t len = index + 1;
+    ScrAlsOptions *grown = realloc(scr_als_options, len * sizeof *grown);
+    if (!grown) scr_ad_oom();
+    for (size_t i = scr_als_options_len; i < len; i++) grown[i] = (ScrAlsOptions){NULL, NULL};
+    scr_als_options = grown;
+    scr_als_options_len = len;
+  }
+  scr_als_options[index].default_value = value; /* the read's +1 moves */
+  scr_als_options[index].name = name->kind != SCR_DYN_UNDEF ? name : NULL;
+  if (name->kind == SCR_DYN_UNDEF) scr_dyn_release(name);
+  return id;
+}
+
+/* asyncLocalStorage.name (+1): the constructor's name option, or "". */
+ScrDyn *scr_als_name(double id) {
+  const ScrAlsOptions *options = scr_als_options_of(id);
+  if (options && options->name) return scr_dyn_retain(options->name);
+  ScrStr *empty = scr_str_new("", 0);
+  ScrDyn *result = scr_dyn_new_str(empty);
+  scr_str_release(empty);
+  return result;
+}
+
 ScrDyn *scr_als_get(double id) {
   const ScrAlsCtx *c = *SCR_ALS_SLOT();
   if (c) {
@@ -55,6 +161,8 @@ ScrDyn *scr_als_get(double id) {
       if (c->entries[i].id == id) return scr_dyn_retain(c->entries[i].value);
     }
   }
+  const ScrAlsOptions *options = scr_als_options_of(id);
+  if (options && options->default_value) return scr_dyn_retain(options->default_value);
   return scr_dyn_retain(scr_dyn_undefined());
 }
 
@@ -104,8 +212,80 @@ ScrDyn *scr_als_run(double id, ScrDyn *value, ScrDyn *fn, ScrDyn *args) {
   return scr_als_call_in(scr_als_enter(id, value), fn, args);
 }
 
+/* exit() runs fn with the store undefined: a store with a default value
+ * holds an undefined entry for the call (getStore() answers undefined,
+ * not the default, as in Node); other stores drop their entry. */
 ScrDyn *scr_als_exit_run(double id, ScrDyn *fn, ScrDyn *args) {
-  return scr_als_call_in(scr_als_enter_absent(id), fn, args);
+  const ScrAlsOptions *options = scr_als_options_of(id);
+  ScrAlsCtx *prev = options && options->default_value
+                        ? scr_als_enter(id, scr_dyn_undefined())
+                        : scr_als_enter_absent(id);
+  return scr_als_call_in(prev, fn, args);
+}
+
+/* AsyncLocalStorage.bind(fn) and the dyn completion callbacks of
+ * callback-style APIs: a function that calls fn in the context active
+ * when it was bound, with its own arguments and receiver. caps[0] holds
+ * fn, caps[1] the context, as scr_als_bind_closure lays them out. */
+static void *scr_als_ctx_retain_v(void *c) { return scr_als_ctx_retain(c); }
+static void scr_als_ctx_release_v(void *c) { scr_als_ctx_release(c); }
+
+static ScrDyn *scr_als_bound_dyn_call(ScrClosure *self, ScrDyn *const *args, size_t argc) {
+  ScrDyn *fn = scr_box_get_ref(self->caps[0]);
+  ScrAlsCtx *prev = scr_als_bound_enter(self);
+  ScrDyn *result = scr_dyn_call(fn, args, argc, "callback");
+  scr_als_restore(prev);
+  scr_dyn_release(fn);
+  return result;
+}
+
+static ScrClosure *scr_als_context_closure(void *fn, size_t ncaps) {
+  ScrClosure *closure = scr_closure_new(fn, ncaps);
+  closure->caps[ncaps - 1] = scr_box_new_obj(scr_als_ctx_retain_v, scr_als_ctx_release_v, NULL);
+  scr_box_set_ref(closure->caps[ncaps - 1], scr_als_ctx_retain(*SCR_ALS_SLOT()));
+  return closure;
+}
+
+/* fn borrowed; +1. With `always` false an empty context answers fn
+ * itself (the completion-callback form). AsyncLocalStorage.bind throws
+ * Node's ERR_INVALID_ARG_TYPE for a non-function. */
+ScrDyn *scr_als_bind_dyn(ScrDyn *fn, bool always) {
+  if (fn->kind != SCR_DYN_FUNC) {
+    if (always) {
+      scr_dyn_arg_type_fail("fn", "of type function", fn);
+      return NULL;
+    }
+    return scr_dyn_retain(fn);
+  }
+  if (!always && *SCR_ALS_SLOT() == NULL) return scr_dyn_retain(fn);
+  ScrClosure *closure = scr_als_context_closure(NULL, 2);
+  closure->caps[0] = scr_box_new_obj(scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v);
+  scr_box_set_ref(closure->caps[0], scr_dyn_retain(fn));
+  return scr_dyn_new_func(closure, scr_als_bound_dyn_call, fn->v.fn.arity, "(...args)", "bound");
+}
+
+/* AsyncLocalStorage.snapshot(): a function (cb, ...args) that calls cb
+ * with args in the context active at the snapshot. */
+static ScrDyn *scr_als_snapshot_call(ScrClosure *self, ScrDyn *const *args, size_t argc) {
+  const ScrDyn *cb = argc > 0 ? args[0] : scr_dyn_undefined();
+  if (cb->kind != SCR_DYN_FUNC) {
+    static const char message[] = "cb is not a function";
+    scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+    return NULL;
+  }
+  ScrAlsCtx **slot = SCR_ALS_SLOT();
+  ScrAlsCtx *prev = *slot;
+  *slot = scr_box_get_ref(self->caps[0]); /* the slot owns this reference */
+  /* Node applies cb to an undefined receiver, whatever the runner's own. */
+  scr_dyn_this_push_dyn(scr_dyn_undefined());
+  ScrDyn *result = scr_dyn_call(cb, args + 1, argc - 1, "callback");
+  scr_dyn_this_pop();
+  scr_als_restore(prev);
+  return result;
+}
+
+ScrDyn *scr_als_snapshot(void) {
+  return scr_dyn_new_func(scr_als_context_closure(NULL, 1), scr_als_snapshot_call, 1, "(cb, ...args)", "bound");
 }
 
 /* The two rejection-event registries share one shape: listeners with a

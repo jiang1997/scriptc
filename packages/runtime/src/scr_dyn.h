@@ -200,6 +200,8 @@ typedef enum {
   X(SHARED_ARRAY_BUFFER, 37) \
   X(SIGN, 67) /* node:crypto Sign (scr_pki.c) */ \
   X(STDIO, 27) /* stable process stdin/stdout/stderr values */ \
+  X(TEXT_DECODER, 76) /* compiled TextDecoder record (scr_text_codec_dyn.c) */ \
+  X(TEXT_ENCODER, 77) /* compiled TextEncoder record (scr_text_codec_dyn.c) */ \
   X(URL, 28) /* native WHATWG URL */ \
   X(VERIFY, 68) /* node:crypto Verify (scr_pki.c) */ \
   X(WASM_GLOBAL, 61) /* WebAssembly.Global */ \
@@ -212,6 +214,9 @@ typedef enum {
   X(WEB_CONTROLLER, 11) /* native ReadableStreamDefaultController */ \
   X(WEB_READER, 10) /* native ReadableStreamDefaultReader */ \
   X(WEB_STREAM, 9) /* native WHATWG ReadableStream */ \
+  X(WEB_TRANSFORM, 73) /* native identity TransformStream (scr_fetch.c) */ \
+  X(WEB_WRITABLE, 74) /* a TransformStream's WritableStream (scr_fetch.c) */ \
+  X(WEB_WRITER, 75) /* WritableStreamDefaultWriter (scr_fetch.c) */ \
   X(WORKER, 35)
 
 typedef enum {
@@ -540,6 +545,10 @@ _Static_assert(offsetof(ScrDyn, null_proto) == sizeof(size_t) + sizeof(ScrDynKin
                "dyn-to-record conversions read null_proto at byte 13 (9 on wasm32)");
 _Static_assert(offsetof(ScrDyn, v.typed_ref.type_key) == 16 + 3 * sizeof(void *),
                "typed_ref.type_key offset");
+/* Emitted brand probes read type_key_len as the low 27 bits of the 32-bit
+ * word after `casts` (native 88, wasm32 52). */
+_Static_assert(offsetof(ScrDyn, v.typed_ref.casts) == 16 + 8 * sizeof(void *),
+               "typed_ref.casts offset");
 /* The region links ride in payload space the capsule variant already
  * reserves, so dyn nodes keep their size (and allocation size class). */
 _Static_assert(sizeof(((ScrDyn *)0)->v.arr) <= sizeof(((ScrDyn *)0)->v.typed_ref) &&
@@ -1046,6 +1055,19 @@ void scr_dyn_typed_ref_bind_record(ScrDyn *d, const ScrDynTypedRecordOps *ops);
 void scr_record_source_note(void *rec, const ScrDyn *src, const char *const *names,
                             const size_t *lens, size_t count);
 bool scr_record_source_has(const void *rec);
+/* A literal that starts with `...src` creates src's keys first, in src's
+ * order: when src kept a source, the fresh record `dst` (whose shape's
+ * declared names are `names`) keeps one listing the keys it declares in
+ * that order. Undeclared keys are not copied, as the literal copies none. */
+void scr_record_source_spread(void *dst, const void *src, const char *const *names,
+                              const size_t *lens, size_t count);
+/* Object.freeze of a record a program may freeze: sets SCR_RC_FROZEN in its
+ * rc word (immortal records are left as they are). */
+void scr_record_freeze(void *record);
+/* Node's TypeError for a write to a frozen record: operation 0 assigns the
+ * existing property `key`, 1 adds it, 2 deletes it. `owner` is the object's
+ * text in the message ("#<Object>"). */
+void scr_record_throw_frozen(ScrStr *key, ScrStr *owner, double operation);
 /* The commit of a live record view converts the view into a new record
  * `from`, whose conversion keeps the view's undeclared properties, then
  * moves its fields into `to`: this moves the kept properties to `to` too,
@@ -1509,6 +1531,19 @@ ScrDyn *scr_dyn_visit_view(const ScrDyn *capsule);
  * (scr_http_dyn_install / scr_net_dyn_install — emitted main() calls
  * them exactly when the unit is linked, the scr_net_install story), so
  * this always-linked core never references gated units. */
+/* A method a handle class answers through invoke, read as a value
+ * (`typeof req.json`, `raw[key]()`): the read answers one function per
+ * (tag, method) that calls invoke on its `this`. length is the method's
+ * Function.prototype.length; rejects marks a method whose call on another
+ * receiver answers a rejected promise instead of throwing (the async
+ * WebIDL operations: Body's json(), ReadableStream's cancel()). */
+typedef struct ScrDynHandleMethod {
+  const char *name;
+  uint32_t length;
+  bool rejects;
+  const char *invalid_this; /* NULL = the class's (ScrDynHandleOps) */
+} ScrDynHandleMethod;
+
 typedef struct ScrDynHandleOps {
   const char *cls; /* Node's constructor name — error texts and dynCheck's "got ..." */
   void *(*retain)(void *h);
@@ -1574,6 +1609,16 @@ typedef struct ScrDynHandleOps {
    * stream unit builds the handle's Transform from these operations on its
    * first stream use. NULL = the class is not a stream. */
   const struct ScrDynHandleTransform *transform;
+  /* The class's methods as values, terminated by a NULL name; NULL = a
+   * property read answers no methods (member calls still reach invoke).
+   * See ScrDynHandleMethod. */
+  const ScrDynHandleMethod *methods;
+  /* The TypeError (code ERR_INVALID_THIS) a method value called on another
+   * receiver raises; NULL = WebIDL's "Illegal invocation". */
+  const char *invalid_this;
+  /* A promise rejected with the pending exception (+1), for the rejects
+   * methods; the owning unit supplies it, since promises are a gated unit. */
+  ScrDyn *(*rejected)(void);
 } ScrDynHandleOps;
 
 /* The operations a Transform handle gives the stream unit (scr_stream.c):

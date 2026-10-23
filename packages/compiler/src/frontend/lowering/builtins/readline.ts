@@ -6,9 +6,11 @@ import {
   DYN,
   F64,
   type IrExpr,
+  type IrType,
   type IrStmt,
   type SrcLoc,
   STRING,
+  UNDEFINED_T,
   VOID,
   arrayOf,
   BYTES_U8,
@@ -52,6 +54,21 @@ export function isReadlineTyped(lowerer: Lowerer, node: ts.Expression): boolean 
     if (!lowerer.isStdlibFile(ts.getSourceFileOfNode(d))) return false;
     return isReadlineModule(ambientModuleOf(d));
   });
+}
+
+/** `rl.cursor`: @types/node declares a number, but an interface that is
+ * not a terminal answers undefined, so the read keeps its
+ * `number | undefined` union. */
+export function isOptionalReadlineCursorRead(
+  lowerer: Lowerer,
+  expr: ts.PropertyAccessExpression,
+): boolean {
+  return (
+    expr.name.text === "cursor" &&
+    !expr.questionDotToken &&
+    isReadlineTyped(lowerer, expr.expression) &&
+    lowerer.isStdlibMember(expr)
+  );
 }
 
 /** The runtime's listener event numbers (scr_readline.c). */
@@ -1341,7 +1358,7 @@ export function lowerReadlineCreateCall(
 /** Property reads on an Interface: `history` (the history option itself,
  * or the interface's own empty array), `historySize`, `historyIndex`,
  * `crlfDelay`, `tabSize`, `escapeCodeTimeout`, `line`, `terminal` and
- * `cursor` (a non-terminal interface's undefined cursor throws SC2020).
+ * `cursor` (undefined on a non-terminal interface).
  * Null for other receivers. */
 export function lowerReadlineProperty(
   lowerer: Lowerer,
@@ -1373,10 +1390,38 @@ export function lowerReadlineProperty(
       loc,
     };
   }
-  const reads: Record<string, ["rl.line" | "rl.isTerminal" | "rl.cursor", IrExpr["type"]]> = {
+  if (name === "cursor") {
+    // `number | undefined`: a non-terminal interface has no cursor
+    const recv = lowerer.lowerExprExpecting(access.expression, F64);
+    const type: IrType = { kind: "union", unionId: lowerer.unions.intern([F64, UNDEFINED_T]) };
+    const local = recv.kind === "varRef" ? null : lowerer.declareHiddenLocal("%rlCursor", F64);
+    const id: IrExpr = local ? { kind: "varRef", localId: local.id, type: F64, loc } : recv;
+    const result: IrExpr = {
+      kind: "ternary",
+      cond: { kind: "libCall", fn: "rl.isTerminal", args: [id], type: BOOL, loc },
+      then: lowerer.coerceToExpected(
+        { kind: "libCall", fn: "rl.cursor", args: [id], type: F64, loc },
+        type,
+      ),
+      else_: lowerer.coerceToExpected(
+        { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
+        type,
+      ),
+      type,
+      loc,
+    };
+    if (!local) return result;
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "varDecl", localId: local.id, init: recv, loc }],
+      result,
+      type,
+      loc,
+    };
+  }
+  const reads: Record<string, ["rl.line" | "rl.isTerminal", IrExpr["type"]]> = {
     line: ["rl.line", STRING],
     terminal: ["rl.isTerminal", BOOL],
-    cursor: ["rl.cursor", F64],
   };
   const read = reads[name];
   if (read !== undefined) {

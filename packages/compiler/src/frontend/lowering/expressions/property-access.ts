@@ -135,6 +135,7 @@ import {
 import { expandoMemberRead } from "../lower-expando.js";
 import { lowerProtocolPropertyRead } from "../class-protocol-dispatch.js";
 import { lowerReadlineProperty } from "../builtins/readline.js";
+import { lowerAsyncLocalStorageProperty } from "../builtins/async-context.js";
 import { lowerEventStaticProperty } from "../builtins/numbers.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "../lower-stream.js";
 import { lowerValueStreamProperty } from "../builtins/hash-stream.js";
@@ -839,6 +840,8 @@ export function lowerPropertyAccessExpr(
     // diagnostics_channel Channel receivers — name/hasSubscribers
     // over the f64 channel handle.
     lowerer.lowerDiagnosticsChannelProperty(expr) ??
+    // AsyncLocalStorage receivers — the name option.
+    lowerAsyncLocalStorageProperty(lowerer, expr) ??
     // readline Interface receivers — the history and option members
     // over the f64 interface handle.
     lowerReadlineProperty(lowerer, expr) ??
@@ -1504,6 +1507,25 @@ export function lowerPropertyAccessExpr(
     typedArrayLacksMember(expr.name.text, recvLowered.type.elem === "u8")
   ) {
     return afterReceiver(recvLowered, dynUndefinedExpr(loc), loc);
+  }
+  // A typed array under a checker `any` (a JS binding its own initializer's
+  // inference refers to: hono's etag digest `nextChunk`) reads through its
+  // box, as the method-call twin dispatches. The box shares the native
+  // storage, so it needs no fresh-result restriction.
+  if (
+    recvLowered.type.kind === "bytes" &&
+    (lowerer.typeOf(expr.expression).flags & ts.TypeFlags.Any) !== 0
+  ) {
+    return lowerer.maybeNarrow(
+      {
+        kind: "dynKeyGet",
+        value: lowerer.coerceToExpected(recvLowered, DYN),
+        key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+        type: DYN,
+        loc,
+      },
+      expr,
+    );
   }
   lowerer.unsupported(
     "SC1090",

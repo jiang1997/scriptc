@@ -51,6 +51,9 @@ typedef struct ScrZlibStream {
   bool done_pending;   /* Transform's kCallback: completion waits for _read */
   double rlen_before;  /* readableLength when the chunk's transform began */
   ScrBytes *flush_bufs[6]; /* zero-length sentinels, one per flush kind */
+  /* The AsyncLocalStorage context of the stream's creation (+1, NULL
+   * outside a store): Node runs the handle's step callbacks in it. */
+  ScrAlsCtx *als;
 } ScrZlibStream;
 
 static void scr_zlib_stream_oom(void) {
@@ -81,6 +84,7 @@ static void scr_zs_release_v(void *p) {
   for (size_t i = 0; i < 6; i++) {
     if (zs->flush_bufs[i]) scr_bytes_release(zs->flush_bufs[i]);
   }
+  scr_als_ctx_release(zs->als);
   free(zs);
 }
 
@@ -242,6 +246,7 @@ static void scr_zs_step_after(void *payload) {
   ScrZlibStep *op = payload;
   ScrZlibStream *zs = op->zs;
   ScrStream *s = op->s;
+  ScrAlsCtx *prev = scr_als_dispatch_enter(zs->als);
   zs->write_in_progress = false;
   ScrZlibError ze;
   if (scr_zlib_engine_error(zs->eng, &ze)) {
@@ -252,6 +257,7 @@ static void scr_zs_step_after(void *payload) {
     scr_zs_process(zs, s);
   }
   if (zs->pending_close) scr_zs_close_engine(zs);
+  scr_als_dispatch_leave(prev);
 }
 
 static void scr_zs_step_destroy(void *payload) {
@@ -463,6 +469,7 @@ ScrStream *scr_zlib_stream_new(double mode_d, ScrDyn *opts) {
   ScrZlibStream *zs = calloc(1, sizeof *zs);
   if (!zs) scr_zlib_stream_oom();
   zs->rc = 1;
+  zs->als = scr_als_capture();
   zs->mode = mode;
   zs->eng = scr_zlib_engine_from_options(mode, &zo);
   scr_zlib_options_drop(&zo);

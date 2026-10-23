@@ -343,6 +343,60 @@ static void *reclaim_arena(void *arg) {
   return NULL;
 }
 
+#if defined(__linux__) && defined(__GLIBC__)
+/* A thread whose large blocks pass 16 MiB gets them from a glibc heap of
+ * its own, which is then advised huge pages where THP is in madvise mode. */
+enum { HEAP_BLOCKS = 320, HEAP_BLOCK = 64 << 10 };
+static void *heap_blocks[HEAP_BLOCKS];
+static char heap_flags[256];
+static void *thread_heap_allocate(void *arg) {
+  (void)arg;
+  for (unsigned i = 0; i < HEAP_BLOCKS; i++) {
+    heap_blocks[i] = scr_mem_alloc(HEAP_BLOCK);
+    assert(heap_blocks[i] && !owned(heap_blocks[i]));
+    ((unsigned char *)heap_blocks[i])[0] = (unsigned char)i;
+  }
+  vm_flags(heap_blocks[HEAP_BLOCKS - 1], heap_flags, sizeof heap_flags);
+  for (unsigned i = 0; i < HEAP_BLOCKS; i++) {
+    assert(((unsigned char *)heap_blocks[i])[0] == (unsigned char)i);
+    scr_mem_free(heap_blocks[i]);
+  }
+  scr_sa_thread_park();
+  return NULL;
+}
+
+static void check_thread_heap_huge_pages(void) {
+  pthread_t t;
+  assert(pthread_create(&t, NULL, thread_heap_allocate, NULL) == 0);
+  assert(pthread_join(t, NULL) == 0);
+  char mode[96] = {0};
+  FILE *thp = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (thp) {
+    size_t n = fread(mode, 1, sizeof mode - 1, thp);
+    mode[n] = '\0';
+    fclose(thp);
+  }
+  FILE *f = fopen("/proc/sys/vm/overcommit_memory", "r");
+  int overcommit = f ? fgetc(f) : '0';
+  if (f) fclose(f);
+  /* ThreadSanitizer replaces malloc, which turns the policy off. */
+  bool glibc_malloc = true;
+#if defined(__SANITIZE_THREAD__)
+  glibc_malloc = false;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+  glibc_malloc = false;
+#endif
+#endif
+  /* With glibc's memory tagging tunable set the heap is left alone: under
+   * arm64 MTE, reading its chunk headers through block pointers faults. */
+  const char *tunables = getenv("GLIBC_TUNABLES");
+  if (tunables && strstr(tunables, "glibc.mem.tagging=3")) assert(!strstr(heap_flags, " hg"));
+  else if (glibc_malloc && strstr(mode, "[madvise]") && !tunables && overcommit != '2')
+    assert(strstr(heap_flags, " hg"));
+}
+#endif
+
 static void check_threads(void) {
   void *mine = scr_mem_alloc(48);
   assert(owned(mine));
@@ -1047,6 +1101,9 @@ int main(void) {
   setenv("SCR_SA_DISCARD_DELAY_MS", "100", 1);
   setenv("SCR_SA_DISCARD_DELAY_MAX_MS", "0", 1);
   check_threads();
+#if defined(__linux__) && defined(__GLIBC__)
+  check_thread_heap_huge_pages();
+#endif
 #ifdef __linux__
   check_trim();
   check_release_frontiers();

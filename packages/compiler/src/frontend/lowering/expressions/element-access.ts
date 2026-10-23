@@ -1028,7 +1028,7 @@ function lowerGuardedRecordWrite(
   const value = stabilized(lowerer, lowerer.lowerExpr(expr.right), "%recordValue", receiver.stmts);
   const write = lowerer.withExpressionOverride(target.expression, receiver.present, () =>
     lowerer.withExpressionOverride(target.argumentExpression, key, () =>
-      lowerer.withExpressionOverride(expr.right, value, () => lowerElementWrite(lowerer, expr)),
+      lowerer.withExpressionOverride(expr.right, value, () => lowerer.lowerElementWrite(expr)),
     ),
   );
   return {

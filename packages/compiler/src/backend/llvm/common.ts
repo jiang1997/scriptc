@@ -29,6 +29,9 @@ export const SCR_ARR_FIELD = {
  * (SCR_ARR_STATES in scr_array.h). */
 export const SCR_ARR_STATES = 16;
 
+/** The `spare` flag of a frozen %ScrArr (SCR_ARR_FROZEN in scr_array.h). */
+export const SCR_ARR_FROZEN = 32;
+
 /** Loads the i32 `len` or `cap` of a %ScrArr at `ptr` into `dest` as a
  * size-type count. */
 export function loadArrCount(

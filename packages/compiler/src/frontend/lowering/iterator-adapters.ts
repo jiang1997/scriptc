@@ -28,9 +28,204 @@ export function iteratorSlotAdapter(
   expr: IrExpr,
   expected: IrType & { kind: "generator" },
 ): IrExpr | null {
-  if (expr.type.kind === "dyn") return dynIteratorAdapter(lowerer, expr, expected);
+  if (expr.type.kind === "dyn")
+    return (
+      collectionIteratorSlotValue(lowerer, expr, expected) ??
+      dynIteratorAdapter(lowerer, expr, expected)
+    );
   if (expr.type.kind === "generator") return generatorRetypeAdapter(lowerer, expr, expected);
   return null;
+}
+
+/** `m.values()` (or keys/entries, or a Set's) on a typed Map or Set, which
+ * lowers to a dynamic invocation on the boxed collection, flowing into an
+ * iterator-typed slot (`values(): IterableIterator<T> { return
+ * this.rows.values(); }`): an interned generator over the collection that
+ * reads each entry typed, instead of the checked adapter over the boxed
+ * native iterator (dynIteratorAdapter), which boxes every value and checks
+ * it back. It keeps that adapter's protocol: the walk is lazy and live, and
+ * since the native iterator has no return(), an early exit from a
+ * consumer's loop parks it on the current entry instead of completing it,
+ * so a later loop continues with the next entry. Null for any other source
+ * or a slot whose yield type is not the collection's entry type. */
+function collectionIteratorSlotValue(
+  lowerer: Lowerer,
+  expr: IrExpr,
+  expected: IrType & { kind: "generator" },
+): IrExpr | null {
+  if (expr.kind !== "dynInvoke" || expr.args.length > 0 || expr.calleeNameValue) return null;
+  const method = expr.method;
+  if (method !== "values" && method !== "keys" && method !== "entries") return null;
+  if (expr.recv.kind !== "dynFrom") return null;
+  const receiver = expr.recv.value;
+  const collT = receiver.type;
+  if (collT.kind !== "map" && collT.kind !== "set") return null;
+  if (expected.async || expected.yieldT.kind === "void") return null;
+  if (expected.retT.kind !== "void" && expected.retT.kind !== "dyn") return null;
+  if (expected.nextT.kind !== "undefinedT" && expected.nextT.kind !== "dyn") return null;
+  const resultType = genResultRecord(
+    expected.yieldT,
+    expected.retT,
+    lowerer.shapes,
+    lowerer.unions,
+  );
+  if (!resultType) return null;
+  const loc = expr.loc;
+  const key = `collIterSlot:${method}:${typeKey(collT)}:${typeKey(expected)}`;
+  let name = lowerer.valueHelpers.get(key);
+  if (!name) {
+    const coll = varRef("coll.0", collT, loc);
+    const index = varRef("index.0", F64, loc);
+    const native = varRef("native.0", DYN, loc);
+    const resumedFlag = varRef("resumed.0", BOOL, loc);
+    const keyT = collT.kind === "map" ? collT.key : collT.elem;
+    const valueT = collT.kind === "map" ? collT.value : collT.elem;
+    const read = (m: "iterKey" | "iterValue", t: IrType): IrExpr =>
+      collT.kind === "map"
+        ? { kind: "mapIntrinsic", method: m, receiver: coll, args: [index], type: t, loc }
+        : { kind: "setIntrinsic", method: "iterKey", receiver: coll, args: [index], type: t, loc };
+    // entries() answers [key, value] pairs: only a slot whose yield type is
+    // that pair as a record of the two fields takes the typed walk; a tuple
+    // or other pair type keeps the checked adapter.
+    if (method === "entries") {
+      const pair =
+        expected.yieldT.kind === "record" ? lowerer.shapes.get(expected.yieldT.shapeId) : undefined;
+      const field = (name: string): IrType | undefined =>
+        pair?.fields.find((f) => f.name === name)?.type;
+      const first = field("0");
+      const second = field("1");
+      if (
+        pair === undefined ||
+        pair.fields.length !== 2 ||
+        first === undefined ||
+        second === undefined ||
+        !typeEquals(first, keyT) ||
+        !typeEquals(second, valueT)
+      )
+        return null;
+    }
+    const entry = (): IrExpr =>
+      method === "keys" || (collT.kind === "set" && method === "values")
+        ? read("iterKey", keyT)
+        : method === "values"
+          ? read("iterValue", valueT)
+          : {
+              kind: "recordLit",
+              fields: [
+                { name: "0", value: read("iterKey", keyT) },
+                { name: "1", value: read("iterValue", valueT) },
+              ],
+              type: expected.yieldT,
+              loc,
+            };
+    if (!typeEquals(entry().type, expected.yieldT)) return null;
+    // The entry is read once per step and kept: the parking yield of an
+    // early exit answers it again rather than rereading a slot the loop may
+    // have deleted.
+    const current = varRef("current.0", expected.yieldT, loc);
+    const suspend = (): IrStmt => ({
+      kind: "exprStmt",
+      expr: { kind: "yieldExpr", value: current, type: resumeType(expected.nextT), loc },
+      loc,
+    });
+    const finish: IrStmt = {
+      kind: "return",
+      value: expected.retT.kind === "dyn" ? dynUndefinedExpr(loc) : null,
+      loc,
+    };
+    name = keyedHelperName(lowerer, "%coll.iterSlot", key);
+    lowerer.valueHelpers.set(key, name);
+    lowerer.liftedFns.push({
+      name,
+      params: [{ localId: "coll.0", name: "coll", type: collT }],
+      returnType: expected.retT,
+      locals: [
+        { id: "coll.0", name: "coll", type: collT, mutable: false },
+        { id: "native.0", name: "native", type: DYN, mutable: false },
+        { id: "index.0", name: "index", type: F64, mutable: true },
+        { id: "resumed.0", name: "resumed", type: BOOL, mutable: true },
+        { id: "current.0", name: "current", type: expected.yieldT, mutable: false },
+      ],
+      body: [
+        {
+          kind: "varDecl",
+          localId: "native.0",
+          init: {
+            kind: "dynInvoke",
+            recv: lowerer.coerceToExpected(coll, DYN),
+            method: "values",
+            calleeName: collT.kind === "map" ? "map.values" : "set.values",
+            args: [],
+            type: DYN,
+            loc,
+          },
+          loc,
+        },
+        {
+          kind: "varDecl",
+          localId: "resumed.0",
+          init: { kind: "boolLit", value: false, type: BOOL, loc },
+          loc,
+        },
+        {
+          kind: "while",
+          cond: { kind: "boolLit", value: true, type: BOOL, loc },
+          body: [
+            {
+              kind: "assign",
+              localId: "index.0",
+              value: {
+                kind: "libCall",
+                fn: "dyn.collectionIteratorIndex",
+                args: [native],
+                type: F64,
+                loc,
+              },
+              loc,
+            },
+            {
+              kind: "if",
+              cond: {
+                kind: "bin",
+                op: "<",
+                left: index,
+                right: { kind: "numLit", value: 0, type: F64, loc },
+                type: BOOL,
+                loc,
+              },
+              then: [finish],
+              else_: null,
+              loc,
+            },
+            setResumed(false, loc),
+            { kind: "varDecl", localId: "current.0", init: entry(), loc },
+            {
+              kind: "tryCatch",
+              tryBody: [suspend(), setResumed(true, loc)],
+              catchBody: null,
+              catchLocalId: null,
+              // An early exit parks on the current entry; the next step
+              // resumes the walk after it.
+              finallyBody: [
+                {
+                  kind: "if",
+                  cond: { kind: "unary", op: "!", operand: resumedFlag, type: BOOL, loc },
+                  then: [suspend(), { kind: "continue", loc }],
+                  else_: null,
+                  loc,
+                },
+              ],
+              loc,
+            },
+          ],
+          loc,
+        },
+      ],
+      generator: { yieldT: expected.yieldT, nextT: expected.nextT, resultType, tag: "!" },
+      loc,
+    });
+  }
+  return { kind: "call", callee: name, args: [receiver], type: expected, loc };
 }
 
 /** `resumed.0 = value` — the adapters' early-exit marker around a yield. */

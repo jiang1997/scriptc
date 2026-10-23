@@ -163,6 +163,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "fetch.abortNow": { argTypes: [DYN], result: DYN },
   "fetch.abortAny": { argTypes: [DYN], result: DYN },
   "fetch.streamNew": { argTypes: [DYN], result: DYN },
+  "fetch.transformNew": { argTypes: [], result: DYN },
   // Program-dependent iterable: typed arrays/bytes/string stay intact so
   // the native stream can pull lazily; checked-dynamic values are the
   // fallback. The libCall validator in validate.ts checks the closed set.
@@ -272,6 +273,28 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   /** Throws Node's TypeError for a class field initializer on a
    * non-extensible instance: the field name. */
   "class.throwNotExtensible": { argTypes: [STRING], result: VOID },
+  /** Object.freeze of a record whose shape is freezable (frozen-records.ts):
+   * sets the frozen bit in its rc word (scr_record_freeze). The receiver is
+   * any record type. */
+  "record.freeze": { argTypes: [null], result: VOID },
+  /** Whether a record is frozen: its rc word's frozen bit, set by
+   * record.freeze and dyn.freeze of a capsule. Emitted inline. The receiver
+   * is any record type. */
+  "record.isFrozen": { argTypes: [null], result: BOOL },
+  /** Throws Node's TypeError for a write to a frozen record: the key, the
+   * object's text in the message ("#<Object>") and the operation (0 assign,
+   * 1 add, 2 delete). */
+  "record.throwFrozen": { argTypes: [STRING, STRING, F64], result: VOID },
+  /** Object.freeze of an array (scr_arr_freeze): sets its frozen bit, which
+   * the write guards of IrModule.freezableArrays test, and isFrozen reads.
+   * The receiver is any array type. */
+  "array.freeze": { argTypes: [null], result: VOID },
+  "array.isFrozen": { argTypes: [null], result: BOOL },
+  /** Object.freeze, seal or preventExtensions of a Map or Set
+   * (scr_map_prevent_extensions), which only makes it not extensible: its
+   * entries stay writable. The receiver is any map or set type. */
+  "collection.preventExtensions": { argTypes: [null], result: VOID },
+  "collection.isExtensible": { argTypes: [null], result: BOOL },
   "dyn.nativeSetNew": { argTypes: [DYN], result: DYN },
   "dyn.nativeSetIs": { argTypes: [DYN], result: BOOL },
   "dyn.nativeMapIs": { argTypes: [DYN], result: BOOL },
@@ -4041,6 +4064,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "stream.setTransform": { argTypes: [null, null], result: VOID },
   "stream.setFlush": { argTypes: [null, null], result: VOID },
   "stream.setConstruct": { argTypes: [null, null], result: VOID },
+  "stream.replaceConstruct": { argTypes: [null, null], result: VOID },
   "stream.setWritev": { argTypes: [null, null], result: VOID },
   "stream.setWritevDefault": { argTypes: [null, null], result: VOID },
   /** The dyn-options twins (a checked-dynamic options record — the JS
@@ -4177,6 +4201,11 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * after construction; answers the receiver (+1, the chaining shape). */
   "stream.objectMode": { argTypes: [null, BOOL, BOOL], result: VOID },
   "stream.decodeStrings": { argTypes: [null, BOOL], result: VOID },
+  /** Runtime decodeStrings and defaultEncoding option values, applied
+   * after construction (answers the receiver +1); the encoding was
+   * validated by stream.checkEncodingOption before construction. */
+  "stream.optionValues": { argTypes: [null, DYN, DYN], result: VOID },
+  "stream.checkEncodingOption": { argTypes: [DYN], result: VOID },
   "stream.duplexFromGen": { argTypes: [null, null, null, null, null, null], result: VOID },
   "stream.duplexFromDyn": { argTypes: [DYN], result: VOID },
   /** Duplex.from over a lone Readable or Writable, or a { readable,
@@ -4475,6 +4504,11 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * (inspect, Object.keys/values/entries) then answer through its live
    * checked view. The receiver is any such record type. Never throws. */
   "record.sourceHas": { argTypes: [null], result: BOOL },
+  /** `record.sourceSpread(built, value)`: the record a literal starting
+   * with `...value` just built keeps the order of value's kept source
+   * (key-order-witness.ts ordered spreads). Both are record types. Never
+   * throws. */
+  "record.sourceSpread": { argTypes: [null, null], result: VOID },
   "insp.key": { argTypes: [STRING], result: STRING },
   "insp.moreItems": { argTypes: [F64], result: STRING },
   "insp.end": { argTypes: [STRING, STRING, STRING, F64, BOOL, BOOL], result: STRING },
@@ -4765,6 +4799,20 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "als.exitRun": { argTypes: [F64, DYN, DYN], result: DYN },
   "als.enterWith": { argTypes: [F64, DYN], result: VOID },
   "als.disable": { argTypes: [F64], result: VOID },
+  /** new AsyncLocalStorage(options) (Node's object check throws; MAY
+   * THROW) and the store's name option (dyn; "" without one). */
+  "als.newOptions": { argTypes: [DYN], result: F64 },
+  "als.name": { argTypes: [F64], result: DYN },
+  /** A function bound to the active context: the completion callbacks of
+   * callback-style APIs (always false: an empty context leaves the
+   * callback unbound) and AsyncLocalStorage.bind (always true). The typed
+   * form answers its closure argument's type; the dyn form throws Node's
+   * ERR_INVALID_ARG_TYPE for a non-function when always (MAY THROW). */
+  "als.bindCallback": { argTypes: [null, BOOL], result: VOID },
+  "als.bindCallbackDyn": { argTypes: [DYN, BOOL], result: DYN },
+  /** AsyncLocalStorage.snapshot(): a dyn function (cb, ...args) that runs
+   * cb in the context active at the snapshot. */
+  "als.snapshot": { argTypes: [], result: DYN },
   /** Channel.bindStore/unbindStore/runStores (scr_dc.c): the
    * AsyncLocalStorage integration — set-semantics bindings per store,
    * runStores entering every bound store with transform(data) around the
@@ -4892,6 +4940,10 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "text.decoderEncoding": { argTypes: [DYN], result: F64 },
   "text.decoderName": { argTypes: [F64], result: STRING },
   "text.encodeInto": { argTypes: [DYN, DYN], result: DYN },
+  /** `value instanceof TextDecoder` (true) or `TextEncoder` (false) on a
+   * checked-dynamic value: a codec record's handle box (scr_text_codec_dyn.c).
+   * Borrowed; never throws. */
+  "text.codecIs": { argTypes: [DYN, BOOL], result: BOOL },
   "buffer.isAscii": { argTypes: [DYN], result: BOOL },
   "buffer.isUtf8": { argTypes: [DYN], result: BOOL },
   "buffer.transcode": { argTypes: [DYN, DYN, DYN], result: BYTES_U8 },

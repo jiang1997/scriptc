@@ -1,11 +1,15 @@
 import { F64, type IrExpr, type IrLocal, type IrStmt } from "../../ir/ir.js";
 import type { IntegerRange, IntegerRanges } from "../../ir/integer-ranges.js";
-import type { IntegerCountedForLoop } from "../../ir/integer-loops.js";
+import type { IntegerCountedForLoop, IntegerPairedForLoop } from "../../ir/integer-loops.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 import { byteNumberAccess } from "../../ir/byte-numbers.js";
 import { everyExprChild, everyStmtChild } from "../../ir/traverse.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
-import { emitCountedLoopLimit, emitCountedLoopSafety } from "./counted-loops.js";
+import {
+  emitCountedLoopLimit,
+  emitCountedLoopSafety,
+  emitExactIntegerTest,
+} from "./counted-loops.js";
 import { emitBytesHeaderLength, emitBytesSharedStorage } from "./expr-bytes.js";
 import { f64Lit } from "./common.js";
 import { emitStringAsciiFlag, emitStringByteLength } from "./string-reads.js";
@@ -79,6 +83,10 @@ export interface BytesLoopVersion {
   guarded: ReadonlySet<string>;
   /** The counted loop whose iteration space the affine checks cover. */
   counted: IntegerCountedForLoop | null;
+  /** A two-counter loop (`for (let i = lo, j = hi; i < j; i++, j--)`) and
+   * the receivers it indexes at either counter. Both counters stay between
+   * the two starts, so the guard requires `lo >= 0` and `hi < length`. */
+  paired: { loop: IntegerPairedForLoop; receivers: number[] } | null;
   /** The guard also requires every counter value within [-bound, bound]. */
   counterBound: number | null;
   /** Integer ranges of affine index operands that hold in the unchecked
@@ -153,6 +161,7 @@ export function matchBytesLoopVersion(
   loop: IrStmt & { kind: "for" | "while" },
   counted: IntegerCountedForLoop | null,
   facts: BytesLoopFacts,
+  paired: IntegerPairedForLoop | null = null,
 ): BytesLoopVersion | null {
   const written = new Set<string>();
   const temps = new Map<string, IrExpr>();
@@ -438,6 +447,9 @@ export function matchBytesLoopVersion(
     string,
     { check: BoundedCheck; nodes: { node: Node; access: WhileAccess }[] }
   >();
+  const pairedCounters =
+    paired !== null && counted === null ? new Set([paired.low.localId, paired.high.localId]) : null;
+  const pairedNodes = new Map<number, Node[]>();
   const access = (node: Node, array: IrExpr, index: IrExpr, width: number): void => {
     const ref = root(array);
     if (!ref) return;
@@ -448,6 +460,20 @@ export function matchBytesLoopVersion(
       else owned.set(receiver, [node]);
     }
     if (facts.proven.has(node)) return;
+    // An element at either counter of a two-counter loop.
+    if (
+      pairedCounters !== null &&
+      width === 1 &&
+      ref.type.kind === "bytes" &&
+      index.kind === "varRef" &&
+      pairedCounters.has(index.localId)
+    ) {
+      const receiver = receiverOf(ref);
+      const nodes = pairedNodes.get(receiver);
+      if (nodes) nodes.push(node);
+      else pairedNodes.set(receiver, [node]);
+      return;
+    }
     const shape = counter !== null ? affine(index) : null;
     if (shape && shape.counter !== 0) {
       const operands = new Set<IrExpr>();
@@ -543,11 +569,16 @@ export function matchBytesLoopVersion(
     Math.max(0, MAX_CHECKS - fixedKept.length - affineKept.length),
   );
   const ownedKept = [...owned.entries()].slice(0, MAX_CHECKS);
+  const pairedKept = [...pairedNodes.entries()].slice(
+    0,
+    Math.max(0, MAX_CHECKS - fixedKept.length - affineKept.length - boundedKept.length),
+  );
   if (
     fixedKept.length === 0 &&
     affineKept.length === 0 &&
     boundedKept.length === 0 &&
-    ownedKept.length === 0
+    ownedKept.length === 0 &&
+    pairedKept.length === 0
   )
     return null;
   const bounds = new Set<Node>();
@@ -616,6 +647,10 @@ export function matchBytesLoopVersion(
       if (access.index !== access.ref) narrow(access.index, { min: 0, max: SAFE });
     }
   }
+  for (const [receiver, nodes] of pairedKept) {
+    used.add(receiver);
+    for (const node of nodes) bounds.add(node);
+  }
   const counterChecks: CounterCheck[] = [];
   for (const [id, min] of counterMins) {
     const info = whileAccesses!.counters.get(id)!;
@@ -658,6 +693,10 @@ export function matchBytesLoopVersion(
     counters: counterChecks,
     guarded,
     counted: affineKept.length > 0 ? counted : null,
+    paired:
+      paired !== null && pairedKept.length > 0
+        ? { loop: paired, receivers: pairedKept.map(([receiver]) => renumber.get(receiver)!) }
+        : null,
     counterBound: needsBound ? bound : null,
     ranges,
   };
@@ -1143,6 +1182,25 @@ export function emitBytesLoopVersionGuard(
       conditions.push(both);
     }
   }
+  if (version.paired !== null) {
+    // Both counters stay within [lo, hi] (exact integers below 2^53): every
+    // access at either one is in bounds when `lo >= 0` and `hi < length`.
+    const { loop } = version.paired;
+    const [low, high] = [loop.low.start, loop.high.start].map((expr) => {
+      const tested = emitExactIntegerTest(host, host.emitExpr(expr).name, -SAFE, SAFE);
+      conditions.push(tested.ok);
+      return tested.integer;
+    });
+    const nonNegative = B.tmp();
+    B.line(`${nonNegative} = icmp sge i64 ${low}, 0`);
+    conditions.push(nonNegative);
+    for (const receiver of version.paired.receivers) {
+      // Lengths are at most 2^53 elements: a signed comparison is exact.
+      const below = B.tmp();
+      B.line(`${below} = icmp slt i64 ${high}, ${lengths[receiver]}`);
+      conditions.push(below);
+    }
+  }
   let valid = "true";
   for (const cond of conditions) {
     if (valid === "true") valid = cond;
@@ -1154,39 +1212,6 @@ export function emitBytesLoopVersionGuard(
   }
   if (valid === "true") B.br(fast);
   else B.condBr(valid, fast, slow);
-}
-
-/** Tests that a double is an exact integer within [min, max] (not -0; NaN
- * fails the ordered comparisons) and gives its i64. The integer is frozen,
- * so it is a fixed value even when the test fails. */
-function emitExactIntegerTest(
-  host: LlvmEmitterContext,
-  value: string,
-  min: number,
-  max: number,
-): { ok: string; integer: string } {
-  const B = host.B;
-  const low = B.tmp(),
-    high = B.tmp(),
-    inRange = B.tmp(),
-    raw = B.tmp(),
-    integer = B.tmp(),
-    back = B.tmp(),
-    bits = B.tmp(),
-    backBits = B.tmp(),
-    exact = B.tmp(),
-    ok = B.tmp();
-  B.line(`${low} = fcmp oge double ${value}, ${f64Lit(min)}`);
-  B.line(`${high} = fcmp ole double ${value}, ${f64Lit(max)}`);
-  B.line(`${inRange} = and i1 ${low}, ${high}`);
-  B.line(`${raw} = fptosi double ${value} to i64`);
-  B.line(`${integer} = freeze i64 ${raw}`);
-  B.line(`${back} = sitofp i64 ${integer} to double`);
-  B.line(`${bits} = bitcast double ${value} to i64`);
-  B.line(`${backBits} = bitcast double ${back} to i64`);
-  B.line(`${exact} = icmp eq i64 ${bits}, ${backBits}`);
-  B.line(`${ok} = and i1 ${inRange}, ${exact}`);
-  return { ok, integer };
 }
 
 function scaleCounter(host: LlvmEmitterContext, value: string, scale: number): string {

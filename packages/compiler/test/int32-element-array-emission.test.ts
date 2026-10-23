@@ -77,6 +77,19 @@ function literalCounter(n: number): number {
   for (let i = 0; i < n; i++) a[0] = a[0]! + 1;
   return a[0]!;
 }
+function walk(n: number, steps: number): number {
+  const next: number[] = [];
+  for (let i = 0; i < n; i++) next.push(i + 1 < n ? i + 1 : 0);
+  let at = next[0]!;
+  let total = 0;
+  for (let s = 0; s < steps; s++) {
+    const t = next[at]!;
+    next[at] = at;
+    at = t;
+    total = (total + at) | 0;
+  }
+  return total;
+}
 function joined(n: number): string {
   const a = [n | 0, 2];
   return a.join(",");
@@ -91,6 +104,7 @@ console.log(
   shortCounter(),
   literalCounter(n),
   joined(n),
+  walk(n | 0, 5),
 );
 `;
 
@@ -117,6 +131,16 @@ test("arrays storing only int32 elements get 4-byte slots", async () => {
   const counts = functions(llvm, "counts");
   expect(counts).toMatch(/@scr_arr_new\(i32 7, i64 0\)/);
   expect(counts).not.toContain("popArray");
+});
+
+test("an array that stores a cursor read back from its own elements gets 4-byte slots", async () => {
+  const llvm = await emitLlvm(source);
+  const walk = functions(llvm, "walk");
+  expect(walk).not.toBe("");
+  // `at` is assigned `next[at]!` in the loop and stored back into `next`:
+  // it holds an int32 whenever the array's elements are int32s.
+  expect(walk).toMatch(/@scr_arr_new_small\(i32 7\)/);
+  expect(walk).toMatch(/getelementptr inbounds i32, ptr %\w+, i64 %\w+\n\s+%\w+ = load i32/);
 });
 
 test("arrays with a store that has no exact integer range, or that escape, keep doubles", async () => {
@@ -195,4 +219,43 @@ test("only the candidates the proof keeps are rewritten", async () => {
   expect(selected.int32ArrayCandidates).toEqual([...kept]);
   for (const fn of selected.functions)
     if (fn.name !== "compose") expect(fn).toBe(mod.functions.find((f) => f.name === fn.name));
+});
+
+const sharedSource = `
+const data: number[] = [];
+for (let i = 0; i < 64; i++) data.push((i * 7) & 255);
+function fnv(values: number[]): number {
+  let h = 2166136261;
+  for (let i = 0; i < values.length; i++) h = Math.imul(h ^ values[i]!, 16777619) >>> 0;
+  return h;
+}
+function mean(values: number[]): number {
+  let s = 0;
+  for (let i = 0; i < values.length; i++) s += values[i]!;
+  return s / values.length;
+}
+function first(values: number[]): number {
+  return values[0]!;
+}
+const ints = [1, 2, 3];
+const halves = [0.5, 1.5];
+const pick: (values: number[]) => number = first;
+console.log(fnv(data), mean(ints), mean(halves), pick([4]));
+`;
+
+test("arrays passed to helpers and held in module globals get 4-byte slots", async () => {
+  const mod = await lowerIr(sharedSource);
+  const proposed = markInt32ArrayCandidates(mod).int32ArrayCandidates ?? [];
+  // A global and the parameter every call passes it to; a function used as
+  // a value keeps its parameter.
+  expect(proposed).toEqual(expect.arrayContaining(["\0%g.e.data", "fnv\0values.0"]));
+  expect(proposed.some((key) => key.startsWith("first\0"))).toBe(false);
+  const llvm = await emitLlvm(sharedSource);
+  // The helper reads int32 slots; `mean`, also called with fractions,
+  // reads doubles.
+  expect(functions(llvm, "fnv")).toMatch(
+    /getelementptr inbounds i32, ptr %\w+, i64 %\w+\n\s+%\w+ = load i32/,
+  );
+  expect(functions(llvm, "mean")).not.toMatch(/getelementptr inbounds i32, ptr/);
+  expect(llvm).toMatch(/@scr_arr_new(_small)?\(i32 7/);
 });

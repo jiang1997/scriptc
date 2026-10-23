@@ -1,10 +1,11 @@
 /* Focused LLVM library-call emission extracted from emitter.ts. */
 import { InternalCompilerError } from "../../errors.js";
 import { undefinedArmTag } from "../../ir/analysis.js";
-import { F64, RUNTIME_ERROR_CLASSES, STRING } from "../../ir/ir.js";
+import { F64, type IrType, RUNTIME_ERROR_CLASSES, STRING, typeKey } from "../../ir/ir.js";
 import type { LlvmEmitterContext, LibCallExpr, LlValue } from "./expr-context.js";
 import { f64Lit } from "./common.js";
 import { mockTimerSym } from "./lib-shared.js";
+import { FN_ATTRS } from "./shapes.js";
 
 export function emitChildProcessLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
   const B = host.B;
@@ -460,7 +461,56 @@ export function emitAsyncContextLibCall(host: LlvmEmitterContext, e: LibCallExpr
     for (const a of e.args) host.emitExpr(a);
     return { name: "", type: e.type };
   }
+  if (e.fn === "als.bindCallback") {
+    // The closure moves into the bound closure, whose entry is the
+    // per-signature thunk; with nothing to bind the runtime answers the
+    // closure itself.
+    if (e.type.kind !== "func")
+      throw new InternalCompilerError("llvm emitter bug: als.bindCallback on non-func");
+    const cb = host.emitExpr(e.args[0]!);
+    const always = host.emitExpr(e.args[1]!);
+    host.toHeap(cb);
+    const thunk = boundCallbackThunk(host, e.type);
+    host.declare("declare ptr @scr_als_bind_closure(ptr, ptr, i1 zeroext)");
+    const t = B.tmp();
+    B.line(
+      `${t} = call ptr @scr_als_bind_closure(ptr ${cb.name}, ptr @${thunk}, i1 ${always.name})`,
+    );
+    return host.own({ name: t, type: e.type });
+  }
   return host.emitGenericLibCall(e);
+}
+
+/** The entry of a callback bound to an AsyncLocalStorage context, one per
+ * callback signature: enters the captured context, calls the target with
+ * the same arguments (the callValue ABI) and restores the caller's
+ * context, also when the target leaves an exception pending. */
+function boundCallbackThunk(host: LlvmEmitterContext, cbT: IrType & { kind: "func" }): string {
+  const key = `alsbound:${typeKey(cbT)}`;
+  let sym = host.resolveThunks.get(key);
+  if (sym) return sym;
+  sym = `sc_alsbound_${host.resolveThunks.size}`;
+  host.resolveThunks.set(key, sym);
+  host.declare("declare ptr @scr_als_bound_target(ptr)");
+  host.declare("declare ptr @scr_als_bound_enter(ptr)");
+  host.declare("declare void @scr_als_bound_leave(ptr, ptr)");
+  const ret = host.llType(cbT.ret);
+  const params = cbT.params.map((p, i) => `${host.llType(p)} %a${i}`);
+  const call = `call ${ret} %fn(${["ptr %cb", ...params].join(", ")})`;
+  host.resolveThunkDefs.push(
+    `define internal ${ret} @${sym}(${["ptr %self", ...params].join(", ")}) ${FN_ATTRS} { ; AsyncLocalStorage-bound callback ${typeKey(cbT)}`,
+    `entry:`,
+    `  %cb = call ptr @scr_als_bound_target(ptr %self)`,
+    `  %prev = call ptr @scr_als_bound_enter(ptr %self)`,
+    `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+    `  %fn = load ptr, ptr %fnp`,
+    ret === "void" ? `  ${call}` : `  %r = ${call}`,
+    `  call void @scr_als_bound_leave(ptr %prev, ptr %cb)`,
+    ret === "void" ? `  ret void` : `  ret ${ret} %r`,
+    `}`,
+    ``,
+  );
+  return sym;
 }
 
 export function emitProcessLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {

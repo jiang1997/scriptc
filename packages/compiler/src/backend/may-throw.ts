@@ -3,7 +3,8 @@
 import type { IrExpr, IrStmt, IrModule, IrType, SrcLoc } from "../ir/ir.js";
 import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS } from "../ir/ir.js";
 import { MAY_THROW_LIB_FNS } from "../ir/builtin-effects.js";
-import { everyExprChild, everyStmtChild, everyStmtList } from "../ir/traverse.js";
+import { everyExprChild, everyStmtChild } from "../ir/traverse.js";
+import { eachNodeOfKinds, type IrNodeIndex } from "../ir/node-index.js";
 import { hasRetainedFfiCallback } from "./ffi-callbacks.js";
 import { computePublishedTypes, writesPublished } from "./publication.js";
 
@@ -40,6 +41,8 @@ export function computeMayThrow(
     explain?: boolean;
     /** computePublishedTypes(mod), when the caller already has it. */
     published?: ReturnType<typeof computePublishedTypes>;
+    /** The module's node index, read instead of walking the bodies. */
+    nodes?: IrNodeIndex;
   } = {},
 ): {
   fns: Set<string>;
@@ -52,8 +55,9 @@ export function computeMayThrow(
    * entry (and may therefore throw the stack-overflow RangeError). */
   stackChecks?: Set<string>;
 } {
-  const terminations = mod.workers === true ? workerTerminationPolls(mod) : null;
-  const stackChecks = options.stackChecks === true ? stackCheckedFunctions(mod) : null;
+  const terminations = mod.workers === true ? workerTerminationPolls(mod, options.nodes) : null;
+  const stackChecks =
+    options.stackChecks === true ? stackCheckedFunctions(mod, options.nodes) : null;
   // Stores that can reach a published object throw the frozen TypeError.
   const published =
     options.published !== undefined ? options.published : computePublishedTypes(mod);
@@ -898,7 +902,19 @@ function boundedNode(rec: IrExpr | IrStmt): boolean {
  * finishes after finitely many steps or reaches a polling callee. `polls`
  * names the functions that poll (and therefore may unwind with the
  * termination sentinel); `entry` the subset that polls on entry. */
-export function workerTerminationPolls(mod: IrModule): {
+/** The kinds call-graph census below can skip: boundedNode answers true
+ * for them, and the census reads nothing else from them. */
+const CENSUS_SKIPPED_KINDS: ReadonlySet<string> = new Set(
+  [...BOUNDED_KINDS].filter(
+    (kind) =>
+      !["while", "doWhile", "for", "forOf", "call", "new", "virtualCall", "closure"].includes(kind),
+  ),
+);
+
+export function workerTerminationPolls(
+  mod: IrModule,
+  nodes?: IrNodeIndex,
+): {
   entry: Set<string>;
   polls: Set<string>;
 } {
@@ -914,11 +930,12 @@ export function workerTerminationPolls(mod: IrModule): {
   const edges = new Map<string, string[]>();
   const entry = new Set<string>();
   const polls = new Set<string>();
+  const scan = nodes?.scanExcept(CENSUS_SKIPPED_KINDS);
   for (const fn of mod.functions) {
     const out: string[] = [];
     let bounded = fn.async !== true && fn.generator === undefined && fn.name !== mod.entry;
     let loops = false;
-    const visit = (rec: IrExpr | IrStmt): boolean => {
+    const visit = (rec: IrExpr | IrStmt): void => {
       if (!boundedNode(rec)) bounded = false;
       switch (rec.kind) {
         case "while":
@@ -937,9 +954,8 @@ export function workerTerminationPolls(mod: IrModule): {
           out.push(...(methodImpls.get(rec.method) ?? []));
           break;
       }
-      return true;
     };
-    everyStmtList(fn.body, { expr: visit, stmt: visit });
+    eachNodeOfKinds(fn, scan, visit);
     edges.set(
       fn.name,
       out.filter((callee) => names.has(callee)),
@@ -960,7 +976,7 @@ export function workerTerminationPolls(mod: IrModule): {
  * library call; see boundedNode) also reaches every function that such an
  * operation can invoke: closure targets and class members. Non-recursive
  * functions, including leaf callbacks, stay check-free. */
-export function stackCheckedFunctions(mod: IrModule): Set<string> {
+export function stackCheckedFunctions(mod: IrModule, nodes?: IrNodeIndex): Set<string> {
   const reentry = "\0reentry";
   const methodImpls = new Map<string, string[]>();
   const memberPrefixes = new Set<string>();
@@ -975,12 +991,13 @@ export function stackCheckedFunctions(mod: IrModule): Set<string> {
   const names = new Set(mod.functions.map((fn) => fn.name));
   const edges = new Map<string, string[]>();
   const targets = new Set<string>();
+  const scan = nodes?.scanExcept(CENSUS_SKIPPED_KINDS);
   for (const fn of mod.functions) {
     const dot = fn.name.indexOf(".");
     if (dot > 0 && memberPrefixes.has(fn.name.slice(0, dot + 1))) targets.add(fn.name);
     const out: string[] = [];
     let reenters = false;
-    const visit = (rec: IrExpr | IrStmt): boolean => {
+    const visit = (rec: IrExpr | IrStmt): void => {
       if (!boundedNode(rec)) reenters = true;
       switch (rec.kind) {
         case "call":
@@ -996,9 +1013,8 @@ export function stackCheckedFunctions(mod: IrModule): Set<string> {
           targets.add(rec.fnName);
           break;
       }
-      return true;
     };
-    everyStmtList(fn.body, { expr: visit, stmt: visit });
+    eachNodeOfKinds(fn, scan, visit);
     const callees = out.filter((callee) => names.has(callee));
     if (reenters) callees.push(reentry);
     edges.set(fn.name, callees);

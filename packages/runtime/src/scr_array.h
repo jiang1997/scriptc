@@ -128,7 +128,8 @@ typedef struct ScrArr {
    * header. Kept beside `elem` so the RC fast paths test it with one load. */
   uint8_t cyc;
   /* The low SCR_ARR_OPS_SHIFT bits: storage flags (SCR_ARR_INLINE_SLOTS,
-   * SCR_ARR_HEAD_ROOM, SCR_ARR_UNSHIFTED, SCR_ARR_HAS_EXT, SCR_ARR_STATES). The rest: the
+   * SCR_ARR_HEAD_ROOM, SCR_ARR_UNSHIFTED, SCR_ARR_HAS_EXT, SCR_ARR_STATES)
+   * and SCR_ARR_FROZEN. The rest: the
    * registry id of the element type's ops (scr_arr_ops), 0 for every kind
    * but SCR_ELEM_REF and SCR_ELEM_CREF. */
   uint16_t spare;
@@ -204,6 +205,10 @@ _Static_assert(sizeof(ScrArr) == sizeof(size_t) + 16 + sizeof(void *),
 #define SCR_ARR_UNSHIFTED 4u
 #define SCR_ARR_HAS_EXT 8u
 #define SCR_ARR_STATES 16u
+/* Object.freeze of the array (scr_arr_freeze). Emitted guards test it
+ * before the writes of array types a program may freeze; the runtime's own
+ * writes assume it is clear. */
+#define SCR_ARR_FROZEN 32u
 
 /* An array starts without state bytes. Without them, every index below
  * `len` is a present value in dense storage: len <= cap, there are no
@@ -213,6 +218,19 @@ _Static_assert(sizeof(ScrArr) == sizeof(size_t) + 16 + sizeof(void *),
  * a length set past the elements, or a sparse entry gives the array its
  * states (scr_arr_add_states), which it keeps. */
 static inline bool scr_arr_has_states(const ScrArr *a) { return (a->spare & SCR_ARR_STATES) != 0; }
+
+static inline bool scr_arr_frozen(const ScrArr *a) { return (a->spare & SCR_ARR_FROZEN) != 0; }
+/* Sets SCR_ARR_FROZEN; immortal arrays are left as they are. */
+void scr_arr_freeze(ScrArr *a);
+bool scr_arr_is_frozen(const ScrArr *a);
+/* Throws Node's TypeError for the first write that the array operation
+ * `op` makes to a frozen array of length `len`, or answers false when the
+ * operation writes nothing. op: 0 index write (x = index), 1 push (y =
+ * argument count), 2 pop, 3 length write, 4 unshift (y = argument count),
+ * 5 delete (x = index), 6 shift, 7 reverse or sort, 8 fill (x = start, y =
+ * end), 9 copyWithin (x = target, y = start, z = end), 10 splice (x =
+ * start, y = delete count, z = item count). */
+bool scr_array_frozen_error(int op, size_t len, double x, double y, double z);
 
 /* The start of the dense slots' allocation: `data` less any head room. */
 static inline uint64_t *scr_arr_block(const ScrArr *a) {
@@ -236,7 +254,7 @@ static inline struct ScrArrExt *scr_arr_ext_of(const ScrArr *a) {
  * Id 0 is no ops; ids are assigned on each descriptor's first array, in
  * any thread. A program with more element types than the field holds keeps
  * the ops of the rest in the array's ext (SCR_ARR_OPS_OVERFLOW). */
-#define SCR_ARR_OPS_SHIFT 5
+#define SCR_ARR_OPS_SHIFT 6
 #define SCR_ARR_OPS_OVERFLOW (UINT16_MAX >> SCR_ARR_OPS_SHIFT)
 extern const ScrArrOps *scr_arr_ops_table[SCR_ARR_OPS_OVERFLOW];
 /* By registry id: 1 when the descriptor has SCR_ARR_OPS_RELEASE_NOTHING.

@@ -34,6 +34,7 @@ import {
   cycTypeDescriptor,
   emitObjectAlloc,
   emitObjectFree,
+  emitSegmentFree,
   CYC_APPEND,
   cycleAppendDecls,
   cycleAppendHelper,
@@ -1405,17 +1406,23 @@ export interface DirectDestroy {
 /** The release of child `value` (a loaded field, possibly NULL) inside a
  * teardown whose chain length is `%d`: the child's own release for a shared
  * or immortal reference, its teardown for the last one. Labels use `tag`;
- * the lines end in the open block `${tag}.next`. */
+ * the lines end in the open block `${tag}.next`.
+ *
+ * With `segment` (the child has the teardown's own type, in a segmented
+ * teardown; segmentPrologueLines), the child's teardown appends its blocks
+ * to the teardown's segment. */
 export function directChildReleaseLines(
   host: ShapeHost,
   tag: string,
   value: string,
   target: DirectDestroy,
   comment: string,
+  segment = false,
 ): string[] {
   const S = host.sizeType;
   const C = target.count ?? S;
-  host.declare(`declare void @scr_rc_destroy(ptr, ptr)`);
+  if (segment) host.declare(`declare ptr @scr_rc_destroy_seg(ptr, ptr, ptr, ptr)`);
+  else host.declare(`declare void @scr_rc_destroy(ptr, ptr)`);
   const lines = [
     `  %${tag}.nn = icmp ne ptr ${value}, null`,
     `  br i1 %${tag}.nn, label %${tag}.chk, label %${tag}.next`,
@@ -1447,14 +1454,137 @@ export function directChildReleaseLines(
     `  br i1 %${tag}.short, label %${tag}.direct, label %${tag}.bounded`,
     `${tag}.direct:`,
     `  %${tag}.d = add i32 %d, 1`,
-    `  call void @${target.destroy}_d(ptr ${value}, i32 %${tag}.d)`,
+  );
+  if (!segment) {
+    lines.push(
+      `  call void @${target.destroy}_d(ptr ${value}, i32 %${tag}.d)`,
+      `  br label %${tag}.next`,
+      `${tag}.bounded:`,
+      `  call void @scr_rc_destroy(ptr ${value}, ptr @${target.destroy})`,
+      `  br label %${tag}.next`,
+      `${tag}.next:`,
+    );
+    return lines;
+  }
+  lines.push(
+    `  %${tag}.t = load ptr, ptr %sg.t`,
+    `  %${tag}.dt = call ptr @${target.destroy}_s(ptr ${value}, i32 %${tag}.d, ptr %${tag}.t)`,
+    `  store ptr %${tag}.dt, ptr %sg.t`,
     `  br label %${tag}.next`,
     `${tag}.bounded:`,
-    `  call void @scr_rc_destroy(ptr ${value}, ptr @${target.destroy})`,
+    `  %${tag}.bt = load ptr, ptr %sg.t`,
+    `  %${tag}.rt = call ptr @scr_rc_destroy_seg(ptr ${value}, ptr @${target.destroy}_sc, ptr @${target.destroy}, ptr %${tag}.bt)`,
+    `  store ptr %${tag}.rt, ptr %sg.t`,
     `  br label %${tag}.next`,
     `${tag}.next:`,
   );
   return lines;
+}
+
+/* Teardown segments. A typed teardown that frees each block onto its free
+ * list as it goes frees a tree in walk order, and the free lists, which are
+ * LIFO, hand the blocks to the next allocations in the reverse order: a tree
+ * built again in the same order as the last (each generation of a structure
+ * a loop rebuilds) is laid out mirrored, and every walk over it, the next
+ * teardown included, runs through memory backwards, which defeats the
+ * hardware prefetchers. The runtime frees large dead sets of the cycle
+ * collector in address order for the same reason (scr_mem_order_for_free).
+ *
+ * So the teardown of a type with children of its own type (the `_s` form,
+ * segmentedTeardown) keeps the blocks it frees in a segment, linked through
+ * their first words, which it builds in order through a tail pointer: the
+ * `_s` form takes the segment's last link (the first word of its last block,
+ * or the head slot of an empty segment) and returns the new one. A node
+ * first releases its own block (emitObjectFree, keeping it), then appends it
+ * ahead of its children's blocks when its address is the lower, behind them
+ * otherwise (segmentTeardownLines), and the children append theirs in field
+ * order, so a structure
+ * built parent first (object literals allocate before their fields) or
+ * children first (constructor arguments) comes back in ascending order. The
+ * chain's first teardown (`_d`) frees the whole segment onto the class's
+ * free list in one step (emitSegmentFree), and the walks over the next
+ * generation run forward. A teardown past DIRECT_DESTROY_CHAIN appends
+ * through scr_rc_destroy_seg, under the same depth budget as
+ * scr_rc_destroy. Blocks outside the calling thread's arena are freed as
+ * before; one type's blocks are all of one class. */
+
+/** Whether the teardown of a type whose reference fields have `fieldTypes`
+ * (with direct targets `targets`) and whose own teardown is `destroy` keeps
+ * a segment: a child field has its own type, and the inline allocation paths
+ * are in use. */
+export function segmentedTeardown(
+  host: ShapeHost,
+  destroy: string,
+  fieldTypes: readonly IrType[],
+  targets: ReadonlyMap<string, DirectDestroy>,
+): boolean {
+  if (host.inlineAlloc !== true) return false;
+  return fieldTypes.some((t) => directDestroyTarget(host, t, targets)?.destroy === destroy);
+}
+
+/** The first lines of a segmented teardown, in its entry block: the
+ * segment's last link (`%sg.t`, from the `%tail` argument) and the kept own
+ * block (`%sg.own`, for emitObjectFree). */
+export function segmentPrologueLines(): string[] {
+  return [
+    `  %sg.t = alloca ptr`,
+    `  %sg.own = alloca ptr`,
+    `  store ptr %tail, ptr %sg.t`,
+    `  store ptr null, ptr %sg.own`,
+  ];
+}
+
+/** The rest of a segmented teardown after emitObjectFree kept (or freed)
+ * its own block: the block goes ahead of its children's when its address is
+ * below the first non-NULL one of `children` (loaded fields of the
+ * teardown's own type, which stand for their blocks) or there is none, and
+ * behind them otherwise; then the children's releases (`releases`, given a
+ * label prefix), and the segment's last link is returned. Each order has its
+ * own copy of the releases, so neither keeps the decision, or the block once
+ * it is appended, across the children's teardowns. */
+export function segmentTeardownLines(
+  children: readonly string[],
+  releases: (prefix: string) => string[],
+): string[] {
+  const lines = [`  %sg.o = load ptr, ptr %sg.own`, `  %sg.kept = icmp ne ptr %sg.o, null`];
+  let ref = "null";
+  [...children].reverse().forEach((child, i) => {
+    lines.push(
+      `  %sg.nn${i} = icmp ne ptr ${child}, null`,
+      `  %sg.r${i} = select i1 %sg.nn${i}, ptr ${child}, ptr ${ref}`,
+    );
+    ref = `%sg.r${i}`;
+  });
+  lines.push(
+    `  %sg.leaf = icmp eq ptr ${ref}, null`,
+    `  %sg.lower = icmp ult ptr %sg.o, ${ref}`,
+    `  %sg.first = or i1 %sg.leaf, %sg.lower`,
+    `  %sg.ahead = and i1 %sg.kept, %sg.first`,
+    `  br i1 %sg.ahead, label %sg.front, label %sg.back`,
+    `sg.front:`,
+    ...segmentAppendLines("a"),
+    ...releases("ta"),
+    `  br label %sg.ret`,
+    `sg.back:`,
+    ...releases("tb"),
+    `  %sg.keep = icmp ne ptr %sg.o, null`,
+    `  br i1 %sg.keep, label %sg.last, label %sg.ret`,
+    `sg.last:`,
+    ...segmentAppendLines("l"),
+    `  br label %sg.ret`,
+    `sg.ret:`,
+    `  %sg.tr = load ptr, ptr %sg.t`,
+    `  ret ptr %sg.tr`,
+  );
+  return lines;
+}
+
+function segmentAppendLines(tag: string): string[] {
+  return [
+    `  %sg.t${tag} = load ptr, ptr %sg.t`,
+    `  store ptr %sg.o, ptr %sg.t${tag}`,
+    `  store ptr %sg.o, ptr %sg.t`,
+  ];
 }
 
 /** The direct-teardown target of a reference of `type`, if `targets` (keyed
@@ -1499,12 +1629,42 @@ export function usedDirectTargets(
 
 /** The teardown definitions for `destroy`: with `chained`, the body takes
  * the chain length `%d` (directChildReleaseLines) and the runtime's
- * one-argument entry starts a chain. */
+ * one-argument entry starts a chain. With `segment` (the host, for a
+ * segmented teardown), the body is a segment teardown's
+ * (segmentPrologueLines to segmentTeardownLines), defined as `_s`, with
+ * `_sc` for scr_rc_destroy_seg, and `_d` starts a segment and frees it. */
 export function destroyDefinitions(
   destroy: string,
   body: readonly string[],
   chained: boolean,
+  segment: ShapeHost | null = null,
 ): string[] {
+  if (segment !== null)
+    return [
+      `define internal ptr @${destroy}_s(ptr %o, i32 %d, ptr %tail) ${FN_ATTRS} {`,
+      `entry:`,
+      ...body,
+      `}`,
+      `define internal ptr @${destroy}_sc(ptr %o, ptr %tail) ${FN_ATTRS} {`,
+      `entry:`,
+      `  %t = call ptr @${destroy}_s(ptr %o, i32 0, ptr %tail)`,
+      `  ret ptr %t`,
+      `}`,
+      `define internal void @${destroy}_d(ptr %o, i32 %d) ${FN_ATTRS} {`,
+      `entry:`,
+      `  %head = alloca ptr`,
+      `  store ptr null, ptr %head`,
+      `  %last = call ptr @${destroy}_s(ptr %o, i32 %d, ptr %head)`,
+      `  %first = load ptr, ptr %head`,
+      ...emitSegmentFree(segment, "sgf", "%first", "%last"),
+      `  ret void`,
+      `}`,
+      `define internal void @${destroy}(ptr %o) ${FN_ATTRS} {`,
+      `entry:`,
+      `  call void @${destroy}_d(ptr %o, i32 0)`,
+      `  ret void`,
+      `}`,
+    ];
   if (!chained)
     return [
       `define internal void @${destroy}(ptr %o) ${FN_ATTRS} {`,
@@ -1527,6 +1687,17 @@ export function destroyDefinitions(
   ];
 }
 
+/** The frozen bit of a freezable record's rc word (scr_rc.h SCR_RC_FROZEN):
+ * bit 62 on 64-bit targets, bit 30 on 32-bit ones. */
+function recordFrozenBit(sizeType: RcCount): bigint {
+  return 1n << (sizeType === "i64" ? 62n : 30n);
+}
+
+/** `value` as a signed LLVM integer literal of `sizeType`. */
+function sizeLiteral(sizeType: RcCount, value: bigint): string {
+  return BigInt.asIntN(sizeType === "i64" ? 64 : 32, value).toString();
+}
+
 /** Common NULL/immortal/decrement skeleton for ordinary object releases.
  * `freeBody` owns the zero-ref teardown and must leave the current block at
  * its end; traced objects also get the possible-cycle-root branch.
@@ -1543,13 +1714,17 @@ export function releaseBody(
   bounded = true,
   immortal = false,
   chained = false,
+  segmented = false,
+  frozen = false,
 ): string[] {
   const S = host.sizeType;
   if (bounded) host.declare(`declare void @scr_rc_destroy(ptr, ptr)`);
   const destroy = `${fnName}_destroy`;
+  // A freezable record's count is the word without its frozen bit.
+  const notFrozen = sizeLiteral(S, ~recordFrozenBit(S));
   const lines = [
-    ...(bounded ? destroyDefinitions(destroy, freeBody, chained) : []),
-    ...releaseFastPath(host, fnName, `${fnName}_slow`, traced, comment, immortal),
+    ...(bounded ? destroyDefinitions(destroy, freeBody, chained, segmented ? host : null) : []),
+    ...releaseFastPath(host, fnName, `${fnName}_slow`, traced, comment, immortal, S, frozen),
     `define internal void @${fnName}_slow(ptr %o) noinline ${FN_ATTRS} {${comment ? ` ; ${comment}` : ""}`,
     `entry:`,
     `  %isnull = icmp eq ptr %o, null`,
@@ -1561,7 +1736,9 @@ export function releaseBody(
     `dec:`,
     `  %n = sub ${S} %rc, 1`,
     `  store ${S} %n, ptr %o`,
-    `  %dead = icmp eq ${S} %n, 0`,
+    ...(frozen
+      ? [`  %refs = and ${S} %n, ${notFrozen}`, `  %dead = icmp eq ${S} %refs, 0`]
+      : [`  %dead = icmp eq ${S} %n, 0`]),
     `  br i1 %dead, label %free, label %${traced ? "root" : "done"}`,
     `free:`,
     ...(traced ? cycleDeadLines(host, "teardown") : []),
@@ -1591,9 +1768,14 @@ export function releaseFastPath(
   comment = "",
   immortal = false,
   count: RcCount = host.sizeType,
+  frozen = false,
 ): string[] {
   const S = count;
   if (immortal) return immortalRcBody(host, fnName, "void", comment);
+  // A freezable record compares its count without the frozen bit: an
+  // immortal word's count is then ~FROZEN, which the same compare sends to
+  // `slow`.
+  const notFrozen = ~recordFrozenBit(S);
   return [
     `define internal void @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment} (fast path)` : ""}`,
     `entry:`,
@@ -1601,8 +1783,13 @@ export function releaseFastPath(
     `  br i1 %isnull, label %done, label %check`,
     `check:`,
     `  %rc = load ${S}, ptr %o`,
-    `  %rcm2 = sub ${S} %rc, 2`,
-    `  %shared = icmp ult ${S} %rcm2, -3`,
+    ...(frozen
+      ? [
+          `  %refs = and ${S} %rc, ${sizeLiteral(S, notFrozen)}`,
+          `  %rcm2 = sub ${S} %refs, 2`,
+          `  %shared = icmp ult ${S} %rcm2, ${sizeLiteral(S, notFrozen - 2n)}`,
+        ]
+      : [`  %rcm2 = sub ${S} %rc, 2`, `  %shared = icmp ult ${S} %rcm2, -3`]),
     `  br i1 %shared, label %dec, label %slow`,
     `dec:`,
     `  %n = sub ${S} %rc, 1`,
@@ -1780,26 +1967,58 @@ export function emitRecordShapes(
     const chained =
       directTargets.has(`record:${shape.id}`) ||
       refMembers.some((m) => directDestroyTarget(host, m.type, directTargets) !== null);
-    for (const m of refMembers) {
-      freeBody.push(
-        `  %f${t} = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 ${m.index}`,
-        `  %v${t} = load ptr, ptr %f${t}`,
+    const destroy = `${mangleRecordRelease(shape.id)}_destroy`;
+    const bounded = refMembers.some((member) => needsBoundedRelease(member.type));
+    const segmented =
+      bounded &&
+      segmentedTeardown(
+        host,
+        destroy,
+        refMembers.map((m) => m.type),
+        directTargets,
       );
-      const direct = directDestroyTarget(host, m.type, directTargets);
-      if (direct) {
-        freeBody.push(
-          ...directChildReleaseLines(host, `td${t}`, `%v${t}`, direct, llvmCommentText(m.name)),
-        );
-      } else {
-        freeBody.push(
-          `  call void ${releaseSym(host, m.type)}(ptr %v${t}) ; ${llvmCommentText(m.name)}`,
-        );
-      }
-      t++;
-    }
     // Closed layouts can carry a kept record source (record-sources.ts).
     const observers = recordMayKeepSource(shape) ? "weak-or-source" : "weak";
-    freeBody.push(...emitObjectFree(host, traced, observers));
+    // A segmented teardown loads its fields, releases its own block, and
+    // then releases the fields (segmentTeardownLines).
+    const loads: string[] = [];
+    const ownType: string[] = [];
+    const release = (prefix: string, m: (typeof refMembers)[number], i: number): string[] => {
+      const direct = directDestroyTarget(host, m.type, directTargets);
+      if (direct === null)
+        return [`  call void ${releaseSym(host, m.type)}(ptr %v${i}) ; ${llvmCommentText(m.name)}`];
+      const own = segmented && direct.destroy === destroy;
+      return directChildReleaseLines(
+        host,
+        `${prefix}${i}`,
+        `%v${i}`,
+        direct,
+        llvmCommentText(m.name),
+        own,
+      );
+    };
+    for (const m of refMembers) {
+      const fieldLines = [
+        `  %f${t} = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 ${m.index}`,
+        `  %v${t} = load ptr, ptr %f${t}`,
+      ];
+      if (segmented) {
+        loads.push(...fieldLines);
+        if (directDestroyTarget(host, m.type, directTargets)?.destroy === destroy)
+          ownType.push(`%v${t}`);
+      } else freeBody.push(...fieldLines, ...release("td", m, t));
+      t++;
+    }
+    if (segmented)
+      freeBody.push(
+        ...segmentPrologueLines(),
+        ...loads,
+        ...emitObjectFree(host, traced, observers, "%sg.own"),
+        ...segmentTeardownLines(ownType, (prefix) =>
+          refMembers.flatMap((m, i) => release(prefix, m, i)),
+        ),
+      );
+    else freeBody.push(...emitObjectFree(host, traced, observers));
     defs.push(
       ...releaseBody(
         host,
@@ -1807,9 +2026,11 @@ export function emitRecordShapes(
         traced,
         freeBody,
         "",
-        refMembers.some((member) => needsBoundedRelease(member.type)),
+        bounded,
         false,
         chained,
+        segmented,
+        shape.freezable === true,
       ),
       ``,
     );

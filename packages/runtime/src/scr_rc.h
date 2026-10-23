@@ -45,14 +45,32 @@ typedef size_t ScrRcCount;
 /* Whether `obj`, an object of any kind, is published (immortal). */
 #define SCR_RC_PUBLISHED(obj) (SCR_RC_COUNT(obj) >= SCR_RC_PUBLISHED_MIN)
 
+/* Frozen records (Object.freeze). The rc word of a record a program may
+ * freeze (llvm/shapes.ts) carries SCR_RC_FROZEN beside its count, and that
+ * record's emitted release ignores the bit. On 64-bit targets the bit is in
+ * the high half, outside the count; on 32-bit targets it is the count's bit
+ * 30, which SCR_RC_REFS masks. An immortal word has the bit set too; it
+ * does not read as frozen. */
+#if SIZE_MAX > UINT32_MAX
+#define SCR_RC_FROZEN ((size_t)1 << 62)
+#define SCR_RC_REFS(obj) SCR_RC_COUNT(obj)
+#else
+#define SCR_RC_FROZEN ((size_t)1 << 30)
+#define SCR_RC_REFS(obj) (SCR_RC_COUNT(obj) == SCR_RC_IMMORTAL ? SCR_RC_IMMORTAL : SCR_RC_COUNT(obj) & ~SCR_RC_FROZEN)
+#endif
+static inline bool scr_rc_frozen(const void *obj) {
+  size_t word = *(const size_t *)obj;
+  return word != SIZE_MAX && (word & SCR_RC_FROZEN) != 0;
+}
+
 /* The class id in the high half of `obj`'s rc word, or 0 for an object
- * without one: the high half of any other object's word is 0, or 0xffffffff
- * (immortal) or 0x80000000 (program-lifetime), and a class id is never one of
- * these. */
+ * without one: the high half of any other object's word is 0, 0xffffffff
+ * (immortal), 0x80000000 (program-lifetime) or 0x40000000 (a frozen record),
+ * and a class id is never one of these. */
 static inline uint32_t scr_rc_class_id(const void *obj) {
 #if SIZE_MAX > UINT32_MAX
   uint32_t high = (uint32_t)(*(const size_t *)obj >> 32);
-  return high == UINT32_MAX || high == UINT32_C(0x80000000) ? 0 : high;
+  return high == UINT32_MAX || high == UINT32_C(0x80000000) || high == UINT32_C(0x40000000) ? 0 : high;
 #else
   (void)obj;
   return 0;
@@ -552,6 +570,14 @@ _Static_assert(sizeof(((ScrCycHdr *)0)->gen) == 1 && SCR_CYC_OLD == 2,
  * depth; deeper objects wait until the outer disposal drains the worklist.
  * The callback owns the object and must release its children and free it. */
 void scr_rc_destroy(void *obj, void (*destroy)(void *));
+/* scr_rc_destroy for an emitted teardown that keeps the blocks it frees in
+ * a segment, linked through their first words, instead of freeing them onto
+ * the free list (llvm/shapes.ts): destroy_seg tears obj down, appending its
+ * blocks after the segment's last link `tail`, and returns the new last
+ * link, which this returns. A disposal past the depth budget is queued with
+ * `destroy`, which frees its own blocks, and leaves `tail` as it was. */
+void *scr_rc_destroy_seg(void *obj, void *(*destroy_seg)(void *, void *),
+                         void (*destroy)(void *), void *tail);
 
 /* RC hooks for cycle-headered types. on_release: rc was decremented and
  * stayed above zero — buffer the object as a possible cycle root (may run
@@ -725,12 +751,14 @@ void scr_pub_dyn_fn(void *v, ScrPub *ctx);
 void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem);
 void scr_pub_map(void *v, ScrPub *ctx, ScrPubFn key, ScrPubFn val);
 void scr_publish_refuse(const char *message);
-/* Writes into published objects (emitted guards): Node's frozen-object
- * TypeErrors. scr_throw_published_array answers false (and throws nothing)
- * when Node's operation would not write the array. */
+/* Writes into published or frozen objects (emitted guards): Node's
+ * frozen-object TypeErrors. The array guards answer false (and throw
+ * nothing) when Node's operation would not write the array; their ops are
+ * scr_array_frozen_error's (scr_array.h). */
 struct ScrArr;
 SCR_COLD void scr_throw_published_field(const char *prop, const char *owner);
 bool scr_throw_published_array(int op, const struct ScrArr *a, double index, double n);
+bool scr_throw_published_array_range(int op, const struct ScrArr *a, double x, double y, double z);
 SCR_COLD void scr_throw_published_collection(bool set);
 
 /* Young-in nursery (scr_cycle.c built with SCR_YIN, linked by programs

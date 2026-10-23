@@ -420,6 +420,11 @@ enum { SCR_NET_K_SERVER = 1, SCR_NET_K_SOCKET = 2 };
 struct ScrNetServer {
   int kind; /* FIRST: poller udata routes on it */
   size_t rc;
+  /* The AsyncLocalStorage contexts of the listen() and close() calls
+   * (+1, NULL outside a store): 'listening', 'connection' and 'error' run
+   * in the first, 'close' and the close() callbacks in the second, as
+   * Node runs them in its handle's and its close request's contexts. */
+  ScrAlsCtx *listen_ctx, *close_ctx;
   int fd; /* -1 while not listening */
   int port;
   bool listening;
@@ -489,6 +494,14 @@ struct ScrNetServer {
 struct ScrNetSocket {
   int kind; /* FIRST: poller udata routes on it */
   size_t rc;
+  /* The AsyncLocalStorage context of the socket's creation (+1, NULL
+   * outside a store): its I/O events ('connect', 'data', 'end', 'close',
+   * 'error', 'timeout') run in it, as Node runs them in its handle's
+   * context. An accepted socket has none, except under an HTTP or TLS
+   * server, whose sockets take the server's listen() context. end_ctx is
+   * the end() call's context, for 'finish' and the end() callback (Node's
+   * shutdown request). */
+  ScrAlsCtx *als, *end_ctx;
   int fd; /* -1 once closed */
   bool unrefd; /* socket.unref(): does not keep the loop alive */
   bool connecting;
@@ -675,6 +688,13 @@ static SCR_TL ScrPoller *scr_net_poller = NULL;
 
 static void scr_net_close_fd_raw(int fd); /* forget-then-close, defined below */
 
+/* The listen() call's context: the server's 'listening', 'connection'
+ * and 'error' events run in it. */
+static void scr_net_server_capture_listen(ScrNetServer *s) {
+  scr_als_ctx_release(s->listen_ctx);
+  s->listen_ctx = scr_als_capture();
+}
+
 ScrNetServer *scr_net_server_retain(ScrNetServer *s) {
   if (s->rc != SIZE_MAX) s->rc++;
   return s;
@@ -690,6 +710,8 @@ void scr_net_server_release(ScrNetServer *s) {
     scr_net_ls_drop(&s->listening_cbs);
     scr_net_ls_drop(&s->timeout_ls);
     scr_net_ls_drop(&s->drop_ls);
+    scr_als_ctx_release(s->listen_ctx);
+    scr_als_ctx_release(s->close_ctx);
     scr_closure_release(s->close_override);
     for (size_t i = 0; i < 5; i++) scr_dyn_release(s->http_timeout_dyn[i]);
     scr_dyn_release(s->drop_max_connection);
@@ -728,6 +750,8 @@ void scr_net_sock_release(ScrNetSocket *s) {
     scr_net_ls_drop(&s->finish_ls);
     scr_net_ls_drop(&s->wcb_ls);
     scr_net_ls_drop(&s->ready_ls);
+    scr_als_ctx_release(s->als);
+    scr_als_ctx_release(s->end_ctx);
     scr_str_release(s->pending_err);
     scr_str_release(s->remote_cache);
     for (size_t i = 0; i < s->dial_n; i++) scr_str_release(s->dial_ips[i]);
@@ -972,6 +996,7 @@ static ScrNetSocket *scr_net_sock_new(void) {
   s->kind = SCR_NET_K_SOCKET;
   s->rc = 1;
   s->fd = -1;
+  s->als = scr_als_capture();
 #ifdef SCR_RC_AUDIT
   scr_net_live++;
 #endif
@@ -1682,6 +1707,7 @@ ScrNetServer *scr_net_create_server(ScrClosure *handler /*moves, nullable*/, Scr
  * listen: IPv6 any with dual-stack when the kernel allows, IPv4 fallback. */
 static void scr_net_listen_any(ScrNetServer *s, double port, bool reuse_port,
                                ScrClosure *cb /*moves, nullable*/) {
+  scr_net_server_capture_listen(s);
   if (cb) scr_net_ls_add(&s->listening_cbs, cb, NULL, true);
   if (s->listening || s->close_emitted) return;
   if (!scr_net_poller_init()) {
@@ -1760,6 +1786,7 @@ void scr_net_listen(ScrNetServer *s, double port, ScrClosure *cb /*moves, nullab
 static void scr_net_listen_opts_impl(ScrNetServer *s, double port, ScrStr *host /*borrowed*/,
                                      bool ipv6_only, bool reuse_port,
                                      ScrClosure *cb /*moves, nullable*/) {
+  scr_net_server_capture_listen(s);
   if (host == NULL || host->len == 0) {
     scr_net_listen_any(s, port, reuse_port, cb);
     return;
@@ -1975,6 +2002,8 @@ void scr_net_server_close_direct(ScrNetServer *s, ScrClosure *cb /*moves, nullab
     scr_closure_release(cb);
     return;
   }
+  scr_als_ctx_release(s->close_ctx);
+  s->close_ctx = scr_als_capture();
   if (cb) scr_net_ls_add(&s->close_ls, cb, NULL, true);
   if (s->listening) {
     scr_net_close_fd_raw(s->fd); /* stops accepting NOW (registrations dropped first) */
@@ -2118,17 +2147,22 @@ void scr_net_server_on_client_error(ScrNetServer *s, ScrClosure *cb /*moves*/, v
 
 typedef void (*ScrNetClientErrorFn)(ScrClosure *, ScrError *, ScrNetSocket *);
 
+/* Node emits 'tlsClientError' from the accepted connection's handshake,
+ * which has no AsyncLocalStorage store, not from the server's listen()
+ * context the connection's other events run in. */
 void scr_net_server_fire_client_error(ScrNetServer *s, ScrError *err /*borrowed*/,
                                       ScrNetSocket *sock /*borrowed*/) {
   if (s->client_error_ls.n == 0) return;
   ScrNetL *snap;
   size_t n = scr_net_ls_snapshot(&s->client_error_ls, &snap);
+  ScrAlsCtx *prev = scr_als_dispatch_enter(NULL);
   scr_dyn_this_push(s, SCR_DYNH_NET_SERVER);
   for (size_t i = 0; i < n; i++) {
     if (!scr_exc_pending()) ((ScrNetClientErrorFn)snap[i].fn)(snap[i].cb, err, sock);
     scr_closure_release(snap[i].cb);
   }
   scr_dyn_this_pop();
+  scr_als_dispatch_leave(prev);
   free(snap);
 }
 
@@ -2274,6 +2308,13 @@ static void scr_net_server_accept(ScrNetServer *srv) {
       continue;
     }
     ScrNetSocket *sock = scr_net_sock_new();
+    /* Node runs an accepted socket's own events with no store, except
+     * under the protocol layer (an HTTP or TLS server), whose connections
+     * run in the listen() context this accept runs in. */
+    if (!srv->native_conn && !srv->defer_conn) {
+      scr_als_ctx_release(sock->als);
+      sock->als = NULL;
+    }
     sock->fd = fd;
     sock->server = scr_net_server_retain(srv);
     srv->nconns++;
@@ -2825,6 +2866,7 @@ void scr_net_server_address_check(ScrNetServer *s) {
  * deferred 'error', success the deferred 'listening', as for a port. */
 void scr_net_listen_path(ScrNetServer *s, ScrStr *path /*borrowed*/,
                          ScrClosure *cb /*moves, nullable*/) {
+  scr_net_server_capture_listen(s);
   /* Node's isPipeName: a string that reads as a non-negative number is a port */
   double port = scr_string_to_number(path);
   if (port >= 0) {
@@ -3127,6 +3169,8 @@ void scr_net_sock_end(ScrNetSocket *s) {
   }
   if (s->fd < 0 || s->wr_ending) return;
   s->wr_ending = true;
+  scr_als_ctx_release(s->end_ctx);
+  s->end_ctx = scr_als_capture();
   scr_net_sock_maybe_finish_write(s);
   if (s->rd_eof && s->wr_done) scr_net_sock_close_fd(s);
 }
@@ -3233,6 +3277,62 @@ void scr_net_sock_on_finish(ScrNetSocket *s, ScrClosure *cb /*moves*/) {
   if (s->wr_done) s->finish_pending = true; /* already finished: next sweep */
 }
 
+/* The context the socket's events run in from now on (borrowed): an HTTP
+ * agent hands a pooled socket to another request. */
+void scr_net_sock_set_context(ScrNetSocket *s, ScrAlsCtx *ctx) {
+  ScrAlsCtx *next = scr_als_ctx_retain(ctx);
+  scr_als_ctx_release(s->als);
+  s->als = next;
+}
+
+/* A write callback runs in the write() call's AsyncLocalStorage context
+ * (Node's write request): with a store active, the list holds a closure
+ * that enters it around the callback. caps[0] is the callback, caps[1]
+ * the context. */
+static void *scr_net_ctx_retain_v(void *c) { return scr_als_ctx_retain(c); }
+static void scr_net_ctx_release_v(void *c) { scr_als_ctx_release(c); }
+
+static void scr_net_ctx_fire0(ScrClosure *self) {
+  ScrClosure *cb = scr_box_get_ref(self->caps[0]);
+  ScrAlsCtx *ctx = scr_box_get_ref(self->caps[1]);
+  ScrAlsCtx *prev = scr_als_dispatch_enter(ctx);
+  ((void (*)(ScrClosure *))cb->fn)(cb);
+  scr_als_dispatch_leave(prev);
+  scr_als_ctx_release(ctx);
+  scr_closure_release(cb);
+}
+
+static void scr_net_dyn_fire_arg(ScrClosure *cb, const ScrDyn *arg);
+
+static void scr_net_ctx_fire_arg(ScrClosure *self, const ScrDyn *arg) {
+  ScrClosure *cb = scr_box_get_ref(self->caps[0]);
+  ScrAlsCtx *ctx = scr_box_get_ref(self->caps[1]);
+  ScrAlsCtx *prev = scr_als_dispatch_enter(ctx);
+  scr_net_dyn_fire_arg(cb, arg);
+  scr_als_dispatch_leave(prev);
+  scr_als_ctx_release(ctx);
+  scr_closure_release(cb);
+}
+
+/* Adds a write callback (moves) with its firing adapter (NULL: a
+ * zero-argument closure; scr_net_dyn_fire_arg: a dyn listener). */
+static __attribute__((noinline)) ScrClosure *scr_net_bind_write_cb(ScrClosure *cb /*moves*/, void **fn,
+                                                                    ScrAlsCtx *active) {
+  ScrClosure *bound = scr_closure_new(*fn == NULL ? (void *)scr_net_ctx_fire0 : NULL, 2);
+  bound->caps[0] = scr_box_new(SCR_BOX_FUNC);
+  scr_box_set_ref(bound->caps[0], cb);
+  bound->caps[1] = scr_box_new_obj(scr_net_ctx_retain_v, scr_net_ctx_release_v, NULL);
+  scr_box_set_ref(bound->caps[1], scr_als_ctx_retain(active));
+  if (*fn != NULL) *fn = (void *)&scr_net_ctx_fire_arg;
+  return bound;
+}
+
+static void scr_net_sock_add_write_cb(ScrNetSocket *s, ScrClosure *cb, void *fn) {
+  ScrAlsCtx *active = *SCR_ALS_SLOT();
+  if (active != NULL) cb = scr_net_bind_write_cb(cb, &fn, active);
+  scr_net_ls_add(&s->wcb_ls, cb, fn, true);
+}
+
 /* write(chunk, callback): fires when the write buffer drains (this
  * surface's flush moment), from the sweep. */
 void scr_net_sock_on_write_flush(ScrNetSocket *s, ScrClosure *cb /*moves*/) {
@@ -3240,7 +3340,7 @@ void scr_net_sock_on_write_flush(ScrNetSocket *s, ScrClosure *cb /*moves*/) {
     scr_closure_release(cb);
     return;
   }
-  scr_net_ls_add(&s->wcb_ls, cb, NULL, true);
+  scr_net_sock_add_write_cb(s, cb, NULL);
 }
 
 double scr_net_sock_bytes_written(ScrNetSocket *s) { return (double)s->bytes_written; }
@@ -4642,8 +4742,8 @@ void scr_net_server_close_dyn(ScrNetServer *s, const ScrDyn *listener /*borrowed
 
 void scr_net_sock_on_write_flush_dyn(ScrNetSocket *s, const ScrDyn *listener /*borrowed*/) {
   if (s->close_emitted) return;
-  scr_net_ls_add(&s->wcb_ls, scr_dyn_listener_closure_fn(listener, (void *)&scr_net_dyn_fire_arg),
-                 (void *)&scr_net_dyn_fire_arg, true);
+  scr_net_sock_add_write_cb(s, scr_dyn_listener_closure_fn(listener, (void *)&scr_net_dyn_fire_arg),
+                            (void *)&scr_net_dyn_fire_arg);
 }
 
 /* socket.setTimeout(ms[, callback]) as the program calls it: Node's
@@ -5454,7 +5554,9 @@ static void scr_net_sweep(void) {
         ((sock->tops && sock->t_est && sock->tops->pending && sock->tops->pending(sock->tctx)) ||
          (!sock->tops && sock->rlen > sock->rhead))) {
       /* deliver bytes the kernel can't re-signal (see flags_pending) */
+      ScrAlsCtx *prev = scr_als_dispatch_enter(sock->als);
       scr_net_sock_read(sock);
+      scr_als_dispatch_leave(prev);
       if (scr_exc_pending()) {
         scr_net_sock_release(sock);
         return;
@@ -5476,14 +5578,18 @@ static void scr_net_sweep(void) {
     }
     if (sock->finish_pending) {
       sock->finish_pending = false;
+      ScrAlsCtx *prev = scr_als_dispatch_enter(sock->end_ctx);
       scr_net_fire0_this(&sock->finish_ls, sock, SCR_DYNH_NET_SOCKET);
+      scr_als_dispatch_leave(prev);
       if (scr_exc_pending()) {
         scr_net_sock_release(sock);
         return;
       }
     }
     if (sock->lookup_evs != NULL && sock->pending_err) {
+      ScrAlsCtx *prev = scr_als_dispatch_enter(sock->als);
       scr_net_lookup_ops->flush(sock);
+      scr_als_dispatch_leave(prev);
       if (scr_exc_pending()) {
         scr_net_sock_release(sock);
         return;
@@ -5497,6 +5603,7 @@ static void scr_net_sweep(void) {
        * teardown without an event); unconsumed errors fall through to the socket's own
        * listeners — and the unhandled-'error' exit */
       bool consumed = false;
+      ScrAlsCtx *prev = scr_als_dispatch_enter(sock->als);
       if (sock->native_err) consumed = sock->native_err(sock->native_ctx, msg);
       if (!consumed && !scr_exc_pending()) {
         ScrError *coded = NULL;
@@ -5510,6 +5617,7 @@ static void scr_net_sweep(void) {
         scr_event_error_payload = saved;
         if (coded != NULL) scr_error_release(coded);
       }
+      scr_als_dispatch_leave(prev);
       sock->pending_code = NULL;
       scr_str_release(msg);
       if (scr_exc_pending()) {
@@ -5518,7 +5626,10 @@ static void scr_net_sweep(void) {
       }
     }
     if (sock->emit_close && !sock->close_emitted && sock->fd < 0) {
-      if (!scr_net_sock_settle(sock)) {
+      ScrAlsCtx *prev = scr_als_dispatch_enter(sock->als);
+      bool settled = scr_net_sock_settle(sock);
+      scr_als_dispatch_leave(prev);
+      if (!settled) {
         scr_net_sock_release(sock);
         return;
       }
@@ -5532,7 +5643,9 @@ static void scr_net_sweep(void) {
     scr_net_server_retain(srv);
     if (srv->emit_listening) {
       srv->emit_listening = false;
+      ScrAlsCtx *prev = scr_als_dispatch_enter(srv->listen_ctx);
       scr_net_fire0_this(&srv->listening_cbs, srv, SCR_DYNH_NET_SERVER);
+      scr_als_dispatch_leave(prev);
       if (scr_exc_pending()) {
         scr_net_server_release(srv);
         return;
@@ -5541,7 +5654,9 @@ static void scr_net_sweep(void) {
     if (srv->pending_err) {
       ScrStr *msg = srv->pending_err;
       srv->pending_err = NULL;
+      ScrAlsCtx *prev = scr_als_dispatch_enter(srv->listen_ctx);
       scr_net_fire_err_this(&srv->err_ls, msg, srv, SCR_DYNH_NET_SERVER);
+      scr_als_dispatch_leave(prev);
       scr_str_release(msg);
       /* A failed listen SETTLES the handle: listeners drop (an error
        * listener capturing its own server would otherwise cycle forever —
@@ -5577,7 +5692,9 @@ static void scr_net_sweep(void) {
     }
     if (due == NULL) return;
     scr_net_server_retain(due);
+    ScrAlsCtx *prev = scr_als_dispatch_enter(due->close_ctx);
     scr_net_server_settle(due);
+    scr_als_dispatch_leave(prev);
     scr_net_server_release(due);
     if (scr_exc_pending()) return;
   }
@@ -5611,6 +5728,70 @@ bool scr_loop_io_take(void);
 bool scr_loop_io_more(void);
 void scr_loop_io_reopen(void);
 
+/* One poller event of a socket; false with an exception pending. */
+static bool scr_net_sock_event(ScrNetSocket *s, unsigned events) {
+  if (events & SCRP_TIMER) {
+    /* the idle period elapsed: 'timeout' fires once (one-shot — the
+     * next activity re-arms); the socket stays open, like Node */
+    s->timeout_armed = false;
+    if (s->native_timeout) {
+      s->native_timeout(s->native_ctx);
+      if (scr_exc_pending()) return false;
+    }
+    if (s->server && s->server->http_timeout_surface &&
+        s->native_http_timeout) {
+      ScrNetServer *srv = scr_net_server_retain(s->server);
+      bool handled = s->native_http_timeout(s->native_ctx);
+      if (scr_exc_pending()) {
+        scr_net_server_release(srv);
+        return false;
+      }
+      bool server_handled = srv->timeout_ls.n > 0;
+      if (server_handled) {
+        ScrNetL *snap;
+        size_t count = scr_net_ls_snapshot(&srv->timeout_ls, &snap);
+        scr_dyn_this_push(srv, SCR_DYNH_NET_SERVER);
+        for (size_t j = 0; j < count; j++) {
+          if (!scr_exc_pending()) ((ScrNetConnFn)snap[j].fn)(snap[j].cb, scr_net_sock_retain(s));
+          scr_closure_release(snap[j].cb);
+        }
+        scr_dyn_this_pop();
+        free(snap);
+      }
+      if (!handled && !server_handled && !scr_exc_pending())
+        scr_net_sock_destroy(s); /* Node's unhandled server timeout */
+      scr_net_server_release(srv);
+      if (scr_exc_pending()) return false;
+    }
+    scr_net_fire0_this(&s->timeout_ls, s, SCR_DYNH_NET_SOCKET);
+    if (scr_exc_pending()) return false;
+    if (s->fd < 0) return true;
+  }
+  /* kqueue delivers one direction per event (today's exact order);
+   * epoll may coalesce both into one — writes first (connect
+   * completion, flushes), then reads, re-checking the fd a write
+   * failure may have closed. */
+  if (events & SCRP_WRITABLE) {
+    if (s->connecting) scr_net_sock_connect_done(s);
+    else if (s->tunnel != NULL) scr_net_sock_tunnel_pump(s);
+    else if (s->tops && !s->t_est) {
+      s->t_want_write = false;
+      scr_net_sock_transport_pump(s);
+      if (!scr_exc_pending() && s->fd >= 0) scr_net_sock_update_write(s);
+    } else {
+      s->t_want_write = false;
+      if (s->tops && s->tops->drain) s->tops->drain(s->tctx);
+      scr_net_sock_flush(s);
+    }
+  }
+  if ((events & SCRP_READABLE) && !scr_exc_pending() && s->fd >= 0) {
+    if (s->tunnel != NULL) scr_net_sock_tunnel_pump(s);
+    else if (s->tops && !s->t_est) scr_net_sock_transport_pump(s);
+    else scr_net_sock_read(s);
+  }
+  return true;
+}
+
 static void scr_net_dispatch(void) {
   if (!scr_net_servers && !scr_net_socks &&
       !scr_net_proto_pending()) {
@@ -5636,72 +5817,22 @@ static void scr_net_dispatch(void) {
       if (!udata) continue;
       int kind = *(int *)udata;
       if (kind == SCR_NET_K_SERVER) {
-        scr_net_server_accept((ScrNetServer *)udata);
+        /* 'connection' runs in the context of the listen() call. */
+        ScrNetServer *srv = (ScrNetServer *)udata;
+        ScrAlsCtx *prev = scr_als_dispatch_enter(srv->listen_ctx);
+        scr_net_server_accept(srv);
+        scr_als_dispatch_leave(prev);
       } else if (kind == SCR_NET_K_SOCKET) {
         ScrNetSocket *s = (ScrNetSocket *)udata;
         /* A callback earlier in this batch may have closed this fd
          * (destroy inside a data listener) — its remaining events are
          * stale; the handle itself stays alive until the sweep. */
         if (s->fd < 0) continue;
-        if (evs[i].events & SCRP_TIMER) {
-          /* the idle period elapsed: 'timeout' fires once (one-shot — the
-           * next activity re-arms); the socket stays open, like Node */
-          s->timeout_armed = false;
-          if (s->native_timeout) {
-            s->native_timeout(s->native_ctx);
-            if (scr_exc_pending()) return;
-          }
-          if (s->server && s->server->http_timeout_surface &&
-              s->native_http_timeout) {
-            ScrNetServer *srv = scr_net_server_retain(s->server);
-            bool handled = s->native_http_timeout(s->native_ctx);
-            if (scr_exc_pending()) {
-              scr_net_server_release(srv);
-              return;
-            }
-            bool server_handled = srv->timeout_ls.n > 0;
-            if (server_handled) {
-              ScrNetL *snap;
-              size_t count = scr_net_ls_snapshot(&srv->timeout_ls, &snap);
-              scr_dyn_this_push(srv, SCR_DYNH_NET_SERVER);
-              for (size_t j = 0; j < count; j++) {
-                if (!scr_exc_pending()) ((ScrNetConnFn)snap[j].fn)(snap[j].cb, scr_net_sock_retain(s));
-                scr_closure_release(snap[j].cb);
-              }
-              scr_dyn_this_pop();
-              free(snap);
-            }
-            if (!handled && !server_handled && !scr_exc_pending())
-              scr_net_sock_destroy(s); /* Node's unhandled server timeout */
-            scr_net_server_release(srv);
-            if (scr_exc_pending()) return;
-          }
-          scr_net_fire0_this(&s->timeout_ls, s, SCR_DYNH_NET_SOCKET);
-          if (scr_exc_pending()) return;
-          if (s->fd < 0) continue;
-        }
-        /* kqueue delivers one direction per event (today's exact order);
-         * epoll may coalesce both into one — writes first (connect
-         * completion, flushes), then reads, re-checking the fd a write
-         * failure may have closed. */
-        if (evs[i].events & SCRP_WRITABLE) {
-          if (s->connecting) scr_net_sock_connect_done(s);
-          else if (s->tunnel != NULL) scr_net_sock_tunnel_pump(s);
-          else if (s->tops && !s->t_est) {
-            s->t_want_write = false;
-            scr_net_sock_transport_pump(s);
-            if (!scr_exc_pending() && s->fd >= 0) scr_net_sock_update_write(s);
-          } else {
-            s->t_want_write = false;
-            if (s->tops && s->tops->drain) s->tops->drain(s->tctx);
-            scr_net_sock_flush(s);
-          }
-        }
-        if ((evs[i].events & SCRP_READABLE) && !scr_exc_pending() && s->fd >= 0) {
-          if (s->tunnel != NULL) scr_net_sock_tunnel_pump(s);
-          else if (s->tops && !s->t_est) scr_net_sock_transport_pump(s);
-          else scr_net_sock_read(s);
-        }
+        /* The socket's events run in its AsyncLocalStorage context. */
+        ScrAlsCtx *prev = scr_als_dispatch_enter(s->als);
+        bool ok = scr_net_sock_event(s, evs[i].events);
+        scr_als_dispatch_leave(prev);
+        if (!ok) return;
       }
       if (scr_exc_pending()) return;
     }

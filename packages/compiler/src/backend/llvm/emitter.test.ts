@@ -499,6 +499,27 @@ test("class brand probes compare the program's key constant before the key text"
   const named = work(probe("dyn.typedRefIs"), dyn);
   expect(named).toContain("; ->v.typed_ref.type_key");
   expect(named).toContain("@scr_dyn_typed_ref_is_key");
+  // Another key pointer is rejected on its length and last eight bytes
+  // ("Example" plus the prefix's ':') before the out-of-line comparison.
+  expect(named).toContain("; ->v.typed_ref.type_key_len");
+  expect(named).toContain("and i32 %t");
+  expect(named).toMatch(/icmp eq i32 %t\d+, 14\b/);
+  const tail = Buffer.from("object:Example").readBigInt64LE(6);
+  expect(named).toContain(`icmp eq i64 %t`);
+  expect(named).toContain(`, ${tail}`);
+  const shortKey: IrExpr = { kind: "strLit", value: "o:E", type: STRING, loc: receiverLoc };
+  const short = work(
+    {
+      kind: "libCall",
+      fn: "dyn.typedRefIs",
+      args: [ref(dyn), shortKey],
+      type: BOOL,
+      loc: receiverLoc,
+    },
+    dyn,
+  );
+  expect(short).toMatch(/icmp eq i32 %t\d+, 3\b/);
+  expect(short).not.toContain("load i64");
   // The key-pointer test answers false for capsules boxed elsewhere.
   const exact = work(probe("dyn.typedRefKeyIs"), dyn);
   expect(exact).toContain("; ->v.typed_ref.type_key");

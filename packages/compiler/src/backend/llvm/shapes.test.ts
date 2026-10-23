@@ -14,6 +14,7 @@ import {
   type ShapeHost,
   vAdapters,
 } from "./shapes.js";
+import { mangleRecordRelease } from "../mangle.js";
 import { NullableUnions } from "./nullable-unions.js";
 import { InlineUnionFields } from "./inline-unions.js";
 
@@ -314,6 +315,42 @@ describe("emitted object releases", () => {
     expect(root.indexOf("enqueue:")).toBeLessThan(
       root.indexOf("call void @scr_cyc_on_release(ptr %o)"),
     );
+  });
+
+  test("freezable records count their references without the frozen bit", () => {
+    const mod: IrModule = {
+      irVersion: 17,
+      sourceFile: "frozen.ts",
+      entry: "main",
+      functions: [],
+      records: [
+        { id: "plain", fields: [{ name: "n", type: F64 }] },
+        { id: "frozen", fields: [{ name: "n", type: F64 }], freezable: true },
+      ],
+    };
+    const body = (defs: string, name: string): string =>
+      new RegExp(`^define internal void @${name}\\([^]*?^}`, "m").exec(defs)?.[0] ?? "";
+    for (const [pointerBits, notFrozen, sharedBelow] of [
+      [64, "-4611686018427387905", "-4611686018427387907"],
+      [32, "-1073741825", "-1073741827"],
+    ] as const) {
+      const { host } = declarationHost(pointerBits);
+      const defs = emitRecordShapes({ ...host, objectAudit: false }, mod).defs.join("\n");
+      const S = pointerBits === 64 ? "i64" : "i32";
+      const plain = body(defs, mangleRecordRelease("plain"));
+      expect(plain).toContain(`%shared = icmp ult ${S} %rcm2, -3`);
+      expect(plain).not.toContain("%refs");
+      // The immortal word's count is ~FROZEN, which the compare sends to the
+      // immortal test, like counts 0 and 1.
+      const fast = body(defs, mangleRecordRelease("frozen"));
+      expect(fast).toContain(`%refs = and ${S} %rc, ${notFrozen}`);
+      expect(fast).toContain(`%rcm2 = sub ${S} %refs, 2`);
+      expect(fast).toContain(`%shared = icmp ult ${S} %rcm2, ${sharedBelow}`);
+      expect(fast).toContain(`%imm = icmp eq ${S} %rc, -1`);
+      const slow = body(defs, `${mangleRecordRelease("frozen")}_slow`);
+      expect(slow).toContain(`%refs = and ${S} %n, ${notFrozen}`);
+      expect(slow).toContain(`%dead = icmp eq ${S} %refs, 0`);
+    }
   });
 });
 

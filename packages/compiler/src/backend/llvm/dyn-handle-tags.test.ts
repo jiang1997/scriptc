@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import { DYN_HANDLE_KINDS } from "../../ir/ir.js";
-import { DYN_HANDLE_TAG_NUM } from "./dyn.js";
+import { DYN_HANDLE_TAG_NUM, TEXT_CODEC_TAG_NUM } from "./dyn.js";
 
 // SCR_DYNH_TAGS in scr_dyn.h lists the ScrDynHandleTag values by name, each
 // with an explicit value, so changes that add tags edit different lines. The
@@ -38,4 +38,10 @@ test("the backend's handle tag numbers match scr_dyn.h", () => {
     expect(tag, kind).toBeDefined();
     expect(values.get(tag!), `${kind} (${tag})`).toBe(num);
   }
+});
+
+test("the backend's codec handle tag numbers match scr_dyn.h", () => {
+  const values = new Map(tags.map((tag) => [tag.name, tag.value]));
+  expect(values.get("SCR_DYNH_TEXT_DECODER")).toBe(TEXT_CODEC_TAG_NUM.TextDecoder);
+  expect(values.get("SCR_DYNH_TEXT_ENCODER")).toBe(TEXT_CODEC_TAG_NUM.TextEncoder);
 });

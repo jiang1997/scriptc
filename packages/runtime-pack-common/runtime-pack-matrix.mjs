@@ -148,6 +148,8 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   ["scr_dns_promises.c", all("dgram", "dnsPromises")],
   // Sockets as untyped values run over the dgram unit.
   ["scr_dgram_dyn.c", all("dgram", "dgramDyn")],
+  // TextEncoder and TextDecoder records boxed as untyped values.
+  ["scr_text_codec_dyn.c", "textCodecDyn"],
   ["scr_watch.c", "watch"],
   ["scr_ffi_queue.c", "foreignFfi"],
   ["scr_test.c", "nodeTest"],

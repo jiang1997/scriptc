@@ -189,6 +189,7 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
     e.fn === "stream.setTransform" ||
     e.fn === "stream.setFlush" ||
     e.fn === "stream.setConstruct" ||
+    e.fn === "stream.replaceConstruct" ||
     e.fn === "stream.setWritev" ||
     e.fn === "stream.setWritevDefault"
   ) {
@@ -203,6 +204,7 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
       "stream.setTransform": "t",
       "stream.setFlush": "l",
       "stream.setConstruct": "c",
+      "stream.replaceConstruct": "c",
       "stream.setWritev": "v",
       "stream.setWritevDefault": "v",
     };
@@ -214,6 +216,7 @@ export function emitStreamLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlV
       "stream.setTransform": "scr_stream_set_transform",
       "stream.setFlush": "scr_stream_set_flush",
       "stream.setConstruct": "scr_stream_set_construct",
+      "stream.replaceConstruct": "scr_stream_replace_construct",
       "stream.setWritev": "scr_stream_set_writev",
       "stream.setWritevDefault": "scr_stream_set_writev_default",
     };

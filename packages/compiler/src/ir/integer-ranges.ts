@@ -480,6 +480,7 @@ export function analyzeIntegerRangeFacts(
             return boxedRange(e.localId);
           }
           case "fieldGet":
+          case "arrayGet":
           case "call":
             return slotRange(e);
           default:

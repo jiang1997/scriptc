@@ -440,6 +440,37 @@ test("int32-closed locals keep the int32 range across loops and switches", () =>
   expect(switched.get(afterSwitch)).toEqual(INT32);
 });
 
+test("loop-carried locals written from Int32[] element reads keep the int32 range", () => {
+  const arrType = { kind: "array", elem: F64 } as const;
+  const loop = (localId: string): { after: IrExpr; f: IrFunction } => {
+    const after = ref();
+    // `x = a[x]!` in a loop: a cursor that follows indices stored in the array.
+    const read: IrExpr = {
+      loc,
+      kind: "arrayGet",
+      arr: { loc, kind: "varRef", localId, type: arrType },
+      index: ref(),
+      type: F64,
+    };
+    const f = fn([
+      assign(num(0)),
+      {
+        loc,
+        kind: "while",
+        cond: condition("<", ref("unknown"), num(1)),
+        body: [assign(read)],
+      },
+      observe(after),
+    ]);
+    return { after, f };
+  };
+  const elements = { elements: (arr: IrExpr) => arr.kind === "varRef" && arr.localId === "ints" };
+  const ints = loop("ints");
+  expect(analyzeIntegerRanges(ints.f, elements).get(ints.after)).toEqual(INT32);
+  const floats = loop("floats");
+  expect(analyzeIntegerRanges(floats.f, elements).get(floats.after) ?? null).toBeNull();
+});
+
 test("uint32-closed locals keep the uint32 range across loop back edges", () => {
   // for (let i = 0; i < n; i++) { v = unknown >>> 0; acc = (acc + v) >>> 0; ... }
   const loop = (start: IrExpr | null, writes: IrExpr[]) => {

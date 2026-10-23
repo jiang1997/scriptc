@@ -1387,7 +1387,20 @@
         "evidence": "derived:descendants",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "chapter"
@@ -1437,7 +1450,20 @@
         "evidence": "compiler-dedicated:AsyncLocalStorage",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -1510,7 +1536,20 @@
         "evidence": "compiler-dedicated:asyncLocalStorage.disable",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -1537,7 +1576,20 @@
         "evidence": "compiler-dedicated:asyncLocalStorage.getStore",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -1564,7 +1616,20 @@
         "evidence": "compiler-dedicated:asyncLocalStorage.enterWith",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -1591,7 +1656,20 @@
         "evidence": "compiler-dedicated:asyncLocalStorage.run",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -1618,7 +1696,20 @@
         "evidence": "compiler-dedicated:asyncLocalStorage.exit",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -1922,6 +2013,19 @@
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
           "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs",
           "tests/harness/node-test.test.ts"
         ]
       },
@@ -2484,7 +2588,20 @@
         "evidence": "compiler-dedicated:AsyncLocalStorage",
         "tests": [
           "tests/corpus/2213-async-local-storage.cjs",
-          "tests/corpus/5815-als-callback-context.ts"
+          "tests/corpus/5815-als-callback-context.ts",
+          "tests/corpus/7110-als-completion-callbacks.ts",
+          "tests/corpus/7111-als-bind-snapshot-options.ts",
+          "tests/corpus/7112-als-bind-snapshot-dynamic.mjs",
+          "tests/corpus/7119-als-net-event-context.mjs",
+          "tests/corpus/7380-als-http-event-context.mjs",
+          "tests/corpus/7383-als-stream-events.ts",
+          "tests/corpus/7384-als-stream-events.mjs",
+          "tests/corpus/7385-als-child-process-events.ts",
+          "tests/corpus/7386-als-child-fork-events/main.mjs",
+          "tests/corpus/7387-als-http2-events.mjs",
+          "tests/corpus/7388-als-http2-compat-events.mjs",
+          "tests/corpus/7389-als-http2-secure-events.mjs",
+          "tests/corpus/7391-als-response-end-and-finished.mjs"
         ]
       },
       "anchorSource": "exact"
@@ -52281,6 +52398,8 @@
           "tests/corpus/6294-webcrypto-js-values.mjs",
           "tests/corpus/6295-jose-hs256/main.mjs",
           "tests/corpus/6331-jose-root-entry/main.ts",
+          "tests/corpus/7743-transform-stream-identity.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js",
           "tests/corpus/text-codec-values/main.ts",
           "tests/corpus/webassembly-api.mjs",
           "tests/corpus/webassembly-dylink/main.mjs",
@@ -53433,7 +53552,8 @@
         "tests": [
           "tests/corpus/1423-text-codec.ts",
           "tests/corpus/text-codec-values/main.ts",
-          "tests/corpus/3133-text-decoder-streaming.ts"
+          "tests/corpus/3133-text-decoder-streaming.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js"
         ]
       },
       "anchorSource": "exact"
@@ -53484,7 +53604,8 @@
         "tests": [
           "tests/corpus/1423-text-codec.ts",
           "tests/corpus/text-codec-values/main.ts",
-          "tests/corpus/3133-text-decoder-streaming.ts"
+          "tests/corpus/3133-text-decoder-streaming.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js"
         ]
       },
       "anchorSource": "exact"
@@ -53530,8 +53651,11 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:globals"
+        "status": "partial",
+        "evidence": "compiler-feature:globals.TransformStream",
+        "tests": [
+          "tests/corpus/7743-transform-stream-identity.ts"
+        ]
       },
       "anchorSource": "exact"
     },
@@ -101425,6 +101549,7 @@
           "tests/corpus/5835-util-format-integer-specifiers.ts",
           "tests/corpus/5884-inspect-layout-options.ts",
           "tests/corpus/6428-promisify-callback-functions.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js",
           "tests/corpus/node24-deep-equality-properties.js",
           "tests/corpus/node24-deep-equality.cjs",
           "tests/corpus/node24-deep-equality.ts",
@@ -101953,7 +102078,8 @@
           "tests/corpus/text-codec-values/main.ts",
           "tests/fixtures/node-types/text-codecs.mts",
           "tests/harness/project-config.test.ts",
-          "tests/corpus/3133-text-decoder-streaming.ts"
+          "tests/corpus/3133-text-decoder-streaming.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js"
         ]
       },
       "anchorSource": "exact"
@@ -102074,7 +102200,8 @@
           "tests/corpus/text-codec-values/main.ts",
           "tests/fixtures/node-types/text-codecs.mts",
           "tests/harness/project-config.test.ts",
-          "tests/corpus/3133-text-decoder-streaming.ts"
+          "tests/corpus/3133-text-decoder-streaming.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js"
         ]
       },
       "anchorSource": "exact"
@@ -102184,7 +102311,8 @@
           "tests/corpus/text-codec-values/main.ts",
           "tests/fixtures/node-types/text-codecs.mts",
           "tests/harness/project-config.test.ts",
-          "tests/corpus/3133-text-decoder-streaming.ts"
+          "tests/corpus/3133-text-decoder-streaming.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js"
         ]
       },
       "anchorSource": "exact"
@@ -102213,7 +102341,8 @@
           "tests/corpus/text-codec-values/main.ts",
           "tests/fixtures/node-types/text-codecs.mts",
           "tests/harness/project-config.test.ts",
-          "tests/corpus/3133-text-decoder-streaming.ts"
+          "tests/corpus/3133-text-decoder-streaming.ts",
+          "tests/corpus/7747-text-codec-untyped-slot.js"
         ]
       },
       "anchorSource": "exact"
@@ -111631,6 +111760,7 @@
           "tests/corpus/2630-stream-consumers-errors.ts",
           "tests/corpus/2862-web-readable-async-iteration.ts",
           "tests/corpus/4875-stream-consumers-array-buffer.ts",
+          "tests/corpus/7743-transform-stream-identity.ts",
           "tests/corpus/stream-web-readable.ts",
           "tests/corpus/stream-web-require.cjs",
           "tests/harness/fetch-conformance.test.ts"
@@ -113105,8 +113235,11 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:webstreams"
+        "status": "partial",
+        "evidence": "compiler-feature:webstreams.TransformStream",
+        "tests": [
+          "tests/corpus/7743-transform-stream-identity.ts"
+        ]
       },
       "anchorSource": "exact"
     },

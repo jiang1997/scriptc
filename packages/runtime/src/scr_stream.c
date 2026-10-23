@@ -269,6 +269,7 @@ struct ScrStreamState {
    * destroyed and runs its _destroy once construction completes. */
   bool constructing, destroy_deferred;
   bool construct_finished; /* onConstruct ran: a second callback is ERR_MULTIPLE_CALLBACK */
+  bool construct_called;   /* the construct tick called the hook */
   ScrError *destroy_err; /* owned: the deferred destroy's error */
   ScrClosure *construct_cb;
   ScrStreamPlainInv construct_inv;
@@ -542,6 +543,10 @@ typedef struct ScrStreamTick {
   ScrError *err;   /* owned or NULL (SCR_ST_ERROR) */
   ScrClosure *cb;  /* owned or NULL (SCR_ST_AFTER_WRITE / SCR_ST_WCB_ERR / SCR_ST_WRITE_ERR) */
   bool hold;       /* SCR_ST_AFTER_WRITE: counted in w.after_holds */
+  /* The AsyncLocalStorage context active when the tick was scheduled (+1,
+   * NULL outside a store): Node schedules these steps with
+   * process.nextTick, so their events and callbacks run in it. */
+  ScrAlsCtx *ctx;
   struct ScrStreamTick *next;
 } ScrStreamTick;
 
@@ -558,6 +563,7 @@ static void scr_st_tick(ScrStream *s, ScrStreamTickOp op, ScrError *err /*moves*
   t->op = op;
   t->err = err;
   t->cb = cb;
+  t->ctx = scr_als_capture();
   if (scr_st_tail) scr_st_tail->next = t;
   else scr_st_head = t;
   scr_st_tail = t;
@@ -2157,6 +2163,24 @@ static ScrDyn *scr_stream_wentry_encoding(const ScrStreamState *st, ScrDyn *enc)
   return scr_dyn_retain(enc ? enc : scr_dyn_undefined());
 }
 
+/* A compiled writev whose entries declare `encoding` a string: an entry
+ * without one (an object-mode write passes undefined or null) gets "".
+ * The batch array is the one this call receives. */
+void scr_stream_writev_fill_encodings(ScrDyn *chunks) {
+  if (!chunks || chunks->kind != SCR_DYN_ARR) return;
+  double n = scr_dyn_arr_len(chunks);
+  for (double i = 0; i < n; i++) {
+    ScrDyn *entry = scr_dyn_arr_at(chunks, i); /* +1 */
+    ScrDyn *enc = entry->kind == SCR_DYN_OBJ ? scr_dyn_obj_get(entry, "encoding", 8) : NULL;
+    if (entry->kind == SCR_DYN_OBJ && (!enc || enc->kind == SCR_DYN_UNDEF || enc->kind == SCR_DYN_NULL)) {
+      ScrStr *empty = scr_str_new("", 0);
+      scr_dyn_obj_set(entry, "encoding", 8, scr_dyn_new_str(empty));
+      scr_str_release(empty);
+    }
+    scr_dyn_release(entry);
+  }
+}
+
 /* A batch entry's callback: the write's callback, or Node's nop. */
 static ScrDyn *scr_stream_writev_entry_cb_call(ScrClosure *clo, ScrDyn *const *args, size_t argc) {
   (void)args;
@@ -2675,9 +2699,8 @@ void *scr_stream_native(ScrStream *s, void (*release)(void *)) {
  * way the compiler-emitted dyn thunks do (chunk as Buffer-flavored bytes,
  * encoding 'buffer', the error via the boundary encoding, the completion
  * callback as a callable dyn over the *_done glue). Options that Node's
- * base WOULD consume but have no lowering here (objectMode truthy,
- * decodeStrings:false, non-utf8 defaultEncoding, signal, construct,
- * writev, and read/write/final on the transformish bases) throw the
+ * base WOULD consume but have no lowering here (signal, and
+ * read/write/final on the transformish bases) throw the
  * "not supported yet" Error — the compile-time fence's runtime twin. */
 
 /* The boxed dyn callable (+1 — scr_box_get_ref retains; callers release
@@ -2903,11 +2926,8 @@ static bool scr_stream_parse_dyn_opts(const ScrDyn *opts, char base, ScrStreamDy
     }
   }
   out->construct = scr_stream_dynopt_fn(opts, "construct", 9);
+  /* a Transform's batches reach writev, not the transform, as in Node */
   if (base != 'r') out->writev = scr_stream_dynopt_fn(opts, "writev", 6);
-  if (transformish && out->writev != NULL) {
-    static const char m[] = "the stream option 'writev' on a Transform is not supported yet (batches would bypass the transform)";
-    return scr_stream_dynopt_unsupported(m, sizeof m - 1);
-  }
   {
     /* a known encoding or ERR_UNKNOWN_ENCODING (the states' constructors) */
     ScrDyn *v = scr_dyn_obj_get((ScrDyn *)opts, "defaultEncoding", 15);
@@ -6296,6 +6316,55 @@ ScrStream *scr_stream_set_default_encoding(ScrStream *s, ScrDyn *enc) {
   return scr_stream_retain(s);
 }
 
+/* Whether a defaultEncoding option value is the default: null, undefined,
+ * 'utf8' or 'utf-8' (the state constructors' kDefaultUTF8Encoding). */
+static bool scr_stream_default_encoding_value(const ScrDyn *v) {
+  if (!v || v->kind == SCR_DYN_UNDEF || v->kind == SCR_DYN_NULL) return true;
+  return v->kind == SCR_DYN_STR && ((v->v.str->len == 4 && memcmp(v->v.str->data, "utf8", 4) == 0) ||
+                                    (v->v.str->len == 5 && memcmp(v->v.str->data, "utf-8", 5) == 0));
+}
+
+/* A runtime defaultEncoding option value, checked before construction as
+ * the state constructors check it: the default, a name Buffer.isEncoding
+ * knows, or ERR_UNKNOWN_ENCODING (thrown). Borrows v. */
+void scr_stream_check_encoding_option(ScrDyn *v) {
+  if (scr_stream_default_encoding_value(v)) return;
+  if (v->kind == SCR_DYN_STR) {
+    ScrStr *canonical = scr_bytes_normalize_encoding(v->v.str);
+    if (canonical) scr_str_release(canonical);
+    return;
+  }
+  ScrStr *shown = scr_dyn_string_coerce_js(v);
+  if (!shown) return;
+  char msg[128];
+  int len = snprintf(msg, sizeof msg, "Unknown encoding: %.*s", (int)(shown->len < 64 ? shown->len : 64),
+                     shown->data);
+  scr_str_release(shown);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)(len < 0 ? 0 : len), "ERR_UNKNOWN_ENCODING");
+}
+
+/* Runtime decodeStrings and defaultEncoding option values over a fresh
+ * stream (after its objectMode): decodeStrings === false keeps string
+ * writes, and a known defaultEncoding is the write side's default as
+ * given and how a byte-mode readable side decodes push(string). Borrows
+ * both; answers the receiver (+1). */
+ScrStream *scr_stream_option_values(ScrStream *s, ScrDyn *decode_strings, ScrDyn *default_encoding) {
+  ScrStreamState *st = s->st;
+  if (st->has_w && decode_strings && decode_strings->kind == SCR_DYN_BOOL && !decode_strings->v.b)
+    scr_stream_set_decode_strings(s, false);
+  if (!scr_stream_default_encoding_value(default_encoding) && default_encoding->kind == SCR_DYN_STR) {
+    ScrStr *canonical = scr_bytes_normalize_encoding(default_encoding->v.str);
+    if (canonical) {
+      scr_stream_set_write_encoding(s, default_encoding->v.str);
+      if (st->has_r && !st->r.object_entries) scr_stream_release(scr_stream_set_push_encoding(s, canonical));
+      scr_str_release(canonical);
+    } else if (scr_exc_pending()) {
+      scr_exc_clear(); /* checked before construction */
+    }
+  }
+  return scr_stream_retain(s);
+}
+
 /* stream.objectMode: scr_stream_set_object_mode, answering the receiver
  * (+1). */
 ScrStream *scr_stream_object_mode(ScrStream *s, bool readable, bool writable) {
@@ -7460,6 +7529,17 @@ void scr_stream_set_construct(ScrStream *s, ScrClosure *cb /*moves*/, ScrStreamP
   scr_stream_construct(s, cb, inv);
 }
 
+void scr_stream_replace_construct(ScrStream *s, ScrClosure *cb /*moves*/, ScrStreamPlainInv inv) {
+  ScrStreamState *st = s->st;
+  if (!st->constructing || st->construct_called || !st->construct_cb) {
+    scr_closure_release(cb);
+    return;
+  }
+  scr_closure_release(st->construct_cb);
+  st->construct_cb = cb;
+  st->construct_inv = inv;
+}
+
 /* A class's _writev under options that may carry their own writev (the
  * option, an instance property in Node, wins). */
 void scr_stream_set_writev_default(ScrStream *s, ScrClosure *cb /*moves*/, ScrStreamWritevInv inv) {
@@ -7728,6 +7808,7 @@ static void scr_stream_run_tick(ScrStreamTick *t) {
       scr_stream_error_buffer(s);
       break;
     case SCR_ST_CONSTRUCT: {
+      st->construct_called = true;
       if (st->construct_cb) {
         st->construct_inv(st->construct_cb, s);
         /* a throw inside _construct reaches onConstruct on a tick */
@@ -7759,6 +7840,21 @@ static void scr_stream_run_tick(ScrStreamTick *t) {
 
 static void scr_stream_dispatch(void);
 
+/* A tick runs in the context it was scheduled in. */
+static void scr_stream_run_tick_in_context(ScrStreamTick *t) {
+  ScrAlsCtx *prev = scr_als_dispatch_enter(t->ctx);
+  scr_stream_run_tick(t);
+  scr_als_dispatch_leave(prev);
+}
+
+static void scr_stream_tick_free(ScrStreamTick *t) {
+  scr_stream_release(t->s);
+  if (t->err) scr_error_release(t->err);
+  if (t->cb) scr_closure_release(t->cb);
+  scr_als_ctx_release(t->ctx);
+  free(t);
+}
+
 /* One tick-marker's dispatch: the queue's FIFO head (markers and entries
  * are enqueued 1:1 in the same order). After an uncaught throw the
  * remaining entries drop through the station's exc branch below, keeping
@@ -7768,11 +7864,8 @@ static void scr_stream_dispatch_one(void) {
   if (t == NULL || scr_exc_pending()) return;
   scr_st_head = t->next;
   if (scr_st_head == NULL) scr_st_tail = NULL;
-  scr_stream_run_tick(t);
-  scr_stream_release(t->s);
-  if (t->err) scr_error_release(t->err);
-  if (t->cb) scr_closure_release(t->cb);
-  free(t);
+  scr_stream_run_tick_in_context(t);
+  scr_stream_tick_free(t);
   if (scr_exc_pending()) scr_stream_dispatch(); /* its exc branch drops the rest */
 }
 
@@ -7781,11 +7874,8 @@ static void scr_stream_dispatch(void) {
     ScrStreamTick *t = scr_st_head;
     scr_st_head = t->next;
     if (scr_st_head == NULL) scr_st_tail = NULL;
-    scr_stream_run_tick(t);
-    scr_stream_release(t->s);
-    if (t->err) scr_error_release(t->err);
-    if (t->cb) scr_closure_release(t->cb);
-    free(t);
+    scr_stream_run_tick_in_context(t);
+    scr_stream_tick_free(t);
   }
   /* An uncaught throw ends the process (the loop returns to main): the
    * undelivered ticks are DROPPED — release their references here so the
@@ -7794,10 +7884,7 @@ static void scr_stream_dispatch(void) {
     while (scr_st_head != NULL) {
       ScrStreamTick *t = scr_st_head;
       scr_st_head = t->next;
-      scr_stream_release(t->s);
-      if (t->err) scr_error_release(t->err);
-      if (t->cb) scr_closure_release(t->cb);
-      free(t);
+      scr_stream_tick_free(t);
     }
     scr_st_tail = NULL;
   }

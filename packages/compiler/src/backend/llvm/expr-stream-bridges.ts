@@ -16,6 +16,7 @@ import {
   KEY_ORDER_FIELD,
   shapeKeyOrders,
   isDynTypedRefType,
+  textCodecRecordClass,
   isRefCounted,
   shapeHasAccessorSlots,
   typeKey,
@@ -597,12 +598,21 @@ export function liveDynUnionRefAdapter(
   if (!union) {
     throw new InternalCompilerError(`llvm emitter bug: live dyn ref of unknown union ${t.unionId}`);
   }
+  // Codec records box as their own handles, by reference, through toDynHelper.
+  const codecArm = (arm: IrType): boolean =>
+    textCodecRecordClass(arm, (id) => host.recordsById.get(id)) !== null;
   const mutableArms = union.arms
     .map((arm, tag) => ({ arm, tag }))
     .filter(
-      ({ arm }) => arm.kind !== "bytes" && (streamTypedRefEligible(arm) || isDynTypedRefType(arm)),
+      ({ arm }) =>
+        arm.kind !== "bytes" &&
+        !codecArm(arm) &&
+        (streamTypedRefEligible(arm) || isDynTypedRefType(arm)),
     );
-  if (mutableArms.length === 0 && !union.arms.some((arm) => arm.kind === "bytes")) {
+  if (
+    mutableArms.length === 0 &&
+    !union.arms.some((arm) => arm.kind === "bytes" || codecArm(arm))
+  ) {
     throw new InternalCompilerError(`llvm emitter bug: live dyn ref of immutable union ${key}`);
   }
 
@@ -712,7 +722,13 @@ export function streamTypedRefBoxValue(
     B.line(`${boxed} = call ptr @${host.liveDynUnionRefAdapter(t)}(ptr ${value})`);
     return boxed;
   }
-  if (t.kind === "bytes" || (!streamTypedRefEligible(t) && !isDynTypedRefType(t))) {
+  // A codec record boxes as its own handle, by reference (toDynHelper), as
+  // it does outside a live view.
+  if (
+    t.kind === "bytes" ||
+    textCodecRecordClass(t, (id) => host.recordsById.get(id)) !== null ||
+    (!streamTypedRefEligible(t) && !isDynTypedRefType(t))
+  ) {
     const valueTy = host.llType(t);
     B.line(`${boxed} = call ptr @${host.dyn.toDynHelper(t)}(${valueTy} ${value})`);
     return boxed;

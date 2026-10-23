@@ -42,6 +42,7 @@ const base: NativeLinkFeatures = {
   dgram: false,
   dnsPromises: false,
   dgramDyn: false,
+  textCodecDyn: false,
   watch: false,
   foreignFfi: false,
   nodeTest: false,

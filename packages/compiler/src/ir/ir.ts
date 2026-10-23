@@ -1056,6 +1056,10 @@ export interface IrModule {
    * each one's hierarchy carries a slot word (the slots.* intrinsics;
    * backend/llvm/thread-slots.ts). */
   threadSlotKeys?: string[];
+  /** typeKeys of the array types whose values the program may freeze
+   * (frontend frozen-records.ts): their writes test the array's frozen bit
+   * (SCR_ARR_FROZEN) and throw Node's TypeError when it is set. */
+  freezableArrays?: string[];
   /** The entry module is CommonJS under Node's classification. Node runs a
    * CommonJS main synchronously and drains process.nextTick callbacks
    * before promise jobs at the first checkpoint; an ES-module main's
@@ -1685,6 +1689,10 @@ export interface IrRecordShape {
    * dynCheck), and JSON serialization appends overflow entries after the
    * declared fields in insertion order. */
   indexValue?: IrType;
+  /** Values of this shape may be frozen (frozen-records.ts): their rc word
+   * can carry the frozen bit, which their release ignores, and every write
+   * to them checks it. */
+  freezable?: true;
   /** Field names in FIRST-SEEN declaration order (the checker's property
    * order of the first ts.Type interned to this shape) — metadata, NOT
    * part of the interned identity: a later structurally-equal type with a
@@ -1743,6 +1751,18 @@ export function recordTextCodecClass(shape: IrRecordShape): "TextEncoder" | "Tex
   if (shape.fields.some((f) => f.name === "%TextEncoder")) return "TextEncoder";
   if (shape.fields.some((f) => f.name === "%TextDecoder")) return "TextDecoder";
   return null;
+}
+
+/** The codec class of a TextEncoder or TextDecoder record type, else null.
+ * Such a record crosses an `unknown` slot as a native handle that holds the
+ * record itself (scr_text_codec_dyn.c), never as a copy or a field view. */
+export function textCodecRecordClass(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+): "TextEncoder" | "TextDecoder" | null {
+  if (t.kind !== "record") return null;
+  const shape = getRecord(t.shapeId);
+  return shape ? recordTextCodecClass(shape) : null;
 }
 
 /** Object-literal ACCESSOR properties (`{ get x() {...}, set x(v) {...} }`)
@@ -3898,8 +3918,10 @@ export type IrExpr =
    * not shape equality; missing or wrong-typed fields throw, EXCEPT that a
    * missing key for an undefined-armed union field — an optional field —
    * builds the interned undefined arm instead); arrays check every element;
-   * unions try arms in canonical order and the first FULL match wins (no
-   * match → throw; an undefined arm matches no dyn value); JSON null matches
+   * unions try arms in canonical order, except that record arms with more
+   * required fields and then more fields go first, and the first FULL match
+   * wins (no match → throw; an undefined arm matches no dyn value); JSON
+   * null matches
    * exactly the nullT arm of a union target (bare null targets cannot
    * exist). MAY THROW:
    * backends' may-throw analyses must treat it like a `throw` statement.
@@ -4271,6 +4293,7 @@ export function canConvertToDyn(
   visiting: Set<string> = new Set(),
 ): boolean {
   if (isJsonSafeType(t, getRecord, getUnion)) return true;
+  if (textCodecRecordClass(t, getRecord) !== null) return true;
   // numeric typed arrays and boxable functions are dyn kinds the walker boxes
   // ANYWHERE (bytes and functions held by identity), including nested
   // in records/arrays/unions. isJsonSafeType rejects them, but dynFrom
@@ -4317,6 +4340,7 @@ export function canConvertToDyn(
           // either its result or a promise of it.
           canBoxDynComposite(a, getRecord, getUnion, visiting) ||
           isDynTypedRefType(a) ||
+          textCodecRecordClass(a, getRecord) !== null ||
           a.kind === "classval" ||
           DYN_HANDLE_KINDS.has(a.kind) ||
           (a.kind === "func" && canBoxFuncIntoDyn(a, getRecord, getUnion, visiting)) ||
@@ -4396,7 +4420,8 @@ function canBoxDynCompositeAt(
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
-      if (recordTextCodecClass(shape) !== null) return false;
+      // A codec boxes as its own handle wherever it sits (toDynHelper).
+      if (recordTextCodecClass(shape) !== null) return true;
       // Recursive shapes answer coinductively, like isJsonSafeType.
       if (visiting.has(t.shapeId)) return true;
       visiting.add(t.shapeId);
@@ -4497,6 +4522,8 @@ function canDynCheckToAt(
     visiting.delete(key);
     return result;
   }
+  // A codec handle unboxes to the record it holds.
+  if (textCodecRecordClass(t, getRecord) !== null) return true;
   if (t.kind === "record") {
     const key = typeKey(t);
     if (visiting.has(key)) return false;

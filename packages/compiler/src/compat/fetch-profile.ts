@@ -900,7 +900,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       {
         name: "WritableStream/TransformStream",
         reason:
-          "native support currently covers readable fetch bodies; general Web Streams graphs are unsupported",
+          "native support covers readable fetch bodies and the identity `new TransformStream()`; the WritableStream constructor, transformers, and general Web Streams graphs are unsupported",
       },
       {
         name: "Readable byte/BYOB streams",

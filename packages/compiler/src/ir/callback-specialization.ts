@@ -2,6 +2,7 @@ import type { IrContracts, IrExpr, IrFunction, IrModule, IrStmt } from "./ir.js"
 import { exprFunctionReference, moduleFunctionReferences } from "./function-references.js";
 import { reparseExpr, reparseStmt } from "./serialize.js";
 import { everyStmtList, mapExprChildren, mapStmtChildren } from "./traverse.js";
+import { eachNodeOfKinds, type IrNodeIndex, type IrNodeKind } from "./node-index.js";
 
 /** Largest body (IR nodes) that is copied per callback target. */
 const MAX_FUNCTION_NODES = 300;
@@ -15,11 +16,24 @@ const COPIED_NODE_FRACTION = 0.25;
  * closure it creates writes through its environment (and transitively the
  * closures those create). A parameter or capture absent from its function's
  * set holds the value it entered with for the whole call. */
-export function writtenLocals(mod: IrModule): Map<string, Set<string>> {
-  return rebindings(mod).written;
+export function writtenLocals(mod: IrModule, nodes?: IrNodeIndex): Map<string, Set<string>> {
+  return rebindings(mod, nodes).written;
 }
 
-function rebindings(mod: IrModule): {
+/** The nodes that rebind a local or capture bindings. */
+const REBINDING_KINDS: readonly IrNodeKind[] = [
+  "assign",
+  "forOf",
+  "tryCatch",
+  "assignExpr",
+  "incDec",
+  "closure",
+];
+
+function rebindings(
+  mod: IrModule,
+  nodes?: IrNodeIndex,
+): {
   written: Map<string, Set<string>>;
   /** Bindings of each function that a closure it creates writes. */
   closureWritten: Map<string, Set<string>>;
@@ -27,20 +41,15 @@ function rebindings(mod: IrModule): {
   const written = new Map<string, Set<string>>();
   const closureWritten = new Map<string, Set<string>>();
   const sites: { owner: string; fnName: string; captures: string[] }[] = [];
+  const scan = nodes?.scan(REBINDING_KINDS);
   for (const fn of mod.functions) {
     const ids = new Set<string>();
-    everyStmtList(fn.body, {
-      stmt: (stmt) => {
-        if (stmt.kind === "assign" || stmt.kind === "forOf") ids.add(stmt.localId);
-        if (stmt.kind === "tryCatch" && stmt.catchLocalId !== null) ids.add(stmt.catchLocalId);
-        return true;
-      },
-      expr: (expr) => {
-        if (expr.kind === "assignExpr" || expr.kind === "incDec") ids.add(expr.localId);
-        if (expr.kind === "closure" && expr.captures.length)
-          sites.push({ owner: fn.name, fnName: expr.fnName, captures: expr.captures });
-        return true;
-      },
+    eachNodeOfKinds(fn, scan, (node) => {
+      if (node.kind === "assign" || node.kind === "forOf") ids.add(node.localId);
+      else if (node.kind === "tryCatch" && node.catchLocalId !== null) ids.add(node.catchLocalId);
+      else if (node.kind === "assignExpr" || node.kind === "incDec") ids.add(node.localId);
+      else if (node.kind === "closure" && node.captures.length)
+        sites.push({ owner: fn.name, fnName: node.fnName, captures: node.captures });
     });
     written.set(fn.name, ids);
   }

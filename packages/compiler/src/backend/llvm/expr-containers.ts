@@ -257,6 +257,16 @@ function emitDiscarded(host: LlvmEmitterContext, e: IrExpr): void {
   const start = host.emitExpr(e.args[0]!);
   const count = e.args[1] ? host.emitExpr(e.args[1]).name : F64_INF;
   const values = items.map((item) => host.emitExpr(item));
+  // Before the values move into the buffer: a throw releases them with the
+  // frame.
+  host.emitPublishedArrayGuard(
+    r.name,
+    e.receiver.type,
+    10,
+    start.name,
+    count,
+    f64Lit(values.length),
+  );
   if (acc === "ref") values.forEach((value) => host.toHeap(value));
   let buffer = "null";
   if (values.length > 0) {
@@ -978,7 +988,25 @@ export function emitArrIntrinsic(
     case "fill":
     case "fillUndefined": {
       const args = e.args.map((arg) => host.emitExpr(arg));
-      host.emitPublishedArrayGuard(r.name, e.receiver.type, 7);
+      // fill's range is its last two arguments; copyWithin's target,
+      // start and end are its three.
+      if (e.method === "copyWithin")
+        host.emitPublishedArrayGuard(
+          r.name,
+          e.receiver.type,
+          9,
+          args[0]!.name,
+          args[1]!.name,
+          args[2]!.name,
+        );
+      else
+        host.emitPublishedArrayGuard(
+          r.name,
+          e.receiver.type,
+          8,
+          args[args.length - 2]!.name,
+          args[args.length - 1]!.name,
+        );
       if (host.checkedFills.has(e)) {
         // A new int32 array with checked stores, filled with a value that
         // may not be an int32: widen it first then.
@@ -1042,7 +1070,7 @@ export function emitArrIntrinsic(
       // removes to the end (+Infinity, the slice convention).
       const start = host.emitExpr(e.args[0]!);
       const cnt = e.args[1] ? host.emitExpr(e.args[1]).name : F64_INF;
-      host.emitPublishedArrayGuard(r.name, e.receiver.type, 7);
+      host.emitPublishedArrayGuard(r.name, e.receiver.type, 10, start.name, cnt, f64Lit(0));
       host.declare(`declare ptr @scr_arr_splice(ptr, double, double)`);
       const t = B.tmp();
       B.line(`${t} = call ptr @scr_arr_splice(ptr ${r.name}, double ${start.name}, double ${cnt})`);
@@ -1052,7 +1080,12 @@ export function emitArrIntrinsic(
       const start = host.emitExpr(e.args[0]!);
       const count = host.emitExpr(e.args[1]!);
       const items = emitBorrowedInput(host, e.args[2]!);
-      host.emitPublishedArrayGuard(r.name, e.receiver.type, 7);
+      if (host.publishedTypes?.containerGuarded(e.receiver.type) === true) {
+        host.declare(`declare double @scr_arr_len(ptr)`);
+        const n = B.tmp();
+        B.line(`${n} = call double @scr_arr_len(ptr ${items.name})`);
+        host.emitPublishedArrayGuard(r.name, e.receiver.type, 10, start.name, count.name, n);
+      }
       host.declare(`declare ptr @scr_arr_splice_insert(ptr, double, double, ptr)`);
       const t = B.tmp();
       B.line(

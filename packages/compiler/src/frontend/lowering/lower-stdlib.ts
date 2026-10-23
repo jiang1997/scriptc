@@ -1945,6 +1945,19 @@ export function lowerStaticReadableStreamNew(
   };
 }
 
+/** `new TransformStream()`: the identity transform, a native handle whose
+ * readable side is a native ReadableStream and whose writable side is the
+ * runtime's WritableStream. A transformer or queuing strategies have no
+ * native lowering yet and keep the SC2020 refusal. */
+export function lowerStaticTransformStreamNew(
+  lowerer: Lowerer,
+  expr: ts.NewExpression,
+): IrExpr | null {
+  if (stdlibGlobalNameOf(lowerer, expr.expression) !== "TransformStream") return null;
+  if ((expr.arguments?.nodes.length ?? 0) > 0) return null;
+  return { kind: "libCall", fn: "fetch.transformNew", args: [], type: DYN, loc: locOf(expr) };
+}
+
 /** Native Request and Headers values share the fetch runtime's handles. */
 export function lowerFetchWebNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr | null {
   const name = stdlibGlobalNameOf(lowerer, expr.expression);

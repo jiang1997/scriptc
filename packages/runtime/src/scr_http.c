@@ -209,6 +209,11 @@ void scr_http_set_h2_upgrade_hook(void (*hook)(void *h2ctx, ScrClosure *cb, void
 
 struct ScrHttpReq {
   size_t rc;
+  /* The AsyncLocalStorage context of its creation (+1, NULL outside a
+   * store): the deferred emits run in it (scr_http_proto_sweep). A server
+   * request is created in its connection's dispatch, which runs in the
+   * server's listen() context; a client response in its request's. */
+  ScrAlsCtx *als;
   int status;      /* -1 on server requests (Node's undefined statusCode) */
   ScrStr *method;
   ScrStr *url;
@@ -303,6 +308,7 @@ void scr_http_req_set_encoding(ScrHttpReq *r, ScrStr *enc /*borrowed*/) {
 void scr_http_req_release(ScrHttpReq *r) {
   if (!r || r->rc == SIZE_MAX) return;
   if (--r->rc == 0) {
+    scr_als_ctx_release(r->als);
     scr_str_release(r->method);
     scr_str_release(r->url);
     for (size_t i = 0; i < r->nheaders; i++) {
@@ -950,6 +956,7 @@ static bool scr_http_trailers_replace(ScrHttpTrailers *t, ScrArr *pairs /*borrow
 
 struct ScrHttpRes {
   size_t rc;
+  ScrAlsCtx *als; /* +1: as ScrHttpReq's */
   ScrNetSocket *sock; /* +1; writes after the connection died are no-ops */
   void *h2_stream; /* +1 through scr_http_h2_ops — set on h2 compat
                     * responses; every write path routes to frames */
@@ -990,6 +997,13 @@ struct ScrHttpRes {
   bool req_cleared;
   ScrNetLs close_ls, timeout_ls;
   ScrNetLs finish_ls; /* res.on('finish') — fires deferred once the body went out */
+  /* The AsyncLocalStorage context of the end() call (+1, NULL outside a
+   * store) once `end_ctx_set`: 'finish', the end() callbacks and 'close'
+   * after an end run in it, as Node's do. An http2 compatibility response
+   * never sets it: its events follow the server stream, which has no
+   * store. */
+  ScrAlsCtx *end_als;
+  bool end_ctx_set;
   ScrNetLs endcb_ls;  /* res.end(cb) — fires just before the 'finish' listeners */
   ScrNetLs wcb_ls;    /* res.write(chunk, cb) — fires from the queue */
   bool writable_finished; /* set where Node emits 'finish' (writableFinished) */
@@ -1007,6 +1021,8 @@ ScrHttpRes *scr_http_res_retain(ScrHttpRes *r) {
 void scr_http_res_release(ScrHttpRes *r) {
   if (!r || r->rc == SIZE_MAX) return;
   if (--r->rc == 0) {
+    scr_als_ctx_release(r->als);
+    scr_als_ctx_release(r->end_als);
     for (size_t i = 0; i < r->nheaders; i++) {
       scr_str_release(r->hnames[i]);
       scr_str_release(r->hvalues[i]);
@@ -1937,6 +1953,10 @@ static void scr_http_res_cork_flush(ScrHttpRes *r) {
 
 static void scr_http_res_end_raw(ScrHttpRes *r, const char *data, size_t len) {
   if (r->finished) return;
+  if (!r->end_ctx_set && r->h2_stream == NULL) {
+    r->end_ctx_set = true;
+    r->end_als = scr_als_capture();
+  }
   double expected;
   if (len > 0 && r->head_sent && scr_http_res_expected_length(r, &expected) &&
       (double)(r->strict_bytes_written + len) != expected) {
@@ -2279,9 +2299,28 @@ void scr_http_res_on_write_flush(ScrHttpRes *r, ScrClosure *cb /*moves*/) {
 
 static bool scr_http_proto_pending(void) { return scr_http_emits_head < scr_http_emits_len; }
 
+static ScrAlsCtx *scr_http_client_ctx(struct ScrHttpClientReq *c);
+
+/* The context an emit's handle was created in (borrowed). */
+static ScrAlsCtx *scr_http_emit_ctx(const ScrHttpEmit *e) {
+  switch (e->kind) {
+  case SCR_HTTP_EMIT_RES_CLOSE:
+  case SCR_HTTP_EMIT_RES_FINISH: {
+    const ScrHttpRes *res = (const ScrHttpRes *)e->h;
+    return res->end_ctx_set ? res->end_als : res->als;
+  }
+  case SCR_HTTP_EMIT_RES_WCB: return ((ScrHttpRes *)e->h)->als;
+  case SCR_HTTP_EMIT_REQ_CLOSE:
+  case SCR_HTTP_EMIT_REQ_DRAIN:
+  case SCR_HTTP_EMIT_REQ_ABORTED: return ((ScrHttpReq *)e->h)->als;
+  default: return scr_http_client_ctx((struct ScrHttpClientReq *)e->h);
+  }
+}
+
 static void scr_http_proto_sweep(void) {
   while (scr_http_emits_head < scr_http_emits_len) {
     ScrHttpEmit e = scr_http_emits[scr_http_emits_head++];
+    ScrAlsCtx *prev = scr_als_dispatch_enter(scr_http_emit_ctx(&e));
     switch (e.kind) {
     case SCR_HTTP_EMIT_RES_CLOSE: {
       ScrHttpRes *res = (ScrHttpRes *)e.h;
@@ -2372,6 +2411,7 @@ static void scr_http_proto_sweep(void) {
       break;
     }
     }
+    scr_als_dispatch_leave(prev);
     scr_http_emit_release(&e);
     if (scr_exc_pending()) return;
   }
@@ -2894,6 +2934,7 @@ static bool scr_http_conn_parse_head(ScrHttpConn *conn, size_t head_len, bool *o
   ScrHttpReq *req = calloc(1, sizeof *req);
   if (!req) scr_http_oom();
   req->rc = 1;
+  req->als = scr_als_capture();
   req->status = -1; /* Node: statusCode is undefined on server requests */
   req->gated = true;
   req->join_dup = conn->srv != NULL && conn->srv->join_dup;
@@ -3062,6 +3103,7 @@ static bool scr_http_conn_parse_head(ScrHttpConn *conn, size_t head_len, bool *o
   ScrHttpRes *res = calloc(1, sizeof *res);
   if (!res) scr_http_oom();
   res->rc = 1;
+  res->als = scr_als_capture();
 #ifdef SCR_RC_AUDIT
   scr_http_live++;
 #endif
@@ -3614,6 +3656,7 @@ ScrHttpReq *scr_http_h2_req_new(ScrNetSocket *sock /*borrowed, nullable*/,
   ScrHttpReq *req = calloc(1, sizeof *req);
   if (!req) scr_http_oom();
   req->rc = 1;
+  req->als = scr_als_capture();
   req->status = -1; /* server requests: statusCode is Node's undefined */
   req->http2 = true;
   req->sock = sock ? scr_net_sock_retain(sock) : NULL;
@@ -3685,6 +3728,7 @@ ScrHttpRes *scr_http_h2_res_new(ScrNetSocket *sock /*borrowed, nullable*/,
   ScrHttpRes *res = calloc(1, sizeof *res);
   if (!res) scr_http_oom();
   res->rc = 1;
+  res->als = scr_als_capture();
   res->sock = sock ? scr_net_sock_retain(sock) : NULL;
   res->h2_stream = scr_http_h2_ops->retain(stream);
   res->keep_alive = true; /* inert on h2 — no Connection header exists */
@@ -3794,6 +3838,9 @@ void scr_http_handler_thunk0(ScrClosure *cb, ScrHttpReq *req, ScrHttpRes *res) {
 
 struct ScrHttpClientReq {
   size_t rc;
+  /* The http.request() call's AsyncLocalStorage context (+1): the
+   * request's deferred emits ('socket', 'finish', 'close') run in it. */
+  ScrAlsCtx *als;
   ScrNetSocket *sock; /* +1 */
   ScrHttpConn *conn;  /* borrowed backref (the socket's ctx); NULL after free */
   ScrStr *host, *path, *method;
@@ -3858,6 +3905,7 @@ ScrHttpClientReq *scr_http_client_retain(ScrHttpClientReq *c) {
 void scr_http_client_release(ScrHttpClientReq *c) {
   if (!c || c->rc == SIZE_MAX) return;
   if (--c->rc == 0) {
+    scr_als_ctx_release(c->als);
     scr_net_ls_drop(&c->resp_ls);
     scr_net_ls_drop(&c->err_ls);
     scr_net_ls_drop(&c->timeout_ls);
@@ -3895,6 +3943,8 @@ void scr_http_client_release(ScrHttpClientReq *c) {
 static void scr_http_client_release_internal(struct ScrHttpClientReq *c) {
   scr_http_client_release(c);
 }
+
+static ScrAlsCtx *scr_http_client_ctx(struct ScrHttpClientReq *c) { return c->als; }
 
 void *scr_http_client_retain_v(void *p) { return scr_http_client_retain((ScrHttpClientReq *)p); }
 void scr_http_client_release_v(void *p) { scr_http_client_release((ScrHttpClientReq *)p); }
@@ -4690,6 +4740,7 @@ static bool scr_http_client_parse_head(ScrHttpConn *conn, size_t head_len) {
   ScrHttpReq *res = calloc(1, sizeof *res);
   if (!res) scr_http_oom();
   res->rc = 1;
+  res->als = scr_als_capture();
   res->status = status;
   res->sock = scr_net_sock_retain(conn->sock);
 #ifdef SCR_RC_AUDIT
@@ -5083,6 +5134,7 @@ static ScrHttpClientReq *scr_http_request_impl(ScrStr *host /*borrowed*/, double
   ScrHttpClientReq *c = calloc(1, sizeof *c);
   if (!c) scr_http_oom();
   c->rc = 1;
+  c->als = scr_als_capture();
 #ifdef SCR_RC_AUDIT
   scr_http_live++;
 #endif
@@ -5128,6 +5180,7 @@ static ScrHttpClientReq *scr_http_request_impl(ScrStr *host /*borrowed*/, double
 
   if (presock != NULL) {
     c->sock = presock;
+    scr_net_sock_set_context(c->sock, c->als);
   } else {
     ScrStr *dial = scr_net_blocking_lookup(host);
     c->sock = scr_net_connect(port, dial, NULL);
@@ -5386,6 +5439,8 @@ static void scr_http_client_rebind(ScrHttpClientReq *c, ScrHttpAgentFree *f, boo
   scr_net_sock_release(old);
   ScrHttpConn *conn = f->conn;
   c->sock = f->sock; /* the free entry's +1 moves */
+  /* Node runs a pooled socket's events for this request in its context. */
+  scr_net_sock_set_context(c->sock, c->als);
   c->conn = conn;
   conn->client = scr_http_client_retain(c);
   conn->pool_agent = NULL;

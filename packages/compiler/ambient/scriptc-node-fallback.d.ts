@@ -1106,6 +1106,34 @@ declare var ReadableStream: {
   from(iterable: string): ReadableStream<string>;
   readonly prototype: ReadableStream<unknown>;
 };
+/* The writable side of a TransformStream and its writer. The
+ * WritableStream constructor has no native lowering; writable streams come
+ * from `new TransformStream()`. */
+interface WritableStreamDefaultWriter<W = unknown> {
+  readonly closed: Promise<void>;
+  readonly desiredSize: number | null;
+  readonly ready: Promise<void>;
+  abort(reason?: unknown): Promise<void>;
+  close(): Promise<void>;
+  releaseLock(): void;
+  write(chunk?: W): Promise<void>;
+}
+interface WritableStream<W = unknown> {
+  readonly locked: boolean;
+  abort(reason?: unknown): Promise<void>;
+  close(): Promise<void>;
+  getWriter(): WritableStreamDefaultWriter<W>;
+}
+/* The identity transform: chunks written to `writable` are read from
+ * `readable`, and a write completes when its chunk is read. */
+interface TransformStream<I = unknown, O = unknown> {
+  readonly readable: ReadableStream<O>;
+  readonly writable: WritableStream<I>;
+}
+declare var TransformStream: {
+  new <I = unknown, O = I>(): TransformStream<I, O>;
+  readonly prototype: TransformStream<unknown, unknown>;
+};
 
 /* fetch, typed as the native JSON + readable-stream slice: one URL, an
  * optional init with the members CLI requests carry, and a Response
@@ -6131,6 +6159,7 @@ declare module "http2" {
   export interface Http2Stream {
     on(event: "error" | "close", listener: (err: Error) => void): void;
     once(event: "error" | "close", listener: (err: Error) => void): void;
+    addListener(event: "error" | "close", listener: (err: Error) => void): void;
     destroy(): void;
   }
   export interface Http2ServerRequest {
@@ -6231,11 +6260,6 @@ declare module "http2" {
       listener: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders, flags: number) => void,
     ): void;
     on(event: "session", listener: (session: ServerHttp2Session) => void): void;
-    once(
-      event: "stream",
-      listener: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders, flags: number) => void,
-    ): void;
-    once(event: "session", listener: (session: ServerHttp2Session) => void): void;
     /* HTTP CONNECT (and, in Node, the h2 extended CONNECT — which the
      * allowHTTP1 lowering never sees): the second argument is the raw
      * socket on HTTP/1.1 connections; narrow with instanceof. */
@@ -6253,6 +6277,42 @@ declare module "http2" {
     ): void;
     once(event: "error", listener: (err: Error) => void): void;
     once(event: "close", listener: () => void): void;
+    once(event: "sessionError", listener: (err: Error, session: ServerHttp2Session) => void): void;
+    once(
+      event: "stream",
+      listener: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    once(event: "session", listener: (session: ServerHttp2Session) => void): void;
+    once(
+      event: "connect",
+      listener: (
+        req: Http2ServerRequest | import("http").IncomingMessage,
+        resOrSocket: Http2ServerResponse | Socket,
+      ) => void,
+    ): void;
+    addListener(event: "connection", listener: (socket: Socket) => void): void;
+    addListener(
+      event: "request",
+      listener: (req: Http2ServerRequest, res: Http2ServerResponse) => void,
+    ): void;
+    addListener(event: "error", listener: (err: Error) => void): void;
+    addListener(event: "close", listener: () => void): void;
+    addListener(
+      event: "sessionError",
+      listener: (err: Error, session: ServerHttp2Session) => void,
+    ): void;
+    addListener(
+      event: "stream",
+      listener: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    addListener(event: "session", listener: (session: ServerHttp2Session) => void): void;
+    addListener(
+      event: "connect",
+      listener: (
+        req: Http2ServerRequest | import("http").IncomingMessage,
+        resOrSocket: Http2ServerResponse | Socket,
+      ) => void,
+    ): void;
   }
   export interface SecureServerOptions {
     allowHTTP1?: boolean;
@@ -6594,6 +6654,28 @@ declare module "http2" {
       listener: (errorCode: number, lastStreamID: number, opaqueData?: Uint8Array) => void,
     ): void;
     once(event: "localSettings" | "remoteSettings", listener: (settings: any) => void): void;
+    once(event: "frameError", listener: (type: number, code: number, id: number) => void): void;
+    once(event: "ping", listener: (payload: Uint8Array) => void): void;
+    addListener(event: "close" | "timeout", listener: () => void): void;
+    addListener(event: "error", listener: (err: Error) => void): void;
+    addListener(
+      event: "connect",
+      listener: (session: Http2Session, socket: import("net").Socket) => void,
+    ): void;
+    addListener(
+      event: "stream",
+      listener: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    addListener(
+      event: "goaway",
+      listener: (errorCode: number, lastStreamID: number, opaqueData?: Uint8Array) => void,
+    ): void;
+    addListener(event: "localSettings" | "remoteSettings", listener: (settings: any) => void): void;
+    addListener(
+      event: "frameError",
+      listener: (type: number, code: number, id: number) => void,
+    ): void;
+    addListener(event: "ping", listener: (payload: Uint8Array) => void): void;
   }
 
   export interface ClientHttp2Session extends Http2Session {
@@ -6671,7 +6753,30 @@ declare module "http2" {
       listener: () => void,
     ): void;
     once(event: "error", listener: (err: Error) => void): void;
+    once(event: "frameError", listener: (type: number, code: number, id: number) => void): void;
     once(event: "trailers", listener: (trailers: IncomingHttpHeaders, flags: number) => void): void;
+    addListener(event: "data", listener: (chunk: any) => void): void;
+    addListener(
+      event:
+        | "end"
+        | "close"
+        | "aborted"
+        | "ready"
+        | "timeout"
+        | "drain"
+        | "finish"
+        | "wantTrailers",
+      listener: () => void,
+    ): void;
+    addListener(event: "error", listener: (err: Error) => void): void;
+    addListener(
+      event: "frameError",
+      listener: (type: number, code: number, id: number) => void,
+    ): void;
+    addListener(
+      event: "trailers",
+      listener: (trailers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
     respond(
       headers?: OutgoingHttpHeaders,
       options?: { endStream?: boolean; waitForTrailers?: boolean },
@@ -6721,6 +6826,7 @@ declare module "http2" {
     on(event: "trailers", listener: (trailers: IncomingHttpHeaders, flags: number) => void): void;
     once(event: "response", listener: (headers: IncomingHttpHeaders, flags: number) => void): void;
     once(event: "push", listener: (headers: IncomingHttpHeaders, flags: number) => void): void;
+    once(event: "headers", listener: (headers: IncomingHttpHeaders, flags: number) => void): void;
     once(event: "data", listener: (chunk: any) => void): void;
     once(
       event:
@@ -6735,6 +6841,42 @@ declare module "http2" {
       listener: () => void,
     ): void;
     once(event: "error", listener: (err: Error) => void): void;
+    once(event: "frameError", listener: (type: number, code: number, id: number) => void): void;
+    once(event: "trailers", listener: (trailers: IncomingHttpHeaders, flags: number) => void): void;
+    addListener(
+      event: "response",
+      listener: (headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    addListener(
+      event: "push",
+      listener: (headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    addListener(
+      event: "headers",
+      listener: (headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    addListener(event: "data", listener: (chunk: any) => void): void;
+    addListener(
+      event:
+        | "end"
+        | "close"
+        | "aborted"
+        | "ready"
+        | "timeout"
+        | "drain"
+        | "finish"
+        | "wantTrailers",
+      listener: () => void,
+    ): void;
+    addListener(event: "error", listener: (err: Error) => void): void;
+    addListener(
+      event: "frameError",
+      listener: (type: number, code: number, id: number) => void,
+    ): void;
+    addListener(
+      event: "trailers",
+      listener: (trailers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
   }
 
   export interface Http2Server {
@@ -6769,6 +6911,24 @@ declare module "http2" {
     ): void;
     once(event: "error", listener: (err: Error) => void): void;
     once(event: "close" | "listening" | "timeout", listener: () => void): void;
+    once(event: "connection", listener: (socket: import("net").Socket) => void): void;
+    once(event: "sessionError", listener: (err: Error, session: ServerHttp2Session) => void): void;
+    addListener(
+      event: "stream",
+      listener: (stream: ServerHttp2Stream, headers: IncomingHttpHeaders, flags: number) => void,
+    ): void;
+    addListener(event: "session", listener: (session: ServerHttp2Session) => void): void;
+    addListener(
+      event: "request",
+      listener: (req: Http2ServerRequest, res: Http2ServerResponse) => void,
+    ): void;
+    addListener(event: "error", listener: (err: Error) => void): void;
+    addListener(event: "close" | "listening" | "timeout", listener: () => void): void;
+    addListener(event: "connection", listener: (socket: import("net").Socket) => void): void;
+    addListener(
+      event: "sessionError",
+      listener: (err: Error, session: ServerHttp2Session) => void,
+    ): void;
   }
 
   export interface ServerOptions {
@@ -7167,9 +7327,18 @@ declare module "node:tty" {
 declare module "async_hooks" {
   /* AsyncLocalStorage: fiber-carried context snapshots — run/getStore/
    * exit/enterWith/disable lower onto the runtime's active-slot machinery
-   * (als.* libCalls); values cross as dyn values. */
+   * (als.* libCalls); values cross as dyn values. bind and snapshot bind
+   * functions to the active context; the options carry the store's
+   * default value and name. */
+  export interface AsyncLocalStorageOptions {
+    defaultValue?: any;
+    name?: string | undefined;
+  }
   export class AsyncLocalStorage<T = any> {
-    constructor();
+    constructor(options?: AsyncLocalStorageOptions);
+    static bind<Func extends (...args: any[]) => any>(fn: Func): Func;
+    static snapshot(): <R, TArgs extends any[]>(fn: (...args: TArgs) => R, ...args: TArgs) => R;
+    readonly name: string;
     run<R>(store: T, callback: (...args: any[]) => R, ...args: any[]): R;
     exit<R>(callback: (...args: any[]) => R, ...args: any[]): R;
     getStore(): T | undefined;

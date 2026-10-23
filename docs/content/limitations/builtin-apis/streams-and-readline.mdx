@@ -18,7 +18,7 @@
   Stages may take the `{ signal }` argument.
   With a function destination, `pipeline()` returns an object-mode PassThrough that receives an async generator destination's values, or an async function destination's value unless it is `null` or `undefined`.
   `@types/node` types that result as `NodeJS.WritableStream`, so `for await` over it needs the `PassThrough` type (`pipeline(...) as PassThrough`, or a JSDoc `@type`).
-  In typed code, the callback of a pipeline with an async function destination receives `null` instead of `undefined` when there is no error.
+  In typed code, a pipeline callback with an async function or async generator destination receives `null` for no error when its error parameter cannot hold `undefined` (@types/node declares it `NodeJS.ErrnoException | null`), and `undefined` when it can, as in Node.
   `Readable.from` accepts `objectMode` and `highWaterMark` options.
   The `Readable` operators (`map`, `filter`, `forEach`, `toArray`, `some`, `find`, `every`, `flatMap`, `drop`, `take`, and `reduce`) accept `concurrency`, `highWaterMark`, and `signal` options.
   Their callbacks may take the `{ signal }` argument, `map` may return any value, and `flatMap` may return any iterable, async iterable, or stream.
@@ -27,14 +27,16 @@
   A `Duplex.from` body function may take the `{ signal }` argument, which is aborted with the error the Duplex is destroyed with.
   `stream.compose` accepts streams and async generator functions in any position, an async function as the last stage, and an array, a string, or a generator as the first stage; one stage is `Duplex.from` of it.
   A web `ReadableStream` is read as an async iterable by `Readable.from` and as the first stage of `compose` or `pipeline`, and through its reader by `Readable.fromWeb` (with `objectMode`, `highWaterMark`, `encoding`, and `signal` in an options object literal) and `Duplex.from`.
-  A web stream in a later compose stage, `Readable.toWeb`, and web `WritableStream` and `TransformStream` interop are unsupported.
+  `new TransformStream()` without arguments builds the identity transform: its readable side is a web `ReadableStream`, its writable side supports `getWriter`, `abort`, `close`, and `locked`, and the writer supports `write`, `close`, `abort`, `releaseLock`, `ready`, `closed`, and `desiredSize`, with Node's backpressure (a write completes when the readable side reads its chunk).
+  A web stream in a later compose stage, `Readable.toWeb`, a `TransformStream` with a transformer or queuing strategies, the `WritableStream` constructor, `pipeTo`, and `pipeThrough` are unsupported.
   The `ERR_INVALID_ARG_VALUE` message for a stream that is no longer readable or writable names the stream's class instead of printing the stream.
   `readable.compose(stage, { signal })` is `stream.compose(readable, stage)` with the signal added; the options are an object literal whose `signal` is a variable or a property read.
   `pipeline` from `node:stream/promises` accepts a trailing `{ signal, end }` object, with or without function stages, and `finished` accepts `readable`, `writable`, `error`, `cleanup`, and `signal` options, with boolean literals for the flags.
   Stream constructors accept a `signal` option in an options object literal, and `stream.addAbortSignal` accepts any stream.
-  The `construct` option and `_construct` method, `decodeStrings`, and `defaultEncoding` work on every stream class, and the `writev` option and `_writev` method on Writable and Duplex; `writev` on a Transform or PassThrough, assigning `_construct` after construction, and a non-literal `decodeStrings` or `defaultEncoding` in an options object literal are unsupported.
+  The `construct` option and `_construct` method, `decodeStrings`, and `defaultEncoding` work on every stream class, and the `writev` option and `_writev` method on every class with a writable side.
+  A `decodeStrings` or `defaultEncoding` value known only at run time is unsupported after an option member whose value has effects (a call or an assignment).
+  In typed code, a `writev` entry's `encoding` declared as a string receives `""` where Node passes `undefined` or `null` (an object-mode write).
   `setDefaultEncoding()` takes any encoding Node knows.
-  A `transform` or `flush` option callback whose completion callback types `data` as `any`, as @types/node's `TransformCallback` does, may pass a Buffer, a string, or nothing; any other value throws a TypeError where the callback is called, instead of Node's `ERR_INVALID_ARG_TYPE` stream error.
   `node:readline` and `node:readline/promises` (also reached as `readline.promises`) interfaces, from `createInterface(options)` or `createInterface(input, output, completer, terminal)`, read `process.stdin` or a readable stream: `question`, `prompt`, `write` (with a key object literal of `name`, `ctrl`, `meta`, and `shift`), `pause`, `resume`, `'line'`/`'close'`/`'pause'`/`'resume'`/`'error'`/`'history'`/`'SIGINT'`/`'SIGTSTP'`/`'SIGCONT'` listeners, and `for await` compile.
   `on`, `once`, and `addListener` return the interface, so registrations chain.
   The `history`, `historySize`, `removeHistoryDuplicates`, `completer`, `tabSize`, and `escapeCodeTimeout` options are validated as in Node.
@@ -42,7 +44,7 @@
   The output's `'resize'` event does not redraw the line.
   The cursor never stops between the two UTF-16 units of a supplementary character: where Node's Up or Down movement through a multiline line would, the cursor moves to the character's start or end.
   In JavaScript, a `'history'` listener receives a copy of the history; its changes are written back when the listener returns, but the copy is not `rl.history` itself.
-  `rl.history`, `historySize`, `historyIndex`, `crlfDelay`, `tabSize`, `escapeCodeTimeout`, `line`, `cursor`, and `terminal` read as in Node, except that `rl.cursor` of an interface that is not a terminal throws instead of answering `undefined`.
+  `rl.history`, `historySize`, `historyIndex`, `crlfDelay`, `tabSize`, `escapeCodeTimeout`, `line`, `cursor`, and `terminal` read as in Node; `rl.cursor` is `undefined` on an interface that is not a terminal.
   `rl[Symbol.dispose]()` closes the interface, and `instanceof` with `readline.Interface` or `readlinePromises.Interface` answers whether the interface came from that module, as in Node.
   In JavaScript, the input and output can be any expression that evaluates to a stream, such as a function's result or an object's member; a value that is not a stream is unsupported.
   In JavaScript, `question()` and `setPrompt()` accept a value that is not a string: when such a prompt is written, an interface that is not a terminal throws `ERR_INVALID_ARG_TYPE` as Node does (the `readline/promises` question rejects with it) and the question stays pending, and a terminal interface writes `String(value)`.

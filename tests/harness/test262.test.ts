@@ -19,6 +19,10 @@ const upstreamHarness = ["assert.js", "sta.js"]
   .map((name) => readFileSync(join(vendorRoot, "harness", name), "utf8"))
   .join("\n");
 const upstreamPropertyHelper = readFileSync(join(vendorRoot, "harness/propertyHelper.js"), "utf8");
+const upstreamTypedArrayHelper = readFileSync(
+  join(vendorRoot, "harness/testTypedArray.js"),
+  "utf8",
+);
 
 function runUpstream(
   source: string,
@@ -29,6 +33,8 @@ function runUpstream(
   runInContext(upstreamHarness, context, { timeout: 5000 });
   if (includes.includes("propertyHelper.js"))
     runInContext(upstreamPropertyHelper, context, { timeout: 5000 });
+  if (includes.includes("testTypedArray.js"))
+    runInContext(upstreamTypedArrayHelper, context, { timeout: 5000 });
   runInContext(variant === "strict" ? `"use strict";\n${source}` : source, context, {
     timeout: 5000,
   });
@@ -52,6 +58,8 @@ async function runUpstreamAsync(
   runInContext(upstreamHarness, context, { timeout: 5000 });
   if (includes.includes("propertyHelper.js"))
     runInContext(upstreamPropertyHelper, context, { timeout: 5000 });
+  if (includes.includes("testTypedArray.js"))
+    runInContext(upstreamTypedArrayHelper, context, { timeout: 5000 });
   runInContext(variant === "strict" ? `"use strict";\n${source}` : source, context, {
     timeout: 5000,
   });
@@ -370,6 +378,67 @@ if (propertyControls.length > 0)
           sanitize,
           includes: ["propertyHelper.js"],
         });
+        expect(result, JSON.stringify(result, null, 2)).toMatchObject({ status: control.status });
+      });
+    }
+  });
+
+const typedArrayControls = shardSelect(
+  [
+    {
+      name: "every constructor with array, array-like and buffer arguments",
+      status: "pass",
+      source:
+        "testWithTypedArrayConstructors(function(TA, makeCtorArg) { var sample = new TA(makeCtorArg([40, 41, 42])); assert.sameValue(sample.length, 3); assert.sameValue(sample[2], 42); }, null, ['passthrough', 'arraylike', 'arraybuffer']);",
+    },
+    {
+      name: "failing element assertion",
+      status: "fail",
+      source:
+        "testWithTypedArrayConstructors(function(TA, makeCtorArg) { var sample = new TA(makeCtorArg([40, 41, 42])); assert.sameValue(sample[2], 43); });",
+    },
+    {
+      name: "failure in one constructor",
+      status: "fail",
+      source:
+        "testWithTypedArrayConstructors(function(TA) { assert(TA !== Int16Array, 'Int16Array'); });",
+    },
+    {
+      name: "passthrough factories visit each constructor once",
+      status: "pass",
+      source:
+        "var count = 0; testWithTypedArrayConstructors(function(TA, makeCtorArg) { assert.sameValue(new TA(makeCtorArg(4)).length, 4); count++; }, null, ['passthrough']); assert.sameValue(count, typedArrayConstructors.length);",
+    },
+    {
+      name: "explicit constructor list",
+      status: "pass",
+      source:
+        "var names = []; testWithTypedArrayConstructors(function(TA) { names.push(TA.name); }, [Uint8Array, Float64Array], ['passthrough']); assert.compareArray(names, ['Uint8Array', 'Float64Array']);",
+    },
+    {
+      name: "float constructor classification",
+      status: "pass",
+      source:
+        "assert(isFloatTypedArrayConstructor(Float32Array)); assert(!isFloatTypedArrayConstructor(Int8Array)); assert.sameValue(floatTypedArrayConstructorPrecision(Float64Array), 'double');",
+    },
+    {
+      name: "unknown argument factory feature",
+      status: "fail",
+      source: "testWithTypedArrayConstructors(function() {}, null, ['unknown']);",
+    },
+  ],
+  (item) => `typed-array:${item.name}`,
+);
+
+if (typedArrayControls.length > 0)
+  describe(`Test262 typed array helper contract${shardSuffix()}`, () => {
+    for (const control of typedArrayControls) {
+      test(control.name, async () => {
+        const includes = ["compareArray.js", "testTypedArray.js"];
+        if (control.status === "fail")
+          expect(() => runUpstream(control.source, "strict", includes)).toThrow();
+        else expect(() => runUpstream(control.source, "strict", includes)).not.toThrow();
+        const result = await runSource(control.source, { sanitize, includes });
         expect(result, JSON.stringify(result, null, 2)).toMatchObject({ status: control.status });
       });
     }

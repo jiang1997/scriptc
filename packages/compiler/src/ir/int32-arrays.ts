@@ -1,3 +1,4 @@
+import { exprFunctionReference, moduleFunctionReferences } from "./function-references.js";
 import { F64, type IrExpr, type IrFunction, type IrModule, type IrStmt } from "./ir.js";
 
 type SwitchCase = Extract<IrStmt, { kind: "switch" }>["cases"][number];
@@ -6,22 +7,29 @@ import {
   everyExprChild,
   everyStmtChild,
   everyStmtList,
+  mapExprChildren,
+  mapStmtChildren,
   transformExpr,
   transformStmt,
   transformStmtList,
   type IrTransform,
 } from "./traverse.js";
 
-/** Local number arrays the backend may store as int32 slots.
+/** Number arrays the backend may store as int32 slots.
  *
- * A candidate is a local `number[]` of a synchronous function that no
- * other binding can hold and only compiled element operations reach:
- * every write of the local stores a fresh array (an array literal, or
- * `new Array(n).fill(v)`), and every read of it is the receiver of an
- * element read, write, state test, `length`, `push` or `pop` (a discarded
- * `pop` included), or the array of an element-reader helper call. The
- * array never reaches a runtime function that reads its slots, a library
- * call, a closure, a return or untyped code.
+ * A candidate is a `number[]` binding that only compiled element
+ * operations reach: a local of a synchronous function, a module global, or
+ * a parameter. Every write of a local or a global stores a fresh array (an
+ * array literal, or `new Array(n).fill(v)`); a parameter is never written.
+ * Every read of a candidate is the receiver of an element read, write,
+ * state test, `length`, `push` or `pop` (a discarded `pop` included), the
+ * array of an element-reader helper call, or the argument of a direct call
+ * whose parameter at that position is a candidate itself. A parameter is a
+ * candidate only when its function is reached by direct calls alone and
+ * every call passes a candidate there, so every binding that can hold one
+ * of these arrays is a candidate: the array never reaches a runtime
+ * function that reads its slots, a library call, a closure, a return or
+ * untyped code.
  *
  * Candidates are only proposed here. The int32 slot analysis
  * (int32-slots.ts) keeps the ones whose every stored element is a proven
@@ -32,6 +40,18 @@ import {
  * an int32 widens them to doubles in place. Their element-reader helper
  * calls are inlined first (rewriteCandidates), so no shared helper ever
  * receives an int32 array. */
+
+/** The candidate key of the binding `localId` as `fnName` reads it:
+ * `function\0local` for a local or parameter, `\0global` for a module
+ * global (`%g.` ids), which every function reads alike. */
+export function int32ArrayKey(fnName: string, localId: string): string {
+  return localId.startsWith("%g.") ? `\0${localId}` : `${fnName}\0${localId}`;
+}
+
+/** The int32 element slot (int32-slots.ts) of a candidate key. */
+export function int32ArraySlot(key: string): string {
+  return key.startsWith("\0") ? `g:${key.slice(1)}` : `l:${key}`;
+}
 
 /** Array methods a candidate may be the receiver of: the runtime paths
  * behind them read and write int32 slots through the double-valued slot
@@ -202,10 +222,70 @@ function writesLocal(e: IrExpr, id: string): boolean {
   return !expr(e);
 }
 
-/** The candidate locals of `fn` (see the module comment). */
-export function int32ArrayCandidates(fn: IrFunction, readers: ReadonlySet<string>): Set<string> {
+/** Expression kinds an index can be built from without running any code. */
+const PURE_INDEX_KINDS: ReadonlySet<string> = new Set([
+  "varRef",
+  "numLit",
+  "boolLit",
+  "bin",
+  "unary",
+  "ternary",
+  "logical",
+  "arrayGet",
+  "arrayState",
+]);
+
+/** Whether evaluating an index runs no code (no call, accessor or
+ * conversion): plain reads, literals and their operators only. */
+function pureIndex(e: IrExpr): boolean {
+  return PURE_INDEX_KINDS.has(e.kind) && everyExprChild(e, pureIndex, () => false);
+}
+
+/** The parameters and globals a module's functions share as candidates,
+ * still assumed to qualify. */
+export interface SharedCandidates {
+  /** Candidate parameters, as `function\0local` keys. */
+  params: ReadonlySet<string>;
+  /** Candidate globals, as `%g.` ids. */
+  globals: ReadonlySet<string>;
+  /** Whether the parameter at `index` of `callee` is a candidate. */
+  paramAt: (callee: string, index: number) => boolean;
+}
+
+const NO_SHARED: SharedCandidates = {
+  params: new Set(),
+  globals: new Set(),
+  paramAt: () => false,
+};
+
+/** The candidates of `fn` (see the module comment): its own locals, its
+ * parameters in `shared.params`, and the globals of `shared.globals` that
+ * it reads only in candidate positions. `written` receives the globals it
+ * assigns fresh arrays. */
+export function int32ArrayCandidates(
+  fn: IrFunction,
+  readers: ReadonlySet<string>,
+  shared: SharedCandidates = NO_SHARED,
+  written: Set<string> = new Set(),
+): Set<string> {
   const result = new Set<string>();
-  if (fn.async || fn.generator) return result;
+  if (fn.async || fn.generator) {
+    // Globals read here leave the candidates.
+    for (const id of shared.globals) result.add(id);
+    everyStmtList(fn.body, {
+      expr: (e) => {
+        if ((e.kind === "varRef" || e.kind === "assignExpr") && result.has(e.localId))
+          result.delete(e.localId);
+        return true;
+      },
+      stmt: (s) => {
+        if ((s.kind === "varDecl" || s.kind === "assign") && result.has(s.localId))
+          result.delete(s.localId);
+        return true;
+      },
+    });
+    return result;
+  }
   const captured = new Set(
     [...(fn.captures ?? []), ...(fn.classCaptures ?? [])].map((c) => c.localId),
   );
@@ -217,11 +297,12 @@ export function int32ArrayCandidates(fn: IrFunction, readers: ReadonlySet<string
       !local.boxed &&
       !local.tdz &&
       !captured.has(local.id) &&
-      !params.has(local.id)
+      (!params.has(local.id) || shared.params.has(`${fn.name}\0${local.id}`))
     )
       result.add(local.id);
+  for (const id of shared.globals) result.add(id);
   if (result.size === 0) return result;
-  const written = new Set<string>();
+  const allocated = new Set<string>();
   // A receiver position: the candidate is read there without escaping.
   const receiver = (e: IrExpr): void => {
     if (e.kind !== "varRef") expr(e);
@@ -255,13 +336,28 @@ export function int32ArrayCandidates(fn: IrFunction, readers: ReadonlySet<string
         return true;
       }
       case "call": {
-        if (!readers.has(e.callee) || e.args.length !== 2) break;
-        const [array, index] = e.args;
-        // Inlining evaluates the index before the array read.
-        if (array!.kind === "varRef" && writesLocal(index!, array!.localId))
-          result.delete(array!.localId);
-        receiver(array!);
-        expr(index!);
+        if (readers.has(e.callee) && e.args.length === 2) {
+          const [array, index] = e.args;
+          // Inlining evaluates the index before the array read: an index
+          // that rebinds the array keeps it out, and so does one that can run
+          // code when the array is a module global (a call can reassign it).
+          if (
+            array!.kind === "varRef" &&
+            (writesLocal(index!, array!.localId) ||
+              (array!.localId.startsWith("%g.") && !pureIndex(index!)))
+          )
+            result.delete(array!.localId);
+          receiver(array!);
+          expr(index!);
+          return true;
+        }
+        // An argument at a candidate parameter position passes the array
+        // to another candidate binding (moduleInt32ArrayCandidates checks
+        // every such call).
+        e.args.forEach((arg, index) => {
+          if (shared.paramAt(e.callee, index)) receiver(arg);
+          else expr(arg);
+        });
         return true;
       }
     }
@@ -272,7 +368,8 @@ export function int32ArrayCandidates(fn: IrFunction, readers: ReadonlySet<string
       case "varDecl":
       case "assign": {
         const value = s.kind === "varDecl" ? s.init : s.value;
-        if (value && int32ArrayAllocation(value)) written.add(s.localId);
+        if (params.has(s.localId)) result.delete(s.localId);
+        else if (value && int32ArrayAllocation(value)) allocated.add(s.localId);
         else if (value) result.delete(s.localId);
         if (value) expr(value);
         return true;
@@ -297,8 +394,226 @@ export function int32ArrayCandidates(fn: IrFunction, readers: ReadonlySet<string
     return everyStmtChild(s, expr, stmt);
   };
   fn.body.every(stmt);
-  for (const id of result) if (!written.has(id)) result.delete(id);
+  for (const id of result) {
+    if (shared.globals.has(id)) {
+      if (allocated.has(id)) written.add(id);
+    } else if (!params.has(id) && !allocated.has(id)) result.delete(id);
+  }
   return result;
+}
+
+/** The members of `ids` (none when absent) that are in `live`. */
+function liveIn(ids: ReadonlySet<string> | undefined, live: ReadonlySet<string>): Set<string> {
+  const result = new Set<string>();
+  if (ids) for (const id of ids) if (live.has(id)) result.add(id);
+  return result;
+}
+
+/** The candidates of every function of `mod` that has any, only those
+ * whose keys are in `keep` when given. Parameters and globals are shared:
+ * starting from every one that may qualify, each pass drops the ones a
+ * function reads outside candidate positions, the parameters some call
+ * passes anything but a candidate, and the globals never assigned a fresh
+ * array, until a pass drops nothing. Functions in `redirected` keep their
+ * parameters: some of their calls reach another function. */
+export function moduleInt32ArrayCandidates(
+  mod: IrModule,
+  readers: ReadonlySet<string>,
+  keep: ReadonlySet<string> | null = null,
+  redirected: ReadonlySet<string> = new Set(),
+): Map<string, Set<string>> {
+  const kept = (key: string): boolean => keep === null || keep.has(key);
+  const arrayParams = new Map<string, number[]>();
+  for (const fn of mod.functions) {
+    // Class methods, constructors and runtime helpers (`%` names) keep
+    // their parameters.
+    if (fn.name.startsWith("%") || fn.async || fn.generator || redirected.has(fn.name)) continue;
+    const indexes: number[] = [];
+    fn.params.forEach((p, i) => {
+      if (p.type.kind === "array" && p.type.elem.kind === "f64") indexes.push(i);
+    });
+    if (indexes.length > 0) arrayParams.set(fn.name, indexes);
+  }
+  let globals = new Set<string>();
+  for (const g of mod.globals ?? [])
+    if (
+      g.type.kind === "array" &&
+      g.type.elem.kind === "f64" &&
+      g.initFlag === undefined &&
+      kept(`\0${g.id}`)
+    )
+      globals.add(g.id);
+  const result = new Map<string, Set<string>>();
+  if (arrayParams.size === 0 && globals.size === 0) {
+    for (const fn of mod.functions) {
+      const candidates = int32ArrayCandidates(fn, readers);
+      for (const id of candidates) if (!kept(`${fn.name}\0${id}`)) candidates.delete(id);
+      if (candidates.size > 0) result.set(fn.name, candidates);
+    }
+    return result;
+  }
+  // One walk: the functions reached other than by direct calls, the direct
+  // calls of functions with number[] parameters, the globals each function
+  // reads or writes, and whether a module namespace object exists (its
+  // member reads can reach any global by name).
+  const reached = new Set(moduleFunctionReferences(mod));
+  const calls: { caller: string; call: IrExpr & { kind: "call" } }[] = [];
+  const globalsIn = new Map<string, Set<string>>();
+  let namespaces = false;
+  for (const fn of mod.functions) {
+    const used = new Set<string>();
+    const note = (id: string): void => {
+      if (globals.has(id)) used.add(id);
+    };
+    everyStmtList(fn.body, {
+      expr: (e) => {
+        const name = exprFunctionReference(e);
+        if (name !== undefined) reached.add(name);
+        if (e.kind === "moduleNsRef") namespaces = true;
+        if (e.kind === "call" && arrayParams.has(e.callee))
+          calls.push({ caller: fn.name, call: e });
+        if (e.kind === "varRef" || e.kind === "assignExpr") note(e.localId);
+        return true;
+      },
+      stmt: (s) => {
+        if (s.kind === "varDecl" || s.kind === "assign") note(s.localId);
+        return true;
+      },
+    });
+    if (used.size > 0) globalsIn.set(fn.name, used);
+  }
+  if (namespaces) {
+    globals = new Set();
+    globalsIn.clear();
+  }
+  const paramIds = new Map<string, string[]>();
+  let params = new Set<string>();
+  for (const fn of mod.functions) {
+    const indexes = arrayParams.get(fn.name);
+    if (!indexes || reached.has(fn.name)) continue;
+    paramIds.set(
+      fn.name,
+      fn.params.map((p) => p.localId),
+    );
+    for (const i of indexes) {
+      const key = `${fn.name}\0${fn.params[i]!.localId}`;
+      if (kept(key)) params.add(key);
+    }
+  }
+  for (;;) {
+    const current = params;
+    const written = new Set<string>();
+    const liveGlobals = new Set(globals);
+    result.clear();
+    for (const fn of mod.functions) {
+      const shared: SharedCandidates = {
+        params: current,
+        globals: liveIn(globalsIn.get(fn.name), globals),
+        paramAt: (callee, index) => {
+          const id = paramIds.get(callee)?.[index];
+          return id !== undefined && current.has(`${callee}\0${id}`);
+        },
+      };
+      const candidates = int32ArrayCandidates(fn, readers, shared, written);
+      for (const id of shared.globals) if (!candidates.has(id)) liveGlobals.delete(id);
+      for (const id of candidates)
+        if (!shared.globals.has(id) && !kept(`${fn.name}\0${id}`)) candidates.delete(id);
+      if (candidates.size > 0) result.set(fn.name, candidates);
+    }
+    for (const id of liveGlobals) if (!written.has(id)) liveGlobals.delete(id);
+    const live = new Set(
+      [...current].filter((key) => {
+        const cut = key.indexOf("\0");
+        return result.get(key.slice(0, cut))?.has(key.slice(cut + 1)) === true;
+      }),
+    );
+    // A parameter needs a candidate at that position of every call; a call
+    // with fewer arguments passes undefined.
+    for (const { caller, call } of calls) {
+      const ids = paramIds.get(call.callee);
+      if (!ids) continue;
+      ids.forEach((id, i) => {
+        const key = `${call.callee}\0${id}`;
+        if (!live.has(key)) return;
+        const arg = call.args[i];
+        const ok =
+          arg?.kind === "varRef" &&
+          (arg.localId.startsWith("%g.")
+            ? liveGlobals.has(arg.localId)
+            : result.get(caller)?.has(arg.localId) === true);
+        if (!ok) live.delete(key);
+      });
+    }
+    if (live.size === current.size && liveGlobals.size === globals.size) break;
+    params = live;
+    globals = liveGlobals;
+  }
+  return result;
+}
+
+/** The candidates one array can reach together: a direct call's argument
+ * and the parameter it binds hold the same array, so their element facts
+ * stand or fall together. `group` maps each of `keys` to its group's keys
+ * (itself alone for most), and `globalReaders` each candidate global's
+ * key to the functions that read or write it. */
+export function int32ArrayGroups(
+  mod: IrModule,
+  keys: ReadonlySet<string>,
+): { group: Map<string, string[]>; globalReaders: Map<string, Set<string>> } {
+  const parent = new Map<string, string>();
+  const root = (key: string): string => {
+    let r = key;
+    while (parent.has(r)) r = parent.get(r)!;
+    if (r !== key) parent.set(key, r);
+    return r;
+  };
+  const globalReaders = new Map<string, Set<string>>();
+  const params = new Map(mod.functions.map((fn) => [fn.name, fn.params]));
+  const paramKeys = new Set(
+    mod.functions.flatMap((fn) => fn.params.map((p) => `${fn.name}\0${p.localId}`)),
+  );
+  if ([...keys].some((key) => key.startsWith("\0") || paramKeys.has(key))) {
+    for (const fn of mod.functions) {
+      const touch = (id: string): void => {
+        const key = int32ArrayKey(fn.name, id);
+        if (!key.startsWith("\0") || !keys.has(key)) return;
+        const set = globalReaders.get(key) ?? new Set<string>();
+        set.add(fn.name);
+        globalReaders.set(key, set);
+      };
+      everyStmtList(fn.body, {
+        expr: (e) => {
+          if (e.kind === "varRef" || e.kind === "assignExpr") touch(e.localId);
+          if (e.kind === "call")
+            e.args.forEach((arg, i) => {
+              const param = params.get(e.callee)?.[i];
+              if (arg.kind !== "varRef" || !param) return;
+              const a = int32ArrayKey(fn.name, arg.localId),
+                p = `${e.callee}\0${param.localId}`;
+              if (!keys.has(a) || !keys.has(p)) return;
+              const ra = root(a),
+                rp = root(p);
+              if (ra !== rp) parent.set(ra, rp);
+            });
+          return true;
+        },
+        stmt: (s) => {
+          if (s.kind === "varDecl" || s.kind === "assign") touch(s.localId);
+          return true;
+        },
+      });
+    }
+  }
+  const members = new Map<string, string[]>();
+  for (const key of keys) {
+    const r = root(key);
+    const list = members.get(r);
+    if (list) list.push(key);
+    else members.set(r, [key]);
+  }
+  const group = new Map<string, string[]>();
+  for (const key of keys) group.set(key, members.get(root(key))!);
+  return { group, globalReaders };
 }
 
 /** The element values stored into each candidate: element writes, pushed
@@ -341,16 +656,34 @@ export function int32ArrayStores(
   return stores;
 }
 
+const REPEATED_INDEX_OPS = new Set(["+", "-", "*", "&", "|", "^", "<<", ">>", ">>>"]);
+
+/** An index the inlined read may evaluate at each of its uses: a plain read,
+ * a literal, or integer arithmetic over them. Repeating it keeps the forms
+ * the backend derives from its operands at every use, such as the exact i64
+ * of an int32 product, where a bound local holds only the double. */
+function repeatableIndex(e: IrExpr): boolean {
+  if (e.kind === "varRef" || e.kind === "numLit") return true;
+  if (e.kind === "unary") return e.op === "-" && repeatableIndex(e.operand);
+  return (
+    e.kind === "bin" &&
+    REPEATED_INDEX_OPS.has(e.op) &&
+    repeatableIndex(e.left) &&
+    repeatableIndex(e.right)
+  );
+}
+
 /** Rewrite a function's candidates for the backend. A discarded pop uses
  * the candidate in place of its hidden local. An element-reader helper call
  * whose array is a candidate is inlined: the helper's returned ternary, with
  * the candidate for its array and the index for its index, so the read means
- * the same. An index that is not a plain read or literal is bound to a fresh
- * local first: in its own declaration just before the statement when the
- * call is the whole value of a declaration or assignment (the form lowering
- * gives `a[i]!`, and the one the backend reads without a box), otherwise in a
- * sequence around the ternary. Selection keeps out indexes that write the
- * array, so evaluating the index before the array read is unobservable. */
+ * the same. An index that is not repeatable (repeatableIndex) is bound to a
+ * fresh local first: in its own declaration just before the statement when
+ * the call is the whole value of a declaration or assignment (the form
+ * lowering gives `a[i]!`, and the one the backend reads without a box),
+ * otherwise in a sequence around the ternary. Selection keeps out indexes
+ * that write the array, so evaluating the index before the array read is
+ * unobservable. */
 function rewriteCandidates(
   fn: IrFunction,
   candidates: ReadonlySet<string>,
@@ -374,14 +707,13 @@ function rewriteCandidates(
     candidates.has(e.args[0]!.localId)
       ? e
       : null;
-  const simple = (e: IrExpr): boolean => e.kind === "varRef" || e.kind === "numLit";
   // The statements of a list, with complex read indexes declared first.
   const hoist = (list: IrStmt[]): IrStmt[] =>
     list.flatMap((s): IrStmt[] => {
       if (s.kind !== "varDecl" && s.kind !== "assign") return [s];
       const value = s.kind === "varDecl" ? s.init : s.value;
       const call = readerCall(value);
-      if (!call || simple(call.args[1]!)) return [s];
+      if (!call || repeatableIndex(call.args[1]!)) return [s];
       const { decl, ref } = bind(call.args[1]!);
       const read: IrExpr = { ...call, args: [call.args[0]!, ref] };
       if (s.kind === "varDecl") return [decl, { ...s, init: read }];
@@ -444,21 +776,23 @@ function rewriteCandidates(
     if (ret.kind !== "return" || !ret.value) return e;
     let index = call.args[1]!;
     const stmts: IrStmt[] = [];
-    if (!simple(index)) {
+    if (!repeatableIndex(index)) {
       const { decl, ref } = bind(index);
       stmts.push(decl);
       index = ref;
     }
     const operand = index;
-    const body = transformExpr(reparseExpr(ret.value), {
-      expr: (x) => {
-        if (x.kind !== "varRef") return x;
-        if (x.localId === arrayParam!.localId) return reparseExpr(array);
-        if (x.localId === indexParam!.localId) return reparseExpr(operand);
-        return x;
-      },
-      stmt: (x) => x,
-    });
+    // The arguments' copies are not searched again: an index may read a
+    // local that has the id of one of the helper's parameters.
+    const substituteExpr = (x: IrExpr): IrExpr => {
+      if (x.kind !== "varRef") return mapExprChildren(x, substituteExpr, substituteStmt);
+      if (x.localId === arrayParam!.localId) return reparseExpr(array);
+      if (x.localId === indexParam!.localId) return reparseExpr(operand);
+      return x;
+    };
+    const substituteStmt = (x: IrStmt): IrStmt =>
+      mapStmtChildren(x, substituteExpr, substituteStmt);
+    const body = substituteExpr(reparseExpr(ret.value));
     // The ternary is a fresh copy (reparseExpr): it takes the call's location.
     const typed = body;
     typed.loc = e.loc;
@@ -471,40 +805,45 @@ function rewriteCandidates(
   return { ...fn, body, locals: locals.filter((local) => !popLocals.has(local.id)) };
 }
 
-/** Propose the module's int32 array candidates (`function\0local` keys in
+/** Propose the module's int32 array candidates (int32ArrayKey keys in
  * `int32ArrayCandidates`), only those in `keep` when given, and rewrite
  * their functions. */
 export function markInt32ArrayCandidates(
   mod: IrModule,
   keep: ReadonlySet<string> | null = null,
+  redirected: ReadonlySet<string> = new Set(),
 ): IrModule {
   if (mod.lib !== undefined) return mod;
   const readers = new Map<string, IrFunction>();
   for (const fn of mod.functions) if (isElementReader(fn)) readers.set(fn.name, fn);
-  const names = new Set(readers.keys());
-  const keys: string[] = [];
+  const all = moduleInt32ArrayCandidates(mod, new Set(readers.keys()), keep, redirected);
+  if (all.size === 0) return mod;
+  const keys = new Set<string>();
   const functions = mod.functions.map((fn) => {
-    const candidates = int32ArrayCandidates(fn, names);
-    for (const id of candidates)
-      if (keep === null || keep.has(`${fn.name}\0${id}`)) keys.push(`${fn.name}\0${id}`);
-      else candidates.delete(id);
-    return candidates.size === 0 ? fn : rewriteCandidates(fn, candidates, readers);
+    const candidates = all.get(fn.name);
+    if (!candidates) return fn;
+    for (const id of candidates) keys.add(int32ArrayKey(fn.name, id));
+    return rewriteCandidates(fn, candidates, readers);
   });
-  return keys.length === 0 ? mod : { ...mod, functions, int32ArrayCandidates: keys };
+  return { ...mod, functions, int32ArrayCandidates: [...keys] };
 }
 
 /** The module the backend emits: rewritten for exactly the candidates the
  * int32 slot analysis (`prove`, returning its int32Arrays) keeps, so a
  * module without int32 arrays is `mod` itself. A dropped candidate's
  * rewrite is undone by marking again without it, until every candidate
- * marked is kept. */
+ * marked is kept. `redirected` names the functions some of whose calls the
+ * backend emits as calls of another function (a result-slot entry): their
+ * parameters keep doubles. */
 export function selectInt32Arrays(
   mod: IrModule,
   prove: (marked: IrModule) => ReadonlySet<string>,
+  redirected: (mod: IrModule) => ReadonlySet<string> = () => new Set(),
 ): IrModule {
   let keep: ReadonlySet<string> | null = null;
+  const others = redirected(mod);
   for (let round = 0; round < 4; round++) {
-    const marked = markInt32ArrayCandidates(mod, keep);
+    const marked = markInt32ArrayCandidates(mod, keep, others);
     if (marked === mod) return mod;
     const kept = prove(marked);
     const proposed = marked.int32ArrayCandidates ?? [];

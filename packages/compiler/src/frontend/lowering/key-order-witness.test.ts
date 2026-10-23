@@ -15,6 +15,7 @@ import {
   type KeyOrderSegment,
 } from "./key-order-witness.js";
 import type { Lowerer } from "./lowerer.js";
+import * as ts from "../ts7/adapter.js";
 
 const loc = { file: "order.ts", start: 0, end: 1 };
 /** `number | undefined`: the optional-field slot type. */
@@ -40,6 +41,8 @@ function fixture(): Fixture {
     keyOrder: notes,
     unions: new Map([["u0", { id: "u0", arms: [F64, { kind: "undefinedT" }] }]]),
     classes: new Map(),
+    methodAccessSites: new Map(),
+    dynConvertible: () => true,
     armTag: (unionId: string, arm: IrType): number =>
       unionId === "u0" && arm.kind === "undefinedT" ? 1 : -1,
     recordFieldPresent: (obj: IrExpr, shapeId: string, field: string): IrExpr => ({
@@ -699,4 +702,264 @@ test("a spread reads its source's order right after the literal evaluates the so
   });
   const snapshot = (prologue[2] as IrStmt & { kind: "varDecl" }).localId;
   expect(orderIndexOf(lit)).toMatchObject({ kind: "varRef", localId: snapshot });
+});
+
+/** `{ a, b }` with a declared table `["a", "b"]` and a literal `{ b, a }`
+ * plus `{ ...value, a }` of the same shape, beside `extra`. */
+function selfCopy(extra: (f: Fixture, ab: IrType & { kind: "record" }) => IrStmt[]): string[] {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const self: KeyOrderSegment = { kind: "spread", shapeId: ab.shapeId, maybeAbsent: false };
+  f.run([
+    decl("v", f.literal(ab, ["b", "a"])),
+    observe(f.literal(ab, ["a", "b"], [self, { kind: "key", name: "a", definite: true }])),
+    ...extra(f, ab),
+  ]);
+  return f.order(ab)!;
+}
+
+test("a literal that starts by spreading its own shape takes the other literals' order", () => {
+  expect(selfCopy(() => [])).toEqual(["b", "a"]);
+});
+
+test("a self copy of a shape a checked conversion builds cannot be ordered statically", () => {
+  const parsed = (ab: IrType): IrExpr => ({
+    kind: "dynCheck",
+    value: ref("j", { kind: "dyn" }),
+    type: ab,
+    loc,
+  });
+  expect(selfCopy((_, ab) => [observe(parsed(ab))])).toEqual(["a", "b"]);
+});
+
+test("a replaceable method's checked result builds no record", () => {
+  expect(
+    selfCopy((f, ab) => {
+      const result: IrExpr = { kind: "dynCheck", value: ref("r", { kind: "dyn" }), type: ab, loc };
+      return [observe(f.notes.methodResult(result, "load"))];
+    }),
+  ).toEqual(["b", "a"]);
+});
+
+test("a replaceable method's checked result builds records when a replacement may return one", () => {
+  expect(
+    selfCopy((f, ab) => {
+      // A site the census cannot see through (a computed write of some
+      // value, a reflection call) may install a replacement returning a
+      // record built in any order.
+      (f.lowerer.methodAccessSites as Map<string, ts.Node[]>).set("load", [
+        { kind: ts.SyntaxKind.CallExpression } as unknown as ts.Node,
+      ]);
+      const result: IrExpr = { kind: "dynCheck", value: ref("r", { kind: "dyn" }), type: ab, loc };
+      return [observe(f.notes.methodResult(result, "load"))];
+    }),
+  ).toEqual(["a", "b"]);
+});
+
+test("a replaceable method's result keeps its witness through an IR rewrite", () => {
+  expect(
+    selfCopy((f, ab) => {
+      const result = f.notes.methodResult(
+        {
+          kind: "dynCheck",
+          value: ref("r", { kind: "dyn" }),
+          type: ab,
+          loc,
+        },
+        "load",
+      );
+      const identity = { expr: (e: IrExpr): IrExpr => e, stmt: (st: IrStmt): IrStmt => st };
+      observeRecordLiteralRebuilds((from, to) => f.notes.follow(from, to));
+      try {
+        const rebuilt = transformExpr(result, identity);
+        expect(rebuilt).not.toBe(result);
+        return [observe(rebuilt)];
+      } finally {
+        observeRecordLiteralRebuilds(null);
+      }
+    }),
+  ).toEqual(["b", "a"]);
+});
+
+test("a checked conversion of a boxed primitive builds no record", () => {
+  expect(
+    selfCopy((_, ab) => {
+      const missing: IrExpr = {
+        kind: "dynFrom",
+        value: { kind: "unitLit", unit: "undefined", type: { kind: "undefinedT" }, loc },
+        type: { kind: "dyn" },
+        loc,
+      };
+      return [observe({ kind: "dynCheck", value: missing, type: ab, loc })];
+    }),
+  ).toEqual(["b", "a"]);
+});
+
+test("a checked conversion into a class builds none of its fields' records", () => {
+  expect(
+    selfCopy((f, ab) => {
+      (f.lowerer.classes as Map<string, unknown>).set("Holder", {
+        def: { fields: [{ name: "value", type: ab }] },
+      });
+      const holder: IrType = { kind: "object", className: "Holder" };
+      const checked: IrExpr = {
+        kind: "dynCheck",
+        value: ref("h", { kind: "dyn" }),
+        type: holder,
+        loc,
+      };
+      return [{ kind: "exprStmt", expr: checked, loc }];
+    }),
+  ).toEqual(["b", "a"]);
+});
+
+test("a checked function passes its record parameters out, and its callbacks' back in", () => {
+  const callable = (params: IrType[]): IrType => ({
+    kind: "func",
+    params,
+    ret: { kind: "string" },
+  });
+  const checkedAs = (type: IrType): IrStmt => ({
+    kind: "exprStmt",
+    expr: { kind: "dynCheck", value: ref("fn", { kind: "dyn" }), type, loc },
+    loc,
+  });
+  expect(selfCopy((_, ab) => [checkedAs(callable([ab]))])).toEqual(["b", "a"]);
+  // A callback parameter receives values the JavaScript function builds.
+  expect(selfCopy((_, ab) => [checkedAs(callable([callable([ab])]))])).toEqual(["a", "b"]);
+  // So does a container parameter, which the function can write into.
+  expect(selfCopy((_, ab) => [checkedAs(callable([{ kind: "array", elem: ab }]))])).toEqual([
+    "a",
+    "b",
+  ]);
+});
+
+test("a generator resume builds only its result record, never the value it carries", () => {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const result = f.record(
+    [
+      ["done", { kind: "bool" }],
+      ["value", ab],
+    ],
+    ["value", "done"],
+  );
+  const gen: IrType = {
+    kind: "generator",
+    yieldT: ab,
+    retT: { kind: "void" },
+    nextT: { kind: "undefinedT" },
+  };
+  const resume = (mode: "next" | "value", type: IrType): IrStmt =>
+    observe({ kind: "genResume", mode, gen: ref("g", gen), arg: null, type, loc });
+  f.run([
+    observe(f.literal(ab, ["b", "a"])),
+    observe(f.literal(result, ["done", "value"])),
+    resume("value", ab),
+    resume("next", result),
+  ]);
+  expect(f.order(ab)).toEqual(["b", "a"]);
+  // The result record itself is built in its fixed layout: today's table.
+  expect(f.order(result)).toEqual(["value", "done"]);
+});
+
+/** `{ a, b }` built by a checked conversion and by the literal `{ b, a }`,
+ * copied by `{ ...value, a }` (evaluating the value into a binding, as
+ * spread literals do), observed. Answers the table and the function. */
+function checkedSelfCopy(): { order: string[]; fn: IrFunction; copy: IrExpr } {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const value = ref("value", ab) as IrExpr & { kind: "varRef" };
+  const self: KeyOrderSegment = { kind: "spread", shapeId: ab.shapeId, maybeAbsent: false, value };
+  const literal = f.literal(ab, ["a", "b"], [self, { kind: "key", name: "a", definite: true }]);
+  const copy: IrExpr = {
+    kind: "seqExpr",
+    stmts: [decl("value", { kind: "dynCheck", value: ref("j", { kind: "dyn" }), type: ab, loc })],
+    result: literal,
+    type: ab,
+    loc,
+  };
+  const fn = f.run([observe(f.literal(ab, ["b", "a"])), observe(copy)]);
+  return { order: f.order(ab)!, fn, copy };
+}
+
+test("a spread of a value a checked conversion built carries the value's order over", () => {
+  const { order, fn, copy } = checkedSelfCopy();
+  // Values the literal builds enumerate in its order; copies of converted
+  // values keep the order their record source holds.
+  expect(order).toEqual(["b", "a"]);
+  expect(copy).toMatchObject({
+    kind: "seqExpr",
+    stmts: [
+      { kind: "varDecl", localId: "value" },
+      { kind: "varDecl", localId: "%orderedSpread.0", init: { kind: "recordLit" } },
+      {
+        kind: "exprStmt",
+        expr: {
+          kind: "libCall",
+          fn: "record.sourceSpread",
+          args: [
+            { kind: "varRef", localId: "%orderedSpread.0" },
+            { kind: "varRef", localId: "value" },
+          ],
+        },
+      },
+    ],
+    result: { kind: "varRef", localId: "%orderedSpread.0" },
+  });
+  expect(fn.locals.map((local) => local.id)).toEqual(["%orderedSpread.0"]);
+});
+
+test("a spread of a converted value into a wider shape orders the wider shape", () => {
+  const f = fixture();
+  const ab = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+    ],
+    ["a", "b"],
+  );
+  const abc = f.record(
+    [
+      ["a", F64],
+      ["b", F64],
+      ["c", F64],
+    ],
+    ["c", "a", "b"],
+  );
+  const value = ref("value", ab) as IrExpr & { kind: "varRef" };
+  const spread: KeyOrderSegment = {
+    kind: "spread",
+    shapeId: ab.shapeId,
+    maybeAbsent: false,
+    value,
+  };
+  const wide: IrExpr = {
+    kind: "seqExpr",
+    stmts: [decl("value", { kind: "dynCheck", value: ref("j", { kind: "dyn" }), type: ab, loc })],
+    result: f.literal(abc, ["a", "b", "c"], [spread, { kind: "key", name: "c", definite: true }]),
+    type: abc,
+    loc,
+  };
+  f.run([observe(f.literal(ab, ["b", "a"])), observe(wide)]);
+  expect(f.order(ab)).toEqual(["b", "a"]);
+  expect(f.order(abc)).toEqual(["b", "a", "c"]);
 });

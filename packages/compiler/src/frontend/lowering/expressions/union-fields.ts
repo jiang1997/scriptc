@@ -2,6 +2,7 @@ import { nodeThrowExpr, varRef } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
 import type { Lowerer } from "../lowerer.js";
 import { narrowStoredClassValue } from "../class-unions.js";
+import { markSloppyRecordWrites } from "../frozen-records.js";
 import {
   BOOL,
   type IrExpr,
@@ -246,6 +247,8 @@ export function lowerUnionFieldWrite(
               value: slotValue,
               loc,
             };
+      // A sloppy-mode write to a frozen record leaves it unchanged.
+      if (write.kind === "recordSet") markSloppyRecordWrites(lowerer, write, access);
       branch = { kind: "seqExpr", stmts: [write], result, type: result.type, loc };
     } else {
       branch = nodeThrowExpr(

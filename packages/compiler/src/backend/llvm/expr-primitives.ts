@@ -1076,9 +1076,10 @@ export function emitContainerExpr(
       const idx = host.emitExpr(e.index);
       if (e.arr.type.kind !== "array")
         throw new InternalCompilerError("llvm emitter bug: arrayState on non-array");
+      const proven = host.provenDenseIndex(e.arr, e.index);
       const t = host.checkedInt32Array(e.arr)
         ? host.emitByElementKind(arr.name, "double", (kind) =>
-            emitDenseArrayState(host, arr.name, idx, e.index, "state", slotWidth(kind)),
+            emitDenseArrayState(host, arr.name, idx, e.index, "state", slotWidth(kind), proven),
           )!
         : emitDenseArrayState(
             host,
@@ -1087,6 +1088,7 @@ export function emitContainerExpr(
             e.index,
             "state",
             host.int32Array(e.arr) ? slotWidth("i32") : denseSlotWidth(host, e.arr.type.elem),
+            proven,
           );
       return { name: t, type: e.type };
     }

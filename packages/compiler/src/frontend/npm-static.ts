@@ -614,26 +614,11 @@ export function clearProgramBuiltinAliasCache(): void {
  * but the bundler-emitted CJS export rewrite (npm-static-rewrite.ts)
  * types the getter-table shapes and the offender attribution degrades a
  * package whose surface still breaks its consumers — so those bundles are
- * worth ATTEMPTING: eligible when the .d.ts and unminified criteria hold,
- * gracefully per-package-degraded when the attempt fails. */
+ * worth ATTEMPTING: eligible when the .d.ts criteria hold, gracefully
+ * per-package-degraded when the attempt fails. Minified JS is attempted
+ * too: a minified dist is ordinary JavaScript, and the bundle recognizers
+ * know esbuild's __commonJS helper by its shape under any name. */
 const TRANSFORM_MARKERS = ["__webpack_require__"];
-
-/** Unminified-JS heuristic over an entry source: at least two lines and
- * an average line length under 200 characters (minified dists are one
- * enormous line; readable code averages well under 100). */
-function looksUnminified(source: string): boolean {
-  const lines = source.split("\n");
-  if (lines.length < 2) return false;
-  return source.length / lines.length <= 200;
-}
-
-/** A whitespace/syntax-minified bundler dist whose interop helpers keep
- * their names (`var __toESM=…,__toCommonJS=mod=>…`): the recognizers
- * verify those shapes and refuse the package precisely when they cannot,
- * so the minification heuristic need not refuse it up front. */
-function namedBundlerHelpers(source: string): boolean {
-  return /\b__(?:toCommonJS|commonJS|toESM)\d*\s*=\s*(?:\(|[A-Za-z_$][\w$]*\s*=>)/.test(source);
-}
 
 function hasTransformMarkers(source: string): boolean {
   return TRANSFORM_MARKERS.some((m) => source.includes(m));
@@ -676,8 +661,6 @@ export function npmStaticIneligibleReason(
   if (jsEntry === null) return "no runtime JS entry resolves";
   const source = trackedReadFile(jsEntry);
   if (source === null) return `its runtime entry ${jsEntry} cannot be read`;
-  if (!looksUnminified(source) && !namedBundlerHelpers(source))
-    return "its shipped JS looks minified";
   if (hasTransformMarkers(source)) {
     return "its shipped JS carries build-transform markers (bundled/transpiled dist)";
   }

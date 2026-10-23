@@ -505,8 +505,12 @@ export function emitDenseArrayState(
   indexExpr: IrExpr | undefined,
   kind: "state" | "has",
   width: number,
+  /** The index is a dense array loop counter its entry test proved below
+   * the hole-free prefix (provenDenseIndex): the slot is a present value. */
+  proven = false,
 ): string {
   const B = host.B;
+  if (proven) return kind === "state" ? f64Lit(SCR_ARR_VALUE) : "true";
   const fn = kind === "state" ? "scr_arr_state" : "scr_arr_has";
   const ty = kind === "state" ? "double" : "i1";
   host.declare(`declare ${kind === "state" ? "double" : "zeroext i1"} @${fn}(ptr, double)`);

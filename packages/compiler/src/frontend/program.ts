@@ -1436,8 +1436,20 @@ function requiresOf7(
   return out;
 }
 
+/** `true`, or `!0`, its minified spelling. */
+function isTrueLiteral(expr: ts.Expression): boolean {
+  return (
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    (ts.isPrefixUnaryExpression(expr) &&
+      expr.operator === ts.SyntaxKind.ExclamationToken &&
+      ts.isNumericLiteral(expr.operand) &&
+      expr.operand.text === "0")
+  );
+}
+
 /** The exact `Object.defineProperty(exports|module.exports, "__esModule",
- * { value: true })` interop stamp (shared by preflight and the no-op lowering). */
+ * { value: true })` interop stamp (shared by preflight and the no-op lowering);
+ * `{ value: !0 }` is the same stamp. */
 export function isEsModuleStamp(expr: ts.Expression): boolean {
   if (!ts.isCallExpression(expr) || expr.questionDotToken !== undefined) return false;
   const callee = expr.expression;
@@ -1471,7 +1483,7 @@ export function isEsModuleStamp(expr: ts.Expression): boolean {
     ts.isPropertyAssignment(p) &&
     ts.isIdentifier(p.name) &&
     p.name.text === "value" &&
-    p.initializer.kind === ts.SyntaxKind.TrueKeyword
+    isTrueLiteral(p.initializer)
   );
 }
 
@@ -3891,22 +3903,7 @@ function computeCycleEarlyBindings7(
     const evaluation = known
       ? comp.slice().sort((a, b) => position.get(a)! - position.get(b)!)
       : comp.slice();
-    interface Candidate {
-      symbol: ts.Symbol;
-      name: ts.Identifier;
-      kind: CycleEarlyBinding["kind"];
-      module: ts.SourceFile;
-      /** User code can run between the cycle's start and the end of the
-       * declaration (always true when the order is unknown). */
-      exposed: boolean;
-      rank: number;
-      start: number;
-      end: number;
-      reference: ts.Identifier | null;
-      folded: ts.Identifier | null;
-      localNames: Map<string, string>;
-    }
-    const candidates = new Map<ts.Symbol, Candidate>();
+    const candidates = new Map<ts.Symbol, CycleCandidate7>();
     const names = new Set<string>();
     let dirty = !known;
     evaluation.forEach((m, rank) => {
@@ -3943,6 +3940,7 @@ function computeCycleEarlyBindings7(
             start: ts.tokenStartOfNode(stmt),
             end: stmt.end,
             reference: null,
+            deferredReference: null,
             folded: null,
             localNames: new Map(),
           });
@@ -4011,15 +4009,27 @@ function computeCycleEarlyBindings7(
           ref.end <= c.end
         )
           continue;
+        if (inDeferredPosition7(ref)) {
+          if (c.exposed && c.deferredReference === null) c.deferredReference = ref;
+          continue;
+        }
         let early: boolean;
-        if (inDeferredPosition7(ref)) early = c.exposed;
-        else if (sf === c.module) early = ts.tokenStartOfNode(ref) < c.start;
+        if (sf === c.module) early = ts.tokenStartOfNode(ref) < c.start;
         else if (!memberSet.has(sf) || !rankOf.has(sf)) early = false;
         else early = !known || rankOf.get(sf)! < c.rank;
         if (early) c.reference = ref;
       }
     }
+    // With a static evaluation order, a deferred reference only runs early
+    // when the code that runs before the declaration completes can reach
+    // the function holding it.
+    const reached =
+      known && [...candidates.values()].some((c) => c.reference === null && c.deferredReference)
+        ? cycleReachedDeferredReferences7(program, evaluation, candidates)
+        : null;
     for (const c of candidates.values()) {
+      if (c.reference === null && c.deferredReference !== null)
+        c.reference = reached === null ? c.deferredReference : (reached.get(c.symbol) ?? null);
       if (c.reference === null) continue;
       const settled = new Set<ts.SourceFile>(order.filter((sf) => !rankOf.has(sf)));
       if (known) for (const m of evaluation.slice(c.rank + 1)) settled.add(m);
@@ -4033,6 +4043,299 @@ function computeCycleEarlyBindings7(
         settled,
         ...(c.localNames.size > 0 ? { localNames: c.localNames } : {}),
       });
+    }
+  }
+  return out;
+}
+
+/** Collects into `units` the callables an initializer expression stores
+ * (see moduleEarlyBindingsOf7), recording in `immediate` the parts of a
+ * stored node that run where it is evaluated. */
+function storedCallables7(
+  checker: ts.TypeChecker,
+  e: ts.Expression,
+  units: ts.Node[],
+  immediate: Map<ts.Node, ts.Node[]>,
+): void {
+  while (
+    ts.isParenthesizedExpression(e) ||
+    ts.isAsExpression(e) ||
+    ts.isSatisfiesExpression(e) ||
+    ts.isNonNullExpression(e)
+  )
+    e = e.expression;
+  if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) {
+    units.push(e);
+  } else if (ts.isClassExpression(e)) {
+    units.push(e);
+    immediate.set(e, classSyncParts7(e));
+  } else if (ts.isObjectLiteralExpression(e)) {
+    for (const p of e.properties.nodes) {
+      if (
+        ts.isMethodDeclaration(p) ||
+        ts.isGetAccessorDeclaration(p) ||
+        ts.isSetAccessorDeclaration(p)
+      ) {
+        // A computed key evaluates where the literal does; a plain
+        // member-chain key (`[Equal.symbol]`) runs no user code.
+        if (!ts.isComputedPropertyName(p.name)) units.push(p);
+        else if (memberChainKey7(p.name.expression)) {
+          units.push(p);
+          immediate.set(p, [p.name]);
+        }
+      } else if (ts.isPropertyAssignment(p))
+        storedCallables7(checker, p.initializer, units, immediate);
+    }
+  } else if (ts.isArrayLiteralExpression(e)) {
+    for (const el of e.elements.nodes)
+      if (!ts.isSpreadElement(el)) storedCallables7(checker, el, units, immediate);
+  } else if (ts.isCallExpression(e)) {
+    // `const f = wrap(callback)` where wrap only returns closures over
+    // the callback: it runs when the stored result is called.
+    e.arguments.nodes.forEach((arg, index) => {
+      let fn: ts.Expression = arg;
+      while (ts.isParenthesizedExpression(fn)) fn = fn.expression;
+      if (
+        (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) &&
+        returnsOnlyClosuresOver7(checker, e.expression, index)
+      )
+        units.push(fn);
+    });
+  }
+}
+
+/** A binding of an import cycle and what the reference scan found. */
+interface CycleCandidate7 {
+  symbol: ts.Symbol;
+  name: ts.Identifier;
+  kind: CycleEarlyBinding["kind"];
+  module: ts.SourceFile;
+  /** User code can run between the cycle's start and the end of the
+   * declaration (always true when the order is unknown). */
+  exposed: boolean;
+  rank: number;
+  start: number;
+  end: number;
+  /** A reference read at top level before the declaration ran. */
+  reference: ts.Identifier | null;
+  /** A deferred reference (function body, parameter default, instance
+   * field) when user code may run before the declaration completes. */
+  deferredReference: ts.Identifier | null;
+  folded: ts.Identifier | null;
+  localNames: Map<string, string>;
+}
+
+/** For one import cycle with a static evaluation order: the first deferred
+ * reference to each candidate that code running before the candidate's
+ * declaration completes can reach, or null when the walk cannot be precise
+ * (top-level await, a default-exported function or class declaration).
+ *
+ * The cycle's top-level code runs in evaluation order. A stored callable
+ * (a function or class declaration, or a function, class or object-literal
+ * method stored by a variable initializer) becomes reachable once
+ * reachable code names its binding, through an import alias or a
+ * namespace member too; every other function-like in reachable code counts
+ * as reachable, since it may be handed to a callee. A namespace import of
+ * a cycle member used other than for a member read makes every stored
+ * callable reachable. moduleEarlyBindingsOf7 is the single-module form. */
+function cycleReachedDeferredReferences7(
+  program: ts.Program,
+  evaluation: readonly ts.SourceFile[],
+  candidates: ReadonlyMap<ts.Symbol, CycleCandidate7>,
+): Map<ts.Symbol, ts.Identifier> | null {
+  const checker = program.getTypeChecker();
+  const members = new Set(evaluation);
+  for (const sf of evaluation) {
+    if (hasTopLevelAwait7(sf)) return null;
+    for (const stmt of sf.statements.nodes) {
+      if (
+        (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) &&
+        (ts.getCombinedModifierFlags(stmt as unknown as ts.Declaration) &
+          ts.ModifierFlags.Default) !==
+          0
+      )
+        return null;
+    }
+  }
+  const stored = new Set<ts.Node>();
+  const immediate = new Map<ts.Node, ts.Node[]>();
+  const storedNames: ts.Identifier[] = [];
+  const unitsOfName = new Map<ts.Identifier, ts.Node[]>();
+  const store = (name: ts.Identifier, units: ts.Node[]): void => {
+    if (units.length === 0) return;
+    for (const u of units) stored.add(u);
+    storedNames.push(name);
+    unitsOfName.set(name, units);
+  };
+  for (const sf of evaluation) {
+    for (const stmt of sf.statements.nodes) {
+      if (
+        (ts.getCombinedModifierFlags(stmt as unknown as ts.Declaration) &
+          ts.ModifierFlags.Ambient) !==
+        0
+      )
+        continue;
+      if (ts.isFunctionDeclaration(stmt) && stmt.name !== undefined && stmt.body !== undefined) {
+        store(stmt.name, [stmt]);
+      } else if (ts.isClassDeclaration(stmt) && stmt.name !== undefined) {
+        store(stmt.name, [stmt]);
+      } else if (ts.isVariableStatement(stmt)) {
+        for (const d of stmt.declarationList.declarations.nodes) {
+          if (ts.isIdentifier(d.name) && d.initializer !== undefined) {
+            const units: ts.Node[] = [];
+            storedCallables7(checker, d.initializer, units, immediate);
+            store(d.name, units);
+          }
+        }
+      }
+    }
+  }
+  const unitsBySymbol = new Map<ts.Symbol, ts.Node[]>();
+  const allUnits: ts.Node[] = [];
+  for (const name of storedNames) {
+    const symbol = checker.getSymbolAtLocation(name);
+    if (symbol === undefined) continue;
+    const units = unitsOfName.get(name)!;
+    unitsBySymbol.set(symbol, [...(unitsBySymbol.get(symbol) ?? []), ...units]);
+    allUnits.push(...units);
+  }
+  // A named class expression's inner name (`class Impl { static x =
+  // Impl.m(); }`) names the class inside its own body, as the binding it
+  // is stored in names it outside.
+  const innerNames: ts.Identifier[] = [];
+  for (const unit of allUnits) {
+    if (!ts.isClassExpression(unit) || unit.name === undefined) continue;
+    const symbol = checker.getSymbolAtLocation(unit.name);
+    if (symbol === undefined) continue;
+    innerNames.push(unit.name);
+    unitsBySymbol.set(symbol, [...(unitsBySymbol.get(symbol) ?? []), unit]);
+  }
+  // The identifier texts worth resolving: declared names, and the local
+  // names of imports (named, default and namespace) in cycle members.
+  const names = new Set<string>();
+  for (const c of candidates.values()) names.add(c.name.text);
+  for (const name of storedNames) names.add(name.text);
+  for (const name of innerNames) names.add(name.text);
+  for (const sf of evaluation) {
+    for (const stmt of sf.statements.nodes) {
+      if (!ts.isImportDeclaration(stmt) || stmt.importClause === undefined) continue;
+      const clause = stmt.importClause;
+      if (clause.name !== undefined) names.add(clause.name.text);
+      const bindings = clause.namedBindings;
+      if (bindings === undefined) continue;
+      if (ts.isNamedImports(bindings))
+        for (const element of bindings.elements.nodes) names.add(element.name.text);
+      else names.add(bindings.name.text);
+    }
+  }
+  const idents: ts.Identifier[] = [];
+  for (const sf of evaluation) {
+    ts.walkPreorder(sf, (node) => {
+      if (ts.isImportDeclaration(node)) return "skip";
+      if (ts.isIdentifier(node) && names.has(node.text)) idents.push(node);
+      return undefined;
+    });
+  }
+  checker.prefetchSymbolNodesExact(idents);
+  const symbolOf = (id: ts.Identifier): ts.Symbol | undefined => {
+    const parent = id.parent;
+    let symbol = checker.getSymbolAtLocation(id);
+    if (parent !== undefined && ts.isShorthandPropertyAssignment(parent) && parent.name === id) {
+      symbol = checker.getShorthandAssignmentValueSymbol(parent) ?? symbol;
+    }
+    if (symbol !== undefined && symbol.flags & ts.SymbolFlags.Alias) {
+      symbol = checker.getAliasedSymbol(symbol);
+    }
+    return symbol;
+  };
+  const isMemberNamespace = (symbol: ts.Symbol): boolean =>
+    (symbol.flags & ts.SymbolFlags.ValueModule) !== 0 &&
+    symbol.declarations.some((d) => ts.isSourceFile(d) && members.has(d));
+  const declared = new Set<ts.Symbol>();
+  const reachedUnits = new Set<ts.Node>();
+  const out = new Map<ts.Symbol, ts.Identifier>();
+  const work: ts.Node[] = [];
+  const reach = (unit: ts.Node): void => {
+    if (reachedUnits.has(unit)) return;
+    reachedUnits.add(unit);
+    work.push(unit);
+  };
+  const visit = (root: ts.Node): void => {
+    ts.walkPreorder(root, (node) => {
+      if (node !== root && stored.has(node)) {
+        for (const part of immediate.get(node) ?? []) visit(part);
+        return "skip";
+      }
+      if (ts.isImportDeclaration(node)) return "skip";
+      if (node.kind === ts.SyntaxKind.ThisKeyword) {
+        // `this` in a static initializer or block names the class, so it
+        // reaches the class's methods as naming the class does.
+        const owner = staticThisClass7(node);
+        if (owner !== undefined && stored.has(owner)) reach(owner);
+        return undefined;
+      }
+      if (!ts.isIdentifier(node) || !names.has(node.text)) return undefined;
+      if (inTypePosition7(node)) return undefined;
+      const parent = node.parent;
+      if (parent !== undefined && ts.isExportSpecifier(parent)) return undefined;
+      if (parent !== undefined && declaredName7(parent) === node) return undefined;
+      const symbol = symbolOf(node);
+      if (symbol === undefined) return undefined;
+      if (isMemberNamespace(symbol)) {
+        // `ns.member` resolves through the member's own identifier; any
+        // other use can reach every export.
+        if (
+          !(
+            parent !== undefined &&
+            ts.isPropertyAccessExpression(parent) &&
+            parent.expression === node
+          )
+        )
+          for (const unit of allUnits) reach(unit);
+        return undefined;
+      }
+      const c = candidates.get(symbol);
+      if (
+        c !== undefined &&
+        node !== c.name &&
+        !declared.has(symbol) &&
+        !out.has(symbol) &&
+        inDeferredPosition7(node) &&
+        !(
+          c.kind === "class" &&
+          ts.getSourceFileOfNode(node) === c.module &&
+          ts.tokenStartOfNode(node) >= c.start &&
+          node.end <= c.end
+        )
+      )
+        out.set(symbol, node);
+      for (const unit of unitsBySymbol.get(symbol) ?? []) reach(unit);
+      return undefined;
+    });
+  };
+  const drain = (): void => {
+    while (work.length > 0) visit(work.pop()!);
+  };
+  const declare = (name: ts.BindingName): void => {
+    for (const id of boundNames7(name)) {
+      const symbol = checker.getSymbolAtLocation(id);
+      if (symbol !== undefined) declared.add(symbol);
+    }
+  };
+  for (const sf of evaluation) {
+    for (const stmt of sf.statements.nodes) {
+      if (ts.isClassDeclaration(stmt)) {
+        for (const part of classSyncParts7(stmt)) visit(part);
+        drain();
+        if (stmt.name !== undefined) declare(stmt.name);
+      } else if (ts.isVariableStatement(stmt)) {
+        for (const d of stmt.declarationList.declarations.nodes) {
+          visit(d);
+          drain();
+          declare(d.name);
+        }
+      } else if (!ts.isFunctionDeclaration(stmt)) visit(stmt);
+      drain();
     }
   }
   return out;
@@ -4102,51 +4405,8 @@ function moduleEarlyBindingsOf7(
     storedBy.set(name.text, list);
   };
   const checker = program.getTypeChecker();
-  const storedIn = (e: ts.Expression, units: ts.Node[]): void => {
-    while (
-      ts.isParenthesizedExpression(e) ||
-      ts.isAsExpression(e) ||
-      ts.isSatisfiesExpression(e) ||
-      ts.isNonNullExpression(e)
-    )
-      e = e.expression;
-    if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) {
-      units.push(e);
-    } else if (ts.isClassExpression(e)) {
-      units.push(e);
-      immediate.set(e, classSyncParts7(e));
-    } else if (ts.isObjectLiteralExpression(e)) {
-      for (const p of e.properties.nodes) {
-        if (
-          ts.isMethodDeclaration(p) ||
-          ts.isGetAccessorDeclaration(p) ||
-          ts.isSetAccessorDeclaration(p)
-        ) {
-          // A computed key evaluates where the literal does; a plain
-          // member-chain key (`[Equal.symbol]`) runs no user code.
-          if (!ts.isComputedPropertyName(p.name)) units.push(p);
-          else if (memberChainKey7(p.name.expression)) {
-            units.push(p);
-            immediate.set(p, [p.name]);
-          }
-        } else if (ts.isPropertyAssignment(p)) storedIn(p.initializer, units);
-      }
-    } else if (ts.isArrayLiteralExpression(e)) {
-      for (const el of e.elements.nodes) if (!ts.isSpreadElement(el)) storedIn(el, units);
-    } else if (ts.isCallExpression(e)) {
-      // `const f = wrap(callback)` where wrap only returns closures over
-      // the callback: it runs when the stored result is called.
-      e.arguments.nodes.forEach((arg, index) => {
-        let fn: ts.Expression = arg;
-        while (ts.isParenthesizedExpression(fn)) fn = fn.expression;
-        if (
-          (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) &&
-          returnsOnlyClosuresOver7(checker, e.expression, index)
-        )
-          units.push(fn);
-      });
-    }
-  };
+  const storedIn = (e: ts.Expression, units: ts.Node[]): void =>
+    storedCallables7(checker, e, units, immediate);
   sf.statements.nodes.forEach((stmt, index) => {
     if (ambient(stmt)) return;
     if (ts.isFunctionDeclaration(stmt) && stmt.name !== undefined && stmt.body !== undefined) {
@@ -4399,6 +4659,40 @@ function returnsOnlyClosuresOver7(
  * expressions, decorators, computed member keys, static field
  * initializers and static blocks. Methods and instance fields wait for a
  * call or a construction. */
+/** The class whose static field initializer or static block evaluates `this`
+ * (through arrow functions, which keep the enclosing `this`), or undefined
+ * when another function or a class's instance side binds it. */
+function staticThisClass7(node: ts.Node): ts.ClassLikeDeclaration | undefined {
+  let child = node;
+  for (let n = node.parent; n !== undefined; child = n, n = n.parent) {
+    if (ts.isArrowFunction(n)) continue;
+    if (ts.isClassStaticBlockDeclaration(n)) return n.parent as ts.ClassLikeDeclaration;
+    if (ts.isPropertyDeclaration(n)) {
+      if (n.initializer !== child) return undefined;
+      return (ts.getCombinedModifierFlags(n) & ts.ModifierFlags.Static) !== 0
+        ? (n.parent as ts.ClassLikeDeclaration)
+        : undefined;
+    }
+    if (ts.isComputedPropertyName(n)) {
+      // A computed key evaluates in the scope around the class.
+      const member = n.parent;
+      const cls = member?.parent;
+      if (cls === undefined) return undefined;
+      child = cls;
+      n = cls;
+      continue;
+    }
+    if (
+      ts.isFunctionLike(n) ||
+      ts.isClassDeclaration(n) ||
+      ts.isClassExpression(n) ||
+      ts.isSourceFile(n)
+    )
+      return undefined;
+  }
+  return undefined;
+}
+
 function classSyncParts7(c: ts.ClassLikeDeclaration): ts.Node[] {
   const decorators = (n: ts.Node): ts.Node[] =>
     ((n as { modifiers?: ts.NodeArray<ts.Node> }).modifiers?.nodes ?? []).filter(
@@ -6143,7 +6437,7 @@ function analyzeEsmNamedImportLinks(
     const nextSeen = new Set(seenModules);
     nextSeen.add(dep);
     const module = checker.getSymbolAtLocation(dep);
-    const exported = module?.getExports().get(name as ts.__String);
+    const exported = module?.getExports().get(ts.escapedSymbolName(name));
     if (exported !== undefined) {
       let resolved = exported;
       const seenSymbols = new Set<ts.Symbol>();

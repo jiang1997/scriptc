@@ -53,7 +53,7 @@ Type-only imports follow Node.js's type stripping. `import type` and `export typ
 scriptc compiles a package automatically when it:
 
 - ships its own type declarations, or is typed by its DefinitelyTyped `@types/` package, or is a dependency of another package that has no declarations at all, and
-- ships readable JavaScript: unminified, or minified by a bundler whose helpers keep their names.
+- ships JavaScript that isn't a webpack bundle. Minified JavaScript compiles like unminified JavaScript.
 
 The declarations check your program; the package's JavaScript compiles with the types scriptc infers from it. A program that doesn't typecheck against the inferred types, for example because an `@types/` package describes another release, fails the build at that use.
 

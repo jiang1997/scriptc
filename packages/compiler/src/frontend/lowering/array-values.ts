@@ -15,6 +15,7 @@ import {
   typeKey,
   unionContainerArmsOk,
 } from "../../ir/ir.js";
+import { everyExpr } from "../../ir/traverse.js";
 import type { Lowerer } from "./lowerer.js";
 import type * as ts from "../ts7/adapter.js";
 
@@ -193,6 +194,81 @@ export function unionArrayValueRead(
   return result;
 }
 
+/** Expression kinds that evaluate without running other code or writing
+ * a binding. */
+const PURE_KINDS = new Set<IrExpr["kind"]>([
+  "varRef",
+  "numLit",
+  "strLit",
+  "boolLit",
+  "unitLit",
+  "bin",
+  "unary",
+  "logical",
+  "ternary",
+  "toBool",
+  "fieldGet",
+  "recordGet",
+  "arrayGet",
+  "arrayState",
+  "arrayHas",
+  "unionIsTag",
+  "unionNarrow",
+  "unionWrap",
+]);
+
+/** The locals evaluating `value` may assign, and whether it may run other
+ * code (anything but the pure kinds and the read-only element helpers),
+ * which can assign locals and fields through closures. */
+function valueEffects(lowerer: Lowerer, value: IrExpr): { writes: Set<string>; opaque: boolean } {
+  const readers = new Set<string>();
+  for (const [key, name] of lowerer.arrHofHelpers) if (key.startsWith("idxOr:")) readers.add(name);
+  const writes = new Set<string>();
+  let opaque = false;
+  everyExpr(value, {
+    expr: (e) => {
+      if (e.kind === "assignExpr" || e.kind === "incDec") writes.add(e.localId);
+      else if (e.kind === "call" ? !readers.has(e.callee) : !PURE_KINDS.has(e.kind)) opaque = true;
+      return true;
+    },
+    stmt: (s) => {
+      if (s.kind === "varDecl" || s.kind === "assign") writes.add(s.localId);
+      else opaque = true;
+      return true;
+    },
+  });
+  return { writes, opaque };
+}
+
+/** Whether evaluating `e` after `value` gives what it gives before it: a
+ * literal, or a local and field read `value` cannot change. */
+function unaffectedBy(e: IrExpr, effects: { writes: Set<string>; opaque: boolean }): boolean {
+  switch (e.kind) {
+    case "numLit":
+    case "strLit":
+      return true;
+    case "varRef":
+      return !effects.writes.has(e.localId);
+    case "bin":
+      return unaffectedBy(e.left, effects) && unaffectedBy(e.right, effects);
+    case "fieldGet":
+    case "recordGet":
+      return !effects.opaque && unaffectedBy(e.obj, effects);
+    default:
+      return false;
+  }
+}
+
+/** Whether `e` reads a `let` or `var` binding, which code the value runs
+ * can assign through a closure. */
+function readsMutableLocal(lowerer: Lowerer, e: IrExpr): boolean {
+  return !everyExpr(e, {
+    expr: (x) =>
+      x.kind !== "varRef" || lowerer.ctx.locals.find((l) => l.id === x.localId)?.mutable === false,
+    stmt: () => true,
+  });
+}
+
 /** Store a stabilized value without changing the array's element ABI. */
 export function arrayValueStore(
   lowerer: Lowerer,
@@ -210,10 +286,31 @@ export function arrayValueStore(
     // owned union temporary to release on every path.
     const unionId = value.type.unionId;
     let stable = value;
-    let prefix: IrStmt[] = [];
+    const prefix: IrStmt[] = [];
+    // The stores below evaluate the receiver and the index after the value.
+    // JavaScript evaluates them first (`out[n++] = src[n]` reads src[1]), so
+    // either may need its value held before the value runs.
+    if (value.kind !== "varRef") {
+      const valueFx = valueEffects(lowerer, value);
+      const hold = (e: IrExpr, name: string, effects: typeof valueFx): IrExpr => {
+        if (unaffectedBy(e, effects) && !(effects.opaque && readsMutableLocal(lowerer, e)))
+          return e;
+        const temp = lowerer.declareHiddenLocal(name, e.type);
+        prefix.push({ kind: "varDecl", localId: temp.id, init: e, loc });
+        return varRef(temp.id, temp.type, loc);
+      };
+      // The receiver runs before the index and the value, so the index's
+      // effects can change it too (`a[(a = b, 0)] = c[0]!`).
+      const indexFx = valueEffects(lowerer, index);
+      arr = hold(arr, "%arrayTarget", {
+        writes: new Set([...valueFx.writes, ...indexFx.writes]),
+        opaque: valueFx.opaque || indexFx.opaque,
+      });
+      index = hold(index, "%arrayIndex", valueFx);
+    }
     if (value.kind !== "varRef") {
       const temp = lowerer.declareHiddenLocal("%arrayValue", value.type);
-      prefix = [{ kind: "varDecl", localId: temp.id, init: value, loc }];
+      prefix.push({ kind: "varDecl", localId: temp.id, init: value, loc });
       stable = varRef(temp.id, temp.type, loc);
     }
     const write: IrStmt = {

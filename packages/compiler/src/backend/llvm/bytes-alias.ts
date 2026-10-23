@@ -7,9 +7,15 @@ import type { LlvmEmitterContext } from "./expr-context.js";
  * buffer. Neither overlaps the other, a native field, array storage or a
  * module global's slot, so element stores leave header loads and global
  * receiver slots loop-invariant. Untagged accesses and calls still alias
- * every category. */
+ * every category.
+ *
+ * Header loads are also `!invariant.load`: no store or call between the
+ * construction of a view and its release changes them. Without it, a data
+ * pointer load ahead of a bounds branch is sunk into the in-bounds block,
+ * and LICM keeps a conditionally executed load inside the loop. */
 export function bytesHeaderAlias(host: LlvmEmitterContext): string {
-  return host.memoryAliasAttachment("bytes:header");
+  const tag = host.memoryAliasAttachment("bytes:header");
+  return tag === "" ? "" : `${tag}, !invariant.load !{}`;
 }
 
 export function bytesElementAlias(host: LlvmEmitterContext): string {

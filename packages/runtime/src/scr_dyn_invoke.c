@@ -740,6 +740,8 @@ static ScrDyn *dyn_live_array_method(ScrDyn *recv, int mid, ScrDyn *const *args,
   if (!ops) return NULL;
   ScrArr *arr = recv->v.typed_ref.ptr;
   size_t len = arr->len;
+  /* A frozen array's view refuses the write. */
+  if (scr_arr_frozen(arr) && ((mid == DYN_M_push) || (mid == DYN_M_pop))) return NULL;
   if ((mid == DYN_M_push) && argc == 1 && ops->set) {
     if (!ops->set(arr, (double)len, args[0])) return NULL;
     *handled = true;
@@ -1112,16 +1114,20 @@ static ScrDyn *scr_dyn_invoke_impl(
           return NULL;
         }
       }
-      if (recv->v.arr.frozen && ((mid == DYN_M_push) ||
-          (mid == DYN_M_pop) || (mid == DYN_M_shift) ||
-          (mid == DYN_M_unshift) || (mid == DYN_M_splice))) {
-        static const char message[] = "Cannot assign to read only property 'length'";
-        scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+      /* A frozen array throws at the operation's first write, as in Node. */
+      int frozen_op = !recv->v.arr.frozen ? -1
+          : (mid == DYN_M_push) ? 1
+          : (mid == DYN_M_pop) ? 2
+          : (mid == DYN_M_shift) ? 6
+          : (mid == DYN_M_unshift) ? 4
+          : (mid == DYN_M_splice) ? 10
+          : ((mid == DYN_M_sort) || (mid == DYN_M_reverse)) ? 7
+          : -1;
+      double items = (mid == DYN_M_splice) ? (argc > 2 ? (double)(argc - 2) : 0) : (double)argc;
+      if (frozen_op >= 0 &&
+          scr_array_frozen_error(frozen_op, len, (double)splice_start, frozen_op == 10 ? (double)splice_removed : items, items))
         return NULL;
-      }
-      if ((grows && recv->non_extensible) || (shrinks && recv->v.arr.sealed && !(mid == DYN_M_shift)) ||
-          (recv->v.arr.frozen && (((mid == DYN_M_sort) && len > 1) ||
-            ((mid == DYN_M_reverse) && len > 1)))) {
+      if ((grows && recv->non_extensible) || (shrinks && recv->v.arr.sealed && !(mid == DYN_M_shift))) {
         static const char message[] = "Cannot modify a sealed or frozen array";
         scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
         return NULL;
@@ -1390,11 +1396,7 @@ static ScrDyn *scr_dyn_invoke_impl(
       if (!dyn_arr_length_unchanged(recv, len)) return NULL;
       size_t start = dyn_rel_index(startD, len);
       size_t end = dyn_rel_index(endD, len);
-      if (recv->v.arr.frozen && start < end) {
-        static const char message[] = "Cannot assign to read only array index";
-        scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
-        return NULL;
-      }
+      if (recv->v.arr.frozen && scr_array_frozen_error(8, len, (double)start, (double)end, 0)) return NULL;
       ScrDyn *fill = argc ? args[0] : scr_dyn_undefined();
       if (start < end) scr_dyn_region_store(recv, fill);
       for (size_t i = start; i < end; i++) {
@@ -1423,11 +1425,8 @@ static ScrDyn *scr_dyn_invoke_impl(
       size_t end = dyn_rel_index(endD, len);
       size_t count = end > start ? end - start : 0;
       if (count > len - target) count = len - target;
-      if (recv->v.arr.frozen && count > 0) {
-        static const char message[] = "Cannot assign to read only array index";
-        scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+      if (recv->v.arr.frozen && scr_array_frozen_error(9, len, (double)target, (double)start, (double)end))
         return NULL;
-      }
       if (start < target && target < start + count) {
         for (size_t i = count; i > 0; i--) {
           ScrDyn *old = recv->v.arr.items[target + i - 1];
@@ -1972,7 +1971,7 @@ static bool dyn_global_construct(const ScrDyn *callee, const ScrDyn *args, ScrDy
 
 static ScrDyn *dyn_global_ctor(const char *name) {
   for (size_t i = 0; i < DYN_GLOBAL_CTORS; i++) {
-    if (strcmp(dyn_global_ctor_names[i], name) != 0) continue;
+    if (dyn_global_ctor_names[i][0] != name[0] || strcmp(dyn_global_ctor_names[i], name) != 0) continue;
     if (!dyn_global_ctors_registered) {
       dyn_global_ctors_registered = true;
       scr_atexit(dyn_global_ctors_cleanup);

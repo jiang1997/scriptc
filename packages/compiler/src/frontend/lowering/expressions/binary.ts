@@ -2843,6 +2843,24 @@ function lowerLogicalPair(lowerer: Lowerer, expr: ts.BinaryExpression, left: IrE
         loc,
       };
     }
+    // A JavaScript default that tsc types `any` (`e.title || null` in an
+    // instance of a function with untyped parameters, where `e.title` is a
+    // string): the checked domain, as for union operands above.
+    if (
+      target === null &&
+      isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
+      lowerer.dynConvertible(left.type) &&
+      lowerer.dynConvertible(right.type)
+    ) {
+      return {
+        kind: "logical",
+        op: op === ts.SyntaxKind.AmpersandAmpersandToken ? "&&" : "||",
+        left: lowerer.coerceInto(expr.left, left, DYN),
+        right: lowerer.coerceInto(expr.right, right, DYN),
+        type: DYN,
+        loc,
+      };
+    }
     lowerer.unsupported("SC1042", expr);
   }
   return {

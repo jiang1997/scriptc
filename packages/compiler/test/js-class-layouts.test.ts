@@ -101,6 +101,51 @@ delete loose.label;
   expect(layout(deleted, "Shape").tracks).toBe(true);
 });
 
+test("freezing values other than class instances keeps JavaScript class layouts fixed", async () => {
+  const module = await lower(`${SHAPES}
+/** @param {{ value: any }} data */
+function settle(data) {
+  data.value = Object.freeze(data.value);
+  Object.seal(data);
+  return Object.preventExtensions(data.value);
+}
+settle({ value: { sides: 1 } });
+const square = new Square();
+Object.freeze(square);
+`);
+  expect(layout(module, "Shape").tracks).toBe(false);
+  expect(layout(module, "Square").tracks).toBe(false);
+});
+
+test("accessors that share no field's name keep JavaScript class layouts fixed", async () => {
+  const module = await lower(`
+class Path {
+  constructor(key) {
+    this.cache = [];
+    this.key = key;
+  }
+  get path() {
+    if (!this.cache.length) this.cache.push(this.key);
+    return this.cache;
+  }
+}
+class Named extends Path {
+  constructor(key) {
+    super(key);
+    this.label = "named";
+  }
+  /** @param {string} value */
+  set label2(value) {
+    this.label = value;
+  }
+}
+console.log(new Named("k").path.length);
+`);
+  expect(layout(module, "Path")).toEqual({ fields: "cache:dyn key:dyn", tracks: false });
+  expect(layout(module, "Named").tracks).toBe(false);
+  expect(layout(module, "Named").fields).toBe("cache:dyn key:dyn label:string");
+});
+
 test("JavaScript subclass fields keep their types when the base constructor only assigns fields", async () => {
   const module = await lower(`
 class Base {

@@ -338,6 +338,22 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         type: BOOL,
         loc,
       };
+    // A codec in untyped storage is its record's handle box.
+    const codec = (["TextEncoder", "TextDecoder"] as const).find((name) =>
+      lowerer.isStdlibGlobal(expr.right, name),
+    );
+    if (codec && lowerer.mapTypeOf(lowerer.typeOf(expr.left))?.kind === "dyn") {
+      return {
+        kind: "libCall",
+        fn: "text.codecIs",
+        args: [
+          lowerer.lowerExprExpecting(expr.left, DYN),
+          { kind: "boolLit", value: codec === "TextDecoder", type: BOOL, loc },
+        ],
+        type: BOOL,
+        loc,
+      };
+    }
     if (lowerer.isStdlibGlobal(expr.right, "ReadableStream")) {
       const value = lowerer.lowerExprExpecting(expr.left, DYN);
       return { kind: "libCall", fn: "fetch.streamIs", args: [value], type: BOOL, loc };

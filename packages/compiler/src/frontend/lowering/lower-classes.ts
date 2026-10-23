@@ -1,3 +1,4 @@
+import { lowerAsyncLocalStorageOptions } from "./builtins/async-context.js";
 import {
   DATE_TIME_FIELD,
   dateRootOf,
@@ -179,7 +180,12 @@ import { hasLexicalPrivateReference, hasStaticThis, rejectStaticThis } from "./s
 import { lowerUrlNew } from "./lower-url.js";
 import { isNativeProxyInitializer, lowerNativeProxy } from "./expressions/native-proxy.js";
 import { classStaticDataFor } from "./class-static-data.js";
-import { construction, constructionPrefix } from "./js-class-fields.js";
+import {
+  accessorInterceptsBase,
+  accessorNames,
+  construction,
+  constructionPrefix,
+} from "./js-class-fields.js";
 import { lowerObjectFactoryNew } from "./object-factory-new.js";
 import { tryLowerExpression } from "./expressions/try-lower-expression.js";
 import { lowerInstanceConstructorNew } from "./class-instance-constructor.js";
@@ -2740,8 +2746,8 @@ export function collectClassShapeInner(
       // state, so an override or shadowing field would split-brain.
       // Underscore methods are the SUPPORTED override form — but only
       // the ones the class's own base consumes (a `_read` on a
-      // Transform, or `_writev`/`_construct` anywhere, would be consumed
-      // by Node machinery that has no lowering here).
+      // Transform, or `_writev` on a Readable, would be consumed by Node
+      // machinery that has no lowering here).
       if (memberName && ts.isIdentifier(memberName)) {
         const streamBase = (() => {
           for (let c = base; c; c = c.base) if (c.builtinStream) return c;
@@ -2760,7 +2766,7 @@ export function collectClassShapeInner(
             lowerer.unsupported(
               "SC1090",
               memberName,
-              `declaring '_writev' on a ${streamBase.def.name.slice(1)} subclass (batched writes are supported on Writable and Duplex subclasses)`,
+              `declaring '_writev' on a ${streamBase.def.name.slice(1)} subclass (a Readable has no writable side)`,
             );
           }
           const accepted = streamCtorShape(streamBase.def.name).accepted;
@@ -4116,7 +4122,7 @@ export function collectClassShapeInner(
       // A subclass field created before anything can observe the instance
       // keeps its type: super() cannot run code that reads it earlier.
       const baseConstruction =
-        base && ![...methods.keys()].some((m) => m.startsWith("get:") || m.startsWith("set:"))
+        base && !accessorInterceptsBase(accessorNames(methods.keys()), base)
           ? construction(base)
           : null;
       const sealedPrefix = baseConstruction
@@ -4149,7 +4155,7 @@ export function collectClassShapeInner(
               // An own JS callable shadows its prototype declaration.
               // Keep the method in the prototype and store the assigned
               // value in the instance property bag.
-              lowerer.prototypeMethodAccesses.set(name, assign);
+              lowerer.noteMethodAccess(name, assign);
               continue;
             }
             const sym = lowerer.checker.getSymbolAtLocation(assign);
@@ -4231,7 +4237,7 @@ export function collectClassShapeInner(
             }
             if (!key && (fields.has(fieldName) || hasAccessor(fieldName))) continue;
             if (!key && (methods.has(fieldName) || lowerer.findMethodOn(base, fieldName))) {
-              lowerer.prototypeMethodAccesses.set(fieldName, lhs);
+              lowerer.noteMethodAccess(fieldName, lhs);
               continue;
             }
             // A key already declared (own or inherited) makes later
@@ -10814,21 +10820,23 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
       lowerer.badType(expr, tsType);
     }
     // `new AsyncLocalStorage()` (node:async_hooks): a fresh store id —
-    // an f64 handle (type-mapper.ts), the Channel story. Construction options
-    // ({ defaultValue, name }) have no lowering yet.
+    // an f64 handle (type-mapper.ts), the Channel story. The options form
+    // ({ defaultValue, name }) passes the options object as a dyn value.
     if (
       symbol !== null &&
       ts.symbolName(symbol) === "AsyncLocalStorage" &&
       lowerer.isStdlibSymbol(symbol)
     ) {
-      if ((expr.arguments?.nodes.length ?? 0) > 0) {
-        lowerer.noLowering(
-          "new AsyncLocalStorage(options)",
-          expr,
-          "the zero-argument constructor is the supported form (defaultValue/name options have no lowering yet)",
-        );
-      }
-      return { kind: "libCall", fn: "als.new", args: [], type: F64, loc };
+      const options = expr.arguments?.nodes[0];
+      if (options === undefined)
+        return { kind: "libCall", fn: "als.new", args: [], type: F64, loc };
+      return {
+        kind: "libCall",
+        fn: "als.newOptions",
+        args: [lowerAsyncLocalStorageOptions(lowerer, options)],
+        type: F64,
+        loc,
+      };
     }
     // `new Promise<T>((resolve) => ...)`: the ambient Promise constructor.
     if (symbol !== null && ts.symbolName(symbol) === "Promise" && lowerer.isStdlibSymbol(symbol)) {

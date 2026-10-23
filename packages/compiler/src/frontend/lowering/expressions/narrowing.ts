@@ -33,6 +33,7 @@ import {
   isOptionalProcessVersionsRead,
 } from "../builtins/process.js";
 import { requestGeneralStreamSurface } from "../general-streams.js";
+import { isOptionalReadlineCursorRead } from "../builtins/readline.js";
 import { literalValues } from "../../literal-values.js";
 import { literalUnionArm } from "../../union-discriminants.js";
 import { checkedArmExtraction } from "../coercions/unions.js";
@@ -617,6 +618,8 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
   if (ts.isPropertyAccessExpression(node) && isOptionalProcessStreamProperty(lowerer, node))
     return expr;
   if (isOptionalProcessVersionsRead(lowerer, node)) return expr;
+  if (ts.isPropertyAccessExpression(node) && isOptionalReadlineCursorRead(lowerer, node))
+    return expr;
 
   // Represented fields and index values can include undefined even when
   // checker inference or lib.d.ts declares strings (RegExp captures).

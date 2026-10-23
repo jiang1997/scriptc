@@ -988,6 +988,12 @@ double scr_map_size(const ScrMap *m) { return (double)m->nlive; }
  *    table. Regrowth is amortized against the insertions that need it.
  * A map without entries has empty tables already: clearing it does no
  * work and keeps its storage for the next fill. */
+void scr_map_prevent_extensions(ScrMap *m) {
+  if (m->rc != SIZE_MAX) m->flags |= SCR_MAP_NOT_EXTENSIBLE;
+}
+
+bool scr_map_is_extensible(const ScrMap *m) { return (m->flags & SCR_MAP_NOT_EXTENSIBLE) == 0; }
+
 void scr_map_clear(ScrMap *m) {
   size_t walked = m->nentries;
   if (walked == 0) return;

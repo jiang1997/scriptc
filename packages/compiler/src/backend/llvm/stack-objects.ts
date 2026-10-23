@@ -44,14 +44,17 @@ export type StackObjectFieldOwner = (fields: readonly StackObjectField[]) => voi
  * standalone scalar class whose constructor never lets `this` escape
  * (record-results.ts). The caller proves that every use of the value only
  * projects it. Record fields may own references; the frame releases them
- * (stackObjectFields). Published shapes keep heap storage: their field
- * guards treat the immortal header as a frozen object. */
+ * (stackObjectFields). Published and freezable shapes keep heap storage:
+ * their field guards treat the immortal header as a frozen object, and a
+ * frozen record keeps its frozen bit in a counted header. */
 export function canStackObject(host: LlvmEmitterContext, e: IrExpr): e is StackObjectSource {
   // A ThreadSlots key keeps its slot index for its lifetime and has its
   // values released when it is freed: it lives on the heap.
   if (e.type.kind === "object" && host.classMeta.get(e.type.className)?.threadSlot === true)
     return false;
   if (e.type.kind === "record" && host.publishedTypes?.recordGuarded(e.type.shapeId) === true)
+    return false;
+  if (e.type.kind === "record" && host.recordsById.get(e.type.shapeId)?.freezable === true)
     return false;
   // A producer with a result-slot entry builds its fresh result in the
   // caller's storage.

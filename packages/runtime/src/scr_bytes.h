@@ -357,6 +357,18 @@ ScrStr *scr_text_decode(const ScrBytes *b);
 double scr_text_decoder_encoding(const ScrDyn *label);
 ScrStr *scr_text_decoder_name(double encoding);
 ScrDyn *scr_text_encode_into(const ScrDyn *source, const ScrDyn *destination);
+/* TextEncoder and TextDecoder records as checked-dynamic handles
+ * (scr_text_codec_dyn.c, linked by the textCodecDyn runtime feature). The
+ * boxes borrow the record and retain it through `retain`; a decoder also
+ * names the byte offsets of its encoding (f64), fatal and ignoreBOM (i8)
+ * and state (dyn) fields. from_dyn answers the retained record or throws
+ * the path-annotated TypeError and answers NULL. */
+ScrDyn *scr_text_encoder_to_dyn(void *rec, void *(*retain)(void *), void (*release)(void *));
+ScrDyn *scr_text_decoder_to_dyn(void *rec, void *(*retain)(void *), void (*release)(void *),
+                                size_t encoding, size_t fatal, size_t ignore_bom, size_t state);
+void *scr_text_codec_from_dyn(const ScrDyn *d, bool decoder, const struct ScrDynPath *path,
+                              const char *want);
+bool scr_text_codec_is(const ScrDyn *d, bool decoder);
 bool scr_buffer_is_ascii(const ScrDyn *input);
 bool scr_buffer_is_utf8(const ScrDyn *input);
 ScrBytes *scr_buffer_transcode(const ScrDyn *source, const ScrDyn *from, const ScrDyn *to);

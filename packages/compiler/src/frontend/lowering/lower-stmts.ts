@@ -105,6 +105,7 @@ import {
   requireSpecOf,
 } from "../program.js";
 import { isStrictCode } from "./strict-mode.js";
+import { markSloppyRecordWrites } from "./frozen-records.js";
 import {
   COMPOUND_ASSIGN_OPS,
   type CompoundOp,
@@ -7161,7 +7162,11 @@ function lowerDeleteStatement(lowerer: Lowerer, expr: ts.DeleteExpression): IrSt
   if (obj.type.kind === "record") {
     const shape = lowerer.shapes.get(obj.type.shapeId);
     if (shape?.indexValue && shape.fields.length === 0 && !shape.tuple) {
-      return { kind: "recordKeyDelete", obj, shapeId: obj.type.shapeId, key: lowerKey(), loc };
+      return markSloppyRecordWrites(
+        lowerer,
+        { kind: "recordKeyDelete", obj, shapeId: obj.type.shapeId, key: lowerKey(), loc },
+        expr,
+      );
     }
     // `delete r.f` of a declared OPTIONAL field (undefined-armed slot)
     // writes the field's ABSENT state: a monomorphic shape cannot remove
@@ -7182,14 +7187,19 @@ function lowerDeleteStatement(lowerer: Lowerer, expr: ts.DeleteExpression): IrSt
     if (field) {
       const absent = lowerer.absentFieldValue(field.type, loc);
       if (absent) {
-        return {
-          kind: "recordSet",
-          obj,
-          shapeId: obj.type.shapeId,
-          field: field.name,
-          value: absent,
-          loc,
-        };
+        return markSloppyRecordWrites(
+          lowerer,
+          {
+            kind: "recordSet",
+            obj,
+            shapeId: obj.type.shapeId,
+            field: field.name,
+            value: absent,
+            loc,
+          },
+          expr,
+          true,
+        );
       }
     }
     if (shape?.indexValue) {

@@ -802,8 +802,21 @@ static void json_schema_union_members(void) {
   assert(test_opts_live == 0);
 }
 
+/* Freezing a record sets the frozen bit beside its count; an immortal
+ * record keeps its word, which does not read as frozen. */
+static void record_frozen_bit(void) {
+  size_t record[2] = {3, 0};
+  assert(!scr_rc_frozen(record));
+  scr_record_freeze(record);
+  assert(scr_rc_frozen(record) && SCR_RC_REFS(record) == 3);
+  size_t immortal[2] = {SIZE_MAX, 0};
+  scr_record_freeze(immortal);
+  assert(immortal[0] == SIZE_MAX && !scr_rc_frozen(immortal));
+}
+
 int main(void) {
   json_string_boundaries();
+  record_frozen_bit();
   json_indent_ownership();
   scr_init();
   checked_storage();

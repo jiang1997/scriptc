@@ -18,6 +18,7 @@ import { canStackUnion, emitStackUnion } from "./stack-unions.js";
 import { emitDowncastGuard, emitUnionNarrowGuard } from "./narrow-guards.js";
 import { emitScalarOptional, isScalarOptionalSource } from "./local-union-storage.js";
 import { borrowableInputs } from "./borrowed-inputs.js";
+import { emitStackRecordKeyGet, scalarRecordKeyGet } from "./expr-records.js";
 import { type WalkBorrowHost, analyzeWalks } from "./walk-borrows.js";
 
 /** Read a receiver whose value is consumed immediately by a field or tag
@@ -95,6 +96,8 @@ export function emitReadReceiver(emitter: LlEmitter, e: IrExpr): LlValue {
   const narrowed = narrow ? emitCheckedNarrowReceiver(emitter, narrow) : null;
   if (narrowed) return narrowed;
   if (canStackUnion(e, emitter.boxedUnionsById)) return emitStackUnion(emitter, e).value;
+  if (e.kind === "recordKeyGet" && scalarRecordKeyGet(emitter, e))
+    return { name: emitStackRecordKeyGet(emitter, e), type: e.type };
   if (e.kind === "unionNarrow") {
     const union = emitter.emitUnionProjection(e.value);
     emitUnionNarrowGuard(emitter, union.name, e.unionId, e.tag);
@@ -342,6 +345,7 @@ export function analyzeBorrowedReturns(emitter: LlEmitter): void {
       borrowsWithoutOwning: (e: IrExpr) => emitter.borrowsWithoutOwning(e),
       borrowedReturn: (callee: string) => emitter.borrowedReturns.has(callee),
       parameterAllowed: (id: string) => allowed.has(id),
+      nodes: emitter.nodeIndex,
     };
     return emitter.referenceEffects.functions.has(fn.name)
       ? host
@@ -409,6 +413,7 @@ export function isStackUnionSource(emitter: LlEmitter, e: IrExpr): boolean {
     emitter.optionalArrayReads.get(e) !== null ||
     isScalarOptionalSource(e, emitter.unionSources) ||
     emitter.scalarResultCall(e) ||
-    emitter.inlineFieldGet(e)
+    emitter.inlineFieldGet(e) ||
+    scalarRecordKeyGet(emitter, e)
   );
 }

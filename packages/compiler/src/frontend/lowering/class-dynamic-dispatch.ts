@@ -282,6 +282,11 @@ interface PropertyDispatch {
   fn: IrFunction;
   classes: Set<string>;
   reflect?: boolean;
+  /** The helper's fallthrough statements as created, and the same access
+   * applied to the receiver itself: what the fallthrough reduces to for a
+   * value that is neither a class capsule nor a function, whose bag is the
+   * value. */
+  plain?: { tail: readonly IrStmt[]; access: IrStmt[] };
 }
 
 export function classInstanceOf(
@@ -2724,7 +2729,28 @@ export class ClassDynamicDispatch {
                   loc,
                 });
               }
-              dispatch = { name, write: !!write, fn: helper, classes: new Set() };
+              const receiverAccess: IrStmt[] = read
+                ? [{ kind: "return", value: { ...read, value: varRef("p.0", DYN, loc) }, loc }]
+                : [
+                    {
+                      kind: "exprStmt",
+                      expr: {
+                        ...write!,
+                        args: [varRef("p.0", DYN, loc), write!.args[1]!, varRef("p.1", DYN, loc)],
+                      },
+                      loc,
+                    },
+                    { kind: "return", value: null, loc },
+                  ];
+              dispatch = {
+                name,
+                write: !!write,
+                fn: helper,
+                classes: new Set(),
+                ...(name !== "constructor" && name !== "toString"
+                  ? { plain: { tail: [...helper.body], access: receiverAccess } }
+                  : {}),
+              };
               this.properties.set(key, dispatch);
               this.generated.add(helper);
               lowerer.liftedFns.push(helper);
@@ -4896,6 +4922,7 @@ export class ClassDynamicDispatch {
       );
     }
     if (lowerer) this.guardClassTables(lowerer);
+    if (lowerer) this.guardPropertyHelpers(lowerer);
   }
 
   /** Each tracked class's bag initializer over a typed receiver (`this`),
@@ -4982,6 +5009,87 @@ export class ClassDynamicDispatch {
         else_: null,
         loc,
       });
+    }
+  }
+
+  /** Fast exits for the generated property helpers: when every class
+   * branch tests a capsule key or a class key and the fallthrough is still
+   * the bag access the helper was created with, a value of another kind
+   * (a plain object, array or primitive) normalizes to itself, has itself
+   * as its bag, and so gets the plain access directly, without the
+   * normalization, bag and static-bag calls. */
+  private guardPropertyHelpers(lowerer: Lowerer): void {
+    // Every class table the fallthrough or normalization calls must answer
+    // a plain value with the value itself: its kind exit is in place.
+    const exits = (name: string): boolean => {
+      const helper = lowerer.liftedFnNamed(name);
+      const first = helper?.body[0];
+      const param = helper?.params[0]?.localId;
+      return (
+        param !== undefined &&
+        first?.kind === "if" &&
+        first.cond.kind === "dynTest" &&
+        first.cond.negated === true &&
+        first.then.length === 1 &&
+        first.then[0]!.kind === "return" &&
+        first.then[0]!.value !== null &&
+        returnsParam(first.then[0]!.value, param)
+      );
+    };
+    const tables = new Set([
+      "%dyn.class.properties",
+      READ_PROPERTIES,
+      READ_PROPERTIES_OR_EMPTY,
+      "%dyn.class.normalize",
+      "%dyn.class.staticProperties",
+    ]);
+    const callsOnlyGuardedTables = (statements: IrStmt[]): boolean =>
+      everyStmtList(statements, {
+        stmt: () => true,
+        expr: (expression) =>
+          expression.kind !== "call" || (tables.has(expression.callee) && exits(expression.callee)),
+      });
+    for (const dispatch of this.properties.values()) {
+      const plain = dispatch.plain;
+      if (!plain) continue;
+      const fn = dispatch.fn;
+      const param = fn.params[0]?.localId;
+      if (param === undefined) continue;
+      const head = fn.body.length - plain.tail.length;
+      if (head < 0 || plain.tail.some((stmt, i) => fn.body[head + i] !== stmt)) continue;
+      let ok = true;
+      for (const stmt of fn.body.slice(0, head)) {
+        if (
+          stmt.kind === "assign" &&
+          stmt.localId === param &&
+          stmt.value.kind === "call" &&
+          stmt.value.callee === "%dyn.class.normalize"
+        )
+          continue;
+        if (stmt.kind === "if" && stmt.else_ === null && branchKind(stmt.cond, param) !== null)
+          continue;
+        ok = false;
+        break;
+      }
+      // Class branches never run for a plain value; the rest always does.
+      if (!ok || !callsOnlyGuardedTables(fn.body.filter((stmt) => stmt.kind !== "if"))) continue;
+      const loc = fn.loc;
+      const not = (test: "classCapsule" | "funcKind"): IrExpr => ({
+        kind: "dynTest",
+        test,
+        negated: true,
+        value: varRef(param, DYN, loc),
+        type: BOOL,
+        loc,
+      });
+      fn.body.unshift({
+        kind: "if",
+        cond: not("classCapsule"),
+        then: [{ kind: "if", cond: not("funcKind"), then: plain.access, else_: null, loc }],
+        else_: null,
+        loc,
+      });
+      delete dispatch.plain;
     }
   }
 

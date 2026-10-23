@@ -54,6 +54,7 @@ export async function compilePackedLibrary(
     dgram: false,
     dnsPromises: false,
     dgramDyn: false,
+    textCodecDyn: false,
     watch: false,
     foreignFfi: false,
     nodeTest: false,

@@ -61,6 +61,7 @@ export async function warmNativeCaches(
         dgram: false,
         dnsPromises: false,
         dgramDyn: false,
+        textCodecDyn: false,
         watch: false,
         foreignFfi: false,
         nodeTest: false,

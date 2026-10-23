@@ -6,6 +6,28 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.4.3
+
+### Highlights
+
+- **Faster checking and smaller builds with tsc-ts 0.0.9:** scriptc checks with tsc-ts 0.0.9, and builds reuse the bundled declaration files' diagnostics instead of checking them again. Small IR builds are 10.6 to 16.0% faster and small executable builds 5.5 to 7.6% faster, with identical output. A native build of tsc-ts with this release checks 0.4 to 6.6% faster than with 0.4.2 and peaks 4 to 16% lower.
+- **Integer arrays and loops:**
+  - Number arrays that only hold int32 values use 4-byte slots in locals, across direct calls and in module globals, and loop-carried locals written from their elements stay int32. A workload that walks arrays of cursors runs 54.5% faster.
+  - Loops with two counters closing in on each other (`for (let i = lo, j = hi; i < j; i++, j--)`) and element copies through `a[i]!` run without per-element checks, and two-counter `while` loops run on integer counters.
+  - Loops over typed arrays and charAt scans are versioned on their bounds, and ASCII strings are scanned as bytes.
+- **Less work for untyped and dynamic code:**
+  - String-keyed record reads under `??` and `!` no longer allocate: a dictionary-walking workload makes no union boxes instead of 363,359 and runs 12 to 15% faster.
+  - Checked-dynamic method calls dispatch on method ids, observed class methods call natively while their slot is unchanged, and calls on bag-tracked class instances skip building their views.
+- **Node.js parity:**
+  - `crypto.getCipherInfo`, AES-CCM, AES key wrap, the legacy `createCipheriv` modes, `checkPrime`/`generatePrime`, and Node's argument checks for `generateKeyPair`.
+  - Streams: `construct`, `writev`, `decodeStrings` and `defaultEncoding`, including `writev` on `Transform` and `PassThrough`.
+  - `FinalizationRegistry`, `new.target`, `String.prototype.at` on untyped values, `Error.stackTraceLimit`, `spawnSync`'s `env` option, and class constructors called through `call`/`apply` throw Node's TypeError.
+  - Records enumerate in the key order their object literal wrote, and objects converting to a union with an empty-record arm keep every field.
+- **npm packages:** zod 3 compiles natively and zod 4's core runs, minified packages such as marked compile, chalk 5 and hot-shots 8 build from built-in shims, and `@hono/node-server` 2.x is built in. User code types npm package declarations at a checked, identity-preserving boundary.
+- **Builds:** the cached build is reused after whitespace and comment edits, function bodies are emitted on forked workers, and the LLVM emitter reads its analyses from one recorded walk of each module.
+
+<!-- release:end -->
+
 ## 0.4.2
 
 ### Highlights
@@ -158,8 +180,6 @@ All notable changes to scriptc will be documented in this file.
 - **A warm build whose cached LLVM exceeds the engine's string limit** reads it in parts instead of failing with `Invalid string length`.
 - **The same program compiles to the same executable wherever it sits on disk** and whatever order its functions lower in, and edits outside a declaration do not rename the helpers and closures inside it.
 - **Libraries that use untyped byte arrays** link.
-
-<!-- release:end -->
 
 ## 0.4.1
 

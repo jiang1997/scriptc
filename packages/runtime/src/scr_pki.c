@@ -5,8 +5,9 @@
  * asymmetricKeyDetails, export(), equals()), crypto.sign and crypto.verify,
  * and the Sign and Verify objects of createSign and createVerify. Keys read
  * and write PEM and DER as PKCS#1, SEC1, PKCS#8 and SubjectPublicKeyInfo,
- * and JWK; the EC curves are prime256v1, secp384r1, secp521r1 and
- * secp256k1, and the Ed25519 arithmetic is scr_ed25519.c. Argument checks
+ * JWK, and the raw-public and raw-private encodings; the EC curves are
+ * prime256v1, secp384r1, secp521r1 and secp256k1, and the Ed25519
+ * arithmetic is scr_ed25519.c. Argument checks
  * and errors follow Node 24's lib/internal/crypto/keys.js, keygen.js and
  * sig.js. Encrypted keys and other key types throw a coded SC2020 error.
  * All arguments are borrowed. */
@@ -878,6 +879,8 @@ static ScrBytes *sp_source_bytes(const ScrDyn *v, const ScrDyn *encoding) {
   return NULL;
 }
 
+static SpKey *sp_key_from_raw(const ScrDyn *input, const ScrDyn *data, const ScrDyn *format, bool private_input);
+
 static const char sp_key_input_types[] =
     "of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, or URL";
 
@@ -929,6 +932,14 @@ static ScrDyn *sp_create_key(ScrDyn *input, bool private_key) {
       SpKey *k = sp_key_from_jwk(data, private_key);
       return k ? sp_key_box(k) : NULL;
     }
+    if (sp_is_str(format, "raw-public") || sp_is_str(format, "raw-private") || sp_is_str(format, "raw-seed")) {
+      SpKey *k = sp_key_from_raw(input, data, format, private_key);
+      if (!k || private_key || !k->private_key) return k ? sp_key_box(k) : NULL;
+      SpKey *pub = sp_public_of(k);
+      sp_key_release(k);
+      if (!pub) sp_unsupported_input();
+      return pub ? sp_key_box(pub) : NULL;
+    }
     if (!sp_absent(format) && !sp_is_str(format, "pem") && !sp_is_str(format, "der")) {
       sp_property_invalid("key.format", format);
       return NULL;
@@ -959,6 +970,183 @@ ScrDyn *scr_crypto_create_private_key(ScrDyn *key) { return sp_create_key(key, t
 
 ScrDyn *scr_crypto_create_public_key(ScrDyn *key) { return sp_create_key(key, false); }
 
+/* ── raw keys ─────────────────────────────────────────────────────────── */
+
+/* A namedCurve as Node reads it: the OpenSSL short name or the NIST name,
+ * matched exactly. NULL for other names. */
+static const SpCurve *sp_curve_named(const ScrDyn *name) {
+  for (size_t i = 0; i < sizeof sp_curves / sizeof sp_curves[0]; i++)
+    if (sp_is_str(name, sp_curves[i].name) || (sp_curves[i].nist && sp_is_str(name, sp_curves[i].nist)))
+      return &sp_curves[i];
+  return NULL;
+}
+
+static void sp_incompatible_key_type(void) {
+  sp_throw(SCR_ERR_ERROR, "ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS",
+           "The selected key encoding is incompatible with the key type");
+}
+
+static void sp_invalid_key_data(void) { sp_throw(SCR_ERR_TYPE, "ERR_INVALID_ARG_VALUE", "Invalid key data"); }
+
+/* A key's raw encoding: an EC public point, compressed when asked, or the
+ * private scalar at the curve's size, or an Ed25519 public key or seed.
+ * raw-seed, and every encoding of an RSA key, throw
+ * ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS. NULL with the error pending. */
+static ScrDyn *sp_export_raw(SpKey *k, bool private_part, bool seed, bool compressed) {
+  if (seed || sp_is_rsa(k)) {
+    sp_incompatible_key_type();
+    return NULL;
+  }
+  if (sp_is_ed(k)) return sp_dyn_buffer(private_part ? k->ed_seed : k->ed_pub, 32);
+  mbedtls_ecp_keypair *ec = mbedtls_pk_ec(k->pk);
+  const mbedtls_ecp_group *grp = &ec->MBEDTLS_PRIVATE(grp);
+  unsigned char buf[1 + 2 * 66];
+  size_t n = (grp->nbits + 7) / 8;
+  int rc = private_part ? mbedtls_mpi_write_binary(&ec->MBEDTLS_PRIVATE(d), buf, n)
+                        : mbedtls_ecp_point_write_binary(
+                              grp, &ec->MBEDTLS_PRIVATE(Q),
+                              compressed ? MBEDTLS_ECP_PF_COMPRESSED : MBEDTLS_ECP_PF_UNCOMPRESSED, &n, buf, sizeof buf);
+  ScrDyn *out = rc == 0 ? sp_dyn_buffer(buf, n) : NULL;
+  mbedtls_platform_zeroize(buf, sizeof buf);
+  if (!out) sp_unsupported_input();
+  return out;
+}
+
+/* Node's named key types that this runtime does not generate or read:
+ * the other OKP curves and the post-quantum types. */
+static const char *const sp_other_named_types[] = {
+    "ed448",
+    "x25519",
+    "x448",
+    "ml-dsa-44",
+    "ml-dsa-65",
+    "ml-dsa-87",
+    "ml-kem-512",
+    "ml-kem-768",
+    "ml-kem-1024",
+    "slh-dsa-sha2-128f",
+    "slh-dsa-sha2-128s",
+    "slh-dsa-sha2-192f",
+    "slh-dsa-sha2-192s",
+    "slh-dsa-sha2-256f",
+    "slh-dsa-sha2-256s",
+    "slh-dsa-shake-128f",
+    "slh-dsa-shake-128s",
+    "slh-dsa-shake-192f",
+    "slh-dsa-shake-192s",
+    "slh-dsa-shake-256f",
+    "slh-dsa-shake-256s",
+};
+
+/* createPrivateKey / createPublicKey of { key, format: "raw-public" |
+ * "raw-private" | "raw-seed", asymmetricKeyType, namedCurve }: an EC point
+ * (uncompressed or compressed) or scalar, or an Ed25519 public key or
+ * seed. The argument checks are Node's prepareAsymmetricKey order, then
+ * the key type, the seed format, the curve and the data. NULL with the
+ * error pending. */
+static SpKey *sp_key_from_raw(const ScrDyn *input, const ScrDyn *data, const ScrDyn *format, bool private_input) {
+  bool raw_public = sp_is_str(format, "raw-public");
+  bool seed = sp_is_str(format, "raw-seed");
+  if (private_input && raw_public) {
+    sp_property_invalid("key.format", format);
+    return NULL;
+  }
+  if (data->kind != SCR_DYN_BYTES && !scr_buffer_storage_is(data)) {
+    scr_dyn_arg_type_fail("key.key", "an instance of ArrayBuffer, Buffer, TypedArray, or DataView", data);
+    return NULL;
+  }
+  const ScrDyn *type = sp_opt(input, "asymmetricKeyType");
+  if (type->kind != SCR_DYN_STR) {
+    scr_dyn_prop_type_fail("key.asymmetricKeyType", "of type string", type);
+    return NULL;
+  }
+  bool ec = sp_is_str(type, "ec");
+  bool ed = sp_is_str(type, "ed25519");
+  const ScrDyn *curve_name = sp_opt(input, "namedCurve");
+  if (ec && curve_name->kind != SCR_DYN_STR) {
+    scr_dyn_prop_type_fail("key.namedCurve", "of type string", curve_name);
+    return NULL;
+  }
+  if (sp_is_str(type, "rsa") || sp_is_str(type, "rsa-pss") || sp_is_str(type, "dsa") || sp_is_str(type, "dh")) {
+    sp_incompatible_key_type();
+    return NULL;
+  }
+  bool other = false;
+  for (size_t i = 0; i < sizeof sp_other_named_types / sizeof sp_other_named_types[0]; i++)
+    other = other || sp_is_str(type, sp_other_named_types[i]);
+  if (!ec && !ed && !other) {
+    ScrStr *s = type->v.str;
+    scr_pki_throw_fmt(SCR_ERR_TYPE, "ERR_INVALID_ARG_VALUE", "Invalid asymmetricKeyType: %.*s", (int)s->len, s->data);
+    return NULL;
+  }
+  bool ml = !ec && !ed && type->v.str->len > 3 && memcmp(type->v.str->data, "ml-", 3) == 0;
+  if (seed && !ml) {
+    sp_incompatible_key_type();
+    return NULL;
+  }
+  if (other) {
+    sp_not_supported("raw keys of this asymmetricKeyType");
+    return NULL;
+  }
+  const SpCurve *curve = NULL;
+  if (ec && !(curve = sp_curve_named(curve_name))) {
+    sp_throw(SCR_ERR_TYPE, "ERR_CRYPTO_INVALID_CURVE", "Invalid EC curve name");
+    return NULL;
+  }
+  ScrBytes *bytes = scr_bytes_buffer_source(data);
+  if (!bytes) return NULL;
+  const unsigned char *p = bytes->data;
+  size_t len = (size_t)scr_bytes_byte_len(bytes);
+  SpKey *k = sp_key_alloc(!raw_public);
+  bool ok = false;
+  if (ed) {
+    k->ed25519 = true;
+    if (len == 32 && raw_public) {
+      memcpy(k->ed_pub, p, 32);
+      ok = true;
+    } else if (len == 32) {
+      const ScrPkiEd25519 *eds = sp_ed();
+      if (!eds) {
+        sp_key_release(k);
+        scr_bytes_release(bytes);
+        return NULL;
+      }
+      memcpy(k->ed_seed, p, 32);
+      eds->public_key(k->ed_pub, k->ed_seed);
+      ok = true;
+    }
+  } else if (raw_public && len == 1 && p[0] == 0) {
+    sp_key_release(k);
+    scr_bytes_release(bytes);
+    sp_not_supported("EC public keys at the point at infinity");
+    return NULL;
+  } else if (mbedtls_pk_setup(&k->pk, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) == 0) {
+    mbedtls_ecp_keypair *kp = mbedtls_pk_ec(k->pk);
+    mbedtls_ecp_group *grp = &kp->MBEDTLS_PRIVATE(grp);
+    ok = mbedtls_ecp_group_load(grp, curve->id) == 0;
+    if (ok && raw_public) {
+      ok = mbedtls_ecp_point_read_binary(grp, &kp->MBEDTLS_PRIVATE(Q), p, len) == 0 &&
+           mbedtls_ecp_check_pubkey(grp, &kp->MBEDTLS_PRIVATE(Q)) == 0;
+    } else if (ok) {
+      ok = len == (grp->nbits + 7) / 8 && mbedtls_mpi_read_binary(&kp->MBEDTLS_PRIVATE(d), p, len) == 0;
+      if (ok && mbedtls_ecp_check_privkey(grp, &kp->MBEDTLS_PRIVATE(d)) != 0) {
+        sp_key_release(k);
+        scr_bytes_release(bytes);
+        sp_not_supported("EC private keys outside 1 to n - 1");
+        return NULL;
+      }
+      ok = ok && mbedtls_ecp_mul(grp, &kp->MBEDTLS_PRIVATE(Q), &kp->MBEDTLS_PRIVATE(d), &grp->G, sp_random, NULL) == 0;
+    }
+  }
+  scr_bytes_release(bytes);
+  if (!ok) {
+    sp_key_release(k);
+    sp_invalid_key_data();
+    return NULL;
+  }
+  return k;
+}
+
 /* ── export ───────────────────────────────────────────────────────────── */
 
 /* export({ format, type }) per Node's parseKeyEncoding: format "pem",
@@ -975,11 +1163,37 @@ static ScrDyn *sp_export(SpKey *k, const ScrDyn *options) {
 }
 
 static ScrDyn *sp_export_plain(SpKey *k, const ScrDyn *options) {
+  const ScrDyn *format = sp_opt(options, "format");
+  /* A private key's passphrase applies only to PEM and DER. */
+  if (k->private_key && !sp_absent(sp_opt(options, "passphrase")) && !sp_is_str(format, "pem") &&
+      !sp_is_str(format, "der")) {
+    ScrStr *text = scr_dyn_string_coerce_js(format);
+    if (!text) return NULL;
+    scr_pki_throw_fmt(SCR_ERR_ERROR, "ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS",
+                      "The selected key encoding %.*s does not support encryption.", (int)text->len, text->data);
+    scr_str_release(text);
+    return NULL;
+  }
+  if (!k->private_key && sp_is_str(format, "raw-public")) {
+    const ScrDyn *type = sp_opt(options, "type");
+    bool compressed = sp_is_str(type, "compressed");
+    /* Only an EC point has a compressed form. */
+    if (sp_is_ec(k) && !sp_absent(type) && !compressed && !sp_is_str(type, "uncompressed")) {
+      ScrStr *received = sp_received(type, false);
+      scr_pki_throw_fmt(SCR_ERR_TYPE, "ERR_INVALID_ARG_VALUE",
+                        "The property 'options.type' must be one of: 'compressed', 'uncompressed'. Received %.*s",
+                        (int)received->len, received->data);
+      scr_str_release(received);
+      return NULL;
+    }
+    return sp_export_raw(k, false, false, sp_is_ec(k) && compressed);
+  }
+  if (k->private_key && (sp_is_str(format, "raw-private") || sp_is_str(format, "raw-seed")))
+    return sp_export_raw(k, true, sp_is_str(format, "raw-seed"), false);
   if (options == NULL || !sp_is_object(options)) {
     scr_dyn_arg_type_fail("options", "of type object", options ? options : scr_dyn_undefined());
     return NULL;
   }
-  const ScrDyn *format = sp_opt(options, "format");
   if (sp_is_str(format, "jwk")) return sp_export_jwk(k);
   bool pem = sp_is_str(format, "pem");
   if (!pem && !sp_is_str(format, "der")) {
@@ -1227,7 +1441,7 @@ static bool sp_check_encoding_plain(const ScrDyn *enc, const char *name, const S
 
 /* Node's parseKeyEncoding for options.publicKeyEncoding or
  * options.privateKeyEncoding of a `type` key: true when the encoding is
- * undefined, null or valid, false with the error pending. A valid raw or
+ * undefined, null or valid, false with the error pending. A valid
  * encrypted encoding, which this runtime does not write, sets *refusal
  * when it is unset. */
 static bool sp_check_encoding(const ScrDyn *options, const char *key, const ScrDyn *type, bool private_key,
@@ -1323,7 +1537,6 @@ static bool sp_check_encoding_plain(const ScrDyn *enc, const char *name, const S
       return false;
     }
   }
-  if (!*refusal && (raw_public || raw_private)) *refusal = "generateKeyPair with a raw key encoding";
   if (!*refusal && encrypted) *refusal = "encrypted private key export";
   return true;
 }
@@ -1335,31 +1548,6 @@ typedef struct {
   const SpCurve *curve;  /* EC */
 } SpKeyGen;
 
-/* The key types Node generates that this runtime does not, apart from
- * rsa-pss, dsa and dh: Node's named key pairs. */
-static const char *const sp_other_named_types[] = {
-    "ed448",
-    "x25519",
-    "x448",
-    "ml-dsa-44",
-    "ml-dsa-65",
-    "ml-dsa-87",
-    "ml-kem-512",
-    "ml-kem-768",
-    "ml-kem-1024",
-    "slh-dsa-sha2-128f",
-    "slh-dsa-sha2-128s",
-    "slh-dsa-sha2-192f",
-    "slh-dsa-sha2-192s",
-    "slh-dsa-sha2-256f",
-    "slh-dsa-sha2-256s",
-    "slh-dsa-shake-128f",
-    "slh-dsa-shake-128s",
-    "slh-dsa-shake-192f",
-    "slh-dsa-shake-192s",
-    "slh-dsa-shake-256f",
-    "slh-dsa-shake-256s",
-};
 
 /* createJob's checks for generateKeyPair(Sync)(type, options) in Node's
  * order: the type, the options object, the public and private key
@@ -1502,14 +1690,18 @@ static ScrDyn *sp_key_pair(const ScrDyn *type, const ScrDyn *options, bool *job_
     sp_unsupported_input();
     return NULL;
   }
+  /* An encoding the key type has no form for (a raw encoding of an RSA
+   * key, raw-seed) fails the job, as in Node. */
   ScrDyn *public_value = sp_encoded(pub, sp_opt(options, "publicKeyEncoding"));
   if (!public_value) {
     sp_key_release(k);
+    *job_error = true;
     return NULL;
   }
   ScrDyn *private_value = sp_encoded(k, sp_opt(options, "privateKeyEncoding"));
   if (!private_value) {
     scr_dyn_release(public_value);
+    *job_error = true;
     return NULL;
   }
   ScrDyn *pair = scr_dyn_new_obj();

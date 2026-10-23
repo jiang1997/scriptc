@@ -156,6 +156,13 @@ export function classCallbackValue(
   };
 }
 
+/** Notes a checked conversion of a replaceable method's result for the
+ * key-order witness: the result is a value the method or its replacement
+ * returns, not a record built from a dynamic value. */
+function methodResult(lowerer: Lowerer, checked: IrExpr, name: string): IrExpr {
+  return checked.kind === "dynCheck" ? lowerer.keyOrder.methodResult(checked, name) : checked;
+}
+
 export function classCallbackCall(
   lowerer: Lowerer,
   receiver: IrExpr,
@@ -197,7 +204,7 @@ export function classCallbackCall(
     // generator arm does not box) keeps its native type: the unchanged
     // method's result stays as it is, and a replacement's dynamic result
     // takes the checked conversion into that type.
-    const converted = lowerer.coerceToExpected(call, fallback.type);
+    const converted = methodResult(lowerer, lowerer.coerceToExpected(call, fallback.type), name);
     if (!typeEquals(converted.type, fallback.type)) {
       lowerer.pushDiag(
         unsupportedDiag(
@@ -234,7 +241,9 @@ export function classCallbackCall(
           loc,
         };
     answer =
-      fallback.type.kind === "void" ? result : lowerer.coerceToExpected(result, fallback.type);
+      fallback.type.kind === "void"
+        ? result
+        : methodResult(lowerer, lowerer.coerceToExpected(result, fallback.type), name);
   }
   // Read after observedSlot built the prototype data and its originals.
   const originalId = observed ? original?.originalId() : undefined;
