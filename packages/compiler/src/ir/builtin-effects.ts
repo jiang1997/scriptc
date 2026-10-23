@@ -1035,6 +1035,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.createSign",
   "crypto.createVerify",
   "crypto.x509Raw",
+  "crypto.x509RawDer",
   "crypto.x509RawStr",
   // Node's argument errors (name, options, pkey) and the key parse.
   "crypto.x509CheckHost",

@@ -11244,20 +11244,23 @@ function genericFieldFnNodeOf(
  * raw. subjectAltName, infoAccess and signatureAlgorithm hold undefined
  * where the runtime answers "". */
 /** The X509Certificate record `t` built from `data`, a certificate Buffer
- * (PEM or DER) or PEM string, through the interned constructor helper. */
+ * (PEM or DER) or PEM string, through the interned constructor helper.
+ * `der` marks a Buffer known to hold a certificate's DER (a TLS socket's),
+ * which is read without looking for PEM armor inside it. */
 export function x509RecordCall(
   lowerer: Lowerer,
   data: IrExpr,
   t: IrType & { kind: "record" },
   loc: SrcLoc,
+  der = false,
 ): IrExpr {
   const isBytes = data.type.kind === "bytes" && data.type.elem === "u8";
-  const key = `x509.record:${isBytes ? "bytes" : "str"}`;
+  const key = `x509.record:${der ? "der" : isBytes ? "bytes" : "str"}`;
   let helper = lowerer.valueHelpers.get(key);
   if (!helper) {
     helper = keyedHelperName(lowerer, "%x509.record", key);
     lowerer.valueHelpers.set(key, helper);
-    lowerer.liftedFns.push(x509RecordHelper(lowerer, helper, data.type, t, isBytes, loc));
+    lowerer.liftedFns.push(x509RecordHelper(lowerer, helper, data.type, t, isBytes, der, loc));
   }
   return { kind: "call", callee: helper, args: [data], type: t, loc };
 }
@@ -11268,6 +11271,7 @@ function x509RecordHelper(
   dataT: IrType,
   t: IrType & { kind: "record" },
   isBytes: boolean,
+  der: boolean,
   loc: SrcLoc,
 ): IrFunction {
   const shape = lowerer.shapes.get(t.shapeId);
@@ -11290,7 +11294,7 @@ function x509RecordHelper(
       localId: "raw.0",
       init: {
         kind: "libCall",
-        fn: isBytes ? "crypto.x509Raw" : "crypto.x509RawStr",
+        fn: der ? "crypto.x509RawDer" : isBytes ? "crypto.x509Raw" : "crypto.x509RawStr",
         args: [{ kind: "varRef", localId: "d.0", type: dataT, loc }],
         type: BYTES_U8,
         loc,

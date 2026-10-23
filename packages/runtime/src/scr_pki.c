@@ -2412,9 +2412,31 @@ bool scr_crypto_x509_verify(ScrBytes *der, ScrDyn *key) {
     return false;
   p += n;
   size_t tbs_len = (size_t)(p - tbs);
+  const unsigned char *outer_alg = p;
   if (mbedtls_asn1_get_tag(&p, end, &n, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE) != 0)
     return false;
   const unsigned char *alg_end = p + n;
+  /* As in OpenSSL's X509_verify, the TBSCertificate's signature field must
+   * be the same AlgorithmIdentifier as the outer one. */
+  {
+    unsigned char *q = (unsigned char *)tbs;
+    const unsigned char *tbs_end = tbs + tbs_len;
+    size_t len;
+    if (mbedtls_asn1_get_tag(&q, tbs_end, &len, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE) != 0)
+      return false;
+    if (q < tbs_end && *q == (MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_ASN1_CONSTRUCTED | 0)) {
+      if (mbedtls_asn1_get_tag(&q, tbs_end, &len, MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_ASN1_CONSTRUCTED | 0) != 0)
+        return false;
+      q += len;
+    }
+    if (mbedtls_asn1_get_tag(&q, tbs_end, &len, MBEDTLS_ASN1_INTEGER) != 0) return false;
+    q += len;
+    const unsigned char *inner_alg = q;
+    if (mbedtls_asn1_get_tag(&q, tbs_end, &len, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE) != 0)
+      return false;
+    size_t inner_len = (size_t)(q + len - inner_alg);
+    if (inner_len != (size_t)(alg_end - outer_alg) || memcmp(inner_alg, outer_alg, inner_len) != 0) return false;
+  }
   size_t oid_len;
   if (mbedtls_asn1_get_tag(&p, alg_end, &oid_len, MBEDTLS_ASN1_OID) != 0) return false;
   const unsigned char *oid = p;
@@ -2477,6 +2499,8 @@ bool scr_crypto_x509_verify(ScrBytes *der, ScrDyn *key) {
     if (md == MBEDTLS_MD_NONE) return false;
     const mbedtls_md_info_t *info = mbedtls_md_info_from_type(md);
     mbedtls_md(info, tbs, tbs_len, hash);
+    /* PKCS#1 v1.5, whatever padding the key's last signature used */
+    if (mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE) != 0) return false;
     return mbedtls_pk_verify(&k->pk, md, hash, mbedtls_md_get_size(info), sig, sig_len) == 0;
   }
   if (oid_len >= sizeof ecdsa_prefix + 1 && memcmp(oid, ecdsa_prefix, sizeof ecdsa_prefix) == 0) {

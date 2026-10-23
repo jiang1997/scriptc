@@ -19,3 +19,9 @@ Minted ONCE with the openssl recipe below (see san.cnf) and committed with a 100
     openssl ecparam -genkey -name prime256v1 -noout -out client-key.pem
     openssl req -new -key client-key.pem -out client.csr -subj "/CN=scriptc test client" -config client.cnf
     openssl x509 -req -in client.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out client.pem -days 36500 -extfile client.cnf -extensions ext
+
+`embedded.pem`/`embedded-key.pem` (CN=embedded pem) is a localhost leaf signed by `ca.pem` whose Netscape comment extension holds `alt.pem` as PEM text on one line (`embedded.cnf`, section `ext`). It checks that a peer certificate's DER is read as DER:
+
+    openssl ecparam -genkey -name prime256v1 -noout -out embedded-key.pem
+    openssl req -new -key embedded-key.pem -out embedded.csr -subj "/CN=embedded pem" -config embedded.cnf
+    openssl x509 -req -in embedded.csr -CA ca.pem -CAkey ca-key.pem -set_serial 4242 -out embedded.pem -days 36500 -extfile embedded.cnf -extensions ext

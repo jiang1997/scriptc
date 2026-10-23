@@ -4,10 +4,13 @@
 // key identifier and key type, private key matches, and the pkey errors.
 import {
   X509Certificate,
+  constants,
   createPrivateKey,
   createPublicKey,
   createSecretKey,
   generateKeyPairSync,
+  sign,
+  verify,
   type KeyObject,
 } from "node:crypto";
 
@@ -298,3 +301,32 @@ attempt("verify private", () => leaf.verify(keys[0]![1]));
 attempt("verify secret", () => leaf.verify(createSecretKey(Buffer.alloc(16))));
 attempt("check public", () => leaf.checkPrivateKey(leaf.publicKey));
 attempt("check secret", () => leaf.checkPrivateKey(createSecretKey(Buffer.alloc(16))));
+
+// A PSS signature check on the root's public key leaves no padding behind
+// for the certificate checks that follow.
+const root = certs[0]![1];
+const message = Buffer.from("pss");
+const pssSignature = sign("sha256", message, { key: keys[0]![1], padding: constants.RSA_PKCS1_PSS_PADDING });
+const pssValid = verify("sha256", message, { key: root.publicKey, padding: constants.RSA_PKCS1_PSS_PADDING }, pssSignature);
+console.log("after pss", pssValid, root.verify(root.publicKey), leaf.verify(root.publicKey));
+
+// An outer signatureAlgorithm that differs from the TBSCertificate's, here
+// without its NULL parameters, does not verify.
+function header(der: Buffer, at: number): [number, number] {
+  const first = der[at + 1]!;
+  if (first < 0x80) return [2, first];
+  let length = 0;
+  for (let i = 0; i < (first & 0x7f); i++) length = length * 256 + der[at + 2 + i]!;
+  return [2 + (first & 0x7f), length];
+}
+const rootDer = root.raw;
+const [outerHeader] = header(rootDer, 0);
+const [tbsHeader, tbsLength] = header(rootDer, outerHeader);
+const algAt = outerHeader + tbsHeader + tbsLength;
+const [algHeader, algLength] = header(rootDer, algAt);
+const algorithm = rootDer.subarray(algAt, algAt + algHeader + algLength);
+const oid = algorithm.subarray(2, 2 + 2 + algorithm[3]!);
+const bare = Buffer.concat([Buffer.from([0x30, oid.length]), oid]);
+const body = Buffer.concat([rootDer.subarray(outerHeader, algAt), bare, rootDer.subarray(algAt + algHeader + algLength)]);
+const altered = new X509Certificate(Buffer.concat([Buffer.from([0x30, 0x82, body.length >> 8, body.length & 0xff]), body]));
+console.log("outer algorithm", algorithm.toString("hex"), "->", bare.toString("hex"), altered.subject.split("\n").join("/"), altered.verify(root.publicKey));

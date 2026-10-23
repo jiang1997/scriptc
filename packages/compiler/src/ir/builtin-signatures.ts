@@ -1196,6 +1196,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   /** The certificate's DER as a fresh Buffer (the raw field), decoded
    * once from the constructor's input; the same PEM error (may-throw). */
   "crypto.x509Raw": { argTypes: [BYTES_U8], result: BYTES_U8 },
+  "crypto.x509RawDer": { argTypes: [BYTES_U8], result: BYTES_U8 },
   "crypto.x509RawStr": { argTypes: [STRING], result: BYTES_U8 },
   /** The remaining X509Certificate fields over that DER, in Node's
    * renderings (scr_lib.c). subjectAltName, infoAccess and

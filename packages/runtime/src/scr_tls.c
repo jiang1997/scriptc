@@ -551,11 +551,14 @@ static mbedtls_x509_crt *scr_tls_system_ca(void);
  * server's own chain, as OpenSSL's automatic chain sends it. */
 static void scr_tls_srv_client_auth(ScrTlsSrv *s, const ScrTlsClientAuth *auth) {
   if (auth == NULL) return;
-  if (auth->ca != NULL && auth->ca->len > 0) {
-    int r = scr_tls_parse_crt(&s->ca, (const char *)auth->ca->data, auth->ca->len);
-    if (r != 0) scr_tls_bad_material("ca certificate", r);
+  /* An empty ca Buffer is an empty trust store, not the default one. */
+  if (auth->ca != NULL) {
+    if (auth->ca->len > 0) {
+      int r = scr_tls_parse_crt(&s->ca, (const char *)auth->ca->data, auth->ca->len);
+      if (r != 0) scr_tls_bad_material("ca certificate", r);
+      if (s->ctx == NULL) scr_tls_auto_chain(&s->cert, &s->ca);
+    }
     s->has_ca = true;
-    if (s->ctx == NULL) scr_tls_auto_chain(&s->cert, &s->ca);
   }
   if (!auth->request) return;
   s->request_cert = true;
@@ -1959,12 +1962,22 @@ static int scr_tls_tunnel_bio_recv(void *ctx, unsigned char *buf, size_t len) {
   return scr_tls_tunnel_read((ScrTlsTunnel *)ctx, buf, len);
 }
 
+/* A tunnel leg's handshake has finished. The tunnel runs no established
+ * callbacks before it writes the CONNECT request or the request itself, so
+ * the last flight goes out now instead of waiting for the immediate that
+ * ends a socket's hold (which does not see the tunnel's legs). */
+static void scr_tls_tunnel_end_hold(ScrTlsSock *t) {
+  t->holding = false;
+  if (t->held_len > t->held_off) (void)scr_tls_flush_held(t);
+}
+
 static int scr_tls_tunnel_handshake(void *tctx) {
   ScrTlsTunnel *tun = (ScrTlsTunnel *)tctx;
   ScrNetSocket *sock = tun->outer->sock;
   if (tun->stage == SCR_TUN_OUTER) {
     int r = scr_tls_handshake(tun->outer);
     if (r <= 0) return r;
+    scr_tls_tunnel_end_hold(tun->outer);
     tun->outer->established = true;
     tun->stage = SCR_TUN_SEND;
   }
@@ -2033,6 +2046,7 @@ static int scr_tls_tunnel_handshake(void *tctx) {
   if (tun->stage == SCR_TUN_INNER) {
     int r = scr_tls_handshake(tun->inner);
     if (r <= 0) return r;
+    scr_tls_tunnel_end_hold(tun->inner);
     tun->stage = SCR_TUN_UP;
   }
   return 1;
@@ -2079,12 +2093,16 @@ static void scr_tls_tunnel_free(void *tctx) {
   free(tun);
 }
 
+/* The fd is writable again: the rest of what the outer leg held. */
+static void scr_tls_tunnel_drain(void *tctx) { scr_tls_drain(((ScrTlsTunnel *)tctx)->outer); }
+
 static const ScrNetTransportOps SCR_TLS_TUNNEL_OPS = {
   .xread = scr_tls_tunnel_xread,
   .xwrite = scr_tls_tunnel_xwrite,
   .handshake = scr_tls_tunnel_handshake,
   .on_established = scr_tls_tunnel_on_established,
   .pending = scr_tls_tunnel_pending,
+  .drain = scr_tls_tunnel_drain,
   .shutdown_write = scr_tls_tunnel_shutdown_write,
   .free = scr_tls_tunnel_free,
 };
@@ -2547,8 +2565,14 @@ static bool scr_tls_srv_opts_walk_ex(const ScrDyn *opts, const char *api, ScrByt
         char what[96];
         snprintf(what, sizeof what, "a %s 'ca' option", api);
         scr_bytes_release(auth->ca);
-        auth->ca = scr_tls_pem_dyn(v, what, true);
-        if (auth->ca == NULL) ok = false;
+        /* An empty string is no ca, as Node reads it; an empty Buffer is
+         * an empty trust store. */
+        if (v->kind == SCR_DYN_STR && v->v.str->len == 0) {
+          auth->ca = NULL;
+        } else {
+          auth->ca = scr_tls_pem_dyn(v, what, true);
+          if (auth->ca == NULL) ok = false;
+        }
       }
       continue;
     }

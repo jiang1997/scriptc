@@ -26,8 +26,9 @@ static bool scr_x509_der(const uint8_t *in, size_t n, const uint8_t **der, size_
   *decoded = NULL;
   /* PEM: base64-decode the armor's body. */
   const uint8_t *b = NULL;
+  /* OpenSSL's PEM reader looks for the armor at the start of a line. */
   for (size_t i = 0; i + sizeof begin - 1 <= n; i++) {
-    if (memcmp(in + i, begin, sizeof begin - 1) == 0) {
+    if ((i == 0 || in[i - 1] == '\n') && memcmp(in + i, begin, sizeof begin - 1) == 0) {
       b = in + i + sizeof begin - 1;
       break;
     }
@@ -76,9 +77,21 @@ static bool scr_x509_der(const uint8_t *in, size_t n, const uint8_t **der, size_
     return true;
   }
   if (n > 0 && in[0] == 0x30) {
-    /* Raw DER: the certificate SEQUENCE. */
+    /* Raw DER: the certificate SEQUENCE, without bytes after it, as
+     * d2i_X509 reads it. */
     *der = in;
     *der_len = n;
+    if (n >= 2) {
+      size_t len = in[1], head = 2;
+      if (len & 0x80) {
+        size_t k = len & 0x7f;
+        len = 0;
+        head = 2 + k;
+        for (size_t i = 0; i < k && k <= 4 && head <= n; i++) len = (len << 8) | in[2 + i];
+        if (k == 0 || k > 4) head = n + 1;
+      }
+      if (head <= n && len <= n - head) *der_len = head + len;
+    }
     return true;
   }
   scr_throw_error_msg_code(SCR_ERR_ERROR,
@@ -677,6 +690,16 @@ static ScrBytes *scr_x509_raw(const uint8_t *in, size_t n) {
 ScrBytes *scr_crypto_x509_raw(ScrBytes *data) {
   SCR_BYTES_SNAPSHOT(data);
   return scr_x509_raw(SCR_X509_DER(data));
+}
+
+/* raw of a certificate whose DER a TLS handshake delivered: a copy, with
+ * no search for PEM armor that its extensions could carry. */
+ScrBytes *scr_crypto_x509_raw_der(ScrBytes *der) {
+  SCR_BYTES_SNAPSHOT(der);
+  size_t n = (size_t)scr_bytes_byte_len(der);
+  ScrBytes *out = scr_buffer_alloc_unsafe_slow((double)n);
+  memcpy(out->data, der->data, n);
+  return out;
 }
 
 ScrBytes *scr_crypto_x509_raw_str(ScrStr *pem) {

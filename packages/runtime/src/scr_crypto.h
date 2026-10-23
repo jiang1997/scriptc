@@ -307,6 +307,7 @@ const char *scr_crypto_asymmetric_key_type(const ScrDyn *value);
  * (borrowed) and never throw. subjectAltName, infoAccess and
  * signatureAlgorithm answer "" where Node answers undefined. */
 ScrBytes *scr_crypto_x509_raw(ScrBytes *data);
+ScrBytes *scr_crypto_x509_raw_der(ScrBytes *der);
 ScrBytes *scr_crypto_x509_raw_str(ScrStr *pem);
 ScrStr *scr_crypto_x509_subject(ScrBytes *der);
 ScrStr *scr_crypto_x509_issuer(ScrBytes *der);

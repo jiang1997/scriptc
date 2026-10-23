@@ -21,6 +21,9 @@ const servers: [string, (h: Handler) => tls.Server][] = [
   ["reject", (h) => tls.createServer({ cert, key, requestCert: true, ca }, h)],
   ["request-noca", (h) => tls.createServer({ cert, key, requestCert: true, rejectUnauthorized: false }, h)],
   ["request-ca2", (h) => tls.createServer({ cert, key, requestCert: true, rejectUnauthorized: false, ca: ca2 }, h)],
+  // an empty Buffer is an empty trust store; an empty string is no ca
+  ["request-empty", (h) => tls.createServer({ cert, key, requestCert: true, rejectUnauthorized: false, ca: Buffer.alloc(0) }, h)],
+  ["request-emptystr", (h) => tls.createServer({ cert, key, requestCert: true, rejectUnauthorized: false, ca: "" }, h)],
   ["plain", (h) => tls.createServer({ cert, key }, h)],
 ];
 const clients: [string, Buffer | null, Buffer | null][] = [

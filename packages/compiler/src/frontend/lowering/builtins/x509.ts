@@ -56,7 +56,8 @@ export function refuseX509DynValues(lowerer: Lowerer, functions: readonly IrFunc
   // Certificates exist only where `new X509Certificate` built one.
   if (
     !lowerer.valueHelpers.has("x509.record:bytes") &&
-    !lowerer.valueHelpers.has("x509.record:str")
+    !lowerer.valueHelpers.has("x509.record:str") &&
+    !lowerer.valueHelpers.has("x509.record:der")
   )
     return;
   const seen = new Map<string, boolean>();
@@ -468,7 +469,8 @@ export function lowerTlsCertificateCall(
               kind: "unionWrap",
               unionId: type.unionId,
               tag: recordTag,
-              value: x509RecordCall(lowerer, d, record, loc),
+              // The handshake's DER, read without PEM detection.
+              value: x509RecordCall(lowerer, d, record, loc, true),
               type,
               loc,
             },

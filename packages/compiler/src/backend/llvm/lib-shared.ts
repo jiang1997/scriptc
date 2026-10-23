@@ -1065,6 +1065,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "crypto.createSign": "scr_crypto_create_sign",
   "crypto.createVerify": "scr_crypto_create_verify",
   "crypto.x509Raw": "scr_crypto_x509_raw",
+  "crypto.x509RawDer": "scr_crypto_x509_raw_der",
   "crypto.x509RawStr": "scr_crypto_x509_raw_str",
   "crypto.x509Subject": "scr_crypto_x509_subject",
   "crypto.x509Issuer": "scr_crypto_x509_issuer",
