@@ -674,6 +674,9 @@ export const PKI_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.generateKeyPairSync",
   "crypto.signOneshot",
   "crypto.verifyOneshot",
+  "crypto.x509PublicKey",
+  "crypto.x509Verify",
+  "crypto.x509CheckPrivateKey",
 ]);
 
 /** The WebCrypto algorithms scr_webcrypto_pki.c implements over the pki
@@ -1040,6 +1043,15 @@ const RUNTIME_FEATURE_RULES = {
       "crypto.x509SignatureAlgorithmOid",
       "crypto.x509Subject",
       "crypto.x509SubjectAltName",
+      "crypto.x509CheckHost",
+      "crypto.x509CheckEmail",
+      "crypto.x509CheckIP",
+      "crypto.x509CheckIssued",
+      "crypto.x509LegacyObject",
+      "crypto.x509Pem",
+      // getPeerCertificate and getCertificate build with scr_x509.c too.
+      "tls.sockGetPeerCertificate",
+      "tls.sockGetCertificate",
     ],
   }),
   zlib: rule({ prefixes: ["zlib."] }),

@@ -110,6 +110,31 @@ export function emitTlsLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValu
       return finishRuntimeCall(host, e, "scr_tls_sock_get_cipher", a);
     case "tls.sockAlpnProtocol":
       return finishRuntimeCall(host, e, "scr_tls_sock_alpn_protocol", a);
+    case "tls.serverAddContext":
+      return finishRuntimeCall(host, e, "scr_tls_server_add_context", [...a, ptr()]);
+    case "tls.serverAddContextCtx":
+      return finishRuntimeCall(host, e, "scr_tls_server_add_context", [a[0]!, a[1]!, ptr(), a[2]!]);
+    case "tls.serverSetSecureContext":
+      return finishRuntimeCall(host, e, "scr_tls_server_set_secure_context", a);
+    case "tls.serverOnClientError": {
+      // (err, tlsSocket) listeners by arity: the adapter retains what the
+      // listener takes.
+      const cb = args[1]!;
+      const thunk = `scr_net_client_error_thunk${callbackType(cb).params.length}`;
+      return finishRuntimeCall(host, e, "scr_net_server_on_client_error", [
+        a[0]!,
+        ...callbackAdapter(host, cb, thunk, ["ptr", "ptr", "ptr"]),
+        a[2]!,
+      ]);
+    }
+    case "tls.sockGetPeerCertificate":
+      return finishRuntimeCall(host, e, "scr_tls_sock_get_peer_certificate", a);
+    case "tls.sockGetCertificate":
+      return finishRuntimeCall(host, e, "scr_tls_sock_get_certificate", a);
+    case "tls.sockPeerCertDer":
+      return finishRuntimeCall(host, e, "scr_tls_sock_peer_cert_der", a);
+    case "tls.sockOwnCertDer":
+      return finishRuntimeCall(host, e, "scr_tls_sock_own_cert_der", a);
     case "tls.sockAuthError": {
       const result = callRuntime(host, "scr_tls_sock_auth_error", "ptr", a);
       return nullableReference(host, e.type, result, "string", "nullT");

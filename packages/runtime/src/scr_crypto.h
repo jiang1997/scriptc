@@ -315,5 +315,19 @@ ScrStr *scr_crypto_x509_fingerprint512(ScrBytes *der);
 bool scr_crypto_x509_ca(ScrBytes *der);
 ScrStr *scr_crypto_x509_signature_algorithm(ScrBytes *der);
 ScrStr *scr_crypto_x509_signature_algorithm_oid(ScrBytes *der);
+ScrStr *scr_crypto_x509_pem(ScrBytes *der);
+/* X509Certificate methods over the DER (borrowed). checkHost, checkEmail
+ * and checkIP answer the matching name ("" for none, Node's undefined) or
+ * NULL with Node's argument error pending (scr_x509.c). publicKey, verify
+ * and checkPrivateKey read keys (scr_pki.c): publicKey is +1 or NULL, and
+ * the two checks answer false with the error pending when they throw. */
+ScrStr *scr_crypto_x509_check_host(ScrBytes *der, ScrDyn *name, ScrDyn *options);
+ScrStr *scr_crypto_x509_check_email(ScrBytes *der, ScrDyn *email, ScrDyn *options);
+ScrStr *scr_crypto_x509_check_ip(ScrBytes *der, ScrDyn *ip, ScrDyn *options);
+bool scr_crypto_x509_check_issued(ScrBytes *der, ScrBytes *issuer_der);
+ScrDyn *scr_crypto_x509_legacy_object(ScrBytes *der);
+ScrDyn *scr_crypto_x509_public_key(ScrBytes *der);
+bool scr_crypto_x509_verify(ScrBytes *der, ScrDyn *key);
+bool scr_crypto_x509_check_private_key(ScrBytes *der, ScrDyn *key);
 
 #endif /* SCR_CRYPTO_H */
