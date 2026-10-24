@@ -11,15 +11,20 @@ const kept = JSON.parse('{"z":1}');
 console.log(typeof ObjectCtor, JSON.stringify(new ObjectCtor()), new ObjectCtor(kept) === kept);
 console.log(typeof plain[key + "s"], plain.constructor === ObjectCtor);
 
-const map = new Map([[1, "one"], [2, "two"]]);
+// Collections and dates held as untyped values, as JavaScript holds them.
+const held = JSON.parse("{}");
+held.map = new Map([[1, "one"], [2, "two"]]);
+held.day = new Date(0);
+held.set = new Set(["x"]);
+const map = held.map;
 const MapCtor = map[key];
 const copy = new MapCtor(map);
 console.log(typeof MapCtor, copy.size, map.constructor === MapCtor, copy.constructor === MapCtor);
 
-const day = new Date(0);
+const day = held.day;
 const DateCtor = day[key];
 console.log(JSON.stringify(new DateCtor(86400000)), day.constructor === DateCtor);
 
-const set = new Set(["x"]);
+const set = held.set;
 const SetCtor = set[key];
 console.log(new SetCtor(["a", "b", "a"]).size);
