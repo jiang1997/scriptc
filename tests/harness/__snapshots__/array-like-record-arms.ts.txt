@@ -1,0 +1,17 @@
+array-like-record-arms.ts:12:23 - error SC2003: union conversion has no unambiguous layout mapping: expected 'string[] | { length: number; [key: string]: number }', got 'number[]' (each source arm needs an identical destination arm, a unique compatible record/array layout, or a shared literal discriminant selecting compatible layouts)
+
+  11 | 
+  12 | const literal: Slot = [3, 4, 5];
+     |                       ^~~~~~~~~
+  13 | console.log(describe(literal));
+
+  hint: narrow the value to a SINGLE arm first (a discriminant check, or '!== undefined'/'!== null' for unit arms); a plain arm value widens into any union that contains it, and a whole union widens into any union whose arms include the source's
+
+array-like-record-arms.ts:16:21 - error SC2003: union conversion has no unambiguous layout mapping: expected 'string[] | { length: number; [key: string]: number }', got 'number[]' (each source arm needs an identical destination arm, a unique compatible record/array layout, or a shared literal discriminant selecting compatible layouts)
+
+  15 | const numbers = [3, 4, 5];
+  16 | const bound: Slot = numbers;
+     |                     ^~~~~~~
+  17 | console.log(describe(bound));
+
+  hint: narrow the value to a SINGLE arm first (a discriminant check, or '!== undefined'/'!== null' for unit arms); a plain arm value widens into any union that contains it, and a whole union widens into any union whose arms include the source's
