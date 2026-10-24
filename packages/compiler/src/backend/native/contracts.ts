@@ -102,6 +102,10 @@ export interface CcOptions {
    * compiles scr_dyn_invoke.c — the assert gating precedent, so
    * dispatch-free binaries keep their exact size class. */
   dynInvoke?: boolean;
+  /** Dynamic reads whose key may name an inherited Object.prototype member
+   * (constant keys naming one, computed keys): compiles scr_dyn_inherited.c,
+   * which the dyn-invoke unit also links. */
+  dynInherited?: boolean;
   /** The program uses the diagnostics_channel surface (index.ts detects
    * dc.* libCalls on the IR): compiles scr_dc.c — pure data structure
    * over the checked-dynamic tree (no loop hooks, no install), cross-compiles everywhere.
