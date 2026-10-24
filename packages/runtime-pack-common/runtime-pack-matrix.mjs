@@ -66,6 +66,8 @@ export const OPTIONAL_RUNTIME_SOURCES = [
   // Inherited Object.prototype members on dynamic values (base units only);
   // the dyn-invoke unit reads them too.
   ["scr_dyn_inherited.c", any("dynInherited", "dynInvoke", "nativeFetch")],
+  // `new` through those constructors builds dates and collections.
+  ["scr_dyn_global_construct.c", any("dynGlobalConstruct", "dynInvoke", "nativeFetch")],
   // Buffer.prototype methods called on checked-dynamic values.
   ["scr_bytes_dyn.c", all("dynBuffer", "dynInvoke")],
   // Builtin functions read as values in JavaScript dependencies.

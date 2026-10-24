@@ -106,6 +106,10 @@ export interface CcOptions {
    * (constant keys naming one, computed keys): compiles scr_dyn_inherited.c,
    * which the dyn-invoke unit also links. */
   dynInherited?: boolean;
+  /** `new` through the builtin constructors inherited reads answer
+   * (dyn.globalConstructInstall): compiles scr_dyn_global_construct.c,
+   * which the dyn-invoke unit also links. */
+  dynGlobalConstruct?: boolean;
   /** The program uses the diagnostics_channel surface (index.ts detects
    * dc.* libCalls on the IR): compiles scr_dc.c — pure data structure
    * over the checked-dynamic tree (no loop hooks, no install), cross-compiles everywhere.

@@ -24,6 +24,7 @@ export function executableLinkFeatures(mod: IrModule): NativeLinkFeatures {
     inspect: features.inspect,
     dynInvoke: features.dynInvoke,
     ...(features.dynInherited ? { dynInherited: true } : {}),
+    ...(features.dynGlobalConstruct ? { dynGlobalConstruct: true } : {}),
     dc: features.dc,
     dynAsync: features.dynAsync,
     ...(features.dynTier ? { dynTier: true } : {}),

@@ -66,6 +66,7 @@ export interface EarlyExecutableNativeFeatures {
   inspect: boolean;
   dynInvoke: boolean;
   dynInherited?: boolean;
+  dynGlobalConstruct?: boolean;
   dc: boolean;
   dynAsync: boolean;
   dynTier?: boolean;

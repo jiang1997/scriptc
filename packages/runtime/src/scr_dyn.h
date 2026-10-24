@@ -895,6 +895,12 @@ ScrDyn *scr_dyn_object_prototype_method(const ScrStr *method);
  * Set, Promise, WeakMap, WeakSet, FinalizationRegistry): +1, or NULL for
  * another name (scr_dyn_inherited.c). */
 ScrDyn *scr_dyn_global_ctor(const char *name);
+/* The call thunk of those constructors (scr_dyn_inherited.c). */
+ScrDyn *scr_dyn_global_ctor_call(ScrClosure *closure, ScrDyn *const *args, size_t argc);
+/* `new` through those constructors, once installed (NULL before). */
+extern bool (*scr_dyn_global_ctor_construct)(const ScrDyn *callee, const ScrDyn *args, ScrDyn **result);
+/* Installs `new` through those constructors (scr_dyn_global_construct.c). */
+void scr_dyn_global_construct_install(void);
 bool scr_dyn_arr_has_index(const ScrDyn *arr, size_t index);
 void scr_dyn_arr_push_hole(ScrDyn *arr);
 ScrDyn *scr_dyn_new_obj(void);

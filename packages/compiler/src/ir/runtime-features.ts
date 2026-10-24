@@ -926,6 +926,10 @@ const RUNTIME_FEATURE_RULES = {
       node.kind === "dynKeyGet" &&
       (node.key.kind !== "strLit" || INHERITED_MEMBER_NAMES.has(node.key.value)),
   }),
+  /** `new` through the builtin constructors those reads answer
+   * (scr_dyn_global_construct.c), installed at start by programs that also
+   * construct dynamic values. */
+  dynGlobalConstruct: rule({ fns: ["dyn.globalConstructInstall"] }),
   /** The program has dynamic-tier jsval operations (js.* builtins, the
    * jsval pass): links the scr_js_* units (two-tier design I3). */
   dynTier: rule({ prefixes: ["js."] }),
@@ -1153,6 +1157,7 @@ function noRuntimeFeatures(): RuntimeFeatures {
     dynBuiltinStream: false,
     dynInvoke: false,
     dynInherited: false,
+    dynGlobalConstruct: false,
     dynTier: false,
     ecdh: false,
     dh: false,
