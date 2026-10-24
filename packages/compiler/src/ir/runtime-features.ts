@@ -915,13 +915,13 @@ const RUNTIME_FEATURE_RULES = {
       "util.promisifyDyn",
       "buffer.prototypeMember",
     ],
-    // Constant-key reads of Object.prototype member names answer the
-    // inherited member through scr_dyn_invoke.c.
+    // Constant-key reads of Object.prototype member names, and computed-key
+    // reads (whose key may name one), answer the inherited member through
+    // scr_dyn_invoke.c.
     expr: (node, _tables) =>
       node.kind === "dynInvoke" ||
       (node.kind === "dynKeyGet" &&
-        node.key.kind === "strLit" &&
-        INHERITED_MEMBER_NAMES.has(node.key.value)),
+        (node.key.kind !== "strLit" || INHERITED_MEMBER_NAMES.has(node.key.value))),
   }),
   /** The program has dynamic-tier jsval operations (js.* builtins, the
    * jsval pass): links the scr_js_* units (two-tier design I3). */
