@@ -159,7 +159,7 @@ ScrDyn *scr_dyn_global_ctor_call(ScrClosure *closure, ScrDyn *const *args, size_
  * dynamic values and read inherited members, and by the dyn-invoke unit;
  * set once, before any thread starts. NULL leaves construction to the
  * ordinary path. */
-bool (*scr_dyn_global_ctor_construct)(const ScrDyn *callee, const ScrDyn *args, ScrDyn **result);
+bool (*scr_dyn_global_ctor_construct)(const ScrDyn *callee, const ScrDyn *args, ScrDyn **result) = NULL;
 
 ScrDyn *scr_dyn_global_ctor(const char *name) {
   for (size_t i = 0; i < DYN_GLOBAL_CTORS; i++) {
